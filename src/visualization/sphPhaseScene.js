@@ -544,6 +544,10 @@ export function resolveResidentSurfaceBufferHandoff({
     0,
     Math.round(Number(surfaceDraw?.drawIndirectRowsBufferByteLength) || 0)
   );
+  const drawAggregateIndirectRowsBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.drawAggregateIndirectRowsBufferByteLength) || 0)
+  );
   const compactedVertexRowsBufferByteLength = Math.max(
     0,
     Math.round(Number(surfaceDraw?.compactedVertexRowsBufferByteLength) || 0)
@@ -565,6 +569,7 @@ export function resolveResidentSurfaceBufferHandoff({
   );
   const drawRowsBufferRetained = Boolean(surfaceDraw?.drawRowsBufferRetained);
   const drawIndirectRowsBufferRetained = Boolean(surfaceDraw?.drawIndirectRowsBufferRetained);
+  const drawAggregateIndirectRowsBufferRetained = Boolean(surfaceDraw?.drawAggregateIndirectRowsBufferRetained);
   const compactedVertexRowsBufferRetained = Boolean(surfaceDraw?.compactedVertexRowsBufferRetained);
   const noFullReadback = normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
     && !surfaceDraw?.surfaceDrawReadback
@@ -610,6 +615,8 @@ export function resolveResidentSurfaceBufferHandoff({
     drawRowsBufferByteLength,
     drawIndirectRowsBufferRetained,
     drawIndirectRowsBufferByteLength,
+    drawAggregateIndirectRowsBufferRetained,
+    drawAggregateIndirectRowsBufferByteLength,
     compactedVertexRowsBufferRetained,
     compactedVertexRowsBufferByteLength,
     sourceVertexRowCount,
@@ -6740,6 +6747,8 @@ export function createSphPhaseScene(container, {
       drawIndirectRowStrideUints: 0,
       drawIndirectRowsBufferRetained: false,
       drawIndirectRowsBufferByteLength: 0,
+      drawAggregateIndirectRowsBufferRetained: false,
+      drawAggregateIndirectRowsBufferByteLength: 0,
       compactedVertexRowsBufferRetained: false,
       compactedVertexRowsBufferByteLength: 0,
       residentBufferLeaseLedgerStatus: null,
@@ -10510,6 +10519,8 @@ export function createSphPhaseScene(container, {
       drawRowsBufferByteLength: 0,
       drawIndirectRowsBufferRetained: false,
       drawIndirectRowsBufferByteLength: 0,
+      drawAggregateIndirectRowsBufferRetained: false,
+      drawAggregateIndirectRowsBufferByteLength: 0,
       compactedVertexRowsBufferRetained: false,
       compactedVertexRowsBufferByteLength: 0,
       readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
@@ -10910,6 +10921,8 @@ export function createSphPhaseScene(container, {
         drawIndirectRowStrideUints: surfaceDrawExecution.drawIndirectRowStrideUints ?? 0,
         drawIndirectRowsBufferRetained: Boolean(surfaceDrawExecution.drawIndirectRowsBufferRetained),
         drawIndirectRowsBufferByteLength: surfaceDrawExecution.drawIndirectRowsBufferByteLength ?? 0,
+        drawAggregateIndirectRowsBufferRetained: Boolean(surfaceDrawExecution.drawAggregateIndirectRowsBufferRetained),
+        drawAggregateIndirectRowsBufferByteLength: surfaceDrawExecution.drawAggregateIndirectRowsBufferByteLength ?? 0,
         compactedVertexRowsBufferRetained: Boolean(surfaceDrawExecution.compactedVertexRowsBufferRetained),
         compactedVertexRowsBufferByteLength: surfaceDrawExecution.compactedVertexRowsBufferByteLength ?? 0,
         residentBufferLeaseLedgerStatus: surfaceDrawExecution.residentBufferLeaseLedgerStatus ?? null,
@@ -10925,6 +10938,12 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyHandoffReason: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffReason ?? null,
         surfaceDrawGpuOnlyUpperBoundVertexCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
         surfaceDrawGpuOnlyUpperBoundTriangleCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyAggregateIndirectReady: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyAggregateIndirectReady
+        ),
+        surfaceDrawGpuOnlyAggregateDrawRangeExact: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyAggregateDrawRangeExact
+        ),
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
         ),
@@ -11227,6 +11246,8 @@ export function createSphPhaseScene(container, {
         drawIndirectRowStrideUints: surfaceDrawExecution.drawIndirectRowStrideUints ?? 0,
         drawIndirectRowsBufferRetained: Boolean(surfaceDrawExecution.drawIndirectRowsBufferRetained),
         drawIndirectRowsBufferByteLength: surfaceDrawExecution.drawIndirectRowsBufferByteLength ?? 0,
+        drawAggregateIndirectRowsBufferRetained: Boolean(surfaceDrawExecution.drawAggregateIndirectRowsBufferRetained),
+        drawAggregateIndirectRowsBufferByteLength: surfaceDrawExecution.drawAggregateIndirectRowsBufferByteLength ?? 0,
         compactedVertexRowsBufferRetained: Boolean(surfaceDrawExecution.compactedVertexRowsBufferRetained),
         compactedVertexRowsBufferByteLength: surfaceDrawExecution.compactedVertexRowsBufferByteLength ?? 0,
         residentBufferLeaseLedgerStatus: translation.residentBufferLeaseLedgerStatus ?? null,
@@ -11242,6 +11263,12 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyHandoffReason: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffReason ?? null,
         surfaceDrawGpuOnlyUpperBoundVertexCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
         surfaceDrawGpuOnlyUpperBoundTriangleCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyAggregateIndirectReady: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyAggregateIndirectReady
+        ),
+        surfaceDrawGpuOnlyAggregateDrawRangeExact: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyAggregateDrawRangeExact
+        ),
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
         ),
@@ -12782,6 +12809,11 @@ export function createSphPhaseScene(container, {
         surfaceDrawIndirectRowStrideUints: sphResidentSurfaceDraw?.drawIndirectRowStrideUints ?? 0,
         surfaceDrawIndirectRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.drawIndirectRowsBufferRetained),
         surfaceDrawIndirectRowsBufferByteLength: sphResidentSurfaceDraw?.drawIndirectRowsBufferByteLength ?? 0,
+        surfaceDrawAggregateIndirectRowsBufferRetained: Boolean(
+          sphResidentSurfaceDraw?.drawAggregateIndirectRowsBufferRetained
+        ),
+        surfaceDrawAggregateIndirectRowsBufferByteLength:
+          sphResidentSurfaceDraw?.drawAggregateIndirectRowsBufferByteLength ?? 0,
         surfaceDrawCompactedVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.compactedVertexRowsBufferRetained),
         surfaceDrawCompactedVertexRowsBufferByteLength: sphResidentSurfaceDraw?.compactedVertexRowsBufferByteLength ?? 0,
         surfaceDrawLeaseStatus: sphResidentSurfaceDraw?.residentBufferLeaseLedgerStatus ?? null,
@@ -12796,6 +12828,12 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyHandoffReason: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoffReason ?? null,
         surfaceDrawGpuOnlyUpperBoundVertexCount: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
         surfaceDrawGpuOnlyUpperBoundTriangleCount: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyAggregateIndirectReady: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuOnlyAggregateIndirectReady
+        ),
+        surfaceDrawGpuOnlyAggregateDrawRangeExact: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuOnlyAggregateDrawRangeExact
+        ),
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuOnlyDrawRangeConservative
         ),

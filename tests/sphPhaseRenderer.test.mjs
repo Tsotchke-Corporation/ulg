@@ -1637,6 +1637,8 @@ test('SPH resident surface buffer handoff requires retained no-readback draw buf
       drawRowsBufferByteLength: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
       drawIndirectRowsBufferRetained: true,
       drawIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
+      drawAggregateIndirectRowsBufferRetained: true,
+      drawAggregateIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
       compactedVertexRowsBufferRetained: true,
       compactedVertexRowsBufferByteLength: 19 * 16 * Float32Array.BYTES_PER_ELEMENT,
       sourceVertexRowCount: 19,
@@ -1661,6 +1663,8 @@ test('SPH resident surface buffer handoff requires retained no-readback draw buf
   assert.equal(ready.sourceVertexCounterMode, 'resident-vertex-counter');
   assert.equal(ready.sourceVertexCounterBufferBound, true);
   assert.equal(ready.sourceVertexCounterBufferByteLength, 16);
+  assert.equal(ready.drawAggregateIndirectRowsBufferRetained, true);
+  assert.equal(ready.drawAggregateIndirectRowsBufferByteLength, 4 * Uint32Array.BYTES_PER_ELEMENT);
 
   const readback = resolveResidentSurfaceBufferHandoff({
     surfaceDraw: {

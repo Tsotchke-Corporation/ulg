@@ -4012,6 +4012,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   const drawIndirectRowsByteLength = surfaceCount
     * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS
     * Uint32Array.BYTES_PER_ELEMENT;
+  const drawAggregateIndirectRowsByteLength = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS
+    * Uint32Array.BYTES_PER_ELEMENT;
   const markProgress = typeof onProgress === 'function'
     ? (status, extra = {}) => {
       try {
@@ -4023,6 +4025,7 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
           compactedVertexRowsByteLength,
           drawRowsByteLength,
           drawIndirectRowsByteLength,
+          drawAggregateIndirectRowsByteLength,
           sourceVertexCounterMode: sourceVertexCounterModeName,
           sourceVertexCounterBufferBound: hasBorrowedVertexCounterBuffer,
           readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
@@ -4101,6 +4104,16 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       new Uint32Array(surfaceCount * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS)
     );
   }
+  const drawAggregateIndirectRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-draw-aggregate-indirect',
+    size: drawAggregateIndirectRowsByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(
+    drawAggregateIndirectRowsBuffer,
+    0,
+    new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS)
+  );
   markProgress('surface-draw-metadata-output-buffers-complete');
   markProgress('surface-draw-metadata-params-buffer-started');
   const paramsBuffer = device.createBuffer({
@@ -4131,7 +4144,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'uniform'),
       computeBufferBinding(5, 'storage'),
-      computeBufferBinding(6, 'read-only-storage')
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'storage')
     ]
   });
   markProgress('surface-draw-metadata-pipeline-complete');
@@ -4145,7 +4159,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       { binding: 3, resource: { buffer: drawRowsBuffer } },
       { binding: 4, resource: { buffer: paramsBuffer } },
       { binding: 5, resource: { buffer: drawIndirectRowsBuffer } },
-      { binding: 6, resource: { buffer: sourceVertexCounterBuffer } }
+      { binding: 6, resource: { buffer: sourceVertexCounterBuffer } },
+      { binding: 7, resource: { buffer: drawAggregateIndirectRowsBuffer } }
     ]
   });
   markProgress('surface-draw-metadata-bind-group-complete');
@@ -4338,9 +4353,11 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   const keepDrawRowsBuffer = retainDrawRowsBuffer || noFullReadback;
   const keepCompactedVertexRowsBuffer = retainCompactedVertexRowsBuffer || noFullReadback;
   const keepDrawIndirectRowsBuffer = retainDrawIndirectRowsBuffer || noFullReadback;
+  const keepDrawAggregateIndirectRowsBuffer = noFullReadback;
   if (!keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
   if (!keepCompactedVertexRowsBuffer) compactedVertexRowsBuffer.destroy?.();
   if (!keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
+  if (!keepDrawAggregateIndirectRowsBuffer) drawAggregateIndirectRowsBuffer.destroy?.();
   if (deferNoFullCleanup) {
     markProgress('surface-draw-metadata-cleanup-deferred', { queueCompletionStatus, queueCompletionMethod });
     deferSubmittedWorkCleanup(device, () => {
@@ -4404,6 +4421,15 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       rowCount: surfaceCount
     });
   }
+  if (keepDrawAggregateIndirectRowsBuffer) {
+    registerRetainedSurfaceDrawBuffer({
+      resourceKey: `surface-draw:draw-aggregate-indirect:1:${drawAggregateIndirectRowsByteLength}`,
+      resourceKind: 'surface-draw-aggregate-indirect-buffer',
+      buffer: drawAggregateIndirectRowsBuffer,
+      byteLength: drawAggregateIndirectRowsByteLength,
+      rowCount: 1
+    });
+  }
   if (keepCompactedVertexRowsBuffer) {
     registerRetainedSurfaceDrawBuffer({
       resourceKey: `surface-draw:compacted-vertices:${sourceVertexRowCount}:${compactedVertexRowsByteLength}`,
@@ -4437,6 +4463,11 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     drawIndirectRowsByteLength,
     drawIndirectRowsBufferByteLength: keepDrawIndirectRowsBuffer ? drawIndirectRowsByteLength : 0,
     drawIndirectRowsBufferRetained: keepDrawIndirectRowsBuffer,
+    drawAggregateIndirectRowsByteLength,
+    drawAggregateIndirectRowsBufferByteLength: keepDrawAggregateIndirectRowsBuffer
+      ? drawAggregateIndirectRowsByteLength
+      : 0,
+    drawAggregateIndirectRowsBufferRetained: keepDrawAggregateIndirectRowsBuffer,
     compactedVertexRows,
     compactedVertexRowsByteLength: compactedVertexRows.byteLength,
     compactedVertexRowsBufferByteLength: keepCompactedVertexRowsBuffer ? compactedVertexRowsByteLength : 0,
@@ -4460,6 +4491,17 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     surfaceDrawGpuOnlyHandoffReason: gpuOnlyDrawRangeReason,
     surfaceDrawGpuOnlyUpperBoundVertexCount: gpuOnlyDrawRangeVertexCount,
     surfaceDrawGpuOnlyUpperBoundTriangleCount: gpuOnlyDrawRangeTriangleCount,
+    surfaceDrawGpuOnlyAggregateIndirectReady: Boolean(
+      noFullReadback
+      && !summaryReadback
+      && keepDrawAggregateIndirectRowsBuffer
+      && hasBorrowedVertexCounterBuffer
+    ),
+    surfaceDrawGpuOnlyAggregateDrawRangeExact: Boolean(
+      noFullReadback
+      && !summaryReadback
+      && hasBorrowedVertexCounterBuffer
+    ),
     surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
       noFullReadback
       && !summaryReadback
@@ -4480,6 +4522,7 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   };
   if (keepDrawRowsBuffer) result.drawRowsBuffer = drawRowsBuffer;
   if (keepDrawIndirectRowsBuffer) result.drawIndirectRowsBuffer = drawIndirectRowsBuffer;
+  if (keepDrawAggregateIndirectRowsBuffer) result.drawAggregateIndirectRowsBuffer = drawAggregateIndirectRowsBuffer;
   if (keepCompactedVertexRowsBuffer) result.compactedVertexRowsBuffer = compactedVertexRowsBuffer;
   if (keepDrawRowsBuffer || keepCompactedVertexRowsBuffer || keepDrawIndirectRowsBuffer) {
     const destroyedSurfaceDrawResourceKeys = new Set();
@@ -4523,6 +4566,12 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
         const resourceKey = `surface-draw:draw-indirect:${surfaceCount}:${drawIndirectRowsByteLength}`;
         destroyResidentBufferWithLease(surfaceDrawLeaseLedger, resourceKey, () => {
           destroySurfaceDrawBufferOnce(resourceKey, drawIndirectRowsBuffer);
+        }, { force, reason });
+      }
+      if (keepDrawAggregateIndirectRowsBuffer) {
+        const resourceKey = `surface-draw:draw-aggregate-indirect:1:${drawAggregateIndirectRowsByteLength}`;
+        destroyResidentBufferWithLease(surfaceDrawLeaseLedger, resourceKey, () => {
+          destroySurfaceDrawBufferOnce(resourceKey, drawAggregateIndirectRowsBuffer);
         }, { force, reason });
       }
       return refreshSurfaceDrawLeaseSummary();

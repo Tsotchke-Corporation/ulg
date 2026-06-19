@@ -2137,11 +2137,12 @@ test('SPH render surface draw WebGPU builder returns compact vertex draw source'
   assert.equal(shaderModules.length, 1);
   assert.match(shaderModules[0].code, /sphRenderSurfaceDraw|SurfaceDrawParams|surface_draw_indirect_rows|source_vertex_counter/);
   assert.equal(bindGroups.length, 1);
-  assert.equal(bindGroups[0].entries.length, 7);
+  assert.equal(bindGroups[0].entries.length, 8);
   assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-surface-draw-compacted-vertices');
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-surface-draw-metadata');
   assert.equal(bindGroups[0].entries[5].resource.buffer.label, 'ulg-sph-surface-draw-indirect');
   assert.equal(bindGroups[0].entries[6].resource.buffer.label, 'ulg-sph-surface-draw-source-vertex-counter');
+  assert.equal(bindGroups[0].entries[7].resource.buffer.label, 'ulg-sph-surface-draw-aggregate-indirect');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [vertices.surfaceCount]);
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawIndirectRows.byteLength));
@@ -2199,6 +2200,8 @@ test('SPH render surface draw no-full mode can read compact summary without vert
   assert.equal(result.drawIndirectRows.length, 0);
   assert.ok(result.drawRowsBufferRetained);
   assert.ok(result.drawIndirectRowsBufferRetained);
+  assert.ok(result.drawAggregateIndirectRowsBufferRetained);
+  assert.equal(result.drawAggregateIndirectRowsBufferByteLength, SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT);
   assert.ok(result.compactedVertexRowsBufferRetained);
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
   assert.equal(copies.some((copy) => copy.size === vertices.vertexRows.byteLength), false);
@@ -2249,6 +2252,8 @@ test('SPH render surface draw no-full mode exposes GPU-only draw range without s
   assert.equal(result.sourceVertexCounterBufferByteLength, 16);
   assert.equal(result.surfaceDrawGpuOnlyHandoff, true);
   assert.equal(result.surfaceDrawGpuOnlyHandoffStatus, 'surface-draw-gpu-resident-draw-range-available');
+  assert.equal(result.surfaceDrawGpuOnlyAggregateIndirectReady, true);
+  assert.equal(result.surfaceDrawGpuOnlyAggregateDrawRangeExact, true);
   assert.equal(result.surfaceDrawGpuOnlyDrawRangeConservative, true);
   assert.equal(result.surfaceDrawGpuOnlyUpperBoundVertexCount, expectedAlignedVertexUpperBound);
   assert.equal(result.surfaceDrawGpuOnlyUpperBoundTriangleCount, Math.floor(expectedAlignedVertexUpperBound / 3));
@@ -2260,10 +2265,13 @@ test('SPH render surface draw no-full mode exposes GPU-only draw range without s
   assert.deepEqual(Array.from(result.drawIndirectRows), []);
   assert.ok(result.drawRowsBufferRetained);
   assert.ok(result.drawIndirectRowsBufferRetained);
+  assert.ok(result.drawAggregateIndirectRowsBufferRetained);
+  assert.ok(result.drawAggregateIndirectRowsBuffer);
   assert.ok(result.compactedVertexRowsBufferRetained);
   assert.match(shaderModules[0].code, /sd_source_vertex_row_count|source_vertex_counter/);
-  assert.equal(bindGroups[0].entries.length, 7);
+  assert.equal(bindGroups[0].entries.length, 8);
   assert.equal(bindGroups[0].entries[6].resource.buffer, vertexCounterBuffer);
+  assert.equal(bindGroups[0].entries[7].resource.buffer.label, 'ulg-sph-surface-draw-aggregate-indirect');
   assert.equal(copies.length, 0);
 });
 

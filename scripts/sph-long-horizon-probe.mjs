@@ -1588,6 +1588,10 @@ async function runBrowserProbe({
             surfaceDrawRowsBufferByteLength: renderState.surfaceDrawRowsBufferByteLength ?? null,
             surfaceDrawIndirectRowsBufferRetained: renderState.surfaceDrawIndirectRowsBufferRetained ?? null,
             surfaceDrawIndirectRowsBufferByteLength: renderState.surfaceDrawIndirectRowsBufferByteLength ?? null,
+            surfaceDrawAggregateIndirectRowsBufferRetained:
+              renderState.surfaceDrawAggregateIndirectRowsBufferRetained ?? null,
+            surfaceDrawAggregateIndirectRowsBufferByteLength:
+              renderState.surfaceDrawAggregateIndirectRowsBufferByteLength ?? null,
             surfaceDrawCompactedVertexRowsBufferRetained: renderState.surfaceDrawCompactedVertexRowsBufferRetained ?? null,
             surfaceDrawCompactedVertexRowsBufferByteLength: renderState.surfaceDrawCompactedVertexRowsBufferByteLength ?? null,
             surfaceDrawVisibleRendererBridge: renderState.surfaceDrawVisibleRendererBridge ?? null,
@@ -1603,6 +1607,10 @@ async function runBrowserProbe({
             surfaceDrawGpuOnlyHandoffReason: renderState.surfaceDrawGpuOnlyHandoffReason ?? null,
             surfaceDrawGpuOnlyUpperBoundVertexCount: renderState.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
             surfaceDrawGpuOnlyUpperBoundTriangleCount: renderState.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+            surfaceDrawGpuOnlyAggregateIndirectReady:
+              renderState.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
+            surfaceDrawGpuOnlyAggregateDrawRangeExact:
+              renderState.surfaceDrawGpuOnlyAggregateDrawRangeExact ?? null,
             surfaceDrawGpuOnlyDrawRangeConservative: renderState.surfaceDrawGpuOnlyDrawRangeConservative ?? null,
             surfaceDrawGpuBufferHandoffReady: renderState.surfaceDrawGpuBufferHandoffReady ?? null,
             surfaceDrawGpuBufferHandoffStatus: renderState.surfaceDrawGpuBufferHandoffStatus ?? null,
@@ -1662,6 +1670,8 @@ async function runBrowserProbe({
             drawRowsBufferByteLength: surfaceDraw.drawRowsBufferByteLength ?? null,
             drawIndirectRowsBufferRetained: surfaceDraw.drawIndirectRowsBufferRetained ?? null,
             drawIndirectRowsBufferByteLength: surfaceDraw.drawIndirectRowsBufferByteLength ?? null,
+            drawAggregateIndirectRowsBufferRetained: surfaceDraw.drawAggregateIndirectRowsBufferRetained ?? null,
+            drawAggregateIndirectRowsBufferByteLength: surfaceDraw.drawAggregateIndirectRowsBufferByteLength ?? null,
             compactedVertexRowsBufferRetained: surfaceDraw.compactedVertexRowsBufferRetained ?? null,
             compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
             gpuBufferHandoffReady: surfaceDraw.surfaceDrawGpuBufferHandoffReady ?? null,
@@ -1674,6 +1684,8 @@ async function runBrowserProbe({
               surfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
             gpuBufferHandoffConservativeDrawRange:
               surfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange ?? null,
+            gpuOnlyAggregateIndirectReady: surfaceDraw.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
+            gpuOnlyAggregateDrawRangeExact: surfaceDraw.surfaceDrawGpuOnlyAggregateDrawRangeExact ?? null,
             visibleRendererBridge: surfaceDraw.visibleRendererBridge ?? null,
             visibleRenderSource: surfaceDraw.visibleRenderSource ?? null,
             renderBridgeStatus: surfaceDraw.renderBridgeStatus ?? null,

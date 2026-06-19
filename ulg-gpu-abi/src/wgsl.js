@@ -3964,6 +3964,7 @@ struct SurfaceDrawVertexCounter {
 @group(0) @binding(4) var<uniform> params: SurfaceDrawParams;
 @group(0) @binding(5) var<storage, read_write> surface_draw_indirect_rows: array<vec4<u32>>;
 @group(0) @binding(6) var<storage, read> source_vertex_counter: SurfaceDrawVertexCounter;
+@group(0) @binding(7) var<storage, read_write> surface_draw_aggregate_indirect: array<vec4<u32>>;
 
 fn sd_surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -4081,6 +4082,16 @@ fn sd_write_draw_indirect_row(
   );
 }
 
+fn sd_write_aggregate_indirect_row(vertex_count: u32) {
+  let aligned_vertex_count = vertex_count - (vertex_count % 3u);
+  surface_draw_aggregate_indirect[0] = vec4<u32>(
+    aligned_vertex_count,
+    select(0u, 1u, aligned_vertex_count >= 3u),
+    0u,
+    0u
+  );
+}
+
 @compute @workgroup_size(1, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let surface_index = global_id.x;
@@ -4091,6 +4102,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let surface_row0 = sd_surface_row0(surface_index);
   let surface_row3 = sd_surface_row3(surface_index);
   let source_vertex_row_count = sd_source_vertex_row_count();
+  if (surface_index == 0u) {
+    sd_write_aggregate_indirect_row(source_vertex_row_count);
+  }
   var prefix_vertex_count = 0u;
   for (var row_index = 0u; row_index < source_vertex_row_count; row_index = row_index + 1u) {
     let row0 = sd_vertex_row0(row_index);

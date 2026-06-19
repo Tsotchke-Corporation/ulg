@@ -5880,7 +5880,7 @@ test('MLS-MPM resident fused mechanics sequence carries active-grid bounds acros
   destroyMlsMpmResidentStepsBuffers(second);
 });
 
-test('MLS-MPM resident steps fall back to per-step fused mechanics when thermal blocks fused sequence', async () => {
+test('MLS-MPM resident steps avoid full-grid per-step fused fallback when thermal blocks fused sequence', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
@@ -5935,8 +5935,8 @@ test('MLS-MPM resident steps fall back to per-step fused mechanics when thermal 
       };
     },
     summaryRunner({ gridUpdate, g2pReconstruction, thermalStep, summaryScope }) {
-      assert.equal(gridUpdate.fusedResidentMechanics, true);
-      assert.equal(g2pReconstruction.fusedResidentMechanics, true);
+      assert.notEqual(gridUpdate.fusedResidentMechanics, true);
+      assert.notEqual(g2pReconstruction.fusedResidentMechanics, true);
       assert.equal(thermalStep?.backend, 'webgpu');
       return {
         schema: 'peercompute.ulg.mls-mpm-resident-summary-execution.v0',
@@ -5983,16 +5983,16 @@ test('MLS-MPM resident steps fall back to per-step fused mechanics when thermal 
   });
 
   assert.equal(execution.fusedResidentSequence, undefined);
-  assert.equal(execution.finalStep.stageTiming.fusedResidentMechanics, true);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentMechanics, false);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, undefined);
   assert.equal(execution.finalStep.stageTiming.thermalRequested, true);
-  assert.equal(execution.finalStep.stageTiming.stageMs.p2gGridProjection, 0);
-  assert.equal(execution.finalStep.stageTiming.stageMs.gridUpdate, 0);
-  assert.equal(execution.finalStep.stageTiming.stageMs.g2pReconstruction, 0);
+  assert.ok(execution.finalStep.stageTiming.stageMs.p2gGridProjection > 0);
+  assert.ok(execution.finalStep.stageTiming.stageMs.gridUpdate > 0);
+  assert.ok(execution.finalStep.stageTiming.stageMs.g2pReconstruction > 0);
   assert.equal(thermalInputs.length, 2);
-  assert.equal(thermalInputs[0].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
-  assert.equal(thermalInputs[1].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
-  assert.equal(device.submissions.length, 2);
+  assert.notEqual(thermalInputs[0].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
+  assert.notEqual(thermalInputs[1].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
+  assert.equal(device.submissions.length, 6);
   assert.equal(device.dispatches.length, 8);
   destroyMlsMpmResidentStepsBuffers(execution);
 });

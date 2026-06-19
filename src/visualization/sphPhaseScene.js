@@ -1369,9 +1369,13 @@ const GPU_TEXTURE_USAGE = {
   RENDER_ATTACHMENT: globalThis.GPUTextureUsage?.RENDER_ATTACHMENT ?? 16
 };
 const GPU_BUFFER_USAGE = {
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
+};
+const GPU_MAP_MODE = {
+  READ: globalThis.GPUMapMode?.READ ?? 1
 };
 const GPU_SHADER_STAGE = {
   VERTEX: globalThis.GPUShaderStage?.VERTEX ?? 1,
@@ -6373,6 +6377,7 @@ export function createSphPhaseScene(container, {
       renderBridge.depthTexture?.destroy?.();
       renderBridge.oitAccumTexture?.destroy?.();
       renderBridge.oitRevealTexture?.destroy?.();
+      renderBridge.pixelValidationTexture?.destroy?.();
       if (renderBridge.renderRowsBufferOwned) {
         renderBridge.renderRowsBuffer?.destroy?.();
       }
@@ -6383,6 +6388,7 @@ export function createSphPhaseScene(container, {
       renderBridge.depthTexture = null;
       renderBridge.oitAccumTexture = null;
       renderBridge.oitRevealTexture = null;
+      renderBridge.pixelValidationTexture = null;
       renderBridge.renderRowsBuffer = null;
       renderBridge.renderRowsBufferOwned = false;
       renderBridge.status = status;
@@ -6747,6 +6753,218 @@ export function createSphPhaseScene(container, {
       accumView: bridge.oitAccumTexture.createView(),
       revealView: bridge.oitRevealTexture.createView()
     };
+  }
+
+  function ensureSphNativeWebGpuSurfacePixelValidationTexture(bridge = sphResidentSurfaceDrawRenderBridge) {
+    if (!bridge?.device || !bridge?.format) return null;
+    if (bridge.pixelValidationTexture && bridge.pixelValidationTextureFormat === bridge.format) {
+      return bridge.pixelValidationTexture;
+    }
+    bridge.pixelValidationTexture?.destroy?.();
+    bridge.pixelValidationTexture = bridge.device.createTexture({
+      label: 'ulg-sph-native-webgpu-surface-consumer-pixel-validation-target',
+      size: [1, 1],
+      format: bridge.format,
+      usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
+    });
+    bridge.pixelValidationTextureFormat = bridge.format;
+    return bridge.pixelValidationTexture;
+  }
+
+  function publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+    status = 'not-run',
+    reason = null,
+    sample = null
+  } = {}) {
+    if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
+    const normalizedStatus = String(status || 'not-run');
+    bridge.pixelValidationStatus = normalizedStatus;
+    bridge.nativeWebGpuSurfaceConsumerPixelValidationStatus = normalizedStatus;
+    bridge.pixelValidationReason = reason;
+    bridge.nativeWebGpuSurfaceConsumerPixelValidationReason = reason;
+    if (sample) bridge.pixelValidationSample = sample;
+
+    const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer || null;
+    if (nativeConsumer) {
+      nativeConsumer.pixelValidationStatus = normalizedStatus;
+      nativeConsumer.pixelValidationReason = reason;
+      nativeConsumer.pixelValidationSample = sample;
+      nativeConsumer.updatedAtMs = nowMs();
+      scene.userData.sphNativeWebGpuSurfaceConsumer = nativeConsumer;
+    }
+
+    if (sphResidentSurfaceDraw) {
+      sphResidentSurfaceDraw.renderBridgePixelValidationStatus = normalizedStatus;
+      sphResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus = normalizedStatus;
+      sphResidentSurfaceDraw.renderBridgePixelValidationReason = reason;
+      if (sample) sphResidentSurfaceDraw.renderBridgePixelValidationSample = sample;
+      const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
+        surfaceDraw: sphResidentSurfaceDraw,
+        readbackMode: RESIDENT_NO_FULL_READBACK_MODE
+      });
+      const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
+        handoff: gpuBufferHandoff,
+        rendererCapability: {
+          status: sphResidentSurfaceDraw.renderBridgeCapabilityStatus
+            ?? 'native-webgpu-surface-consumer-supported',
+          reason: sphResidentSurfaceDraw.renderBridgeCapabilityReason ?? null,
+          rendererBackend: sphResidentSurfaceDraw.renderBridgeRendererBackend
+            ?? scene.userData.sphRendererBackend
+            ?? null,
+          visibleNoReadbackSupported: true,
+          nativeSurfaceConsumerSupported: true,
+          nativeSurfaceConsumerRuntimeValidated: true,
+          nativeSurfaceConsumerPixelValidationStatus: normalizedStatus
+        },
+        renderBridgeMode: bridge.rendererBridge,
+        renderBridgeStatus: bridge.status,
+        pixelValidationStatus: normalizedStatus
+      });
+      assignResidentSurfaceVisibleGpuConsumer(sphResidentSurfaceDraw, visibleGpuConsumer);
+    }
+
+    if (sphResidentRenderState) {
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationStatus = normalizedStatus;
+      sphResidentRenderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus =
+        normalizedStatus;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationReason = reason;
+      if (sample) sphResidentRenderState.surfaceDrawRenderBridgePixelValidationSample = sample;
+      if (sphResidentSurfaceDraw) {
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerReady =
+          Boolean(sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReady);
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerStatus =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerReason =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null;
+      }
+    }
+  }
+
+  function beginSphNativeWebGpuSurfaceConsumerPixelValidation(
+    bridge,
+    encoder,
+    { drawCount = 0 } = {}
+  ) {
+    if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return null;
+    if (!(drawCount > 0)) {
+      publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+        status: 'failed',
+        reason: 'native WebGPU surface consumer submitted no drawable surface draws'
+      });
+      return null;
+    }
+    if (bridge.enableRuntimePixelReadback !== true) {
+      publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+        status: 'not-run',
+        reason: 'native WebGPU runtime pixel readback is disabled; browser harness composited-frame analysis owns visible-output validation'
+      });
+      return null;
+    }
+    if (bridge.pixelValidationPending) return null;
+    if (
+      bridge.pixelValidationStatus === 'passed'
+      && bridge.pixelValidationFormat === bridge.format
+    ) {
+      return null;
+    }
+    const validationTexture = ensureSphNativeWebGpuSurfacePixelValidationTexture(bridge);
+    if (!bridge.device?.createBuffer || !encoder?.copyTextureToBuffer || !validationTexture) {
+      publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+        status: 'error',
+        reason: 'native WebGPU surface consumer pixel validation lacks offscreen texture-copy support'
+      });
+      return null;
+    }
+
+    const readbackBytesPerRow = 256;
+    const readbackSizeBytes = readbackBytesPerRow;
+    try {
+      if (!bridge.pixelValidationReadbackBuffer) {
+        bridge.pixelValidationReadbackBuffer = bridge.device.createBuffer({
+          label: 'ulg-sph-native-webgpu-surface-consumer-pixel-readback',
+          size: readbackSizeBytes,
+          usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+        });
+      }
+      const serial = (bridge.pixelValidationSerial || 0) + 1;
+      bridge.pixelValidationSerial = serial;
+      bridge.pixelValidationPending = true;
+      bridge.pixelValidationWidth = 1;
+      bridge.pixelValidationHeight = 1;
+      bridge.pixelValidationFormat = bridge.format;
+      publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+        status: 'pending',
+        reason: 'native WebGPU surface consumer pixel validation readback is pending'
+      });
+      const validationPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: validationTexture.createView(),
+          clearValue: bridge.backgroundClearValue || { r: 0.094, g: 0.133, b: 0.169, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store'
+        }]
+      });
+      validationPass.end();
+      encoder.copyTextureToBuffer(
+        {
+          texture: validationTexture,
+          origin: { x: 0, y: 0, z: 0 }
+        },
+        {
+          buffer: bridge.pixelValidationReadbackBuffer,
+          bytesPerRow: readbackBytesPerRow,
+          rowsPerImage: 1
+        },
+        {
+          width: 1,
+          height: 1,
+          depthOrArrayLayers: 1
+        }
+      );
+      return () => {
+        const readbackBuffer = bridge.pixelValidationReadbackBuffer;
+        const queueFence = typeof bridge.device?.queue?.onSubmittedWorkDone === 'function'
+          ? bridge.device.queue.onSubmittedWorkDone()
+          : Promise.resolve();
+        queueFence
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
+          .then(() => {
+            if (bridge.pixelValidationSerial !== serial) {
+              readbackBuffer.unmap();
+              return;
+            }
+            const mappedRange = readbackBuffer.getMappedRange();
+            const sample = Array.from(new Uint8Array(mappedRange, 0, 4));
+            readbackBuffer.unmap();
+            bridge.pixelValidationPending = false;
+            const nonzero = sample.some((channel) => channel > 0);
+            publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+              status: nonzero ? 'passed' : 'failed',
+              reason: nonzero
+                ? 'same-device native WebGPU validation render target readback observed nonzero pixels after surface draw submission'
+                : 'same-device native WebGPU validation render target readback returned transparent black after surface draw submission',
+              sample
+            });
+          })
+          .catch((error) => {
+            if (bridge.pixelValidationSerial !== serial) return;
+            bridge.pixelValidationPending = false;
+            publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+              status: 'error',
+              reason: error instanceof Error ? error.message : String(error)
+            });
+          });
+      };
+    } catch (error) {
+      bridge.pixelValidationPending = false;
+      publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+        status: 'error',
+        reason: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
   }
 
   function createSphResidentSurfaceDrawThreeCompactBridge({
@@ -8494,7 +8712,8 @@ export function createSphPhaseScene(container, {
       const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
       const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
-      const canvasView = bridge.context.getCurrentTexture().createView();
+      const canvasTexture = bridge.context.getCurrentTexture();
+      const canvasView = canvasTexture.createView();
       const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
         ? drawState.drawOrder
         : residentSurfaceDrawOrder(
@@ -8606,7 +8825,13 @@ export function createSphPhaseScene(container, {
         }
         transparentPass.end();
       }
+      const completeNativePixelValidation = beginSphNativeWebGpuSurfaceConsumerPixelValidation(
+        bridge,
+        encoder,
+        { drawCount: opaqueDraws.length + transparentDraws.length }
+      );
       bridge.device.queue.submit([encoder.finish()]);
+      completeNativePixelValidation?.();
       bridge.frameCount += 1;
       bridge.lastRenderStatus = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
         ? 'native-webgpu-surface-consumer-rendered'
@@ -8614,20 +8839,6 @@ export function createSphPhaseScene(container, {
       bridge.lastOpaqueDrawCount = opaqueDraws.length;
       bridge.lastTransparentDrawCount = transparentDraws.length;
       bridge.lastTransparentCompositeMode = transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test';
-      if (
-        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-        && (opaqueDraws.length > 0 || transparentDraws.length > 0)
-      ) {
-        bridge.pixelValidationStatus = 'passed';
-        bridge.nativeWebGpuSurfaceConsumerPixelValidationStatus = 'passed';
-        const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer || null;
-        if (nativeConsumer) {
-          nativeConsumer.pixelValidationStatus = 'passed';
-          nativeConsumer.pixelValidationReason =
-            'engine-owned native WebGPU canvas render pass submitted nonzero surface draws';
-          scene.userData.sphNativeWebGpuSurfaceConsumer = nativeConsumer;
-        }
-      }
       if (sphResidentSurfaceDraw) {
         sphResidentSurfaceDraw.renderBridgeFrameCount = bridge.frameCount;
         sphResidentSurfaceDraw.renderBridgeLastRenderStatus = bridge.lastRenderStatus;
@@ -8702,6 +8913,16 @@ export function createSphPhaseScene(container, {
     } catch (error) {
       bridge.lastRenderStatus = 'webgpu-overlay-render-error';
       bridge.reason = error instanceof Error ? error.message : String(error);
+      if (
+        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && bridge.pixelValidationPending
+      ) {
+        bridge.pixelValidationPending = false;
+        publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+          status: 'error',
+          reason: bridge.reason
+        });
+      }
       bridge.drawState = null;
       if (sphResidentSurfaceDraw) {
         sphResidentSurfaceDraw.renderBridgeLastRenderStatus = bridge.lastRenderStatus;

@@ -28305,6 +28305,69 @@ Remaining:
   renderer-owned GPUDevice, then rerun the unsafe external-buffer diagnostic
   and only promote it after console-clean pixel validation.
 
+## 2026-06-19 06:33 AKDT - Native WebGPU Validation Correction and Resident Continuation Blocker
+
+Status:
+
+- Corrected the native WebGPU visible-consumer path to fail closed. Runtime
+  render-loop pixel readback is disabled by default after repeated
+  `A valid external Instance reference no longer exists` failures and one
+  follow-up run that stalled later resident work. The bridge now publishes
+  `pixelValidationStatus=not-run` with an explicit reason instead of claiming
+  `passed`.
+- Extended `scripts/sph-long-horizon-probe.mjs` to decode captured PNG frames,
+  preserve capture-source/canvas metadata in frame artifacts, count blank vs
+  nonblank frames, and report pixel-validation reasons from resident render
+  state and surface-draw state.
+- Tightened the MLS-MPM resident fused-sequence fallback. A
+  `residentFuseSequence=1` request no longer silently becomes full-grid
+  per-step fused mechanics when the true multi-step sequence is blocked by
+  thermal/pressure work unless active-grid fused mechanics is explicitly
+  available. This prevents the scene from entering the pathological full-grid
+  fused fallback by surprise.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal blocks fused sequence"`
+  reported `59/59`.
+- PASS: `git diff --check`.
+- PARTIAL: `/tmp/ulg-native-no-full-policy-smoke.json` completed one no-full
+  resident substep with browser console issues/warnings `0/0`, page errors `0`,
+  retained native direct-consumer surface buffers, native bridge ready, and
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`. It
+  still classified `bad` with
+  `resident-surface-visible-gpu-consumer-not-ready` because runtime pixel
+  validation is `not-run`.
+- PARTIAL: `/tmp/ulg-native-no-full-policy-smoke-frames/` wrote two direct
+  canvas PNGs that are transparent black and one nonblank composited-page PNG.
+  This proves the harness can distinguish capture sources; it is not native
+  surface-pixel acceptance.
+- FAIL: `/tmp/ulg-native-webgpu-readback-disabled-probe.json` timed out on
+  the 2 x 8 non-active-grid no-full native probe with zero browser console
+  issues; last progress was second resident work entering `p2gGridProjection`.
+- FAIL: `/tmp/ulg-native-active-grid-probe.json` and
+  `/tmp/ulg-native-active-grid-2x1.json` timed out with zero browser console
+  issues after first-batch completion; last progress was second-batch
+  active-grid `fusedMechanics`.
+- FAIL: `/tmp/ulg-native-nonactive-2x1.json` timed out with zero browser
+  console issues after first-batch completion; last progress was second-batch
+  `p2gGridProjection`.
+
+Remaining:
+
+- The previous 05:37 native main-canvas `status=good` and mobile-good notes are
+  superseded false positives. Keep the no-overlay/native bridge work, but do
+  not count visible no-readback rendering as accepted until browser-frame
+  analysis proves native surface pixels.
+- Fix resident continuation before chasing mobile/PBR polish. The next
+  concrete runtime blocker is second-batch no-full continuation hanging in GPU
+  mechanics, with active-grid and non-active-grid paths failing in different
+  stages.
+
 ## 2026-06-19 05:37 AKDT - Native WebGPU Main-Canvas Surface Consumer
 
 Status:

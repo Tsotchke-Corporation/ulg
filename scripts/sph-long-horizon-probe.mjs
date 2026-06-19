@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { access, lstat, mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { inflateSync } from 'node:zlib';
 import { chromium } from '@playwright/test';
 
 const DEFAULT_URL = '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0';
@@ -400,6 +401,174 @@ function safeArtifactToken(value, fallback = 'frame') {
   return token || fallback;
 }
 
+function paethPredictor(left, up, upLeft) {
+  const p = left + up - upLeft;
+  const pa = Math.abs(p - left);
+  const pb = Math.abs(p - up);
+  const pc = Math.abs(p - upLeft);
+  if (pa <= pb && pa <= pc) return left;
+  if (pb <= pc) return up;
+  return upLeft;
+}
+
+function analyzePngFrame(bytes) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!Buffer.isBuffer(bytes) || bytes.length < 33 || !bytes.subarray(0, 8).equals(signature)) {
+    return { status: 'unsupported', reason: 'not-png' };
+  }
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idatChunks = [];
+  try {
+    while (offset + 12 <= bytes.length) {
+      const length = bytes.readUInt32BE(offset);
+      const type = bytes.subarray(offset + 4, offset + 8).toString('ascii');
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      if (dataEnd + 4 > bytes.length) break;
+      const data = bytes.subarray(dataStart, dataEnd);
+      if (type === 'IHDR') {
+        width = data.readUInt32BE(0);
+        height = data.readUInt32BE(4);
+        bitDepth = data[8];
+        colorType = data[9];
+      } else if (type === 'IDAT') {
+        idatChunks.push(data);
+      } else if (type === 'IEND') {
+        break;
+      }
+      offset = dataEnd + 4;
+    }
+    const channelsByColorType = new Map([[0, 1], [2, 3], [4, 2], [6, 4]]);
+    const channels = channelsByColorType.get(colorType);
+    if (!width || !height || bitDepth !== 8 || !channels || idatChunks.length === 0) {
+      return {
+        status: 'unsupported',
+        reason: 'unsupported-png-layout',
+        width,
+        height,
+        bitDepth,
+        colorType
+      };
+    }
+    const bytesPerPixel = channels;
+    const rowBytes = width * bytesPerPixel;
+    const inflated = inflateSync(Buffer.concat(idatChunks));
+    if (inflated.length < (rowBytes + 1) * height) {
+      return {
+        status: 'error',
+        reason: 'truncated-png-data',
+        width,
+        height,
+        bitDepth,
+        colorType
+      };
+    }
+    let previous = Buffer.alloc(rowBytes);
+    let nonzeroRgbPixelCount = 0;
+    let nonzeroAlphaPixelCount = 0;
+    let opaquePixelCount = 0;
+    let transparentPixelCount = 0;
+    let maxChannel = 0;
+    let minAlpha = 255;
+    let maxAlpha = 0;
+    for (let y = 0; y < height; y += 1) {
+      const rowStart = y * (rowBytes + 1);
+      const filter = inflated[rowStart];
+      const source = inflated.subarray(rowStart + 1, rowStart + 1 + rowBytes);
+      const row = Buffer.alloc(rowBytes);
+      for (let x = 0; x < rowBytes; x += 1) {
+        const left = x >= bytesPerPixel ? row[x - bytesPerPixel] : 0;
+        const up = previous[x] || 0;
+        const upLeft = x >= bytesPerPixel ? previous[x - bytesPerPixel] || 0 : 0;
+        let value = source[x];
+        if (filter === 1) value = (value + left) & 0xff;
+        else if (filter === 2) value = (value + up) & 0xff;
+        else if (filter === 3) value = (value + Math.floor((left + up) / 2)) & 0xff;
+        else if (filter === 4) value = (value + paethPredictor(left, up, upLeft)) & 0xff;
+        else if (filter !== 0) {
+          return {
+            status: 'error',
+            reason: `unsupported-png-filter-${filter}`,
+            width,
+            height,
+            bitDepth,
+            colorType
+          };
+        }
+        row[x] = value;
+      }
+      for (let x = 0; x < width; x += 1) {
+        const pixelOffset = x * bytesPerPixel;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let a = 255;
+        if (colorType === 0) {
+          r = row[pixelOffset];
+          g = r;
+          b = r;
+        } else if (colorType === 2) {
+          r = row[pixelOffset];
+          g = row[pixelOffset + 1];
+          b = row[pixelOffset + 2];
+        } else if (colorType === 4) {
+          r = row[pixelOffset];
+          g = r;
+          b = r;
+          a = row[pixelOffset + 1];
+        } else if (colorType === 6) {
+          r = row[pixelOffset];
+          g = row[pixelOffset + 1];
+          b = row[pixelOffset + 2];
+          a = row[pixelOffset + 3];
+        }
+        if (r > 0 || g > 0 || b > 0) nonzeroRgbPixelCount += 1;
+        if (a > 0) nonzeroAlphaPixelCount += 1;
+        if (a >= 255) opaquePixelCount += 1;
+        if (a === 0) transparentPixelCount += 1;
+        maxChannel = Math.max(maxChannel, r, g, b, a);
+        minAlpha = Math.min(minAlpha, a);
+        maxAlpha = Math.max(maxAlpha, a);
+      }
+      previous = row;
+    }
+    const pixelCount = width * height;
+    return {
+      status: 'ready',
+      width,
+      height,
+      bitDepth,
+      colorType,
+      pixelCount,
+      nonzeroRgbPixelCount,
+      nonzeroAlphaPixelCount,
+      opaquePixelCount,
+      transparentPixelCount,
+      nonzeroRgbRatio: pixelCount > 0 ? nonzeroRgbPixelCount / pixelCount : 0,
+      nonzeroAlphaRatio: pixelCount > 0 ? nonzeroAlphaPixelCount / pixelCount : 0,
+      maxChannel,
+      minAlpha,
+      maxAlpha,
+      allTransparentBlack: nonzeroRgbPixelCount === 0 && nonzeroAlphaPixelCount === 0,
+      allBlack: nonzeroRgbPixelCount === 0,
+      hasVisiblePixels: nonzeroRgbPixelCount > 0 && nonzeroAlphaPixelCount > 0
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      reason: error instanceof Error ? error.message : String(error),
+      width,
+      height,
+      bitDepth,
+      colorType
+    };
+  }
+}
+
 async function persistCapturedFrames({ frames, frameDir }) {
   if (!frameDir) {
     return {
@@ -424,6 +593,12 @@ async function persistCapturedFrames({ frames, frameDir }) {
       width: frame.width ?? null,
       height: frame.height ?? null,
       capturedAtMs: frame.capturedAtMs ?? null,
+      captureSource: frame.captureSource ?? null,
+      canvasCount: frame.canvasCount ?? null,
+      visibleCanvasCount: frame.visibleCanvasCount ?? null,
+      canvasIndex: frame.canvasIndex ?? null,
+      canvasCssWidth: frame.canvasCssWidth ?? null,
+      canvasCssHeight: frame.canvasCssHeight ?? null,
       reason: frame.reason ?? null,
       error: frame.error ?? null
     };
@@ -447,11 +622,14 @@ async function persistCapturedFrames({ frames, frameDir }) {
     const filePath = path.join(frameDir, fileName);
     const bytes = Buffer.from(match[1], 'base64');
     await writeFile(filePath, bytes);
+    const png = analyzePngFrame(bytes);
     artifacts.push({
       ...base,
       status: 'captured',
       path: filePath,
-      byteLength: bytes.byteLength
+      byteLength: bytes.byteLength,
+      png,
+      blankFrame: png?.status === 'ready' ? !png.hasVisiblePixels : null
     });
   }
   return {
@@ -1747,6 +1925,12 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            surfaceDrawRenderBridgePixelValidationReason:
+              renderState.surfaceDrawRenderBridgePixelValidationReason ?? null,
+            surfaceDrawRenderBridgePixelValidationSample:
+              Array.isArray(renderState.surfaceDrawRenderBridgePixelValidationSample)
+                ? [...renderState.surfaceDrawRenderBridgePixelValidationSample]
+                : null,
             surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
             surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
             surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
@@ -1850,6 +2034,10 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            renderBridgePixelValidationReason: surfaceDraw.renderBridgePixelValidationReason ?? null,
+            renderBridgePixelValidationSample: Array.isArray(surfaceDraw.renderBridgePixelValidationSample)
+              ? [...surfaceDraw.renderBridgePixelValidationSample]
+              : null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
             renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
@@ -2266,12 +2454,16 @@ async function runBrowserProbe({
     });
     try {
       const timeline = await Promise.race([inPageProbe, timeoutProbe]);
-      if (
+      const shouldCaptureCompositedPage = Boolean(
         captureFrames
         && timeline
         && Array.isArray(timeline.visualFrames)
-        && timeline.visualFrames.length < captureFrameMax
-      ) {
+        && (
+          timeline.visualFrames.length < captureFrameMax
+          || surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+        )
+      );
+      if (shouldCaptureCompositedPage) {
         try {
           await page.evaluate(() => new Promise((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -3538,6 +3730,15 @@ function analyzeTimeline(timeline, {
   const visualFrameTimeSpanS = visualFrameTimesS.length >= 2
     ? Math.max(...visualFrameTimesS) - Math.min(...visualFrameTimesS)
     : null;
+  const capturedVisualFrames = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
+    .filter((frame) => frame?.status === 'captured');
+  const pngAnalyzedVisualFrames = capturedVisualFrames.filter((frame) => frame?.png?.status === 'ready');
+  const blankVisualFrameCount = pngAnalyzedVisualFrames
+    .filter((frame) => frame.blankFrame === true || frame.png?.hasVisiblePixels === false)
+    .length;
+  const nonblankVisualFrameCount = pngAnalyzedVisualFrames
+    .filter((frame) => frame.png?.hasVisiblePixels === true)
+    .length;
   const nextCenterOfMassYSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.nextCenterOfMassM?.[1]))
     .filter(Number.isFinite);
@@ -4530,6 +4731,12 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('resident-surface-visible-gpu-consumer-not-ready');
   }
+  if (capturedVisualFrames.length > 0 && pngAnalyzedVisualFrames.length === 0) {
+    issues.push('visual-frames-not-png-analyzable');
+  }
+  if (pngAnalyzedVisualFrames.length > 0 && nonblankVisualFrameCount === 0) {
+    issues.push('visual-frames-all-blank');
+  }
   if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
     issues.push('no-visible-surface-samples');
   }
@@ -4646,6 +4853,10 @@ function analyzeTimeline(timeline, {
     lastH2oVisibleSurfaceCount,
     finalParticlesByMaterial,
     maxReactionEventsTotal,
+    capturedVisualFrameCount: capturedVisualFrames.length,
+    pngAnalyzedVisualFrameCount: pngAnalyzedVisualFrames.length,
+    nonblankVisualFrameCount,
+    blankVisualFrameCount,
     visualFrameTimesS,
     visualFrameTimeSpanS,
     meanBatchMs,

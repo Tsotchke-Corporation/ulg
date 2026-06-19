@@ -1,47 +1,56 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-19 Native WebGPU Main-Canvas Consumer
+## Current Focused Result - 2026-06-19 Native WebGPU Validation Correction
 
 The native `native-webgpu-surface-consumer` route now binds an engine-owned
 main-canvas WebGPU context to the resident `GPUDevice`, consumes retained
 native marching-cubes / extension surface draw buffers without an overlay, and
-passes the visible GPU consumer gate in the browser harness.
+renders through the native bridge. It does not yet pass the visible GPU
+consumer gate: runtime WebGPU pixel readback from the render loop is disabled
+after repeated `A valid external Instance reference no longer exists` failures,
+so browser-harness PNG/composited-frame analysis is now the validation owner.
 
 Focused checks:
 
 - Syntax:
   `node --check src/visualization/sphPhaseScene.js`,
-  `node --check src/visualization/sphPhaseDemoMount.js`, and
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
   `node --check scripts/sph-long-horizon-probe.mjs` passed.
 - Runtime/unit coverage:
-  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`.
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`, and
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal blocks fused sequence"`
+  passed `59/59` after tightening fused-sequence fallback policy.
 - Whitespace:
   `git diff --check` passed.
 - Browser diagnostics:
-  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-visual-probe.json` completed with
-  `status=good`, browser console issues/warnings `0/0`, and page errors `0`.
-  Final evidence: `visibleRendererBridge=native-webgpu-surface-consumer`,
-  `renderBridgeStatus=native-webgpu-surface-consumer-ready`,
-  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
-  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
-  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=passed`,
-  `visibleSurfaceSampleCount=2`, and `h2oVisibleSurfaceSampleCount=2`.
-- Mobile-shaped browser diagnostics:
-  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-mobile-visual-probe.json`
-  completed with `status=good`, browser console issues/warnings `0/0`, page
-  errors `0`, `visibleRendererBridge=native-webgpu-surface-consumer`,
-  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
-  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
-  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=passed`,
-  `visibleSurfaceSampleCount=2`, and `h2oVisibleSurfaceSampleCount=2`.
+  `/tmp/ulg-native-no-full-policy-smoke.json` completed one no-full resident
+  substep with browser console issues/warnings `0/0`, page errors `0`,
+  retained direct-consumer surface buffers ready, native bridge status
+  `native-webgpu-surface-consumer-ready`, and
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`.
+  It still classified `bad` with
+  `resident-surface-visible-gpu-consumer-not-ready` because
+  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=not-run`.
+- Frame diagnostics:
+  `/tmp/ulg-native-no-full-policy-smoke-frames/` contains direct canvas PNGs
+  that are transparent black plus a nonblank composited-page screenshot. This
+  proves the new harness can distinguish direct canvas capture from page
+  composition, but it does not prove native surface pixels yet.
+- Resident continuation diagnostics:
+  `/tmp/ulg-native-webgpu-readback-disabled-probe.json`,
+  `/tmp/ulg-native-active-grid-probe.json`,
+  `/tmp/ulg-native-active-grid-2x1.json`, and
+  `/tmp/ulg-native-nonactive-2x1.json` all timed out with zero WebGPU console
+  issues. The non-active continuation stalls in `p2gGridProjection`; the
+  active-grid continuation stalls in `fusedMechanics`.
 
 Known residual risk:
 
-- The visual-only acceptance route is renderer-focused. A four-substep
-  non-visual probe can still report missing motion diagnostics because no-full
-  render-row/readback evidence is intentionally suppressed. Real-device mobile
-  WebGPU still needs manual browser confirmation, but the automated mobile
-  viewport/device-scale harness is passing.
+- The earlier native main-canvas good/mobile-good artifacts were false
+  positives from optimistic runtime pixel-validation reporting. Treat them as
+  superseded. The current path is correctly fail-closed until native visible
+  pixels are proven by browser-frame analysis and the resident continuation
+  hang is fixed.
 
 ## Current Focused Result - 2026-06-19 Native WebGPU Surface Consumer Contract
 

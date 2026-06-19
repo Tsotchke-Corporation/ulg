@@ -36,23 +36,25 @@ physics loop is incoherent.
 ## Active Priority Order
 
 Current routing note, 2026-06-19 AKDT: the engine-owned
-`native-webgpu-surface-consumer` main-canvas path is now wired and browser
-accepted for the short MLS-MPM visual route. Explicit native surface draw
-requests default to `renderer=native-webgpu`, bind the main canvas WebGPU
-context to the resident `GPUDevice`, consume retained native MC / extension
-surface draw buffers without an overlay, retain the valid native bridge across
-later no-full refreshes, and pass the visible GPU consumer gate. Evidence:
-`/tmp/ulg-native-webgpu-main-canvas-mlsmpm-visual-probe.json` has
-`status=good`, `browserConsoleIssueCount=0`, `pageErrorCount=0`,
-`visibleRendererBridge=native-webgpu-surface-consumer`,
-`renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
-`surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
-and H2O visible samples. The automated mobile-shaped viewport/device-scale
-probe `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-mobile-visual-probe.json` is
-also `status=good` with zero console/page issues and the same native visible
-consumer ready state. The next renderer acceptance slice is real-phone
-confirmation and any required native-canvas framing fixes, not an overlay or
-CPU geometry fallback.
+`native-webgpu-surface-consumer` main-canvas path is wired, but the earlier
+`status=good` native/mobile artifacts are superseded false positives. Explicit
+native surface draw requests default to `renderer=native-webgpu`, bind the main
+canvas WebGPU context to the resident `GPUDevice`, consume retained native MC /
+extension surface draw buffers without an overlay, and report
+`renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered` in the
+one-step smoke. The visible GPU consumer remains fail-closed because runtime
+render-loop pixel readback is disabled after WebGPU external-instance failures;
+browser PNG/composited-frame analysis is now the validation owner. Current
+evidence: `/tmp/ulg-native-no-full-policy-smoke.json` completes with zero
+browser console issues/warnings, retained surface draw buffers, native bridge
+ready, and `surfaceDrawVisibleGpuConsumerPixelValidationStatus=not-run`.
+The frame artifacts show direct canvas captures are transparent black while the
+composited page is nonblank, so do not promote this path until native visible
+pixels are proven. Multi-batch no-full continuation is also still a P0 blocker:
+without active grid it times out in `p2gGridProjection`; with active grid it
+times out in second-batch `fusedMechanics`. The next renderer/runtime slice is
+resident continuation plus native pixel validation, not real-phone signoff,
+fallback geometry, or an overlay.
 
 Superseded routing note, 2026-06-19 AKDT: the native
 `native-webgpu-surface-consumer` contract now exists as the next renderer

@@ -12907,9 +12907,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
 
   const requestedReadbackMode = args.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const resolvedDevice = args.device || args.deviceResult?.device || null;
+  const requestActiveGridFusedNoFullMechanics = Boolean(
+    args.fuseNoFullResidentMechanicsActiveGrid || args.fuseNoFullResidentActiveGrid
+  );
   const requestPerStepFusedNoFullMechanics = Boolean(
     args.fuseNoFullResidentMechanics
-    || args.fuseNoFullResidentMechanicsSequence
+    || (args.fuseNoFullResidentMechanicsSequence && requestActiveGridFusedNoFullMechanics)
   );
   const useFusedNoFullResidentMechanicsSequence = Boolean(args.fuseNoFullResidentMechanicsSequence)
     && count > 1

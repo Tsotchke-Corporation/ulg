@@ -98,6 +98,21 @@ The capability gate now blocks that no-full-readback bridge until Three WebGPU
 has an initialized backend device and it matches the resident device; do not
 count a WebGPU renderer object alone as bridge readiness.
 
+Current routing note, 2026-06-18 AKDT: do not use the old
+`three-compact-vertices` path as visual evidence. ULG now blocks it by default
+because the in-repo surface-vertex extractor emits tetrahedralized
+render-field cube triangles and can stall on compact readback. When the
+resident path keeps lower-level render-field buffers, browser diagnostics must
+surface the real missing consumer:
+`surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind=render-field-density-storage-buffer`,
+`surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind=native-webgpu-marching-cubes-buffer-volume`,
+and
+`surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus=requires-buffer-native-marching-cubes-adapter`.
+The next native MC slice is therefore buffer-backed scalar-volume support in
+the sibling extension or an explicit GPU render-field-to-texture bridge, then
+engine-owned consumption; not a canvas overlay and not the compact
+tetrahedral fallback.
+
 Current routing note, 2026-06-18 AKDT: architecture work takes priority over
 micro-optimizing the old fallback renderer. Three WebGPU presentation and the
 same-device `three-webgpu-surface-buffers` bridge now fail closed by default:

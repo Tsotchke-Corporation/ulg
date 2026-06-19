@@ -733,6 +733,18 @@ export function resolveResidentSurfaceBufferHandoff({
   }
   const ready = status === 'resident-surface-buffer-direct-consumer-ready'
     || status === 'resident-render-field-buffer-direct-consumer-ready';
+  const surfaceExtractionInputKind = handoffKind === 'render-field-buffers'
+    ? 'render-field-density-storage-buffer'
+    : (handoffKind === 'surface-draw-buffers' ? 'surface-draw-compact-vertex-buffer' : null);
+  const surfaceExtractionConsumerKind = handoffKind === 'render-field-buffers'
+    ? 'native-webgpu-marching-cubes-buffer-volume'
+    : (handoffKind === 'surface-draw-buffers' ? 'direct-gpu-draw-consumer' : null);
+  const surfaceExtractionBridgeStatus = handoffKind === 'render-field-buffers'
+    ? 'requires-buffer-native-marching-cubes-adapter'
+    : (handoffKind === 'surface-draw-buffers' ? 'surface-extraction-not-required' : 'direct-consumer-blocked');
+  const surfaceExtractionBridgeReason = handoffKind === 'render-field-buffers'
+    ? 'retained ULG render-field buffers are storage-buffer scalar fields; native webgpu-marching-cubes consumption requires buffer-backed scalar-volume support or a GPU texture bridge'
+    : null;
   return {
     schema: 'peercompute.ulg.sph-resident-surface-buffer-handoff.v0',
     status,
@@ -743,6 +755,18 @@ export function resolveResidentSurfaceBufferHandoff({
       ? (surfaceDraw?.sourceRenderFieldSchema ?? surfaceDraw?.renderFieldExecution?.schema ?? null)
       : (surfaceDraw?.surfaceDrawSchema ?? surfaceDraw?.schema ?? null),
     requiresSurfaceExtraction: handoffKind === 'render-field-buffers',
+    surfaceExtractionInputKind,
+    surfaceExtractionInputLayout: handoffKind === 'render-field-buffers'
+      ? 'peercompute.ulg.sph-gpu-render-field-cell-row.density-x-f32.v0'
+      : (handoffKind === 'surface-draw-buffers'
+        ? 'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0'
+        : null),
+    surfaceExtractionConsumerKind,
+    surfaceExtractionRequiredAdapter: handoffKind === 'render-field-buffers'
+      ? 'webgpu-marching-cubes.buffer-volume.v0'
+      : null,
+    surfaceExtractionBridgeStatus,
+    surfaceExtractionBridgeReason,
     readbackMode: normalizedReadbackMode,
     noFullReadback,
     noSummaryReadback,
@@ -11119,6 +11143,15 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuBufferHandoffReadbackMode: gpuBufferHandoff.readbackMode,
         surfaceDrawGpuBufferHandoffNoFullReadback: gpuBufferHandoff.noFullReadback,
         surfaceDrawGpuBufferHandoffNoSummaryReadback: gpuBufferHandoff.noSummaryReadback,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind: gpuBufferHandoff.surfaceExtractionInputKind,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout: gpuBufferHandoff.surfaceExtractionInputLayout,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind: gpuBufferHandoff.surfaceExtractionConsumerKind,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter:
+          gpuBufferHandoff.surfaceExtractionRequiredAdapter,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus:
+          gpuBufferHandoff.surfaceExtractionBridgeStatus,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason:
+          gpuBufferHandoff.surfaceExtractionBridgeReason,
         surfaceDrawGpuBufferHandoffUpperBoundVertexCount: gpuBufferHandoff.upperBoundVertexCount,
         surfaceDrawGpuBufferHandoffUpperBoundTriangleCount: gpuBufferHandoff.upperBoundTriangleCount,
         surfaceDrawGpuBufferHandoffConservativeDrawRange: gpuBufferHandoff.conservativeDrawRange,
@@ -11446,6 +11479,15 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuBufferHandoffReadbackMode: gpuBufferHandoff.readbackMode,
         surfaceDrawGpuBufferHandoffNoFullReadback: gpuBufferHandoff.noFullReadback,
         surfaceDrawGpuBufferHandoffNoSummaryReadback: gpuBufferHandoff.noSummaryReadback,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind: gpuBufferHandoff.surfaceExtractionInputKind,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout: gpuBufferHandoff.surfaceExtractionInputLayout,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind: gpuBufferHandoff.surfaceExtractionConsumerKind,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter:
+          gpuBufferHandoff.surfaceExtractionRequiredAdapter,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus:
+          gpuBufferHandoff.surfaceExtractionBridgeStatus,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason:
+          gpuBufferHandoff.surfaceExtractionBridgeReason,
         surfaceDrawGpuBufferHandoffUpperBoundVertexCount: gpuBufferHandoff.upperBoundVertexCount,
         surfaceDrawGpuBufferHandoffUpperBoundTriangleCount: gpuBufferHandoff.upperBoundTriangleCount,
         surfaceDrawGpuBufferHandoffConservativeDrawRange: gpuBufferHandoff.conservativeDrawRange,
@@ -12661,6 +12703,18 @@ export function createSphPhaseScene(container, {
               gpuBufferHandoff.directConsumerInputSchema;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction =
               gpuBufferHandoff.requiresSurfaceExtraction;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind =
+              gpuBufferHandoff.surfaceExtractionInputKind;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout =
+              gpuBufferHandoff.surfaceExtractionInputLayout;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind =
+              gpuBufferHandoff.surfaceExtractionConsumerKind;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter =
+              gpuBufferHandoff.surfaceExtractionRequiredAdapter;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus =
+              gpuBufferHandoff.surfaceExtractionBridgeStatus;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason =
+              gpuBufferHandoff.surfaceExtractionBridgeReason;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReadbackMode = RESIDENT_NO_FULL_READBACK_MODE;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoFullReadback = gpuBufferHandoff.noFullReadback;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoSummaryReadback = gpuBufferHandoff.noSummaryReadback;
@@ -13115,6 +13169,18 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
         ),
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind ?? null,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout ?? null,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind ?? null,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter ?? null,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus ?? null,
+        surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason ?? null,
         surfaceDrawGpuBufferHandoffReadbackMode: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
         surfaceDrawGpuBufferHandoffNoFullReadback: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffNoFullReadback

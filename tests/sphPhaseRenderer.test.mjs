@@ -1713,6 +1713,9 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(ready.ready, true);
   assert.equal(ready.handoffKind, 'surface-draw-buffers');
   assert.equal(ready.requiresSurfaceExtraction, false);
+  assert.equal(ready.surfaceExtractionInputKind, 'surface-draw-compact-vertex-buffer');
+  assert.equal(ready.surfaceExtractionConsumerKind, 'direct-gpu-draw-consumer');
+  assert.equal(ready.surfaceExtractionBridgeStatus, 'surface-extraction-not-required');
   assert.equal(ready.noFullReadback, true);
   assert.equal(ready.noSummaryReadback, true);
   assert.equal(ready.upperBoundVertexCount, 18);
@@ -1755,6 +1758,15 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(renderFieldReady.handoffKind, 'render-field-buffers');
   assert.equal(renderFieldReady.directConsumerInputSchema, 'peercompute.ulg.sph-gpu-render-field.v0');
   assert.equal(renderFieldReady.requiresSurfaceExtraction, true);
+  assert.equal(renderFieldReady.surfaceExtractionInputKind, 'render-field-density-storage-buffer');
+  assert.equal(
+    renderFieldReady.surfaceExtractionInputLayout,
+    'peercompute.ulg.sph-gpu-render-field-cell-row.density-x-f32.v0'
+  );
+  assert.equal(renderFieldReady.surfaceExtractionConsumerKind, 'native-webgpu-marching-cubes-buffer-volume');
+  assert.equal(renderFieldReady.surfaceExtractionRequiredAdapter, 'webgpu-marching-cubes.buffer-volume.v0');
+  assert.equal(renderFieldReady.surfaceExtractionBridgeStatus, 'requires-buffer-native-marching-cubes-adapter');
+  assert.match(renderFieldReady.surfaceExtractionBridgeReason, /storage-buffer scalar fields/);
   assert.equal(renderFieldReady.renderFieldRowsBufferRetained, true);
   assert.equal(renderFieldReady.renderFieldRowsBufferByteLength, 2048);
   assert.equal(renderFieldReady.renderFieldSurfaceBufferRetained, true);

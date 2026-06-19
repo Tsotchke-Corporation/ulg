@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: explicit compact vertex surface
+presentation is now fail-closed by default. The current in-repo WebGPU
+surface-vertex extractor emits tetrahedralized render-field cube triangles, not
+a true marching-cubes surface, and compact readback can stall, so
+`surfaceDraw=three-compact-vertices` demotes to `auto` with a recorded
+fallback reason instead of showing misleading geometry. The direct handoff
+contract is now more explicit: retained render-field buffers report
+`surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind=render-field-density-storage-buffer`,
+`surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind=native-webgpu-marching-cubes-buffer-volume`,
+and
+`surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus=requires-buffer-native-marching-cubes-adapter`.
+This keeps the engine-owned Three/MarchingCubes render-field path as the
+visible correctness fallback while the real sibling `webgpu-marching-cubes`
+buffer-volume/native consumer is implemented and pixel validated.
+
 Current checkpoint, 2026-06-18 AKDT: Three WebGPU presentation now has an
 explicit unsafe diagnostic opt-in, but it is still not a production or default
 path. The policy helper records whether presentation was unavailable, not
@@ -34,11 +49,12 @@ consumer is unavailable. The bridge planner reports
 `extension-surface-render-plan-resident-surface-buffer-handoff` and effective
 bridge `resident-surface-buffers-no-overlay` instead of silently downgrading to
 full-readback Three compact geometry on WebGL or blocked Three WebGPU
-presentation. Explicit `three-compact-vertices` remains available as a
-diagnostic/mobile correctness bridge, but the architecture path is now honest:
-the missing item is the engine-owned marching-cubes/WebGPU surface consumer that
-can bind retained render-field/extension buffers without overlay or CPU
-readback.
+presentation. Explicit `three-compact-vertices` is now blocked by default
+because the current compact extractor is tetrahedralized render-field cube
+geometry, not a true native marching-cubes implementation. The architecture
+path is now honest: the missing item is the engine-owned marching-cubes/WebGPU
+surface consumer that can bind retained render-field/extension buffers without
+overlay or CPU readback.
 
 Current checkpoint, 2026-06-18 AKDT: active-grid dispatch planning no longer
 needs compact-summary CPU readback in the normal no-full resident path. Commit

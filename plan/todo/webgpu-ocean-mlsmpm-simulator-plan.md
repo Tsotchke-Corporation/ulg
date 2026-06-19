@@ -262,15 +262,20 @@ Tactical status, 2026-06-18 AKDT:
   zero browser console issues/warnings and
   `residentSurfaceBufferHandoffSampleCount=4`. The probe still classifies
   visually `bad` because the actual engine/marching-cubes consumer is not bound
-  yet; that binding is now the next visible-render milestone.
+  yet; that binding is now the next visible-render milestone. Current browser
+  state names the required input as
+  `surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind=render-field-density-storage-buffer`
+  and the required consumer as
+  `surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind=native-webgpu-marching-cubes-buffer-volume`.
 - The extension surface bridge planner now preserves the no-readback contract by
   default. When a no-full extension surface request cannot use same-device Three
   WebGPU buffer geometry, the planner retains resident surface buffers and
   reports `resident-surface-buffers-no-overlay` instead of silently downgrading
-  to full-readback Three compact geometry. Explicit
-  `three-compact-vertices` still requests the readback bridge for diagnostics,
-  but routine no-full performance routing now keeps the missing direct consumer
-  visible as the blocker.
+  to full-readback Three compact geometry. Explicit `three-compact-vertices`
+  is now blocked by default because the current compact extractor emits
+  tetrahedralized render-field cube geometry rather than true marching cubes,
+  and compact readback can stall. Routine no-full performance routing now keeps
+  the missing native buffer-volume direct consumer visible as the blocker.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports
@@ -576,7 +581,8 @@ Interim status, 2026-06-18 AKDT:
   It refreshes the material when the closure-derived optical signature changes
   so mesh reuse does not freeze PBR state.
 - The compact surface-vertex bridge remains disabled for the normal path
-  because full surface vertex/metadata readback still wedges in browser probes.
+  because it is both readback-heavy and currently built on tetrahedralized
+  render-field cube geometry, not true native marching cubes.
 - The raw WebGPU render-row overlay remains disabled for the normal path after
   black-frame pixel checks. It must either be fixed inside the normal
   Three/WebGPU presentation/depth path or replaced by the screen-space fluid

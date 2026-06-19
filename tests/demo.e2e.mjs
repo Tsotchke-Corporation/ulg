@@ -5415,6 +5415,18 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       surfaceDrawGpuBufferHandoffInputSchema: renderState?.surfaceDrawGpuBufferHandoffInputSchema ?? null,
       surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction:
         renderState?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus ?? null,
+      surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason:
+        renderState?.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason ?? null,
       surfaceDrawGpuBufferHandoffNoFullReadback: renderState?.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
       surfaceDrawGpuBufferHandoffNoSummaryReadback:
         renderState?.surfaceDrawGpuBufferHandoffNoSummaryReadback ?? null,
@@ -5456,6 +5468,17 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawGpuBufferHandoffKind).toBe('render-field-buffers');
   expect(result.surfaceDrawGpuBufferHandoffInputSchema).toBe('peercompute.ulg.sph-gpu-render-field.v0');
   expect(result.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction).toBe(true);
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind).toBe('render-field-density-storage-buffer');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout)
+    .toBe('peercompute.ulg.sph-gpu-render-field-cell-row.density-x-f32.v0');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind)
+    .toBe('native-webgpu-marching-cubes-buffer-volume');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter)
+    .toBe('webgpu-marching-cubes.buffer-volume.v0');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus)
+    .toBe('requires-buffer-native-marching-cubes-adapter');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason)
+    .toContain('storage-buffer scalar fields');
   expect(result.surfaceDrawGpuBufferHandoffNoFullReadback).toBe(true);
   expect(result.surfaceDrawGpuBufferHandoffNoSummaryReadback).toBe(true);
   expect(result.surfaceDrawRenderBridgeStatus).toBe('resident-render-field-buffers-retained-no-overlay');

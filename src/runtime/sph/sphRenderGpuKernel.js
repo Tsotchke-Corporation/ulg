@@ -4015,6 +4015,10 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
   let deferNoFullCleanup = false;
+  let gpuOnlyDrawRangeVertexCount = null;
+  let gpuOnlyDrawRangeTriangleCount = null;
+  let gpuOnlyDrawRangeStatus = null;
+  let gpuOnlyDrawRangeReason = null;
   if (!noFullReadback) {
     markProgress('surface-draw-metadata-queue-submit-started');
     device.queue.submit([encoder.finish()]);
@@ -4150,6 +4154,21 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     } else {
       summaryReadback = false;
       summaryReadbackByteLength = 0;
+      gpuOnlyDrawRangeVertexCount = Math.max(0, sourceVertexRowCount - (sourceVertexRowCount % 3));
+      gpuOnlyDrawRangeTriangleCount = Math.floor(gpuOnlyDrawRangeVertexCount / 3);
+      gpuOnlyDrawRangeStatus = gpuOnlyDrawRangeVertexCount >= 3
+        ? 'surface-draw-gpu-resident-draw-range-available'
+        : 'surface-draw-gpu-resident-empty-draw-range';
+      gpuOnlyDrawRangeReason = gpuOnlyDrawRangeVertexCount >= 3
+        ? 'compact surface-draw summary was not read; retained GPU buffers expose a conservative upper-bound draw range for same-device consumers'
+        : 'compact surface-draw summary was not read and retained GPU buffers do not contain a drawable triangle range';
+      markProgress('surface-draw-metadata-gpu-only-draw-range-ready', {
+        queueCompletionStatus,
+        queueCompletionMethod,
+        gpuOnlyDrawRangeStatus,
+        gpuOnlyDrawRangeVertexCount,
+        gpuOnlyDrawRangeTriangleCount
+      });
     }
   }
 
@@ -4273,6 +4292,16 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     surfaceDrawReadback: !noFullReadback,
     surfaceDrawSummaryReadback: summaryReadback,
     surfaceDrawSummaryReadbackByteLength: summaryReadbackByteLength,
+    surfaceDrawGpuOnlyHandoff: Boolean(noFullReadback && !summaryReadback),
+    surfaceDrawGpuOnlyHandoffStatus: gpuOnlyDrawRangeStatus,
+    surfaceDrawGpuOnlyHandoffReason: gpuOnlyDrawRangeReason,
+    surfaceDrawGpuOnlyUpperBoundVertexCount: gpuOnlyDrawRangeVertexCount,
+    surfaceDrawGpuOnlyUpperBoundTriangleCount: gpuOnlyDrawRangeTriangleCount,
+    surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
+      noFullReadback
+      && !summaryReadback
+      && (gpuOnlyDrawRangeVertexCount || 0) >= 3
+    ),
     fullSurfaceDrawReadback: !noFullReadback,
     compactionMode: 'webgpu-surface-prefix-scan-compact',
     surfaces,

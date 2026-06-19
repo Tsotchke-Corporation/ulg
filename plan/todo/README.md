@@ -145,6 +145,15 @@ renderer integration, not as late WebGPU bind-group errors. This is still a
 boundary/safety gate; the throughput win requires resident surface rows to be
 consumed by the engine-owned GPU renderer path without full geometry readback.
 
+Current routing note, 2026-06-18 AKDT: retained surface-draw metadata now has
+an explicit GPU-only handoff contract for no-full-readback paths. When compact
+surface-draw summaries are not read, the WebGPU builder publishes retained draw,
+indirect, and compacted-vertex buffers plus conservative upper-bound
+vertex/triangle draw ranges and a `surface-draw-gpu-resident-*` status instead
+of pretending it knows exact active surface counts. This is the contract the
+future direct renderer/native marching-cubes consumer should use; exact CPU
+summaries remain diagnostic/parity tools, not a hot-loop requirement.
+
 Current routing note, 2026-06-18 AKDT: ULG now follows NodeKernel for both GPU
 resident stage placement and execution when a real NodeKernel owns the
 resident ComputeManager. The mechanics stage chain records
@@ -198,6 +207,25 @@ isovalue/smoothing/normal policy, and surface PBR rows should become
 algorithm-shaped derived views of fundamental closures, not new hand-tuned
 constants. The precomputed JSON bank can seed/cache these rows only with
 schema, unit, validity-domain, and provenance gates intact.
+
+Current routing note, 2026-06-18 AKDT: slot the new material polytope and
+property-fit roadmap after the element/crystal JSON bank and after the first
+algorithm-derived row schemas are stable. Track it in
+`plan/todo/material-polytope-registry-and-property-fit-plan.md`. Its job is to
+discover valid state domains, replay first-principles samples inside those
+domains, and fit cheap runtime response functions with residual/provenance
+gates. Do not let it become a hand-authored constants table or a reason to
+extrapolate outside accepted domains.
+
+Current routing note, 2026-06-18 AKDT: slot the electron-cloud/material
+derivation visualization plan after provenance-backed material bank,
+algorithm-row, and polytope/sample/fit artifacts exist. Track it in
+`plan/todo/electron-cloud-material-derivation-visualization-plan.md`. Its
+first implementation should be replay/inspection of accepted derivation
+artifacts: orbital clouds, radial density, molecular charge density, bonding,
+polytope domains, sample points, fits, and final reduced runtime rows. It must
+not run heavy quantum derivation on the main render loop or create a second
+authority path for material properties.
 
 Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
 solid-H2O static row remains stable under the current dense visual sequence
@@ -1852,20 +1880,34 @@ still hard-times out before writing a full result.
 5. **WebGPU hot-loop and surface generation**
    - `webgpu-ocean-mlsmpm-simulator-plan.md`
    - `gpu-resident-lanes-and-warm-services-plan.md`
+   - `algorithm-derived-material-properties-plan.md`
    - Goal: keep particle, grid, gas, wall, product, phase, and surface fields
-     GPU resident; use compact summaries instead of full readback.
+     GPU resident; use compact summaries instead of full readback; derive
+     MLS-MPM/contact/surface/PBR rows from closure-backed material state rather
+     than renderer constants.
 6. **Material/closure resolver migration**
    - `webgpu-material-property-resolvers-plan.md`
    - `material-property-json-bank-plan.md`
+   - `material-polytope-registry-and-property-fit-plan.md`
    - Goal: move resolver families into ComputeManager-managed CPU/WASM/WebGPU
      workers with explicit closure provenance, cache keys, validity domains,
-     precomputed JSON bank warm inputs, and CPU/WASM reference paths.
-7. **Frontier law expansion**
+     precomputed JSON bank warm inputs, accepted polytopes, sampled
+     first-principles artifacts, response-fit rows, and CPU/WASM reference
+     paths.
+7. **Derivation visualization and audit surfaces**
+   - `electron-cloud-material-derivation-visualization-plan.md`
+   - `material-polytope-registry-and-property-fit-plan.md`
+   - Goal: let users inspect where material/runtime rows came from, including
+     electron/radial density, molecular bonding, polytope domains, sampled
+     first-principles data, fit residuals, cache status, and strict-mode
+     blockers, without moving expensive closure derivation into the hot UI
+     loop.
+8. **Frontier law expansion**
    - `frontier-todo.md`
    - Goal: add radiation, nuclear, Cherenkov, gravity, MHD/PIC, quantum
      response, relativistic, and astrophysical closure paths as law nodes with
      honest validation gates.
-8. **PeerCompute, Eshkol, and MoonLab service integration**
+9. **PeerCompute, Eshkol, and MoonLab service integration**
    - `peercompute-law-graph-authority-plan.md`
    - `gpu-resident-lanes-and-warm-services-plan.md`
    - `webgpu-material-property-resolvers-plan.md`
@@ -1873,15 +1915,15 @@ still hard-times out before writing a full result.
      orchestration, keep heavy Eshkol/MoonLab hosts warm when scenario latency
      requires it, use Eshkol for derived closures/reference/WASM/WGSL artifacts,
      and use MoonLab for quantum/many-body response artifacts.
-9. **Cold-start and persistence polish**
+10. **Cold-start and persistence polish**
    - `cold-start-cache-performance-plan.md`
    - Goal: persist only stable schemas and content-addressed closure artifacts
      after the law/state contracts stop moving.
-10. **Final validation and packaging**
+11. **Final validation and packaging**
     - `overarching-completion-plan.md`
     - Goal: complete browser smoke tests, scientific overclaim guards,
       distributed evidence handoff, and production-readable status docs.
-11. **Full distributed PeerCompute stack**
+12. **Full distributed PeerCompute stack**
     - `distributed-peercompute-network-stack-plan.md`
     - Goal: after the single-node authority and worker-stage contracts are
       stable, stand up this machine as the WSS/STUN/TURN/ICE test environment

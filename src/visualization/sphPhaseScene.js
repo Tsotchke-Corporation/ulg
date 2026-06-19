@@ -10650,6 +10650,14 @@ export function createSphPhaseScene(container, {
         surfaceDrawReadback: Boolean(surfaceDrawExecution.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
+        surfaceDrawGpuOnlyHandoff: Boolean(surfaceDrawExecution.surfaceDrawGpuOnlyHandoff),
+        surfaceDrawGpuOnlyHandoffStatus: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffStatus ?? null,
+        surfaceDrawGpuOnlyHandoffReason: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffReason ?? null,
+        surfaceDrawGpuOnlyUpperBoundVertexCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
+        surfaceDrawGpuOnlyUpperBoundTriangleCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
+        ),
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         requestedVisibleRendererBridge: renderBridgeMode,
@@ -10914,6 +10922,14 @@ export function createSphPhaseScene(container, {
         surfaceDrawReadback: Boolean(surfaceDrawExecution.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
+        surfaceDrawGpuOnlyHandoff: Boolean(surfaceDrawExecution.surfaceDrawGpuOnlyHandoff),
+        surfaceDrawGpuOnlyHandoffStatus: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffStatus ?? null,
+        surfaceDrawGpuOnlyHandoffReason: surfaceDrawExecution.surfaceDrawGpuOnlyHandoffReason ?? null,
+        surfaceDrawGpuOnlyUpperBoundVertexCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
+        surfaceDrawGpuOnlyUpperBoundTriangleCount: surfaceDrawExecution.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
+          surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
+        ),
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         requestedVisibleRendererBridge: renderBridgeMode,
@@ -12427,6 +12443,14 @@ export function createSphPhaseScene(container, {
         surfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: sphResidentSurfaceDraw?.surfaceDrawSummaryReadbackByteLength ?? 0,
+        surfaceDrawGpuOnlyHandoff: Boolean(sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoff),
+        surfaceDrawGpuOnlyHandoffStatus: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoffStatus ?? null,
+        surfaceDrawGpuOnlyHandoffReason: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoffReason ?? null,
+        surfaceDrawGpuOnlyUpperBoundVertexCount: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
+        surfaceDrawGpuOnlyUpperBoundTriangleCount: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuOnlyDrawRangeConservative
+        ),
         fullSurfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.fullSurfaceDrawReadback),
         surfaceDrawReadbackMode: sphResidentSurfaceDraw?.readbackMode ?? null,
         surfaceDrawCompactionMode: sphResidentSurfaceDraw?.compactionMode ?? null,

@@ -103,6 +103,12 @@ Tactical status, 2026-06-18 AKDT:
   and ULG's wrapper consumes extension preflight before extraction. This moves
   cross-device and malformed-volume failures to the adapter boundary before
   render bridge construction.
+- Retained surface-draw metadata now exposes a no-summary GPU-only handoff:
+  when the no-full path skips compact summary readback, it still reports
+  retained draw/indirect/compacted-vertex buffers and conservative upper-bound
+  draw ranges through `surfaceDrawGpuOnly*` telemetry. This is not a visible
+  renderer by itself, but it removes the need for a CPU summary as the contract
+  boundary for the future engine-owned GPU surface consumer.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

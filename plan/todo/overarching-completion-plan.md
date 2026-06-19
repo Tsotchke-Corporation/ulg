@@ -25,6 +25,10 @@ Active inputs examined:
 - `plan/todo/sedenion-reaction-scoping-plan.md`
 - `plan/todo/phase-resolved-steam-optics-plan.md`
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
+- `plan/todo/material-property-json-bank-plan.md`
+- `plan/todo/algorithm-derived-material-properties-plan.md`
+- `plan/todo/material-polytope-registry-and-property-fit-plan.md`
+- `plan/todo/electron-cloud-material-derivation-visualization-plan.md`
 - `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
 - `plan/todo/sphphasedemo.md`
 - `plan/todo/frontier-todo.md`
@@ -46,16 +50,23 @@ Use this order unless the user redirects:
 4. Finish steam/water/phase/optics and the iron-on-ice controls.
 5. Move the hot loop to ComputeManager-compatible GPU resident lanes with
    resident particle/grid/gas/product/phase/surface buffers and declared copy
-   budgets.
+   budgets, with MLS-MPM/contact/surface/PBR rows derived for the algorithms
+   that consume them.
 6. Move material and closure resolvers into CPU/WASM/WebGPU workers with
-   content-addressed provenance and strict validation flags.
-7. Add frontier laws as law graph nodes: radiation, nuclear, Cherenkov,
+   content-addressed provenance, strict validation flags, precomputed JSON
+   warm inputs, accepted material polytopes, sampled first-principles artifacts,
+   and fitted response rows.
+7. Add material-derivation inspection surfaces after the provenance artifacts
+   exist, so electron/orbital clouds, molecular charge density, bonding,
+   polytope domains, samples, fits, and final runtime rows can be audited
+   without becoming a second material-property authority path.
+8. Add frontier laws as law graph nodes: radiation, nuclear, Cherenkov,
    gravity, MHD/PIC, quantum response, relativistic, and astrophysical paths.
-8. Integrate PeerCompute, Eshkol, and MoonLab service hosts under the same law
+9. Integrate PeerCompute, Eshkol, and MoonLab service hosts under the same law
    graph, worker lease, warm-residency, artifact cache, and admission model.
-9. Polish cold-start persistence and timing after schemas stabilize.
-10. Run final validation, profiling, overclaim checks, and packaging.
-11. Stand up the full local distributed PeerCompute network stack after the
+10. Polish cold-start persistence and timing after schemas stabilize.
+11. Run final validation, profiling, overclaim checks, and packaging.
+12. Stand up the full local distributed PeerCompute network stack after the
     above contracts stabilize: WSS relay plus STUN/TURN/ICE configuration for
     multi-window and multi-computer acceptance testing.
 

@@ -2187,6 +2187,52 @@ test('SPH render surface draw no-full mode can read compact summary without vert
   assert.ok(activeSurface.boundsRadiusM > 0);
 });
 
+test('SPH render surface draw no-full mode exposes GPU-only draw range without summary readback', async () => {
+  const field = twoSurfaceRenderField();
+  const vertices = deriveSphRenderSurfaceVerticesCpu(field);
+  const cpuDraw = deriveSphRenderSurfaceDrawMetadataCpu(vertices);
+  const { device, copies } = fakeSurfaceDrawDevice({
+    drawRows: cpuDraw.drawRows,
+    compactedVertexRows: vertices.vertexRows,
+    drawIndirectRows: cpuDraw.drawIndirectRows
+  });
+
+  const result = await buildSphRenderSurfaceDrawMetadataWebGpu({
+    device,
+    surfaceVertices: vertices,
+    readbackMode: 'no-full-readback',
+    compactSummaryReadback: false,
+    retainDrawRowsBuffer: true,
+    retainDrawIndirectRowsBuffer: true,
+    retainCompactedVertexRowsBuffer: true,
+    waitForQueueCompletion: false
+  });
+
+  const expectedVertexUpperBound = Math.floor(vertices.vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS);
+  const expectedAlignedVertexUpperBound = expectedVertexUpperBound - (expectedVertexUpperBound % 3);
+  assert.equal(result.status, 'surface-draw-resident');
+  assert.equal(result.readbackMode, 'no-full-readback');
+  assert.equal(result.surfaceDrawReadback, false);
+  assert.equal(result.fullSurfaceDrawReadback, false);
+  assert.equal(result.surfaceDrawSummaryReadback, false);
+  assert.equal(result.surfaceDrawSummaryReadbackByteLength, 0);
+  assert.equal(result.surfaceDrawGpuOnlyHandoff, true);
+  assert.equal(result.surfaceDrawGpuOnlyHandoffStatus, 'surface-draw-gpu-resident-draw-range-available');
+  assert.equal(result.surfaceDrawGpuOnlyDrawRangeConservative, true);
+  assert.equal(result.surfaceDrawGpuOnlyUpperBoundVertexCount, expectedAlignedVertexUpperBound);
+  assert.equal(result.surfaceDrawGpuOnlyUpperBoundTriangleCount, Math.floor(expectedAlignedVertexUpperBound / 3));
+  assert.equal(result.activeSurfaceCount, null);
+  assert.equal(result.vertexCount, null);
+  assert.equal(result.triangleCount, null);
+  assert.deepEqual(Array.from(result.drawRows), []);
+  assert.deepEqual(Array.from(result.compactedVertexRows), []);
+  assert.deepEqual(Array.from(result.drawIndirectRows), []);
+  assert.ok(result.drawRowsBufferRetained);
+  assert.ok(result.drawIndirectRowsBufferRetained);
+  assert.ok(result.compactedVertexRowsBufferRetained);
+  assert.equal(copies.length, 0);
+});
+
 test('SPH render surface draw compact summary can fence deferred resident metadata', async () => {
   const field = twoSurfaceRenderField();
   const vertices = deriveSphRenderSurfaceVerticesCpu(field);

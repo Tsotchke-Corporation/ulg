@@ -4,9 +4,9 @@
 import './styles.css';
 import { mountSphPhaseDemoOverlay } from './visualization/sphPhaseDemoMount.js';
 
-function launch() {
-  const handle = mountSphPhaseDemoOverlay();
-  const overlay = document.querySelector('#sph-phase-overlay');
+async function launch() {
+  const handle = await mountSphPhaseDemoOverlay();
+  const overlay = handle?.overlay || document.querySelector('#sph-phase-overlay');
   const closeBtn = overlay?.querySelector('#sph-close');
   if (closeBtn) {
     closeBtn.addEventListener('click', () => {

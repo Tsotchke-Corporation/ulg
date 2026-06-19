@@ -20,6 +20,7 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   createContinuousSurfaceBatches,
+  createResidentMaterialSeedSurfaceBatches,
   resolveSphScenePixelRatio,
   resolveSphSceneViewportSize,
   cpuMarchingCubesCellSizeM,
@@ -27,6 +28,7 @@ import {
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
   createProductEventSurfaceBatches,
+  resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
@@ -34,8 +36,10 @@ import {
   normalizeSphRendererBackend,
   createThreeWebGpuExternalInterleavedBufferAttribute,
   resolveExtensionSurfaceRenderBridgePlan,
+  resolveThreeWebGpuRendererRequiredLimits,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
+  summarizeThreeWebGpuDeviceLimits,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
@@ -161,6 +165,32 @@ test('SPH renderer backend option normalizes WebGPU as opt-in', () => {
   assert.equal(normalizeSphRendererBackend('bad-value'), 'webgl');
 });
 
+test('SPH Three WebGPU renderer required limits are resident-mode opt-in', () => {
+  assert.deepEqual(resolveThreeWebGpuRendererRequiredLimits(), {});
+  assert.deepEqual(resolveThreeWebGpuRendererRequiredLimits({
+    rendererWebGpuResidentDevice: false
+  }), {});
+  assert.deepEqual(resolveThreeWebGpuRendererRequiredLimits({
+    rendererWebGpuResidentDevice: true
+  }), {
+    maxStorageBuffersPerShaderStage: 10,
+    maxBufferSize: 512 * 1024 * 1024,
+    maxStorageBufferBindingSize: 512 * 1024 * 1024
+  });
+
+  assert.deepEqual(summarizeThreeWebGpuDeviceLimits({
+    limits: {
+      maxStorageBuffersPerShaderStage: 12,
+      maxBufferSize: 1024,
+      maxStorageBufferBindingSize: 2048
+    }
+  }), {
+    maxStorageBuffersPerShaderStage: 12,
+    maxBufferSize: 1024,
+    maxStorageBufferBindingSize: 2048
+  });
+});
+
 test('SPH Three WebGPU renderer-owned resident device is explicit opt-in', () => {
   const readyDevice = { label: 'renderer-owned-ready-device' };
   const readyRenderer = {
@@ -240,10 +270,34 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
     device: supportedDevice
   });
   assert.equal(webgpu.rendererBackend, 'three-webgpu');
-  assert.equal(webgpu.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(
+    webgpu.status,
+    'same-device-gpu-buffer-geometry-blocked-three-webgpu-external-buffer-pipeline-unvalidated'
+  );
   assert.equal(webgpu.rendererBackendDeviceReady, true);
-  assert.equal(webgpu.sameDeviceGpuBufferGeometrySupported, true);
-  assert.equal(webgpu.visibleNoReadbackSupported, true);
+  assert.equal(webgpu.sameDeviceGpuBufferGeometryAvailable, true);
+  assert.equal(webgpu.sameDeviceGpuBufferGeometrySupported, false);
+  assert.equal(webgpu.externalBufferPresentationEnabled, false);
+  assert.equal(webgpu.visibleNoReadbackSupported, false);
+
+  const webgpuOptIn = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: supportedDevice,
+        get() { return { buffer: {} }; }
+      },
+      userData: { sphThreeWebGpuSurfaceBufferPresentationEnabled: true },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: supportedDevice
+  });
+  assert.equal(webgpuOptIn.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(webgpuOptIn.sameDeviceGpuBufferGeometryAvailable, true);
+  assert.equal(webgpuOptIn.sameDeviceGpuBufferGeometrySupported, true);
+  assert.equal(webgpuOptIn.externalBufferPresentationEnabled, true);
+  assert.equal(webgpuOptIn.visibleNoReadbackSupported, true);
 
   const presentationDisabled = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
@@ -324,11 +378,35 @@ test('SPH extension surface bridge planner falls back to integrated Three compac
     rendererCapability: webgpuCapability,
     readbackMode: 'no-full-readback'
   });
-  assert.equal(webgpuPlan.status, 'extension-surface-render-plan-three-webgpu-surface-buffers');
-  assert.equal(webgpuPlan.useThreeCompactBridge, false);
-  assert.equal(webgpuPlan.useThreeWebGpuSurfaceBufferBridge, true);
-  assert.equal(webgpuPlan.translationReadbackMode, 'no-full-readback');
-  assert.equal(webgpuPlan.fallbackThreeCompactBridge, false);
+  assert.equal(webgpuPlan.status, 'extension-surface-render-plan-three-compact-fallback');
+  assert.equal(webgpuPlan.useThreeCompactBridge, true);
+  assert.equal(webgpuPlan.useThreeWebGpuSurfaceBufferBridge, false);
+  assert.equal(webgpuPlan.translationReadbackMode, 'full-parity-readback');
+  assert.equal(webgpuPlan.fallbackThreeCompactBridge, true);
+  assert.match(webgpuPlan.fallbackReason, /pipeline validation/);
+
+  const webgpuOptInCapability = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: rendererDevice,
+        get() { return { buffer: {} }; }
+      },
+      userData: { sphThreeWebGpuSurfaceBufferPresentationEnabled: true },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: rendererDevice
+  });
+  const webgpuOptInPlan = resolveExtensionSurfaceRenderBridgePlan({
+    rendererCapability: webgpuOptInCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(webgpuOptInPlan.status, 'extension-surface-render-plan-three-webgpu-surface-buffers');
+  assert.equal(webgpuOptInPlan.useThreeCompactBridge, false);
+  assert.equal(webgpuOptInPlan.useThreeWebGpuSurfaceBufferBridge, true);
+  assert.equal(webgpuOptInPlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(webgpuOptInPlan.fallbackThreeCompactBridge, false);
 
   const requestedCompactPlan = resolveExtensionSurfaceRenderBridgePlan({
     renderBridgeMode: 'three-compact-vertices',
@@ -540,6 +618,41 @@ test('SPH phase renderer preserves same-material render domains as separate surf
     [
       ['h2o|h2o|liquid|domain:base', 1, 2],
       ['h2o|h2o|liquid|domain:drop', 2, 2]
+    ]
+  );
+});
+
+test('SPH resident material seed surfaces preserve domains without CPU geometry', () => {
+  const batches = createResidentMaterialSeedSurfaceBatches({
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' }
+    ],
+    colorsRgb: new Float32Array([
+      0.2, 0.4, 1.0,
+      0.4, 0.6, 1.0,
+      0.8, 0.3, 0.5,
+      1.0, 0.5, 0.7
+    ]),
+    particleRadiiM: new Float32Array([0.1, 0.12, 0.2, 0.22]),
+    renderDomainCounts: { base: 2, drop: 2, total: 4 },
+    smoothingLengthM: 0.3
+  });
+
+  assert.deepEqual(
+    batches.map((batch) => [
+      batch.surfaceKey,
+      batch.renderDomainId,
+      batch.count,
+      batch.positionsM.length,
+      Number(batch.surfaceRadiusM.toFixed(3)),
+      batch.averageColorRgb.map((value) => Number(value.toFixed(3)))
+    ]).sort(),
+    [
+      ['h2o|h2o|liquid|domain:base', 1, 2, 0, 0.11, [0.3, 0.5, 1]],
+      ['h2o|h2o|liquid|domain:drop', 2, 2, 0, 0.21, [0.9, 0.4, 0.6]]
     ]
   );
 });
@@ -1400,7 +1513,7 @@ test('SPH surface mesh material proxies transmissive PBR on mobile WebGL paths',
   assert.ok(material.color.b > material.color.r);
 });
 
-test('SPH surface mesh material preserves true transmissive PBR on Three WebGPU paths', () => {
+test('SPH surface mesh material proxies transmissive PBR for Three WebGPU external buffers', () => {
   const policy = resolveSphSurfaceRendererMaterialPolicy({
     rendererBackend: 'three-webgpu',
     navigatorRef: {
@@ -1424,10 +1537,76 @@ test('SPH surface mesh material preserves true transmissive PBR on Three WebGPU 
     bridgeMode: 'three-webgpu-surface-buffers'
   });
 
-  assert.equal(policy.transmissiveProxyRequired, false);
-  assert.equal(material.transmission, 0.82);
-  assert.equal(material.thickness, 0.4);
-  assert.equal(material.userData.surfaceMaterialRendererProxy, undefined);
+  assert.equal(policy.transmissiveProxyRequired, true);
+  assert.equal(material.transmission, 0);
+  assert.equal(material.thickness, 0);
+  assert.equal(material.userData.surfaceMaterialOriginalTransmission, 0.82);
+  assert.equal(
+    material.userData.surfaceMaterialRendererProxyReason,
+    'three-webgpu-external-buffer-transmissive-surface-proxy'
+  );
+});
+
+test('SPH surface mesh material proxies transmissive PBR for Three WebGPU presentation', () => {
+  const policy = resolveSphSurfaceRendererMaterialPolicy({
+    rendererBackend: 'three-webgpu',
+    navigatorRef: {
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64)',
+      maxTouchPoints: 0
+    },
+    visualViewport: { width: 1280, height: 800 }
+  });
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.08, 0.12, 0.18),
+    transmission: 0.7,
+    thickness: 0.4,
+    transparent: true,
+    opacity: 0.2
+  });
+  material.userData.optical = { transmission: 0.7 };
+
+  stabilizeSurfaceMeshMaterialForRenderer(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    rendererMaterialPolicy: policy,
+    bridgeMode: 'three-compact-vertices'
+  });
+
+  assert.equal(policy.status, 'surface-material-three-webgpu-transmission-proxy');
+  assert.equal(policy.transmissiveProxyRequired, true);
+  assert.equal(material.transmission, 0);
+  assert.equal(material.thickness, 0);
+  assert.equal(material.userData.surfaceMaterialRendererProxy, true);
+  assert.equal(material.userData.surfaceMaterialRendererProxyReason, 'three-webgpu-transmissive-surface-proxy');
+});
+
+test('SPH Three WebGPU surface buffers can use conservative aggregate draw records without summary readback', () => {
+  const records = resolveThreeWebGpuSurfaceBufferDrawRecords({
+    surfaceDrawExecution: {
+      sourceVertexRowCount: 19,
+      compactedVertexRowsBufferByteLength: 19 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      surfaces: [{
+        surfaceKey: 'h2o-liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o-liquid',
+        materialId: stableOpticalMaterialId('h2o'),
+        phaseId: GPU_PHASE_IDS.liquid,
+        vertexOffset: null,
+        vertexCount: null,
+        triangleCount: null
+      }]
+    }
+  });
+
+  assert.equal(records.status, 'conservative-no-readback-aggregate');
+  assert.equal(records.conservativeNoReadbackDrawRange, true);
+  assert.equal(records.aggregateVertexCount, 18);
+  assert.equal(records.records.length, 1);
+  assert.equal(records.records[0].vertexOffset, 0);
+  assert.equal(records.records[0].vertexCount, 18);
+  assert.equal(records.records[0].triangleCount, 6);
+  assert.equal(records.records[0].material, 'h2o');
+  assert.equal(records.records[0].phase, 'liquid');
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

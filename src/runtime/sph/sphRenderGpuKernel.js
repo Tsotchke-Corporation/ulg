@@ -3324,7 +3324,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   maxVertexRows = null,
   onProgress = null,
   waitForQueueCompletion = true,
-  deferCleanup = true
+  deferCleanup = true,
+  useQueueFenceForCleanup = true
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires a WebGPU-like device');
@@ -3465,6 +3466,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
   let deferNoFullCleanup = false;
+  let surfaceVertexDeferredCleanup = false;
   if (!noFullReadback) {
     markProgress('surface-vertices-queue-submit-started');
     device.queue.submit([encoder.finish()]);
@@ -3510,18 +3512,27 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     } else {
       markProgress('surface-vertices-queue-submit-started');
       device.queue.submit([encoder.finish()]);
-      queueCompletionStatus = device.queue?.onSubmittedWorkDone
+      const canFenceCleanup = Boolean(device.queue?.onSubmittedWorkDone && deferCleanup && useQueueFenceForCleanup);
+      queueCompletionStatus = canFenceCleanup
         ? 'queue-submitted-cleanup-deferred'
-        : 'queue-submitted-no-explicit-completion';
-      queueCompletionMethod = device.queue?.onSubmittedWorkDone
+        : (device.queue?.onSubmittedWorkDone
+          ? 'queue-submitted-gpu-handoff-no-cpu-fence'
+          : 'queue-submitted-no-explicit-completion');
+      queueCompletionMethod = canFenceCleanup
         ? 'deferred queue.onSubmittedWorkDone cleanup'
-        : 'queue.submit';
-      deferNoFullCleanup = Boolean(device.queue?.onSubmittedWorkDone && deferCleanup);
+        : (device.queue?.onSubmittedWorkDone
+          ? 'queue.submit(in-order-gpu-surface-vertex-handoff)'
+          : 'queue.submit');
+      deferNoFullCleanup = canFenceCleanup;
+      surfaceVertexDeferredCleanup = Boolean(device.queue?.onSubmittedWorkDone && deferCleanup && !useQueueFenceForCleanup);
       markProgress('surface-vertices-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
     }
   }
 
+  let cleanupDone = false;
   const cleanup = () => {
+    if (cleanupDone) return;
+    cleanupDone = true;
     if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
     if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
     if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
@@ -3532,6 +3543,12 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     deferSubmittedWorkCleanup(device, () => {
       cleanup();
       markProgress('surface-vertices-deferred-cleanup-complete', { queueCompletionStatus, queueCompletionMethod });
+    });
+  } else if (surfaceVertexDeferredCleanup) {
+    markProgress('surface-vertices-cleanup-deferred-no-queue-fence', {
+      queueCompletionStatus,
+      queueCompletionMethod,
+      reason: 'retained resident handoff owns cleanup through buffer lease release'
     });
   } else if (noFullReadback && !waitForQueueCompletion && device.queue?.onSubmittedWorkDone && !deferCleanup) {
     markProgress('surface-vertices-cleanup-retained-for-resident-handoff', {
@@ -3639,6 +3656,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    surfaceVertexDeferredCleanup,
     surfaceVertexReadback: !noFullReadback,
     renderFieldReadback: Boolean(renderField.renderFieldReadback),
     surfaces,
@@ -3673,6 +3691,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       releaseLeases = false,
       reason = 'surface-vertex-buffer-cleanup'
     } = {}) => {
+      cleanup();
       if (releaseLeases) result.releaseSurfaceVertexBufferLeases();
       destroyResidentBufferWithLease(surfaceVertexLeaseLedger, vertexRowsResourceKey, () => {
         if (surfaceVertexBufferDestroyed) return;
@@ -4848,7 +4867,10 @@ export async function buildSphRenderFieldWebGpu({
   refEdgeM = 10,
   readbackMode = FULL_READBACK_MODE,
   retainFieldRowsBuffer = false,
-  retainSurfaceBuffer = false
+  retainSurfaceBuffer = false,
+  waitForQueueCompletion = true,
+  deferCleanup = true,
+  useQueueFenceForCleanup = true
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
@@ -4942,6 +4964,7 @@ export async function buildSphRenderFieldWebGpu({
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
   let fieldRows;
+  let deferNoFullCleanup = false;
   if (!noFullReadback) {
     device.queue.submit([encoder.finish()]);
     queueCompletionStatus = 'queue-submitted';
@@ -4956,7 +4979,7 @@ export async function buildSphRenderFieldWebGpu({
     queueCompletionMethod = 'mapAsync(readback-buffer)';
     fieldRows = new Float32Array(fieldBytes);
   } else {
-    if (device.queue?.onSubmittedWorkDone) {
+    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
       device.queue.submit([encoder.finish()]);
       queueCompletionStatus = 'queue-submitted';
       queueCompletionMethod = 'queue.submit';
@@ -4965,17 +4988,35 @@ export async function buildSphRenderFieldWebGpu({
       queueCompletionMethod = 'queue.onSubmittedWorkDone';
     } else {
       device.queue.submit([encoder.finish()]);
-      queueCompletionStatus = 'queue-submitted-no-explicit-completion';
-      queueCompletionMethod = 'queue.submit';
+      queueCompletionStatus = device.queue?.onSubmittedWorkDone
+        ? 'queue-submitted-gpu-handoff-no-cpu-fence'
+        : 'queue-submitted-no-explicit-completion';
+      queueCompletionMethod = device.queue?.onSubmittedWorkDone
+        ? 'queue.submit(in-order-gpu-render-field-handoff)'
+        : 'queue.submit';
+      deferNoFullCleanup = Boolean(device.queue?.onSubmittedWorkDone && deferCleanup);
     }
     fieldRows = new Float32Array();
   }
 
-  if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
-  if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
-  if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
-  if (!retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
-  paramsBuffer.destroy?.();
+  let cleanupDone = false;
+  const cleanup = () => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
+    if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
+    if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
+    if (!retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+  };
+  let renderFieldDeferredCleanup = false;
+  if (deferNoFullCleanup && useQueueFenceForCleanup) {
+    renderFieldDeferredCleanup = deferSubmittedWorkCleanup(device, cleanup);
+  } else if (deferNoFullCleanup) {
+    renderFieldDeferredCleanup = true;
+  } else {
+    cleanup();
+  }
 
   const fieldRowByteLength = surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const renderFieldLeaseLedger = createResidentBufferLeaseLedger({
@@ -5062,6 +5103,7 @@ export async function buildSphRenderFieldWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    renderFieldDeferredCleanup,
     renderFieldReadback: !noFullReadback,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
@@ -5106,6 +5148,7 @@ export async function buildSphRenderFieldWebGpu({
       releaseLeases = false,
       reason = 'render-field-buffer-cleanup'
     } = {}) => {
+      cleanup();
       if (releaseLeases) result.releaseRenderFieldBufferLeases();
       if (retainFieldRowsBuffer) {
         destroyResidentBufferWithLease(renderFieldLeaseLedger, fieldRowsResourceKey, () => {
@@ -5372,32 +5415,61 @@ export async function extractSphRenderRowsWebGpu({
     encoder.copyBufferToBuffer(renderRowsBuffer, 0, retainedRenderRowsBuffer, 0, renderRowsByteLength);
   }
   let renderRows;
+  let queueCompletionStatus = 'not-submitted';
+  let queueCompletionMethod = null;
+  let deferNoFullReadbackCleanup = false;
   if (!noFullReadback) {
     device.queue.submit([encoder.finish()]);
+    queueCompletionStatus = 'queue-submitted';
+    queueCompletionMethod = 'queue.submit';
     const bytes = await readBuffer(device, renderRowsBuffer, renderRowsByteLength);
     renderRows = new Float32Array(bytes);
+    queueCompletionStatus = 'readback-map-completed';
+    queueCompletionMethod = 'mapAsync(readback-buffer)';
   } else {
-    if (device.queue?.onSubmittedWorkDone) {
-      device.queue.submit([encoder.finish()]);
+    device.queue.submit([encoder.finish()]);
+    if (retainRenderRowsBuffer) {
+      queueCompletionStatus = 'queue-submitted-gpu-handoff-no-cpu-fence';
+      queueCompletionMethod = useGpuHandoffBuffer
+        ? 'queue.submit(in-order-gpu-copy-handoff)'
+        : 'queue.submit(in-order-gpu-buffer-handoff)';
+      deferNoFullReadbackCleanup = true;
+    } else if (device.queue?.onSubmittedWorkDone) {
       await device.queue.onSubmittedWorkDone();
+      queueCompletionStatus = 'queue-work-completed';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone';
     } else {
-      device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
     }
     renderRows = new Float32Array();
   }
   let retainedRowsBufferDestroyed = false;
+  const deferredCleanupBuffers = [];
+  const destroyDeferredCleanupBuffers = () => {
+    for (const buffer of deferredCleanupBuffers) {
+      buffer?.destroy?.();
+    }
+    deferredCleanupBuffers.length = 0;
+  };
   const destroyRetainedRenderRowsBuffer = () => {
     if (retainedRowsBufferDestroyed) return;
     retainedRowsBufferDestroyed = true;
+    destroyDeferredCleanupBuffers();
     retainedRenderRowsBuffer.destroy?.();
   };
 
-  if (!borrowedStateBuffer) stateBuffer.destroy?.();
-  if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-  if (useGpuHandoffBuffer) renderRowsBuffer.destroy?.();
+  const destroyOrDefer = (buffer) => {
+    if (!buffer?.destroy) return;
+    if (deferNoFullReadbackCleanup) deferredCleanupBuffers.push(buffer);
+    else buffer.destroy();
+  };
+  if (!borrowedStateBuffer) destroyOrDefer(stateBuffer);
+  if (!borrowedThermoBuffer) destroyOrDefer(thermoBuffer);
+  if (!borrowedMechanicsBuffer) destroyOrDefer(mechanicsBuffer);
+  if (useGpuHandoffBuffer) destroyOrDefer(renderRowsBuffer);
   if (!retainRenderRowsBuffer) destroyRetainedRenderRowsBuffer();
-  paramsBuffer.destroy?.();
+  destroyOrDefer(paramsBuffer);
 
   const result = {
     schema: ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
@@ -5420,6 +5492,9 @@ export async function extractSphRenderRowsWebGpu({
     renderRowsIncludeMechanicsVolume: Boolean(borrowedMechanicsBuffer || mechanicsReady),
     renderRowsGpuHandoffCopy: useGpuHandoffBuffer,
     renderRowsHandoffMode: useGpuHandoffBuffer ? 'gpu-copy-barrier' : 'direct-render-row-buffer',
+    queueCompletionStatus,
+    queueCompletionMethod,
+    renderRowsDeferredCleanup: deferNoFullReadbackCleanup,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

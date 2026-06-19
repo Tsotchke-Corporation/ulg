@@ -8,6 +8,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  GPU_PHASE_IDS,
   OPTICAL_GPU_RECORD_LAYOUT,
   buildOpticalGpuLookupQueries,
   buildOpticalGpuTable,
@@ -73,6 +74,7 @@ import {
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderSurfaceVerticesWebGpu,
   decodeSphRenderRows,
+  extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
   splitSphRenderFieldBySurface,
   summarizeSphResidentParticleUploadWebGpu,
@@ -124,12 +126,14 @@ export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overl
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
-const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS = Object.freeze({
+const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT = Object.freeze({});
+const SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS = Object.freeze({
   maxStorageBuffersPerShaderStage: 10,
   maxBufferSize: 512 * 1024 * 1024,
   maxStorageBufferBindingSize: 512 * 1024 * 1024
 });
 const SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED = false;
+const SPH_THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED = false;
 const SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED = false;
 let activeThreeNamespace = THREE;
 
@@ -150,6 +154,29 @@ export function normalizeSphRendererBackend(value, fallback = 'webgl') {
   if (normalized === 'webgpu' || normalized === 'three-webgpu') return 'webgpu';
   if (normalized === 'webgl' || normalized === 'three-webgl') return 'webgl';
   return normalizeSphRendererBackend(fallback, 'webgl');
+}
+
+export function resolveThreeWebGpuRendererRequiredLimits({
+  rendererWebGpuResidentDevice = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED
+} = {}) {
+  const requiredLimits = rendererWebGpuResidentDevice
+    ? SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS
+    : SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT;
+  return { ...requiredLimits };
+}
+
+export function summarizeThreeWebGpuDeviceLimits(device = null) {
+  const limits = device?.limits || {};
+  const summary = {};
+  for (const key of [
+    'maxStorageBuffersPerShaderStage',
+    'maxBufferSize',
+    'maxStorageBufferBindingSize'
+  ]) {
+    const value = Number(limits[key]);
+    summary[key] = Number.isFinite(value) && value > 0 ? value : null;
+  }
+  return summary;
 }
 
 export function resolveSphSceneViewportSize(container, {
@@ -224,12 +251,16 @@ export function resolveSphSurfaceRendererMaterialPolicy({
   const mobileTarget = Boolean(mobileUserAgent || (touchTarget && mobileViewport));
   const rendererIsWebGL = backend === 'three-webgl' || backend === 'three-webgpu-webgl-fallback';
   const rendererIsWebGPU = backend === 'three-webgpu';
-  const transmissiveProxyRequired = Boolean(rendererIsWebGL && mobileTarget);
+  const transmissiveProxyRequired = Boolean(rendererIsWebGPU || (rendererIsWebGL && mobileTarget));
   const status = transmissiveProxyRequired
-    ? 'surface-material-mobile-webgl-transmission-proxy'
+    ? (rendererIsWebGPU
+      ? 'surface-material-three-webgpu-transmission-proxy'
+      : 'surface-material-mobile-webgl-transmission-proxy')
     : 'surface-material-true-pbr';
   const reason = transmissiveProxyRequired
-    ? 'mobile WebGL surface meshes proxy transmissive materials through visible closure-derived color because MeshPhysicalMaterial transmission can render black'
+    ? (rendererIsWebGPU
+      ? 'Three WebGPU surface meshes proxy transmissive materials through visible closure-derived color because MeshPhysicalMaterial transmission is not stable across the current renderer paths'
+      : 'mobile WebGL surface meshes proxy transmissive materials through visible closure-derived color because MeshPhysicalMaterial transmission can render black')
     : null;
   const signature = [
     status,
@@ -264,6 +295,7 @@ const SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE = 'three-compact-vertices';
 const SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS = 'three-compact-surface-geometry-ready';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE = 'three-webgpu-surface-buffers';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS = 'three-webgpu-surface-buffers-ready';
+const SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED = false;
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE = 'three-render-row-points';
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS = 'three-render-row-points-ready';
 const SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE = 'three-render-row-spheres';
@@ -323,7 +355,8 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   renderer = null,
   renderBridgeMode = null,
   readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-  device = null
+  device = null,
+  surfaceBufferPresentationEnabled = SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED
 } = {}) {
   const mode = String(renderBridgeMode || '').trim().toLowerCase() || null;
   const normalizedReadbackMode = String(readbackMode || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT).trim().toLowerCase();
@@ -348,12 +381,20 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     rendererBackendDevice
     && (!device || rendererBackendDevice === device)
   );
-  const sameDeviceGpuBufferGeometrySupported = Boolean(
+  const externalBufferPresentationEnabled = Boolean(
+    surfaceBufferPresentationEnabled
+    || renderer?.userData?.sphThreeWebGpuSurfaceBufferPresentationEnabled === true
+  );
+  const sameDeviceGpuBufferGeometryAvailable = Boolean(
     rendererBackend === 'three-webgpu'
     && backendBufferBindingAvailable
     && rendererBackendDeviceReady
     && !rendererPresentationDisabled
     && sameDeviceAsResident
+  );
+  const sameDeviceGpuBufferGeometrySupported = Boolean(
+    sameDeviceGpuBufferGeometryAvailable
+    && externalBufferPresentationEnabled
   );
   const requestedThreeCompactReadbackBridge = mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
   const noFullReadback = normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE;
@@ -363,6 +404,9 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   if (visibleNoReadbackSupported) {
     status = 'same-device-gpu-buffer-geometry-supported';
     reason = null;
+  } else if (sameDeviceGpuBufferGeometryAvailable && !externalBufferPresentationEnabled) {
+    status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-external-buffer-pipeline-unvalidated';
+    reason = 'Three WebGPU external GPUBuffer surface presentation reaches retained buffers but currently fails renderer pipeline validation; using an engine-owned fallback until the direct renderer/native marching-cubes path is validated';
   } else if (requestedThreeCompactReadbackBridge && !noFullReadback) {
     status = 'three-compact-readback-bridge-supported';
     reason = 'requested bridge uses full readback into Three geometry';
@@ -400,7 +444,9 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     rendererPresentationDisabled,
     residentDeviceProvided: Boolean(device),
     sameDeviceAsResident,
+    sameDeviceGpuBufferGeometryAvailable,
     sameDeviceGpuBufferGeometrySupported,
+    externalBufferPresentationEnabled,
     visibleNoReadbackSupported,
     requestedRenderBridgeMode: mode,
     requestedThreeCompactReadbackBridge,
@@ -498,6 +544,100 @@ export function createThreeWebGpuExternalInterleavedBufferAttribute({
     stride: rowStride,
     itemSize: attributeItemSize,
     offset: attributeOffset
+  };
+}
+
+export function resolveThreeWebGpuSurfaceBufferDrawRecords({
+  surfaceDrawExecution = null,
+  rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+} = {}) {
+  const sourceSurfaces = Array.isArray(surfaceDrawExecution?.surfaces)
+    ? surfaceDrawExecution.surfaces
+    : [];
+  const hasExactDrawRows = sourceSurfaces.some((surface) => {
+    const vertexCount = Math.max(0, Math.floor(Number(surface?.vertexCount) || 0));
+    return vertexCount - (vertexCount % 3) >= 3;
+  });
+  if (hasExactDrawRows) {
+    return {
+      schema: 'peercompute.ulg.sph-three-webgpu-surface-buffer-draw-records.v0',
+      status: 'exact-surface-draw-records',
+      reason: null,
+      records: sourceSurfaces,
+      conservativeNoReadbackDrawRange: false,
+      aggregateVertexCount: null
+    };
+  }
+  const sourceVertexRowCount = Math.max(
+    0,
+    Math.floor(Number(
+      surfaceDrawExecution?.sourceVertexRowCount
+        ?? surfaceDrawExecution?.vertexCount
+        ?? (
+          surfaceDrawExecution?.compactedVertexRowsBufferByteLength
+            ? surfaceDrawExecution.compactedVertexRowsBufferByteLength
+              / (Math.max(1, rowStride) * Float32Array.BYTES_PER_ELEMENT)
+            : 0
+        )
+    ) || 0)
+  );
+  const alignedVertexCount = sourceVertexRowCount - (sourceVertexRowCount % 3);
+  if (alignedVertexCount < 3) {
+    return {
+      schema: 'peercompute.ulg.sph-three-webgpu-surface-buffer-draw-records.v0',
+      status: 'surface-draw-records-empty',
+      reason: 'retained GPU vertex buffer does not contain a drawable triangle range',
+      records: sourceSurfaces,
+      conservativeNoReadbackDrawRange: false,
+      aggregateVertexCount: alignedVertexCount
+    };
+  }
+  const templateSurface = sourceSurfaces.find((surface) => surface && typeof surface === 'object') || {};
+  const surfaceIndex = Math.max(0, Math.round(Number(templateSurface.surfaceIndex) || 0));
+  const explicitTransparencyClassId = Number(templateSurface.transparencyClassId);
+  const phaseId = Math.round(Number(templateSurface.phaseId) || 0);
+  const fallbackTransparencyClassId = phaseId === GPU_PHASE_IDS.gas
+    ? 3
+    : (phaseId === GPU_PHASE_IDS.liquid ? 2 : 0);
+  const transparencyClassId = Number.isFinite(explicitTransparencyClassId) && explicitTransparencyClassId >= 0
+    ? explicitTransparencyClassId
+    : fallbackTransparencyClassId;
+  const explicitDepthWriteFlag = Number(templateSurface.depthWriteFlag);
+  const depthWriteFlag = Number.isFinite(explicitDepthWriteFlag) && explicitDepthWriteFlag >= 0
+    ? explicitDepthWriteFlag
+    : (transparencyClassId > 0 ? 0 : 1);
+  const explicitRenderOrder = Number(templateSurface.renderOrder);
+  const renderOrder = Number.isFinite(explicitRenderOrder)
+    ? explicitRenderOrder
+    : (transparencyClassId * 1000 + surfaceIndex);
+  const aggregateRecord = {
+    ...templateSurface,
+    surfaceKey: templateSurface.surfaceKey || 'resident-gpu-surface-buffer-aggregate',
+    material: templateSurface.material || templateSurface.renderKey || 'unknown',
+    phase: templateSurface.phase || 'unknown',
+    renderKey: templateSurface.renderKey || templateSurface.material || 'resident-gpu-surface-buffer-aggregate',
+    renderLayer: templateSurface.renderLayer ?? null,
+    surfaceIndex,
+    vertexOffset: 0,
+    vertexCount: alignedVertexCount,
+    triangleOffset: 0,
+    triangleCount: Math.floor(alignedVertexCount / 3),
+    renderOrder,
+    transparencyClassId,
+    depthWriteFlag,
+    boundsCenterM: Array.isArray(templateSurface.boundsCenterM) ? templateSurface.boundsCenterM : null,
+    boundsRadiusM: Number.isFinite(Number(templateSurface.boundsRadiusM))
+      ? Number(templateSurface.boundsRadiusM)
+      : null,
+    status: 'surface-draw-conservative-no-readback-range'
+  };
+  return {
+    schema: 'peercompute.ulg.sph-three-webgpu-surface-buffer-draw-records.v0',
+    status: 'conservative-no-readback-aggregate',
+    reason: 'exact surface draw rows are GPU-resident; using an aggregate draw range to avoid compact summary readback',
+    records: [aggregateRecord],
+    conservativeNoReadbackDrawRange: true,
+    aggregateVertexCount: alignedVertexCount
   };
 }
 
@@ -2097,6 +2237,21 @@ function renderDomainExtractionOptions(counts = null) {
   };
 }
 
+function renderDomainIdForParticleIndexFromCounts(index, counts = null) {
+  const normalized = normalizeRenderDomainCounts(counts);
+  if (!normalized) return 0;
+  const particleIndex = Math.max(0, Math.round(Number(index) || 0));
+  if (normalized.base > 0 && particleIndex < normalized.base) return 1;
+  if (
+    normalized.drop > 0
+    && particleIndex >= normalized.base
+    && particleIndex < normalized.base + normalized.drop
+  ) {
+    return 2;
+  }
+  return 0;
+}
+
 function normalizePhysicalLawGroups(groups = null) {
   const defaults = {
     mechanics: true,
@@ -2645,6 +2800,39 @@ export function stabilizeSurfaceMeshMaterialForRenderer(material, {
   material.userData.surfaceMaterialRendererBridgeMode = bridgeMode || null;
   const optics = material.userData?.optical || {};
   const transmission = Number(material.transmission ?? optics.transmission ?? 0);
+  const threeWebGpuExternalBufferProxyRequired = Boolean(
+    bridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+    && Number.isFinite(transmission)
+    && transmission > 0.01
+  );
+  if (threeWebGpuExternalBufferProxyRequired) {
+    const fallbackColor = Array.isArray(fallbackColorSrgb)
+      ? fallbackColorSrgb
+      : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+    material.userData.surfaceMaterialOriginalTransmission = transmission;
+    material.userData.surfaceMaterialOriginalThickness = Number(material.thickness ?? 0);
+    material.userData.surfaceMaterialRendererProxy = true;
+    material.userData.surfaceMaterialRendererProxyReason = 'three-webgpu-external-buffer-transmissive-surface-proxy';
+    material.transmission = 0;
+    material.thickness = 0;
+    material.opacity = Math.max(
+      Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+      0.92
+    );
+    material.transparent = material.opacity < 0.999;
+    material.depthWrite = material.opacity >= 0.999;
+    if (material.color) {
+      material.color.setRGB(
+        clamp(fallbackColor[0], 0, 1),
+        clamp(fallbackColor[1], 0, 1),
+        clamp(fallbackColor[2], 0, 1),
+        (activeThreeNamespace || THREE).SRGBColorSpace
+      );
+      material.userData.surfaceMaterialFallbackColor = [...fallbackColor];
+    }
+    material.needsUpdate = true;
+    return material;
+  }
   if (!(policy.transmissiveProxyRequired && Number.isFinite(transmission) && transmission > 0.01)) {
     return material;
   }
@@ -2654,7 +2842,9 @@ export function stabilizeSurfaceMeshMaterialForRenderer(material, {
     : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
   material.userData.surfaceMaterialOriginalTransmission = transmission;
   material.userData.surfaceMaterialRendererProxy = true;
-  material.userData.surfaceMaterialRendererProxyReason = 'mobile-webgl-transmissive-surface-proxy';
+  material.userData.surfaceMaterialRendererProxyReason = policy.rendererIsWebGPU
+    ? 'three-webgpu-transmissive-surface-proxy'
+    : 'mobile-webgl-transmissive-surface-proxy';
   material.transmission = 0;
   material.thickness = 0;
   material.opacity = Math.max(
@@ -2900,6 +3090,95 @@ export function createContinuousSurfaceBatches({
     surfaceRadiusM: estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
       ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM)
   }));
+}
+
+export function createResidentMaterialSeedSurfaceBatches({
+  materials = [],
+  colorsRgb = null,
+  particleRadiiM = null,
+  renderDomainCounts = null,
+  smoothingLengthM = null
+} = {}) {
+  if (!Array.isArray(materials) || materials.length === 0) return [];
+  const batches = new Map();
+  for (let index = 0; index < materials.length; index += 1) {
+    const source = materials[index];
+    if (!source) continue;
+    const explicitDomainId = normalizeRenderDomainId(source.renderDomainId);
+    const renderDomainId = explicitDomainId > 0
+      ? explicitDomainId
+      : renderDomainIdForParticleIndexFromCounts(index, renderDomainCounts);
+    const renderDomainKey = source.renderDomainKey || renderDomainKeyForId(renderDomainId);
+    const descriptor = renderDescriptorOf({
+      ...source,
+      renderDomainId,
+      renderDomainKey
+    });
+    let batch = batches.get(descriptor.surfaceKey);
+    if (!batch) {
+      batch = {
+        surfaceKey: descriptor.surfaceKey,
+        renderKey: descriptor.renderKey,
+        material: descriptor.material,
+        phase: descriptor.phase,
+        opticalState: descriptor.opticalState,
+        opticalStateKey: descriptor.opticalStateKey,
+        renderDomainId: descriptor.renderDomainId,
+        renderDomainKey: descriptor.renderDomainKey,
+        descriptor,
+        positionsM: [],
+        normalizedPositions: [],
+        colorsRgb: [],
+        averageColorRgb: [0, 0, 0],
+        particleRadiiM: [],
+        bounds: emptyBounds(),
+        count: 0,
+        colorCount: 0,
+        radiusSumM: 0,
+        radiusCount: 0,
+        source: 'resident-material-domain-seed'
+      };
+      batches.set(descriptor.surfaceKey, batch);
+    }
+    batch.count += 1;
+    const colorOffset = index * 3;
+    const color = [
+      Number(colorsRgb?.[colorOffset]),
+      Number(colorsRgb?.[colorOffset + 1]),
+      Number(colorsRgb?.[colorOffset + 2])
+    ];
+    if (color.every(Number.isFinite)) {
+      batch.averageColorRgb[0] += clamp(color[0], 0, 1);
+      batch.averageColorRgb[1] += clamp(color[1], 0, 1);
+      batch.averageColorRgb[2] += clamp(color[2], 0, 1);
+      batch.colorCount += 1;
+    }
+    const radiusM = Number(
+      particleRadiiM?.[index]
+        ?? source.currentParticleRadiusM
+        ?? source.particleRadiusM
+        ?? source.restParticleRadiusM
+        ?? source.initialParticleSpacingM
+    );
+    if (Number.isFinite(radiusM) && radiusM > 0) {
+      batch.particleRadiiM.push(radiusM);
+      batch.radiusSumM += radiusM;
+      batch.radiusCount += 1;
+    }
+  }
+  return [...batches.values()].map((batch) => {
+    const averageColorRgb = batch.colorCount > 0
+      ? batch.averageColorRgb.map((value) => clamp(value / batch.colorCount, 0, 1))
+      : [1, 1, 1];
+    return {
+      ...batch,
+      averageColorRgb,
+      colorsRgb: averageColorRgb,
+      surfaceRadiusM: batch.radiusCount > 0
+        ? batch.radiusSumM / batch.radiusCount
+        : ((Number.isFinite(smoothingLengthM) && smoothingLengthM > 0) ? smoothingLengthM : 0.25)
+    };
+  });
 }
 
 export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [], options = {}) {
@@ -3219,6 +3498,7 @@ export function createSphPhaseScene(container, {
   rendererBackend = 'webgl',
   rendererWebGpuPresentation = SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED,
   rendererWebGpuResidentDevice = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED,
+  rendererWebGpuDeviceResult = null,
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
@@ -3229,19 +3509,38 @@ export function createSphPhaseScene(container, {
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(residentSurfaceDrawOverlay);
   const residentSurfaceDrawDiagnosticModeDefault = String(residentSurfaceDrawDiagnosticMode || 'auto').trim().toLowerCase();
-  const useResidentThreeSurfaceBridgeByDefault = isResidentRenderRowBridgeMode(residentSurfaceDrawDiagnosticModeDefault);
+  const useResidentThreeSurfaceBridgeByDefault = isThreeResidentSurfaceBridgeMode(residentSurfaceDrawDiagnosticModeDefault);
   const requestedRendererBackend = normalizeSphRendererBackend(rendererBackend);
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
+  const threeWebGpuRendererRequiredLimits = resolveThreeWebGpuRendererRequiredLimits({
+    rendererWebGpuResidentDevice: enableThreeWebGpuResidentDevice
+  });
+  const threeWebGpuAppOwnedDevice = rendererWebGpuDeviceResult?.device || null;
+  const threeWebGpuRendererDeviceSource = threeWebGpuAppOwnedDevice
+    ? 'app-owned-resident-webgpu-device'
+    : 'three-internal-webgpu-device';
   const webGpuRendererAvailable = requestedRendererBackend === 'webgpu'
     && Boolean(navigatorRef?.gpu || globalThis.navigator?.gpu);
-  const threeWebGpuPresentationBlocked = Boolean(
+  const threeWebGpuPresentationBlockedByRuntime = Boolean(
     webGpuRendererAvailable
     && requestedThreeWebGpuPresentation
+    && !SPH_THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
+  );
+  const threeWebGpuPresentationBlockedByResidentDevice = Boolean(
+    webGpuRendererAvailable
+    && requestedThreeWebGpuPresentation
+    && !threeWebGpuPresentationBlockedByRuntime
     && !enableThreeWebGpuResidentDevice
   );
+  const threeWebGpuPresentationBlocked = Boolean(
+    threeWebGpuPresentationBlockedByRuntime
+    || threeWebGpuPresentationBlockedByResidentDevice
+  );
   const threeWebGpuPresentationBlockReason = threeWebGpuPresentationBlocked
-    ? 'Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering'
+    ? (threeWebGpuPresentationBlockedByRuntime
+      ? 'Three WebGPU presentation is blocked because the current renderer path still fails WebGPU error-scope validation; falling back to WebGL engine rendering while preserving WebGPU compute'
+      : 'Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering')
     : null;
   const canUseThreeWebGpuRenderer = webGpuRendererAvailable && !threeWebGpuPresentationBlocked;
   const enableThreeWebGpuPresentation = canUseThreeWebGpuRenderer && requestedThreeWebGpuPresentation;
@@ -3300,7 +3599,8 @@ export function createSphPhaseScene(container, {
     ? new Three.WebGPURenderer({
       antialias: true,
       preserveDrawingBuffer: Boolean(preserveDrawingBuffer),
-      requiredLimits: SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS
+      requiredLimits: threeWebGpuRendererRequiredLimits,
+      ...(threeWebGpuAppOwnedDevice ? { device: threeWebGpuAppOwnedDevice } : {})
     })
     : new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: Boolean(preserveDrawingBuffer) });
   renderer.userData = {
@@ -3310,7 +3610,17 @@ export function createSphPhaseScene(container, {
     sphWebGpuPresentationRequested: requestedThreeWebGpuPresentation,
     sphWebGpuPresentationEnabled: canUseThreeWebGpuRenderer && enableThreeWebGpuPresentation,
     sphWebGpuPresentationBlocked: threeWebGpuPresentationBlocked,
-    sphWebGpuPresentationBlockReason: threeWebGpuPresentationBlockReason
+    sphWebGpuPresentationBlockReason: threeWebGpuPresentationBlockReason,
+    sphWebGpuDeviceSource: threeWebGpuRendererDeviceSource,
+    sphWebGpuDevicePreflight: rendererWebGpuDeviceResult
+      ? {
+        status: rendererWebGpuDeviceResult.status ?? null,
+        reason: rendererWebGpuDeviceResult.reason ?? null,
+        requiredLimits: rendererWebGpuDeviceResult.requiredLimits || null,
+        adapterLimits: rendererWebGpuDeviceResult.adapterLimits || null,
+        appOwnedDevice: Boolean(threeWebGpuAppOwnedDevice)
+      }
+      : null
   };
   let rendererReady = !renderer.isWebGPURenderer;
   let rendererInitStatus = rendererReady
@@ -3357,10 +3667,15 @@ export function createSphPhaseScene(container, {
       rendererPresentationEnabled: renderer.userData?.sphWebGpuPresentationEnabled !== false,
       rendererPresentationBlocked: Boolean(renderer.userData?.sphWebGpuPresentationBlocked),
       rendererPresentationBlockReason: renderer.userData?.sphWebGpuPresentationBlockReason || null,
+      rendererDeviceSource: renderer.userData?.sphWebGpuDeviceSource || null,
+      rendererDevicePreflight: renderer.userData?.sphWebGpuDevicePreflight || null,
       rendererBackendDeviceReady: Boolean(renderer.backend?.device),
       rendererOwnedResidentDevicePolicy,
       requiredLimits: renderer.isWebGPURenderer
-        ? { ...SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS }
+        ? { ...threeWebGpuRendererRequiredLimits }
+        : null,
+      deviceLimits: renderer.isWebGPURenderer
+        ? summarizeThreeWebGpuDeviceLimits(renderer.backend?.device)
         : null,
       error: rendererInitError,
       scientificValidation: false,
@@ -3629,9 +3944,12 @@ export function createSphPhaseScene(container, {
       device: renderer.backend.device,
       rendererBackend: rendererBackendName(),
       rendererOwnedDevice: true,
+      appOwnedRendererDevice: Boolean(threeWebGpuAppOwnedDevice),
+      rendererDeviceSource: threeWebGpuRendererDeviceSource,
       rendererOwnedResidentDevicePolicy: policy,
       rendererPresentationEnabled: true,
-      requiredLimits: { ...SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS }
+      requiredLimits: { ...threeWebGpuRendererRequiredLimits },
+      deviceLimits: summarizeThreeWebGpuDeviceLimits(renderer.backend?.device)
     };
   }
 
@@ -6257,9 +6575,11 @@ export function createSphPhaseScene(container, {
       name: 'normal'
     });
 
-    const sourceSurfaces = Array.isArray(surfaceDrawExecution?.surfaces)
-      ? surfaceDrawExecution.surfaces
-      : [];
+    const drawRecords = resolveThreeWebGpuSurfaceBufferDrawRecords({
+      surfaceDrawExecution,
+      rowStride
+    });
+    const sourceSurfaces = drawRecords.records;
     const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
     const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
     const group = new Three.Group();
@@ -6373,11 +6693,17 @@ export function createSphPhaseScene(container, {
       externalGpuBufferGeometry: true,
       externalGpuBufferByteLength: vertexRowsBufferByteLength,
       externalGpuBufferVertexRowStrideFloats: rowStride,
+      conservativeNoReadbackDrawRange: Boolean(drawRecords.conservativeNoReadbackDrawRange),
+      drawRecordsStatus: drawRecords.status,
+      drawRecordsReason: drawRecords.reason,
+      aggregateVertexCount: drawRecords.aggregateVertexCount,
       frameCount: 0,
       lastRenderStatus: meshes.length > 0
         ? 'three-webgpu-surface-buffers-submitted'
         : 'three-webgpu-surface-buffers-empty',
-      drawOrderingPolicy: 'three-webgpu-external-buffer-scene-render-order',
+      drawOrderingPolicy: drawRecords.conservativeNoReadbackDrawRange
+        ? 'three-webgpu-external-buffer-conservative-aggregate-draw-range'
+        : 'three-webgpu-external-buffer-scene-render-order',
       drawOrderCount: meshes.length,
       drawOrderSurfaceIndices: meshes.map((mesh) => mesh.userData.surfaceIndex),
       drawOrderIndirectOffsets: [],
@@ -8990,17 +9316,40 @@ export function createSphPhaseScene(container, {
     };
   }
 
+  function hasCpuSurfaceGeometryBatches(batches = []) {
+    return Array.isArray(batches) && batches.some((batch) => {
+      const count = Math.max(0, Math.round(Number(batch?.count) || 0));
+      return count > 0
+        && Math.floor((batch?.normalizedPositions?.length || 0) / 3) >= count
+        && Math.floor((batch?.colorsRgb?.length || 0) / 3) >= count;
+    });
+  }
+
   function averageBatchColor(batch) {
+    if (Array.isArray(batch?.averageColorRgb) || ArrayBuffer.isView(batch?.averageColorRgb)) {
+      const color = [
+        Number(batch.averageColorRgb[0]),
+        Number(batch.averageColorRgb[1]),
+        Number(batch.averageColorRgb[2])
+      ];
+      return [
+        clamp(Number.isFinite(color[0]) ? color[0] : 1, 0, 1),
+        clamp(Number.isFinite(color[1]) ? color[1] : 1, 0, 1),
+        clamp(Number.isFinite(color[2]) ? color[2] : 1, 0, 1)
+      ];
+    }
     if (!batch?.colorsRgb?.length || !batch.count) return [1, 1, 1];
+    const sampleCount = Math.min(batch.count, Math.floor(batch.colorsRgb.length / 3));
+    if (sampleCount <= 0) return [1, 1, 1];
     let r = 0;
     let g = 0;
     let b = 0;
-    for (let i = 0; i < batch.count; i += 1) {
+    for (let i = 0; i < sampleCount; i += 1) {
       r += batch.colorsRgb[i * 3];
       g += batch.colorsRgb[i * 3 + 1];
       b += batch.colorsRgb[i * 3 + 2];
     }
-    return [r / batch.count, g / batch.count, b / batch.count].map((value) => clamp(value, 0, 1));
+    return [r / sampleCount, g / sampleCount, b / sampleCount].map((value) => clamp(value, 0, 1));
   }
 
   function surfaceRadiusMForBatch(batch) {
@@ -9660,6 +10009,17 @@ export function createSphPhaseScene(container, {
           phasePredicate: (phase) => String(phase || '').toLowerCase() === 'liquid'
         })
     ));
+    const residentSeedBatches = measure('residentSurfaceSeedBatches', () => (
+      skipCpuSurfaceGeometry
+        ? createResidentMaterialSeedSurfaceBatches({
+          materials,
+          colorsRgb,
+          particleRadiiM,
+          renderDomainCounts,
+          smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
+        })
+        : []
+    ));
     currentMaterialProperties = materialProperties || null;
     currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
     currentPhysicalLawGroups = normalizePhysicalLawGroups(physicalLawGroups);
@@ -9725,7 +10085,12 @@ export function createSphPhaseScene(container, {
     ));
     const residentFieldBatches = measure('residentSurfaceBatches', () => (
       skipCpuSurfaceGeometry
-        ? []
+        ? createResidentRenderSurfaceBatches({
+          particleBatches: residentSeedBatches,
+          materialProperties,
+          reactionTable: sphReactionTable,
+          smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
+        })
         : createResidentRenderSurfaceBatches({
           particleBatches: batches,
           materialProperties,
@@ -9740,9 +10105,9 @@ export function createSphPhaseScene(container, {
     }));
     const residentSurfaceState = measure('residentSurfaceTable', () => (
       skipCpuSurfaceGeometry
-        ? captureSkippedResidentRenderSurfaceState({
-          status: 'resident-render-surface-table-skipped-three-resident-bridge',
-          reason: 'CPU surface geometry is skipped while the Three resident render-row bridge is active',
+        ? captureResidentRenderSurfaceState({
+          particleBatches: residentSeedBatches,
+          fieldBatches: residentFieldBatches,
           emissiveByMaterial,
           materialProperties
         })
@@ -10055,8 +10420,9 @@ export function createSphPhaseScene(container, {
         surfaceBuffer: renderFieldExecution.surfaceBuffer,
         readbackMode: surfaceVertexReadbackMode,
         retainVertexRowsBuffer: !useEffectiveThreeCompactVertexBridge,
-        waitForQueueCompletion: !useEffectiveThreeCompactVertexBridge,
-        deferCleanup: false,
+        waitForQueueCompletion: useEffectiveThreeCompactVertexBridge,
+        deferCleanup: !useEffectiveThreeCompactVertexBridge,
+        useQueueFenceForCleanup: false,
         onProgress(progress = {}) {
           markSphResidentRenderProgress(progress.status || 'surface-vertices-progress', {
             ...progress,
@@ -10800,6 +11166,27 @@ export function createSphPhaseScene(container, {
         rendererOwnedDevice: true,
         updatedAtMs: nowMs()
       };
+      markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-started', {
+        stage: 'renderer-owned-device-pause',
+        rendererOwnedDevice: true
+      });
+      try {
+        if (typeof globalThis.requestAnimationFrame === 'function') {
+          await new Promise((resolve) => globalThis.requestAnimationFrame(() => resolve()));
+        }
+      } catch (pauseError) {
+        markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-error', {
+          stage: 'renderer-owned-device-pause',
+          rendererOwnedDevice: true,
+          reason: pauseError instanceof Error ? pauseError.message : String(pauseError)
+        });
+      }
+      markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-complete', {
+        stage: 'renderer-owned-device-pause',
+        rendererOwnedDevice: true,
+        queueFenceStatus: 'skipped',
+        queueFenceMethod: 'requestAnimationFrame-presentation-drain'
+      });
     }
     try {
       const reactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
@@ -10809,19 +11196,56 @@ export function createSphPhaseScene(container, {
       const productEventCount = Math.max(0, Math.round(Number(
         residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
       ) || 0));
-      const extractRenderRowsForMode = (readbackMode) => extractSphRenderRowsWebGpu({
-        device: resolvedDeviceResult.device,
-        sphParticleState: nextSphParticleState,
-        mlsMpmParticleState: nextMlsMpmParticleState,
-        sphParticleUpload: nextSphUpload,
-        mlsMpmParticleUpload: nextMlsMpmUpload,
-        sourceStateBuffer: nextSphUpload.stateBuffer,
-        sourceThermoBuffer: nextSphUpload.thermoBuffer,
-        sourceMechanicsBuffer: nextMlsMpmUpload?.mechanicsBuffer || null,
-        retainRenderRowsBuffer: true,
-        readbackMode,
-        ...renderDomainExtractionOptions(currentRenderDomainCounts)
-      });
+      const extractCpuRenderRowsForMode = (readbackMode, reason) => {
+        const cpuRows = extractSphRenderRowsCpu({
+          sphParticleState: nextSphParticleState,
+          mlsMpmParticleState: nextMlsMpmParticleState,
+          ...renderDomainExtractionOptions(currentRenderDomainCounts)
+        });
+        return {
+          ...cpuRows,
+          status: 'render-rows-extracted-cpu-reference-fallback',
+          reason,
+          readbackMode,
+          renderRowsReadback: true,
+          renderRowsReadbackByteLength: cpuRows.renderRows.byteLength,
+          renderRowsBufferRetained: false,
+          renderRowsBufferByteLength: 0,
+          renderRowsGpuHandoffCopy: false,
+          renderRowsHandoffMode: 'cpu-reference-fallback',
+          queueCompletionStatus: 'cpu-reference-no-gpu-submit',
+          queueCompletionMethod: 'extractSphRenderRowsCpu',
+          compactRenderReadback: true,
+          normalHotLoopReadbackFree: false,
+          rendererOwnedDeviceAvoidedReadback: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+          destroyRenderRowsBuffer() {}
+        };
+      };
+      const extractRenderRowsForMode = (readbackMode) => {
+        const fullReadbackOnRendererOwnedDevice = Boolean(
+          resolvedDeviceResult.rendererOwnedDevice
+          && readbackMode !== RESIDENT_NO_FULL_READBACK_MODE
+        );
+        if (fullReadbackOnRendererOwnedDevice) {
+          return Promise.resolve(extractCpuRenderRowsForMode(
+            readbackMode,
+            'renderer-owned Three WebGPU device is reserved for presentation; CPU reference rows avoid mapAsync on the presentation device'
+          ));
+        }
+        return extractSphRenderRowsWebGpu({
+          device: resolvedDeviceResult.device,
+          sphParticleState: nextSphParticleState,
+          mlsMpmParticleState: nextMlsMpmParticleState,
+          sphParticleUpload: nextSphUpload,
+          mlsMpmParticleUpload: nextMlsMpmUpload,
+          sourceStateBuffer: nextSphUpload.stateBuffer,
+          sourceThermoBuffer: nextSphUpload.thermoBuffer,
+          sourceMechanicsBuffer: nextMlsMpmUpload?.mechanicsBuffer || null,
+          retainRenderRowsBuffer: true,
+          readbackMode,
+          ...renderDomainExtractionOptions(currentRenderDomainCounts)
+        });
+      };
       const requestedRenderFieldSurfaceSummaryMode = ['auto', 'readback', 'skip'].includes(
         String(renderFieldSurfaceSummaryMode || '').toLowerCase()
       )
@@ -11194,7 +11618,10 @@ export function createSphPhaseScene(container, {
             refEdgeM,
             readbackMode: visibleRenderFieldReadbackMode,
             retainFieldRowsBuffer: true,
-            retainSurfaceBuffer: true
+            retainSurfaceBuffer: true,
+            waitForQueueCompletion: visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE,
+            deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
+            useQueueFenceForCleanup: false
           });
         const renderFieldHasPositiveDensity = (execution) => {
           if (!(execution?.fieldRows instanceof Float32Array) || execution.fieldRows.length === 0) return true;
@@ -11461,17 +11888,29 @@ export function createSphPhaseScene(container, {
         }
       } catch (fieldError) {
         renderFieldSource = 'resident-gpu-render-rows';
-        applySurfaceBatches(particleBatches, {
-          emissiveByMaterial: decoded.emissiveByMaterial,
-          materialProperties,
-          renderSource: renderFieldSource,
-          renderRowsExecution
+        const fieldErrorReason = fieldError instanceof Error ? fieldError.message : String(fieldError);
+        const cpuFallbackGeometryAvailable = hasCpuSurfaceGeometryBatches(particleBatches);
+        markSphResidentRenderProgress('resident-render-field-fallback-to-render-rows', {
+          stage: 'render-field',
+          reason: fieldErrorReason,
+          cpuFallbackGeometryAvailable
         });
+        if (cpuFallbackGeometryAvailable) {
+          applySurfaceBatches(particleBatches, {
+            emissiveByMaterial: decoded.emissiveByMaterial,
+            materialProperties,
+            renderSource: renderFieldSource,
+            renderRowsExecution
+          });
+        } else {
+          suppressThreeSurfaceMeshesForResidentOverlay('resident-render-field-fallback-no-cpu-surface-geometry');
+        }
         renderFieldExecution = {
           schema: 'peercompute.ulg.sph-gpu-render-field.v0',
           backend: 'cpu-fallback',
           status: 'render-field-fallback-to-render-rows',
-          reason: fieldError instanceof Error ? fieldError.message : String(fieldError),
+          reason: fieldErrorReason,
+          cpuFallbackGeometryAvailable,
           surfaceCount: surfaceTable.surfaceCount,
           totalFieldCells: surfaceTable.totalFieldCells,
           productEventCount: 0,
@@ -11904,8 +12343,10 @@ export function createSphPhaseScene(container, {
         renderFieldByteLength: renderFieldExecution?.fieldRowByteLength ?? 0,
         renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
         renderFieldStatus: renderFieldExecution?.status ?? null,
+        renderFieldReason: renderFieldExecution?.reason ?? null,
         renderFieldBackend: renderFieldExecution?.backend ?? null,
         renderFieldInputSource: renderFieldExecution?.renderFieldInputSource ?? null,
+        renderFieldCpuFallbackGeometryAvailable: renderFieldExecution?.cpuFallbackGeometryAvailable ?? null,
         renderFieldCpuParitySummary,
         renderFieldEmptyRetryReadback: Boolean(renderFieldExecution?.emptyFieldRetryReadback),
         renderFieldEmptyRetryReason: renderFieldExecution?.emptyFieldRetryReason ?? null,

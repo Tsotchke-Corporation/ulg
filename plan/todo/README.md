@@ -98,6 +98,19 @@ The capability gate now blocks that no-full-readback bridge until Three WebGPU
 has an initialized backend device and it matches the resident device; do not
 count a WebGPU renderer object alone as bridge readiness.
 
+Current routing note, 2026-06-18 AKDT: architecture work takes priority over
+micro-optimizing the old fallback renderer. Three WebGPU presentation and the
+same-device `three-webgpu-surface-buffers` bridge now fail closed by default:
+requests for `renderer=webgpu&rendererPresentation=1&rendererResidentDevice=1`
+record the request, but mounted presentation falls back to the console-clean
+Three WebGL engine path while WebGPU compute remains available. The validated
+probe `artifacts/sph-probe-three-webgpu-presentation-gated-webgl-fallback-1.json`
+is `status=good`, has zero browser console issues/page errors, and displays
+H2O through the in-engine `three-render-row-spheres` fallback. This is a
+correctness/mobile guardrail only. The throughput acceptance gate remains a
+direct engine-owned GPU renderer/native marching-cubes consumer that passes
+console plus pixel validation without full CPU surface readback.
+
 Current routing note, 2026-06-18 AKDT: browser visual probes now treat
 DevTools console WebGPU validation as first-class evidence. The probe captures
 page console/pageerror events, analysis emits `browser-console:*` issues, and
@@ -114,14 +127,15 @@ WebGPU memory-limit or shader issue.
 
 Current routing note, 2026-06-18 AKDT: Three WebGPU presentation remains an
 explicit experiment, not a default path. The non-overlay
-`three-webgpu-surface-buffers` bridge is wired through the engine-owned
-surface-draw state and the probe harness can request it, but mounted probes
-still fail before bridge construction with `Instance dropped in popErrorScope`
-and `A valid external Instance reference no longer exists.` Keep default
-rendering on the console-clean Three WebGL engine path while the next
-architecture work targets resident MLS-MPM, native WebGPU marching-cubes
-surface extraction, and an engine-owned buffer bridge that passes console plus
-pixel validation.
+`three-webgpu-surface-buffers` bridge is wired through engine-owned
+surface-draw state and can still be unit-tested behind an explicit future
+capability, but normal mounted probes block it because Three WebGPU currently
+fails browser error-scope validation. The safe mounted behavior is now:
+requested WebGPU presentation blocked, actual renderer `three-webgl`, requested
+surface-buffer bridge downgraded to `three-render-row-spheres`, and no overlay
+or second canvas. Keep the next architecture work on resident MLS-MPM, native
+WebGPU marching-cubes surface extraction, and a direct engine-owned GPU buffer
+consumer that passes console plus pixel validation.
 
 Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
 adapter now exposes a renderer-free preflight/capability contract, and ULG's

@@ -618,6 +618,8 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       setParticlesTiming: overlay?.__sphSetParticlesTiming || sceneUserData.sphSetParticlesTiming || null,
       surfaceApplyTiming: overlay?.__sphSurfaceApplyTiming || sceneUserData.sphSurfaceApplyTiming || null,
       rendererInit: sceneUserData.sphRendererInit || null,
+      residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
+      residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
       surfaceMaterialRenderPolicy: sceneUserData.sphSurfaceMaterialRenderPolicy || null,
       surfaceMaterialRendererProxySummary: sceneUserData.sphSurfaceMaterialRendererProxySummary || null,
       surfaceMaterialRendererProxyCount: sceneUserData.sphResidentSurfaceDrawRenderBridge?.materialRendererProxyCount ?? null,
@@ -1400,6 +1402,7 @@ async function runBrowserProbe({
       const sample = (batchIndex, phase, batchMs = null) => {
         const steps = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || execution || null;
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
+        const sceneUserData = sceneApi?.scene?.userData || {};
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
         const plainSphStepResult = overlay.__sphLastStepResult || null;
@@ -1429,6 +1432,11 @@ async function runBrowserProbe({
             source: residentComputeManager.source ?? null,
             submitTask: residentComputeManager.submitTask ?? null
           } : null,
+        rendererInit: sceneUserData.sphRendererInit || null,
+        residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
+        residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
+        rendererFrame: sceneUserData.sphRendererFrame || null,
+        rendererWebGpuDevicePreflight: overlay.__sphRendererWebGpuDevicePreflight || null,
         statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
         warningText: overlay.querySelector('#sph-warning-bar')?.textContent ?? '',
         plainSphStepResult: plainSphStepResult ? {
@@ -1508,8 +1516,15 @@ async function runBrowserProbe({
             backend: renderState.backend ?? null,
             reason: renderState.reason ?? null,
             error: renderState.error ?? null,
+            rendererOwnedDevice: renderState.rendererOwnedDevice ?? null,
             renderFieldReadback: renderState.renderFieldReadback ?? null,
+            renderFieldStatus: renderState.renderFieldStatus ?? null,
+            renderFieldReason: renderState.renderFieldReason ?? null,
+            renderFieldBackend: renderState.renderFieldBackend ?? null,
+            renderFieldInputSource: renderState.renderFieldInputSource ?? null,
+            renderFieldCpuFallbackGeometryAvailable: renderState.renderFieldCpuFallbackGeometryAvailable ?? null,
             renderFieldSurfaceCount: renderState.renderFieldSurfaceCount ?? null,
+            renderFieldTotalCells: renderState.renderFieldTotalCells ?? null,
             renderFieldCpuParitySummary: renderState.renderFieldCpuParitySummary ?? null,
             renderFieldEmptyRetryReadback: renderState.renderFieldEmptyRetryReadback ?? null,
             renderFieldEmptyRetryReason: renderState.renderFieldEmptyRetryReason ?? null,

@@ -83,25 +83,22 @@ Tactical status, 2026-06-18 AKDT:
   surfaces, but it is still not the throughput fix because resident compact
   MLS-MPM surfaces remain tied to readback-heavy extraction until the
   same-device renderer lands.
-- The first engine-owned Three WebGPU renderer gate exists behind
-  `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for future
-  same-device presentation/geometry bridge work. Routine resident
-  compute/readback stays on the cached resident compute device; an attempted
-  renderer-owned compute reuse path failed render-row `mapAsync` once
-  presentation was active. Actual WebGPU scene presentation remains disabled:
-  the mounted scene/material namespace has been migrated to the active Three
-  namespace, but an ungated probe still produced `Instance dropped in
-  popErrorScope`. The next renderer task is a dedicated Three WebGPU
-  presentation lifetime fix, followed by browser pixel and console validation
-  before enabling the external-buffer surface bridge.
+- The first engine-owned Three WebGPU renderer gate remains experimental and
+  now fails closed at runtime. Requests for
+  `renderer=webgpu&rendererPresentation=1&rendererResidentDevice=1` are
+  recorded in diagnostics, but mounted presentation falls back to Three WebGL
+  because the current Three WebGPU renderer path still produces
+  `Instance dropped in popErrorScope` under browser validation. WebGPU compute
+  remains available through the resident compute device path.
 - Follow-up probes have wired `three-webgpu-surface-buffers` through the
-  non-overlay `sphResidentSurfaceDraw` bridge and can prefer the renderer-owned
-  device, but the browser still fails during resident render-row extraction
-  with `Instance dropped in popErrorScope` /
-  `A valid external Instance reference no longer exists.` Keep this path
-  experimental. The console-clean mobile path is currently
-  `three-render-row-spheres`, which is a correctness and PBR fallback, not a
-  throughput solution.
+  non-overlay `sphResidentSurfaceDraw` bridge, but normal mounted runs block
+  that bridge and downgrade to the in-engine `three-render-row-spheres`
+  fallback. The current evidence artifact
+  `artifacts/sph-probe-three-webgpu-presentation-gated-webgl-fallback-1.json`
+  is `status=good`, has zero browser console issues/page errors, blocks Three
+  WebGPU presentation with an explicit reason, uses actual renderer
+  `three-webgl`, and keeps H2O visible through the sphere bridge. This is a
+  correctness/mobile fallback, not a throughput solution.
 - The sibling marching-cubes adapter now exposes preflight/capability helpers,
   and ULG's wrapper consumes extension preflight before extraction. This moves
   cross-device and malformed-volume failures to the adapter boundary before
@@ -438,11 +435,21 @@ Integration progress, 2026-06-18 AKDT:
   falling into synthetic unknown-material keys such as `material-*`/`phase-*`
   that render as black blocked surfaces on reduced metadata paths.
 - Remaining gap: the no-full-readback extension surface buffers are resident
-  and scene-state integrated, but not yet visibly consumed by a fully
-  GPU-resident Three WebGPU renderer bridge. The next performance slice is a
-  same-device WebGPU renderer/geometry consumer for those retained buffers,
-  with browser console and pixel validation. Do not count this phase complete
-  until the visible no-readback bridge exists.
+  and scene-state integrated, but normal mounted presentation deliberately does
+  not consume them through Three WebGPU yet. The next performance slice is a
+  direct engine-owned GPU surface consumer, likely using the native
+  marching-cubes compaction pattern and ULG draw/material rows, with browser
+  console and pixel validation. Do not count this phase complete until the
+  visible no-readback bridge exists without enabling the currently failing
+  Three WebGPU presentation path.
+- Priority update, 2026-06-18 AKDT: treat direct resident GPU surface
+  consumption as the architectural fix ahead of further fallback tuning.
+  Three WebGPU presentation and `three-webgpu-surface-buffers` remain
+  fail-closed because they still fail browser error-scope validation when
+  enabled directly. The accepted mounted safety path is now the console-clean
+  Three WebGL presentation plus `three-render-row-spheres` fallback; it is
+  useful for mobile/correctness evidence but does not satisfy the no-readback
+  throughput target.
 
 Interim status, 2026-06-18 AKDT:
 

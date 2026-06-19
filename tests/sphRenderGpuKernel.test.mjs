@@ -806,7 +806,10 @@ test('SPH render row WebGPU extraction can retain resident rows without full rea
   assert.equal(result.renderRowsBuffer.label, 'ulg-sph-render-rows-retained-handoff');
   assert.equal(result.renderRowsGpuHandoffCopy, true);
   assert.equal(result.renderRowsHandoffMode, 'gpu-copy-barrier');
-  assert.equal(submittedWorkDoneCount, 1);
+  assert.equal(result.queueCompletionStatus, 'queue-submitted-gpu-handoff-no-cpu-fence');
+  assert.equal(result.queueCompletionMethod, 'queue.submit(in-order-gpu-copy-handoff)');
+  assert.equal(result.renderRowsDeferredCleanup, true);
+  assert.equal(submittedWorkDoneCount, 0);
   assert.equal(dispatches.length, 1);
   assert.equal(copies.length, 1);
   assert.equal(copies[0].source.label, 'ulg-sph-render-rows');
@@ -1452,6 +1455,76 @@ test('SPH render field optional WebGPU can retain resident field buffers without
   execution.result.destroyRenderFieldBuffers();
   assert.equal(retainedFieldRowsBuffer.destroyCount, 1);
   assert.equal(retainedSurfaceBuffer.destroyCount, 1);
+});
+
+test('SPH render field WebGPU no-full handoff can avoid a CPU queue fence', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'Au|Au|solid',
+      material: 'Au',
+      phase: 'solid',
+      renderKey: 'Au',
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [1, 0.7, 0.1]
+    }
+  ]);
+  const { device, createdBuffers } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+  let submittedWorkDoneCount = 0;
+  let resolveSubmittedWork;
+  device.queue.onSubmittedWorkDone = () => {
+    submittedWorkDoneCount += 1;
+    return new Promise((resolve) => {
+      resolveSubmittedWork = resolve;
+    });
+  };
+
+  const result = await buildSphRenderFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true,
+    waitForQueueCompletion: false,
+    deferCleanup: true,
+    useQueueFenceForCleanup: false
+  });
+
+  assert.equal(result.queueCompletionStatus, 'queue-submitted-gpu-handoff-no-cpu-fence');
+  assert.equal(result.queueCompletionMethod, 'queue.submit(in-order-gpu-render-field-handoff)');
+  assert.equal(result.renderFieldDeferredCleanup, true);
+  assert.equal(result.renderFieldReadback, false);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.fieldRowsBufferRetained, true);
+  assert.equal(result.surfaceBufferRetained, true);
+  assert.equal(submittedWorkDoneCount, 0);
+
+  const sourceRowsBuffer = createdBuffers.find((buffer) => buffer.label === 'ulg-sph-render-field-source-rows');
+  const sourceProductEventBuffer = createdBuffers.find((buffer) => buffer.label === 'ulg-sph-render-field-product-events');
+  const paramsBuffer = createdBuffers.find((buffer) => buffer.label === 'ulg-sph-render-field-params');
+  assert.equal(sourceRowsBuffer.destroyed, false);
+  assert.equal(sourceProductEventBuffer.destroyed, false);
+  assert.equal(paramsBuffer.destroyed, false);
+  assert.equal(result.fieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, false);
+
+  assert.equal(resolveSubmittedWork, undefined);
+  result.destroyRenderFieldBuffers();
+
+  assert.equal(sourceRowsBuffer.destroyed, true);
+  assert.equal(sourceProductEventBuffer.destroyed, true);
+  assert.equal(paramsBuffer.destroyed, true);
+  assert.equal(result.fieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, false);
 });
 
 test('SPH render field retained buffers use lease guarded cleanup', async () => {

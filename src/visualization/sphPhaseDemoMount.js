@@ -58,6 +58,7 @@ import {
   deriveMaterialProperties,
   resolveMaterialSpec
 } from '../runtime/material/materialDerivation.js';
+import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 import { materialDerivationSummary } from '../runtime/material/propertyProvenance.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
@@ -194,6 +195,7 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'webgpu-spheres',
   'webgpu-render-row-spheres'
 ]);
+const THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED = false;
 
 function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-render-row-points') {
   const normalized = String(value ?? fallback).trim().toLowerCase();
@@ -1372,7 +1374,7 @@ function openElementPicker({ overlay, select, roleLabel }) {
 /**
  * Open the visual SPH phase demo overlay. Returns a close handle.
  */
-export function mountSphPhaseDemoOverlay({
+export async function mountSphPhaseDemoOverlay({
   autoStart = false,
   hideMenu = false,
   runtime = null,
@@ -1675,6 +1677,41 @@ export function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('webgpuPresentation'),
     false
   );
+  const initialThreeWebGpuRendererResidentDeviceEnabled = booleanUrlParam(
+    initialHash.get('rendererResidentDevice')
+      ?? initialQuery.get('rendererResidentDevice')
+      ?? initialHash.get('rendererWebGpuResidentDevice')
+      ?? initialQuery.get('rendererWebGpuResidentDevice')
+      ?? initialHash.get('threeWebGpuResidentDevice')
+      ?? initialQuery.get('threeWebGpuResidentDevice')
+      ?? initialHash.get('webgpuResidentDevice')
+      ?? initialQuery.get('webgpuResidentDevice'),
+    false
+  );
+  const acquireInitialRendererWebGpuDevice = Boolean(
+    initialSphRendererBackend === 'webgpu'
+    && initialThreeWebGpuRendererPresentationEnabled
+    && initialThreeWebGpuRendererResidentDeviceEnabled
+    && THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
+  );
+  let initialRendererWebGpuDeviceResult = null;
+  if (acquireInitialRendererWebGpuDevice) {
+    statusEl.textContent = 'acquiring shared WebGPU resident/render device...';
+    initialRendererWebGpuDeviceResult = await requestOpticalGpuDevice(globalThis.navigator).catch((error) => ({
+      status: 'webgpu-error-fallback',
+      reason: error instanceof Error ? error.message : String(error),
+      device: null
+    }));
+    overlay.__sphRendererWebGpuDevicePreflight = {
+      schema: 'peercompute.ulg.sph-renderer-webgpu-device-preflight.v0',
+      status: initialRendererWebGpuDeviceResult?.status ?? null,
+      reason: initialRendererWebGpuDeviceResult?.reason ?? null,
+      appOwnedDeviceReady: Boolean(initialRendererWebGpuDeviceResult?.device),
+      requiredLimits: initialRendererWebGpuDeviceResult?.requiredLimits || null,
+      adapterLimits: initialRendererWebGpuDeviceResult?.adapterLimits || null,
+      updatedAtMs: performance.now()
+    };
+  }
   const defaultThreeResidentSurfaceDrawMode = window.innerWidth < 700
     ? 'three-render-row-spheres'
     : 'three-render-row-points';
@@ -1705,6 +1742,7 @@ export function mountSphPhaseDemoOverlay({
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
     if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
     if (initialThreeWebGpuRendererPresentationEnabled) q.set('rendererPresentation', '1');
+    if (initialThreeWebGpuRendererResidentDeviceEnabled) q.set('rendererResidentDevice', '1');
     q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -2638,6 +2676,8 @@ export function mountSphPhaseDemoOverlay({
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
     rendererBackend: initialSphRendererBackend,
     rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
+    rendererWebGpuResidentDevice: initialThreeWebGpuRendererResidentDeviceEnabled,
+    rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
@@ -4249,6 +4289,8 @@ export function mountSphPhaseDemoOverlay({
       preserveDrawingBuffer: preserveDrawingBufferForCapture,
       rendererBackend: initialSphRendererBackend,
       rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
+      rendererWebGpuResidentDevice: initialThreeWebGpuRendererResidentDeviceEnabled,
+      rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
@@ -5267,6 +5309,7 @@ export function mountSphPhaseDemoOverlay({
     staticTableCacheGeneration += 1;
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     scene.dispose();
+    initialRendererWebGpuDeviceResult?.device?.destroy?.();
     overlay.remove();
   }
   overlay.querySelector('#sph-close').addEventListener('click', close);

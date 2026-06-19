@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: no-full extension surface routing now keeps
+resident GPU buffers as the default when the visible same-device Three WebGPU
+consumer is unavailable. The bridge planner reports
+`extension-surface-render-plan-resident-surface-buffer-handoff` and effective
+bridge `resident-surface-buffers-no-overlay` instead of silently downgrading to
+full-readback Three compact geometry on WebGL or blocked Three WebGPU
+presentation. Explicit `three-compact-vertices` remains available as a
+diagnostic/mobile correctness bridge, but the architecture path is now honest:
+the missing item is the engine-owned marching-cubes/WebGPU surface consumer that
+can bind retained render-field/extension buffers without overlay or CPU
+readback.
+
 Current checkpoint, 2026-06-18 AKDT: active-grid dispatch planning no longer
 needs compact-summary CPU readback in the normal no-full resident path. Commit
 `e9f6b0c` adds a planner-only mode to the compact resident summary runner:

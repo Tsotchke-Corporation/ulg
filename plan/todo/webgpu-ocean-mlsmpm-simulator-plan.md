@@ -250,6 +250,14 @@ Tactical status, 2026-06-18 AKDT:
   `residentSurfaceBufferHandoffSampleCount=4`. The probe still classifies
   visually `bad` because the actual engine/marching-cubes consumer is not bound
   yet; that binding is now the next visible-render milestone.
+- The extension surface bridge planner now preserves the no-readback contract by
+  default. When a no-full extension surface request cannot use same-device Three
+  WebGPU buffer geometry, the planner retains resident surface buffers and
+  reports `resident-surface-buffers-no-overlay` instead of silently downgrading
+  to full-readback Three compact geometry. Explicit
+  `three-compact-vertices` still requests the readback bridge for diagnostics,
+  but routine no-full performance routing now keeps the missing direct consumer
+  visible as the blocker.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

@@ -27837,3 +27837,31 @@ Remaining:
 - Bind the retained render-field/surface buffers to the real engine-owned
   marching-cubes/WebGPU renderer consumer so mounted no-summary MLS-MPM scenes
   produce fresh visible surfaces without CPU readback or overlays.
+
+## 2026-06-18 21:20 AKDT - Extension Surface Planner Keeps No-Readback Buffers
+
+Status:
+
+- Updated the WebGPU marching-cubes extension surface bridge planner so no-full
+  extension surface requests retain resident GPU buffers by default when
+  same-device Three WebGPU buffer geometry is unavailable. The previous default
+  could silently choose the full-readback Three compact bridge on WebGL, which
+  made the performance route look like a renderer fallback instead of the
+  explicit missing direct-consumer blocker.
+- Explicit `three-compact-vertices` still forces the compact readback bridge for
+  debugging/mobile correctness checks. The routine no-full path now reports
+  `extension-surface-render-plan-resident-surface-buffer-handoff` and effective
+  bridge `resident-surface-buffers-no-overlay`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `52/52`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`.
+
+Remaining:
+
+- The true visible-render fix is still the engine-owned direct consumer for
+  retained render-field/extension surface buffers. This slice keeps no-full
+  routing honest and avoids spending default-path work on readback geometry.

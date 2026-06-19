@@ -471,7 +471,7 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     && rendererCapability?.visibleNoReadbackSupported
   );
   const retainResidentSurfaceBufferHandoff = Boolean(
-    requestedThreeWebGpuSurfaceBufferBridge
+    !requestedThreeCompactBridge
     && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
     && !canUseThreeWebGpuSurfaceBufferBridge
   );

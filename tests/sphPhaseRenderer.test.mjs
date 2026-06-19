@@ -346,7 +346,7 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(crossDevice.sameDeviceAsResident, false);
 });
 
-test('SPH extension surface bridge planner falls back to integrated Three compact geometry', () => {
+test('SPH extension surface bridge planner keeps no-full resident buffers by default', () => {
   const webglCapability = resolveResidentExtensionSurfaceRendererCapability({
     renderer: { isWebGLRenderer: true, domElement: {} },
     readbackMode: 'no-full-readback'
@@ -355,12 +355,14 @@ test('SPH extension surface bridge planner falls back to integrated Three compac
     rendererCapability: webglCapability,
     readbackMode: 'no-full-readback'
   });
-  assert.equal(webglPlan.status, 'extension-surface-render-plan-three-compact-fallback');
-  assert.equal(webglPlan.useThreeCompactBridge, true);
+  assert.equal(webglPlan.status, 'extension-surface-render-plan-resident-surface-buffer-handoff');
+  assert.equal(webglPlan.useThreeCompactBridge, false);
   assert.equal(webglPlan.useThreeWebGpuSurfaceBufferBridge, false);
-  assert.equal(webglPlan.translationReadbackMode, 'full-parity-readback');
-  assert.equal(webglPlan.fallbackThreeCompactBridge, true);
-  assert.match(webglPlan.fallbackReason, /WebGLRenderer/);
+  assert.equal(webglPlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(webglPlan.fallbackThreeCompactBridge, false);
+  assert.equal(webglPlan.retainResidentSurfaceBufferHandoff, true);
+  assert.equal(webglPlan.effectiveRenderBridgeMode, 'resident-surface-buffers-no-overlay');
+  assert.match(webglPlan.handoffReason, /WebGLRenderer/);
 
   const rendererDevice = { label: 'renderer-resident-device' };
   const webgpuCapability = resolveResidentExtensionSurfaceRendererCapability({
@@ -379,12 +381,13 @@ test('SPH extension surface bridge planner falls back to integrated Three compac
     rendererCapability: webgpuCapability,
     readbackMode: 'no-full-readback'
   });
-  assert.equal(webgpuPlan.status, 'extension-surface-render-plan-three-compact-fallback');
-  assert.equal(webgpuPlan.useThreeCompactBridge, true);
+  assert.equal(webgpuPlan.status, 'extension-surface-render-plan-resident-surface-buffer-handoff');
+  assert.equal(webgpuPlan.useThreeCompactBridge, false);
   assert.equal(webgpuPlan.useThreeWebGpuSurfaceBufferBridge, false);
-  assert.equal(webgpuPlan.translationReadbackMode, 'full-parity-readback');
-  assert.equal(webgpuPlan.fallbackThreeCompactBridge, true);
-  assert.match(webgpuPlan.fallbackReason, /pipeline validation/);
+  assert.equal(webgpuPlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(webgpuPlan.fallbackThreeCompactBridge, false);
+  assert.equal(webgpuPlan.retainResidentSurfaceBufferHandoff, true);
+  assert.match(webgpuPlan.handoffReason, /pipeline validation/);
 
   const requestedSurfaceBufferHandoffPlan = resolveExtensionSurfaceRenderBridgePlan({
     renderBridgeMode: 'three-webgpu-surface-buffers',

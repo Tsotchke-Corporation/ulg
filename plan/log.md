@@ -27543,3 +27543,45 @@ Remaining:
   fields, but the long-term material-size strategy still needs pressure- and
   phase-updated GPU-side radius evolution rather than initial-state metadata
   only.
+
+## 2026-06-18 19:27 AKDT - Counter-Bounded Resident Surface Draw
+
+Status:
+
+- Committed `3ef447f Add atomic compact resident surface vertices`.
+  The no-full surface-vertex WebGPU path now defaults to atomic compact
+  emission, budgets the retained vertex buffer, and avoids treating
+  `maxVertexRows=null` as zero.
+- Committed `fc44a27 Bound surface draw scans by resident vertex counter`.
+  The surface-vertex stage now retains a 16-byte emitted-vertex counter with
+  the resident vertex buffer, and the surface-draw metadata WGSL binds that
+  counter to clamp scan loops to emitted rows instead of sweeping unwritten
+  conservative capacity.
+- The mounted no-overlay handoff remains intact. This is not the final visible
+  same-device renderer; it reduces GPU memory traffic and allocation risk on
+  the resident surface/draw path while the Three WebGPU presentation bridge is
+  still gated.
+
+Validation:
+
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` reported `48/48`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface buffer handoff|extension surface|surface draw|renderer backend|render-row|pressure interface"`
+  reported `52/52`.
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: browser probe
+  `artifacts/sph-probe-counter-bounded-surface-draw-4.json` classified `good`
+  with `browserConsoleIssueCount=0`,
+  `residentSurfaceBufferHandoffSampleCount=2`,
+  `surfaceDrawSourceVertexCounterMode=resident-vertex-counter`,
+  `surfaceDrawSourceVertexCounterBufferBound=true`, and
+  `surfaceDrawGpuBufferHandoffReady=true`.
+
+Remaining:
+
+- The surface draw pass still dispatches per surface and performs two bounded
+  scans. The next real throughput slice is either GPU-side per-surface counts /
+  prefix offsets or the true same-device renderer path that consumes the
+  retained draw/indirect/vertex buffers without falling back to CPU geometry.

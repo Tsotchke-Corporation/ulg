@@ -56,6 +56,7 @@ import {
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
   resolveSphSurfaceRendererMaterialPolicy,
+  resolveRenderRowSphereBridgeContract,
   normalizeSurfaceRadiusForRenderField,
   renderDescriptorForSurfaceRecord,
   residentSurfaceDrawOrder,
@@ -1519,6 +1520,40 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT, 'rgba16float');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT, 'rgba8unorm');
+});
+
+test('SPH render-row sphere bridge contract uses variable-size closure PBR', () => {
+  const sphereContract = resolveRenderRowSphereBridgeContract({
+    sphereBridgeUsed: true,
+    materialRendererProxy: false
+  });
+
+  assert.equal(sphereContract.particleRenderMode, 'variable-size-spheres');
+  assert.equal(sphereContract.sphereBridgeSizingMode, 'per-particle-radius');
+  assert.equal(sphereContract.sphereBridgeVariableSize, true);
+  assert.equal(sphereContract.sphereBridgePbrMaterialSource, 'closure-derived-pbr');
+  assert.equal(sphereContract.sphereBridgeClosurePbr, true);
+  assert.equal(sphereContract.pointsVertexColorOnly, false);
+
+  const proxiedSphereContract = resolveRenderRowSphereBridgeContract({
+    sphereBridgeUsed: true,
+    materialRendererProxy: true
+  });
+
+  assert.equal(
+    proxiedSphereContract.sphereBridgePbrMaterialSource,
+    'closure-derived-pbr-proxied-for-renderer'
+  );
+  assert.equal(proxiedSphereContract.sphereBridgeClosurePbr, true);
+
+  const pointContract = resolveRenderRowSphereBridgeContract({
+    sphereBridgeUsed: false
+  });
+
+  assert.equal(pointContract.particleRenderMode, 'points');
+  assert.equal(pointContract.sphereBridgeSizingMode, null);
+  assert.equal(pointContract.sphereBridgePbrMaterialSource, null);
+  assert.equal(pointContract.pointsVertexColorOnly, true);
 });
 
 test('SPH resident overlay policy chooses no-full-readback only when overlay is available', () => {

@@ -925,6 +925,7 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       setParticlesTiming: overlay?.__sphSetParticlesTiming || sceneUserData.sphSetParticlesTiming || null,
       surfaceApplyTiming: overlay?.__sphSurfaceApplyTiming || sceneUserData.sphSurfaceApplyTiming || null,
       rendererInit: sceneUserData.sphRendererInit || null,
+      renderModeSelection: overlay?.__sphRenderModeSelection || null,
       residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
       residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
       surfaceMaterialRenderPolicy: sceneUserData.sphSurfaceMaterialRenderPolicy || null,
@@ -1798,6 +1799,7 @@ async function runBrowserProbe({
         residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
+        renderModeSelection: overlay.__sphRenderModeSelection || null,
         rendererFrame: sceneUserData.sphRendererFrame || null,
         rendererWebGpuDevicePreflight: overlay.__sphRendererWebGpuDevicePreflight || null,
         statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
@@ -2062,6 +2064,16 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeCapabilityStatus: renderState.surfaceDrawRenderBridgeCapabilityStatus ?? null,
             surfaceDrawRenderBridgeCapabilityReason: renderState.surfaceDrawRenderBridgeCapabilityReason ?? null,
             surfaceDrawRenderBridgeRendererBackend: renderState.surfaceDrawRenderBridgeRendererBackend ?? null,
+            surfaceDrawRenderBridgeParticleRenderMode:
+              renderState.surfaceDrawRenderBridgeParticleRenderMode ?? null,
+            surfaceDrawRenderBridgeSphereSizingMode:
+              renderState.surfaceDrawRenderBridgeSphereSizingMode ?? null,
+            surfaceDrawRenderBridgeSphereVariableSize:
+              renderState.surfaceDrawRenderBridgeSphereVariableSize ?? null,
+            surfaceDrawRenderBridgeSpherePbrMaterialSource:
+              renderState.surfaceDrawRenderBridgeSpherePbrMaterialSource ?? null,
+            surfaceDrawRenderBridgeSphereClosurePbr:
+              renderState.surfaceDrawRenderBridgeSphereClosurePbr ?? null,
             surfaceDrawRenderBridgeVisibleNoReadbackSupported: renderState.surfaceDrawRenderBridgeVisibleNoReadbackSupported ?? null,
             surfaceDrawRenderBridgeLastRenderStatus: renderState.surfaceDrawRenderBridgeLastRenderStatus ?? null,
             surfaceDrawRenderBridgeFrameCount: renderState.surfaceDrawRenderBridgeFrameCount ?? null,
@@ -2426,9 +2438,14 @@ async function runBrowserProbe({
               : null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
             renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
+            renderBridgeParticleRenderMode: surfaceDraw.renderBridgeParticleRenderMode ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
               ? [...surfaceDraw.renderBridgeSphereMaterialKeys]
               : [],
+            renderBridgeSphereSizingMode: surfaceDraw.renderBridgeSphereSizingMode ?? null,
+            renderBridgeSphereVariableSize: surfaceDraw.renderBridgeSphereVariableSize ?? null,
+            renderBridgeSpherePbrMaterialSource: surfaceDraw.renderBridgeSpherePbrMaterialSource ?? null,
+            renderBridgeSphereClosurePbr: surfaceDraw.renderBridgeSphereClosurePbr ?? null,
             renderBridgeSphereTransmissionProxyCount: surfaceDraw.renderBridgeSphereTransmissionProxyCount ?? null,
             renderBridgeSphereFallbackColorCount: surfaceDraw.renderBridgeSphereFallbackColorCount ?? null,
             renderBridgeSphereMaterialRendererProxyCount:

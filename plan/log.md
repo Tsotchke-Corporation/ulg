@@ -28764,6 +28764,48 @@ Remaining:
   is still blank, compare its reported CSS/backing/DPR fields against the new
   mobile probe diagnostics before changing renderer logic.
 
+## 2026-06-19 12:41 AKDT - Explicit Particle Render Mode And PBR Spheres
+
+Status:
+
+- Added an explicit live render-mode selector for the SPH/MLS-MPM demo so
+  particle rendering is selectable as a real render path instead of only a
+  fallback. The options now include native WebGPU surface, Three GPU-buffer
+  surface, variable-size PBR spheres, point particles, and auto.
+- Threaded render-mode changes through resident render-state refreshes and URL
+  state via `surfaceDraw`, including a forced resident visual refresh when the
+  user changes the mode.
+- Promoted the render-row sphere bridge contract to a scene-level diagnostic:
+  sphere mode reports `variable-size-spheres`, `per-particle-radius`, and
+  whether the material came from closure-derived PBR directly or through the
+  Three WebGPU renderer-safe proxy.
+- Sphere meshes continue to use the same `makeSurfaceMaterial()` optical
+  closure path as surfaces; the new fields make that closure-derived PBR source
+  visible in status text, render-state summaries, and browser probe artifacts.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `git diff --check -- src/visualization/sphPhaseDemoMount.js src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row sphere|visible GPU|surface draw|renderer backend|mobile"`
+  reported `58/58`.
+- PASS: `/tmp/ulg-render-mode-spheres-probe.json` completed with browser
+  console issues `0`, selected mode `three-render-row-spheres`, bridge
+  `three-render-row-spheres`, particle mode `variable-size-spheres`, sizing
+  `per-particle-radius`, PBR source `closure-derived-pbr`, and radius range
+  about `0.10339145m` to `0.10339173m`.
+- NOTE: That tiny two-step probe still reports `missing-max-speed` and
+  `no-positive-displacement`; those are motion-evidence limitations of the
+  short validation run, not rendering or console failures.
+
+Remaining:
+
+- Continue renderer cleanup on the native/marching-cubes path. The explicit
+  particle modes are now available for live comparison while the native surface
+  route continues to mature.
+
 ## 2026-06-19 10:50 AKDT - Reset Generation Fence And Render-Row Status Preservation
 
 Status:

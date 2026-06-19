@@ -526,6 +526,23 @@ export function resolveSphSurfaceDrawDiagnosticPresentationMode({
   };
 }
 
+export function resolveRenderRowSphereBridgeContract({
+  sphereBridgeUsed = false,
+  materialRendererProxy = false
+} = {}) {
+  const used = Boolean(sphereBridgeUsed);
+  return {
+    particleRenderMode: used ? 'variable-size-spheres' : 'points',
+    sphereBridgeSizingMode: used ? 'per-particle-radius' : null,
+    sphereBridgeVariableSize: used,
+    sphereBridgePbrMaterialSource: used
+      ? (materialRendererProxy ? 'closure-derived-pbr-proxied-for-renderer' : 'closure-derived-pbr')
+      : null,
+    sphereBridgeClosurePbr: used,
+    pointsVertexColorOnly: !used
+  };
+}
+
 function normalizeSphNativeWebGpuSurfaceConsumerDebugMode(value, fallback = 'none') {
   if ((value == null || String(value).trim() === '') && fallback === '') return '';
   const normalized = String(value ?? fallback).trim().toLowerCase();
@@ -8617,6 +8634,10 @@ export function createSphPhaseScene(container, {
     let sphereBridgeGeometryProxyCount = 0;
     const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
     const useThreeWebGpuResidentBridgeMaterialProxy = Boolean(materialRenderPolicy.rendererIsWebGPU);
+    const renderRowSphereBridgeContract = resolveRenderRowSphereBridgeContract({
+      sphereBridgeUsed: useSphereBridge,
+      materialRendererProxy: useThreeWebGpuResidentBridgeMaterialProxy
+    });
     const previousBridge = sphResidentSurfaceDrawRenderBridge;
 
     if (useSphereBridge) {
@@ -8785,6 +8806,11 @@ export function createSphPhaseScene(container, {
         mesh.userData.surfaceMaterialRendererProxy = Boolean(material.userData.surfaceMaterialRendererProxy);
         mesh.userData.surfaceMaterialRendererProxyReason = material.userData.surfaceMaterialRendererProxyReason || null;
         mesh.userData.renderRowSphereGeometryProxy = Boolean(mesh.geometry?.userData?.threeWebGpuMappedBufferSafeProxy);
+        mesh.userData.renderRowSphereSizingMode = renderRowSphereBridgeContract.sphereBridgeSizingMode;
+        mesh.userData.renderRowSpherePbrMaterialSource =
+          renderRowSphereBridgeContract.sphereBridgePbrMaterialSource;
+        mesh.userData.renderRowSphereClosurePbr =
+          renderRowSphereBridgeContract.sphereBridgeClosurePbr;
         if (material.userData.renderRowSphereTransmissionProxy) sphereBridgeTransmissionProxyCount += 1;
         if (material.userData.renderRowSphereFallbackColor) sphereBridgeFallbackColorCount += 1;
         let groupMinRadius = Number.POSITIVE_INFINITY;
@@ -8974,8 +9000,14 @@ export function createSphPhaseScene(container, {
       vertexCount: pointCount,
       triangleCount: 0,
       pointCount,
+      particleRenderMode: renderRowSphereBridgeContract.particleRenderMode,
       sphereBridgeRequested: requestedSphereBridge,
       sphereBridgeUsed: useSphereBridge,
+      sphereBridgeSizingMode: renderRowSphereBridgeContract.sphereBridgeSizingMode,
+      sphereBridgeVariableSize: renderRowSphereBridgeContract.sphereBridgeVariableSize,
+      sphereBridgePbrMaterialSource: renderRowSphereBridgeContract.sphereBridgePbrMaterialSource,
+      sphereBridgeClosurePbr: renderRowSphereBridgeContract.sphereBridgeClosurePbr,
+      pointsVertexColorOnly: renderRowSphereBridgeContract.pointsVertexColorOnly,
       sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
       sphereBridgeTransmissionProxyCount,
@@ -14501,7 +14533,12 @@ export function createSphPhaseScene(container, {
         renderBridgeOpticalRecordStrideFloats: renderBridge?.opticalRecordStrideFloats ?? 0,
         renderBridgeOpticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? 0,
         renderBridgeOpticalSpectralSampleStrideFloats: renderBridge?.opticalSpectralSampleStrideFloats ?? 0,
+        renderBridgeParticleRenderMode: renderBridge?.particleRenderMode ?? null,
         renderBridgeSphereMaterialKeys: [...(renderBridge?.sphereBridgeMaterialKeys || [])],
+        renderBridgeSphereSizingMode: renderBridge?.sphereBridgeSizingMode ?? null,
+        renderBridgeSphereVariableSize: Boolean(renderBridge?.sphereBridgeVariableSize),
+        renderBridgeSpherePbrMaterialSource: renderBridge?.sphereBridgePbrMaterialSource ?? null,
+        renderBridgeSphereClosurePbr: Boolean(renderBridge?.sphereBridgeClosurePbr),
         renderBridgeSphereTransmissionProxyCount: renderBridge?.sphereBridgeTransmissionProxyCount ?? 0,
         renderBridgeSphereFallbackColorCount: renderBridge?.sphereBridgeFallbackColorCount ?? 0,
         renderBridgeSphereMaterialRendererProxyCount: renderBridge?.sphereBridgeMaterialRendererProxyCount ?? 0,
@@ -16076,37 +16113,43 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeDepthPolicy = renderBridge?.depthPolicy ?? null;
           nextResidentSurfaceDraw.renderBridgeDepthAttachmentFormat = renderBridge?.depthAttachmentFormat ?? null;
           nextResidentSurfaceDraw.renderBridgeDepthAttachmentReady = Boolean(renderBridge?.depthAttachmentReady);
-	          nextResidentSurfaceDraw.renderBridgeTransparencyCompositeMode =
-	            renderBridge?.lastTransparentCompositeMode
-	            || renderBridge?.transparencyCompositeMode
-	            || null;
+          nextResidentSurfaceDraw.renderBridgeTransparencyCompositeMode =
+            renderBridge?.lastTransparentCompositeMode
+            || renderBridge?.transparencyCompositeMode
+            || null;
           nextResidentSurfaceDraw.renderBridgeOitAccumFormat = renderBridge?.oitAccumFormat ?? null;
           nextResidentSurfaceDraw.renderBridgeOitRevealFormat = renderBridge?.oitRevealFormat ?? null;
           nextResidentSurfaceDraw.renderBridgeOitTargetsReady = Boolean(renderBridge?.oitTargetsReady);
-	          nextResidentSurfaceDraw.renderBridgeLastOpaqueDrawCount = renderBridge?.lastOpaqueDrawCount ?? 0;
-	          nextResidentSurfaceDraw.renderBridgeLastTransparentDrawCount = renderBridge?.lastTransparentDrawCount ?? 0;
-	          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugMode =
-	            renderBridge?.lastNativeSurfaceDebugMode
-	            || renderBridge?.nativeSurfaceDebugMode
-	            || 'none';
-	          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugStatus =
-	            renderBridge?.lastNativeSurfaceDebugStatus ?? null;
-	          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugSkippedDrawCount =
-	            renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null;
-		          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugClearValue =
-		            renderBridge?.lastNativeSurfaceDebugClearValue ?? null;
-		          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseStatus =
-		            renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null;
-		          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseReason =
-		            renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null;
-		          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleasePending =
-		            renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0;
-		          nextResidentSurfaceDraw.renderBridgeOpticalRenderSource = renderBridge?.opticalRenderSource ?? null;
+          nextResidentSurfaceDraw.renderBridgeLastOpaqueDrawCount = renderBridge?.lastOpaqueDrawCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeLastTransparentDrawCount = renderBridge?.lastTransparentDrawCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugMode =
+            renderBridge?.lastNativeSurfaceDebugMode
+            || renderBridge?.nativeSurfaceDebugMode
+            || 'none';
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugStatus =
+            renderBridge?.lastNativeSurfaceDebugStatus ?? null;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugSkippedDrawCount =
+            renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDebugClearValue =
+            renderBridge?.lastNativeSurfaceDebugClearValue ?? null;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseStatus =
+            renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseReason =
+            renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null;
+          nextResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleasePending =
+            renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0;
+          nextResidentSurfaceDraw.renderBridgeOpticalRenderSource = renderBridge?.opticalRenderSource ?? null;
           nextResidentSurfaceDraw.renderBridgeOpticalRecordCount = renderBridge?.opticalRecordCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalRecordStrideFloats = renderBridge?.opticalRecordStrideFloats ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleCount = renderBridge?.opticalSpectralSampleCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats = renderBridge?.opticalSpectralSampleStrideFloats ?? 0;
+          nextResidentSurfaceDraw.renderBridgeParticleRenderMode = renderBridge?.particleRenderMode ?? null;
           nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
+          nextResidentSurfaceDraw.renderBridgeSphereSizingMode = renderBridge?.sphereBridgeSizingMode ?? null;
+          nextResidentSurfaceDraw.renderBridgeSphereVariableSize = Boolean(renderBridge?.sphereBridgeVariableSize);
+          nextResidentSurfaceDraw.renderBridgeSpherePbrMaterialSource =
+            renderBridge?.sphereBridgePbrMaterialSource ?? null;
+          nextResidentSurfaceDraw.renderBridgeSphereClosurePbr = Boolean(renderBridge?.sphereBridgeClosurePbr);
           nextResidentSurfaceDraw.renderBridgeSphereTransmissionProxyCount = renderBridge?.sphereBridgeTransmissionProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereFallbackColorCount = renderBridge?.sphereBridgeFallbackColorCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereMaterialRendererProxyCount =
@@ -17194,7 +17237,17 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeOpticalRecordStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalRecordStrideFloats ?? 0,
         surfaceDrawRenderBridgeOpticalSpectralSampleCount: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? 0,
         surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleStrideFloats ?? 0,
+        surfaceDrawRenderBridgeParticleRenderMode:
+          sphResidentSurfaceDraw?.renderBridgeParticleRenderMode ?? null,
         surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
+        surfaceDrawRenderBridgeSphereSizingMode:
+          sphResidentSurfaceDraw?.renderBridgeSphereSizingMode ?? null,
+        surfaceDrawRenderBridgeSphereVariableSize:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeSphereVariableSize),
+        surfaceDrawRenderBridgeSpherePbrMaterialSource:
+          sphResidentSurfaceDraw?.renderBridgeSpherePbrMaterialSource ?? null,
+        surfaceDrawRenderBridgeSphereClosurePbr:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeSphereClosurePbr),
         surfaceDrawRenderBridgeSphereTransmissionProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereTransmissionProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereFallbackColorCount: sphResidentSurfaceDraw?.renderBridgeSphereFallbackColorCount ?? 0,
         surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:

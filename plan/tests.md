@@ -10780,3 +10780,32 @@ Reset generation fence and render-row lifecycle, 2026-06-19 10:50 AKDT:
     `three-render-row-spheres-submitted` after later render-loop skip attempts;
     skip status remains available separately for in-flight GPU work or missing
     WebGPU draw state.
+
+Explicit particle render modes and closure-PBR spheres, 2026-06-19 12:41 AKDT:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `git diff --check -- src/visualization/sphPhaseDemoMount.js src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row sphere|visible GPU|surface draw|renderer backend|mobile"`
+  - Passed: `58/58`.
+  - New coverage pins the render-row sphere bridge contract to
+    `variable-size-spheres`, `per-particle-radius`, and
+    `closure-derived-pbr` or `closure-derived-pbr-proxied-for-renderer`.
+- Browser probe:
+  `/tmp/ulg-render-mode-spheres-probe.json`
+  - Browser console issues: `0`.
+  - Selected render mode: `three-render-row-spheres`.
+  - Render-state mode: `three-render-row-spheres`.
+  - Visible bridge: `three-render-row-spheres`.
+  - Particle render mode: `variable-size-spheres`.
+  - Sphere sizing: `per-particle-radius`.
+  - Sphere PBR source: `closure-derived-pbr`.
+  - Closure PBR flag: `true`.
+  - Particle radius range: about `0.10339145m` to `0.10339173m`.
+  - Expected non-rendering probe issues in this tiny run:
+    `missing-max-speed`, `no-positive-displacement`.

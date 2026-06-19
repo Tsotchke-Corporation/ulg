@@ -28932,3 +28932,39 @@ Remaining:
 - Continue no-full resident visual work without overlays. Native WebGPU pixel
   acceptance still needs a real browser/device check because the local headless
   WebGPU presentation path remains unreliable for final canvas proof.
+
+## 2026-06-19 14:00 AKDT - Resident Render Source Freshness Contract
+
+Status:
+
+- Added a resident render-source metadata stamp that follows MLS-MPM resident
+  execution output into render rows, render fields, surface draw buffers, and
+  the native WebGPU surface consumer bridge.
+- Retained previous native surface buffers now remain visible, but they are
+  explicitly marked stale against the current resident execution generation
+  instead of looking current.
+- Updated the long-horizon browser probe so no-full-readback native rendering
+  can pass on fresh advancing resident generation evidence without falling back
+  to CPU particle readback. Stale retained render-source samples are now a
+  hard analysis issue.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render source|visible GPU|surface buffer handoff|native"`
+  reported `60/60`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseRenderer.test.mjs`.
+- PASS: `/tmp/ulg-native-render-source-probe.json` completed `status=good`
+  with browser console issues/warnings `0/0`, worker capability ready with
+  `12` workers, `native-webgpu-surface-consumer-rendered`,
+  `residentRenderSourceCurrentSampleCount=3`,
+  `residentRenderSourceStaleSampleCount=0`,
+  `residentRenderSourceStepDelta=4`, and
+  `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+
+Remaining:
+
+- Continue the native/marching-cubes integration roadmap. The harness can now
+  distinguish a real fresh no-readback native path from stale retained buffers,
+  which should make the next rendering regressions easier to isolate.

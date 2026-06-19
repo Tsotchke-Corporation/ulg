@@ -28,6 +28,7 @@ import {
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
   createProductEventSurfaceBatches,
+  createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
   hideRenderFieldSurfaceAfterGrace,
@@ -58,6 +59,7 @@ import {
   resolveSphSurfaceRendererMaterialPolicy,
   resolveResidentRenderRowBridgeReadbackPlan,
   resolveRenderRowSphereBridgeContract,
+  applyResidentRenderSourceMetadata,
   normalizeSurfaceRadiusForRenderField,
   renderDescriptorForSurfaceRecord,
   residentSurfaceDrawOrder,
@@ -2069,6 +2071,66 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(renderFieldReady.renderFieldSurfaceBufferByteLength, 512);
   assert.equal(renderFieldReady.upperBoundVertexCount, 0);
   assert.equal(renderFieldReady.upperBoundTriangleCount, 0);
+});
+
+test('SPH resident render source metadata keeps stale retained surfaces visible', () => {
+  const metadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      signature: 'steps-current',
+      residentExecutionGeneration: 7,
+      currentResidentExecutionGeneration: 7,
+      completedStepCount: 2,
+      residentSourceMode: 'previous-gpu-resident-output',
+      nextSphParticleState: {
+        step: 4,
+        time: 0.02,
+        particleCount: 128
+      }
+    },
+    finalStep: {
+      signature: 'step-current',
+      sequenceIndex: 1,
+      particlePingPong: {
+        sourceStep: 3,
+        nextStep: 4,
+        sourceTime: 0.015,
+        nextTime: 0.02
+      }
+    },
+    source: 'resident-render-refresh'
+  });
+
+  assert.equal(metadata.status, 'resident-render-source-current');
+  assert.equal(metadata.residentExecutionGenerationMatchesCurrent, true);
+  assert.equal(metadata.nextStep, 4);
+  assert.equal(metadata.nextTimeS, 0.02);
+  assert.equal(metadata.particleCount, 128);
+
+  const currentSurfaceDraw = {};
+  applyResidentRenderSourceMetadata(currentSurfaceDraw, metadata);
+  assert.equal(currentSurfaceDraw.sourceResidentExecutionGeneration, 7);
+  assert.equal(currentSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, true);
+  assert.equal(currentSurfaceDraw.sourceResidentRetainedPrevious, false);
+
+  const staleMetadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      signature: 'steps-stale',
+      residentExecutionGeneration: 6,
+      currentResidentExecutionGeneration: 7,
+      nextSphParticleState: { step: 3, time: 0.015 }
+    },
+    source: 'resident-render-refresh'
+  });
+  const retainedSurfaceDraw = {};
+  applyResidentRenderSourceMetadata(retainedSurfaceDraw, staleMetadata, {
+    markRetainedPrevious: true,
+    retentionReason: 'previous native surface retained during current no-full refresh'
+  });
+  assert.equal(retainedSurfaceDraw.sourceResidentExecutionGeneration, 6);
+  assert.equal(retainedSurfaceDraw.sourceResidentCurrentExecutionGeneration, 7);
+  assert.equal(retainedSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, false);
+  assert.equal(retainedSurfaceDraw.sourceResidentRetainedPrevious, true);
+  assert.match(retainedSurfaceDraw.sourceResidentRetentionReason, /previous native surface/);
 });
 
 test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {

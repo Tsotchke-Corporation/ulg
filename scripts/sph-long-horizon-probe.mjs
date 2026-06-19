@@ -1894,6 +1894,44 @@ async function runBrowserProbe({
             backend: renderState.backend ?? null,
             reason: renderState.reason ?? null,
             error: renderState.error ?? null,
+            sourceResidentRenderSourceStatus:
+              renderState.sourceResidentRenderSourceStatus ?? null,
+            sourceResidentExecutionGeneration:
+              renderState.sourceResidentExecutionGeneration ?? null,
+            sourceResidentCurrentExecutionGeneration:
+              renderState.sourceResidentCurrentExecutionGeneration ?? null,
+            sourceResidentExecutionGenerationMatchesCurrent:
+              renderState.sourceResidentExecutionGenerationMatchesCurrent ?? null,
+            sourceResidentNextStep: renderState.sourceResidentNextStep ?? null,
+            sourceResidentNextTimeS: renderState.sourceResidentNextTimeS ?? null,
+            sourceResidentRetainedPrevious:
+              renderState.sourceResidentRetainedPrevious ?? null,
+            sourceResidentRetentionReason:
+              renderState.sourceResidentRetentionReason ?? null,
+            surfaceDrawSourceResidentExecutionGeneration:
+              renderState.surfaceDrawSourceResidentExecutionGeneration ?? null,
+            surfaceDrawSourceResidentExecutionGenerationMatchesCurrent:
+              renderState.surfaceDrawSourceResidentExecutionGenerationMatchesCurrent ?? null,
+            surfaceDrawSourceResidentNextStep:
+              renderState.surfaceDrawSourceResidentNextStep ?? null,
+            surfaceDrawSourceResidentNextTimeS:
+              renderState.surfaceDrawSourceResidentNextTimeS ?? null,
+            surfaceDrawSourceResidentRetainedPrevious:
+              renderState.surfaceDrawSourceResidentRetainedPrevious ?? null,
+            surfaceDrawSourceResidentRetentionReason:
+              renderState.surfaceDrawSourceResidentRetentionReason ?? null,
+            surfaceDrawRenderBridgeSourceResidentExecutionGeneration:
+              renderState.surfaceDrawRenderBridgeSourceResidentExecutionGeneration ?? null,
+            surfaceDrawRenderBridgeSourceResidentExecutionGenerationMatchesCurrent:
+              renderState.surfaceDrawRenderBridgeSourceResidentExecutionGenerationMatchesCurrent ?? null,
+            surfaceDrawRenderBridgeSourceResidentNextStep:
+              renderState.surfaceDrawRenderBridgeSourceResidentNextStep ?? null,
+            surfaceDrawRenderBridgeSourceResidentNextTimeS:
+              renderState.surfaceDrawRenderBridgeSourceResidentNextTimeS ?? null,
+            surfaceDrawRenderBridgeSourceResidentRetainedPrevious:
+              renderState.surfaceDrawRenderBridgeSourceResidentRetainedPrevious ?? null,
+            surfaceDrawRenderBridgeSourceResidentRetentionReason:
+              renderState.surfaceDrawRenderBridgeSourceResidentRetentionReason ?? null,
             rendererOwnedDevice: renderState.rendererOwnedDevice ?? null,
             renderFieldReadback: renderState.renderFieldReadback ?? null,
             renderFieldStatus: renderState.renderFieldStatus ?? null,
@@ -2245,6 +2283,24 @@ async function runBrowserProbe({
             schema: surfaceDraw.schema ?? null,
             status: surfaceDraw.status ?? null,
             backend: surfaceDraw.backend ?? null,
+            sourceResidentRenderSourceStatus:
+              surfaceDraw.sourceResidentRenderSourceStatus ?? null,
+            sourceResidentExecutionGeneration:
+              surfaceDraw.sourceResidentExecutionGeneration ?? null,
+            sourceResidentCurrentExecutionGeneration:
+              surfaceDraw.sourceResidentCurrentExecutionGeneration ?? null,
+            sourceResidentExecutionGenerationMatchesCurrent:
+              surfaceDraw.sourceResidentExecutionGenerationMatchesCurrent ?? null,
+            sourceResidentNextStep: surfaceDraw.sourceResidentNextStep ?? null,
+            sourceResidentNextTimeS: surfaceDraw.sourceResidentNextTimeS ?? null,
+            sourceResidentRetainedPrevious:
+              surfaceDraw.sourceResidentRetainedPrevious ?? null,
+            sourceResidentRetentionReason:
+              surfaceDraw.sourceResidentRetentionReason ?? null,
+            residentRenderSourceStaleAfterPublish:
+              surfaceDraw.residentRenderSourceStaleAfterPublish ?? null,
+            residentRenderSourceStaleReason:
+              surfaceDraw.residentRenderSourceStaleReason ?? null,
             overlayPolicyStatus: surfaceDraw.overlayPolicyStatus ?? null,
             overlayPolicyMode: surfaceDraw.overlayPolicyMode ?? null,
             diagnosticMode: surfaceDraw.diagnosticMode ?? null,
@@ -2438,6 +2494,18 @@ async function runBrowserProbe({
               : null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
             renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
+            renderBridgeSourceResidentExecutionGeneration:
+              surfaceDraw.renderBridgeSourceResidentExecutionGeneration ?? null,
+            renderBridgeSourceResidentExecutionGenerationMatchesCurrent:
+              surfaceDraw.renderBridgeSourceResidentExecutionGenerationMatchesCurrent ?? null,
+            renderBridgeSourceResidentNextStep:
+              surfaceDraw.renderBridgeSourceResidentNextStep ?? null,
+            renderBridgeSourceResidentNextTimeS:
+              surfaceDraw.renderBridgeSourceResidentNextTimeS ?? null,
+            renderBridgeSourceResidentRetainedPrevious:
+              surfaceDraw.renderBridgeSourceResidentRetainedPrevious ?? null,
+            renderBridgeSourceResidentRetentionReason:
+              surfaceDraw.renderBridgeSourceResidentRetentionReason ?? null,
             renderBridgeParticleRenderMode: surfaceDraw.renderBridgeParticleRenderMode ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
               ? [...surfaceDraw.renderBridgeSphereMaterialKeys]
@@ -4328,6 +4396,93 @@ function analyzeTimeline(timeline, {
     compactSummaryDisabled
     && (renderRowEstimatedMaxSpeedMPerS != null || renderRowMaxDisplacementM != null)
   );
+  const residentRenderSourceSamples = metrics
+    .map((metric, index) => {
+      const renderState = metric?.renderState || {};
+      const surfaceDraw = metric?.surfaceDraw || {};
+      const nextStep = finiteMetric(
+        surfaceDraw.sourceResidentNextStep
+          ?? renderState.surfaceDrawSourceResidentNextStep
+          ?? renderState.sourceResidentNextStep
+          ?? metric?.residentStep?.particlePingPong?.nextStep
+          ?? metric?.residentSteps?.nextStep
+      );
+      const nextTimeS = finiteMetric(
+        surfaceDraw.sourceResidentNextTimeS
+          ?? renderState.surfaceDrawSourceResidentNextTimeS
+          ?? renderState.sourceResidentNextTimeS
+          ?? metric?.residentStep?.particlePingPong?.nextTime
+          ?? metric?.residentSteps?.nextTime
+      );
+      const generation = finiteMetric(
+        surfaceDraw.sourceResidentExecutionGeneration
+          ?? renderState.surfaceDrawSourceResidentExecutionGeneration
+          ?? renderState.sourceResidentExecutionGeneration
+      );
+      const currentGeneration = finiteMetric(
+        surfaceDraw.sourceResidentCurrentExecutionGeneration
+          ?? renderState.surfaceDrawSourceResidentCurrentExecutionGeneration
+          ?? renderState.sourceResidentCurrentExecutionGeneration
+      );
+      const generationMatchesCurrent = (
+        surfaceDraw.sourceResidentExecutionGenerationMatchesCurrent
+          ?? renderState.surfaceDrawSourceResidentExecutionGenerationMatchesCurrent
+          ?? renderState.sourceResidentExecutionGenerationMatchesCurrent
+          ?? null
+      );
+      const retainedPrevious = Boolean(
+        surfaceDraw.sourceResidentRetainedPrevious
+          ?? renderState.surfaceDrawSourceResidentRetainedPrevious
+          ?? renderState.sourceResidentRetainedPrevious
+      );
+      if (
+        nextStep == null
+        && nextTimeS == null
+        && generation == null
+        && currentGeneration == null
+        && generationMatchesCurrent == null
+        && !retainedPrevious
+      ) {
+        return null;
+      }
+      return {
+        index,
+        phase: metric?.phase ?? null,
+        nextStep,
+        nextTimeS,
+        generation,
+        currentGeneration,
+        generationMatchesCurrent,
+        retainedPrevious,
+        retentionReason: surfaceDraw.sourceResidentRetentionReason
+          ?? renderState.surfaceDrawSourceResidentRetentionReason
+          ?? renderState.sourceResidentRetentionReason
+          ?? null
+      };
+    })
+    .filter(Boolean);
+  const residentRenderSourceCurrentSampleCount = residentRenderSourceSamples
+    .filter((sample) => sample.generationMatchesCurrent === true && !sample.retainedPrevious)
+    .length;
+  const residentRenderSourceStaleSampleCount = residentRenderSourceSamples
+    .filter((sample) => sample.generationMatchesCurrent === false || sample.retainedPrevious)
+    .length;
+  const residentRenderSourceNextStepSeries = residentRenderSourceSamples
+    .map((sample) => sample.nextStep)
+    .filter(Number.isFinite);
+  const residentRenderSourceNextTimeSeries = residentRenderSourceSamples
+    .map((sample) => sample.nextTimeS)
+    .filter(Number.isFinite);
+  const residentRenderSourceStepDelta = residentRenderSourceNextStepSeries.length >= 2
+    ? Math.max(...residentRenderSourceNextStepSeries) - Math.min(...residentRenderSourceNextStepSeries)
+    : null;
+  const residentRenderSourceTimeDeltaS = residentRenderSourceNextTimeSeries.length >= 2
+    ? Math.max(...residentRenderSourceNextTimeSeries) - Math.min(...residentRenderSourceNextTimeSeries)
+    : null;
+  const residentRenderSourceAdvanced = Boolean(
+    (Number.isFinite(residentRenderSourceStepDelta) && residentRenderSourceStepDelta > 0)
+    || (Number.isFinite(residentRenderSourceTimeDeltaS) && residentRenderSourceTimeDeltaS > 0)
+  );
   const minVolumeObservedJ = minVolumeSeries.length ? Math.min(...minVolumeSeries) : null;
   const maxVolumeObservedJ = maxVolumeSeries.length ? Math.max(...maxVolumeSeries) : null;
   const maxPressureImpulseNSeconds = pressureImpulseSeries.length ? Math.max(...pressureImpulseSeries) : null;
@@ -4562,6 +4717,17 @@ function analyzeTimeline(timeline, {
   const nativeWebGpuSurfaceConsumerAccepted = Boolean(
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
     && residentSurfaceVisibleGpuConsumerAccepted
+  );
+  const residentNoReadbackRenderSourceEvidenceAvailable = Boolean(
+    residentSurfaceBufferHandoffProbe
+    && compactSummaryDisabled
+    && residentRenderSourceCurrentSampleCount > 0
+    && residentRenderSourceStaleSampleCount === 0
+    && residentRenderSourceAdvanced
+    && (
+      residentSurfaceVisibleGpuConsumerInputReadySampleCount > 0
+      || residentSurfaceBufferHandoffSampleCount > 0
+    )
   );
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
     (metric.surfaces?.h2oVisibleCount ?? 0) > 0
@@ -5012,9 +5178,23 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('initial-preflight-blocked');
   }
+  if (residentRenderSourceStaleSampleCount > 0) {
+    issues.push('resident-render-source-stale');
+  }
   if (!visualOnly) {
-    if (diagnostics.length === 0 && !renderRowMotionEvidenceAvailable) issues.push('missing-resident-diagnostics');
-    if (motionMaxSpeedObservedMPerS == null) issues.push('missing-max-speed');
+    if (
+      diagnostics.length === 0
+      && !renderRowMotionEvidenceAvailable
+      && !residentNoReadbackRenderSourceEvidenceAvailable
+    ) {
+      issues.push('missing-resident-diagnostics');
+    }
+    if (
+      motionMaxSpeedObservedMPerS == null
+      && !residentNoReadbackRenderSourceEvidenceAvailable
+    ) {
+      issues.push('missing-max-speed');
+    }
     if (motionMaxSpeedObservedMPerS != null && motionMaxSpeedObservedMPerS > maxSpeedMPerS) issues.push(`max-speed>${maxSpeedMPerS}`);
     if (expectStatic) {
       if (motionMaxDisplacementObservedM == null) {
@@ -5028,7 +5208,10 @@ function analyzeTimeline(timeline, {
       ) {
         issues.push(`static-center-of-mass-delta>${staticMaxCenterOfMassDeltaM}`);
       }
-    } else if (motionMaxDisplacementObservedM == null || motionMaxDisplacementObservedM <= 0) {
+    } else if (
+      (motionMaxDisplacementObservedM == null || motionMaxDisplacementObservedM <= 0)
+      && !residentNoReadbackRenderSourceEvidenceAvailable
+    ) {
       issues.push('no-positive-displacement');
     }
     if (minActiveGridNodeCount != null && minActiveGridNodeCount <= 0) issues.push('inactive-grid-nodes');
@@ -5266,6 +5449,15 @@ function analyzeTimeline(timeline, {
     renderRowEstimatedMaxBoundsCenterSpeedMPerS,
     renderRowEstimatedMaxBoundsExtentRateMPerS,
     renderRowEstimatedMaxSpeedMPerS,
+    residentRenderSourceSampleCount: residentRenderSourceSamples.length,
+    residentRenderSourceCurrentSampleCount,
+    residentRenderSourceStaleSampleCount,
+    residentRenderSourceNextStepSeries,
+    residentRenderSourceNextTimeSeries,
+    residentRenderSourceStepDelta,
+    residentRenderSourceTimeDeltaS,
+    residentRenderSourceAdvanced,
+    residentNoReadbackRenderSourceEvidenceAvailable,
     minActiveGridNodeCount,
     minVolumeObservedJ,
     maxVolumeObservedJ,

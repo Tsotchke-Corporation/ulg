@@ -3646,6 +3646,110 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+export function createResidentRenderSourceMetadata({
+  residentSteps = null,
+  finalStep = null,
+  residentExecutionGeneration = null,
+  currentResidentExecutionGeneration = null,
+  stepsSignature = null,
+  stepSignature = null,
+  source = 'resident-render-refresh'
+} = {}) {
+  const step = finalStep || residentSteps?.finalStep || null;
+  const nextSphParticleState = residentSteps?.nextSphParticleState
+    || step?.nextSphParticleState
+    || null;
+  const nextMlsMpmParticleState = residentSteps?.nextMlsMpmParticleState
+    || step?.nextMlsMpmParticleState
+    || null;
+  const particlePingPong = step?.particlePingPong || {};
+  const sourceStep = finiteNumberOrNull(particlePingPong.sourceStep);
+  const nextStep = finiteNumberOrNull(
+    particlePingPong.nextStep
+      ?? nextSphParticleState?.step
+      ?? nextMlsMpmParticleState?.step
+  );
+  const sourceTimeS = finiteNumberOrNull(particlePingPong.sourceTime);
+  const nextTimeS = finiteNumberOrNull(
+    particlePingPong.nextTime
+      ?? nextSphParticleState?.time
+      ?? nextMlsMpmParticleState?.time
+  );
+  const generation = finiteNumberOrNull(
+    residentExecutionGeneration
+      ?? residentSteps?.residentExecutionGeneration
+      ?? step?.residentExecutionGeneration
+  );
+  const currentGeneration = finiteNumberOrNull(
+    currentResidentExecutionGeneration
+      ?? residentSteps?.currentResidentExecutionGeneration
+      ?? step?.currentResidentExecutionGeneration
+      ?? generation
+  );
+  const generationMatchesCurrent = (
+    generation != null
+    && currentGeneration != null
+    && generation === currentGeneration
+  );
+
+  return {
+    schema: 'peercompute.ulg.sph-resident-render-source.v0',
+    status: generationMatchesCurrent
+      ? 'resident-render-source-current'
+      : 'resident-render-source-stale-or-unknown',
+    source,
+    residentExecutionGeneration: generation,
+    currentResidentExecutionGeneration: currentGeneration,
+    residentExecutionGenerationMatchesCurrent: generationMatchesCurrent,
+    residentStepsSignature: stepsSignature ?? residentSteps?.signature ?? null,
+    residentStepSignature: stepSignature ?? step?.signature ?? null,
+    residentSourceMode: residentSteps?.residentSourceMode ?? null,
+    completedStepCount: finiteNumberOrNull(residentSteps?.completedStepCount),
+    finalStepSequenceIndex: finiteNumberOrNull(step?.sequenceIndex),
+    sourceStep,
+    nextStep,
+    sourceTimeS,
+    nextTimeS,
+    particleCount: finiteNumberOrNull(
+      nextSphParticleState?.particleCount
+        ?? nextMlsMpmParticleState?.particleCount
+        ?? step?.particleCount
+    ),
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function applyResidentRenderSourceMetadata(target, metadata, {
+  markRetainedPrevious = false,
+  retentionReason = null
+} = {}) {
+  if (!target || !metadata) return target;
+  target.residentRenderSource = metadata;
+  target.sourceResidentRenderSourceSchema = metadata.schema;
+  target.sourceResidentRenderSourceStatus = metadata.status;
+  target.sourceResidentRenderSource = metadata.source;
+  target.sourceResidentExecutionGeneration = metadata.residentExecutionGeneration;
+  target.sourceResidentCurrentExecutionGeneration = metadata.currentResidentExecutionGeneration;
+  target.sourceResidentExecutionGenerationMatchesCurrent =
+    metadata.residentExecutionGenerationMatchesCurrent;
+  target.sourceResidentStepsSignature = metadata.residentStepsSignature;
+  target.sourceResidentStepSignature = metadata.residentStepSignature;
+  target.sourceResidentSourceMode = metadata.residentSourceMode;
+  target.sourceResidentCompletedStepCount = metadata.completedStepCount;
+  target.sourceResidentFinalStepSequenceIndex = metadata.finalStepSequenceIndex;
+  target.sourceResidentSourceStep = metadata.sourceStep;
+  target.sourceResidentNextStep = metadata.nextStep;
+  target.sourceResidentSourceTimeS = metadata.sourceTimeS;
+  target.sourceResidentNextTimeS = metadata.nextTimeS;
+  target.sourceResidentParticleCount = metadata.particleCount;
+  target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
+  target.sourceResidentRetentionReason = retentionReason ?? null;
+  return target;
+}
+
 function finiteVector3OrNull(value) {
   if (!Array.isArray(value) || value.length < 3) return null;
   const vector = value.slice(0, 3).map((entry) => Number(entry));
@@ -10711,6 +10815,21 @@ export function createSphPhaseScene(container, {
     stepsExecution = null,
     stepsSignature = null
   } = {}) {
+    const residentExecutionGeneration = finiteNumberOrNull(
+      stepsExecution?.residentExecutionGeneration
+        ?? step?.residentExecutionGeneration
+        ?? mlsMpmResidentExecutionGeneration
+    );
+    if (stepsExecution) {
+      stepsExecution.residentExecutionGeneration = residentExecutionGeneration;
+      stepsExecution.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
+      stepsExecution.signature = stepsSignature ?? stepsExecution.signature ?? null;
+    }
+    if (step) {
+      step.residentExecutionGeneration = residentExecutionGeneration;
+      step.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
+      step.signature = signature ?? step.signature ?? null;
+    }
     mlsMpmResidentSteps = stepsExecution;
     mlsMpmResidentStepsSignature = stepsSignature;
     scene.userData.mlsMpmResidentSteps = stepsExecution;
@@ -10726,6 +10845,39 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
     scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
     scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
+    const residentRenderSource = createResidentRenderSourceMetadata({
+      residentSteps: stepsExecution,
+      finalStep: step,
+      residentExecutionGeneration,
+      currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+      stepsSignature,
+      stepSignature: signature,
+      source: 'resident-step-publication'
+    });
+    scene.userData.mlsMpmResidentPublishedRenderSource = residentRenderSource;
+    const markRenderArtifactStale = (target, reason) => {
+      if (!target) return;
+      target.residentRenderSourceStaleAfterPublish = true;
+      target.residentRenderSourceStaleReason = reason;
+      target.residentRenderSourceStaleAgainst = residentRenderSource;
+      target.sourceResidentRenderSourceStatus = 'resident-render-source-stale-or-unknown';
+      target.sourceResidentCurrentExecutionGeneration = residentRenderSource.currentResidentExecutionGeneration;
+      target.sourceResidentExecutionGenerationMatchesCurrent = false;
+      target.sourceResidentRetainedPrevious = true;
+      target.sourceResidentRetentionReason = reason;
+    };
+    markRenderArtifactStale(
+      sphResidentRenderState,
+      'resident mechanics output was published after the last resident render refresh'
+    );
+    markRenderArtifactStale(
+      sphResidentSurfaceDraw,
+      'resident mechanics output was published after the current surface draw buffers'
+    );
+    markRenderArtifactStale(
+      sphResidentSurfaceDrawRenderBridge,
+      'resident mechanics output was published after the current render bridge'
+    );
   }
 
   async function refreshSphGpuParticleBuffers({
@@ -11289,6 +11441,13 @@ export function createSphPhaseScene(container, {
           }
         });
         execution.signature = signature;
+        execution.residentExecutionGeneration = executionGeneration;
+        execution.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
+        if (execution.finalStep) {
+          execution.finalStep.signature = signature;
+          execution.finalStep.residentExecutionGeneration = executionGeneration;
+          execution.finalStep.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
+        }
         const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
         const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
           'released-after-mls-mpm-grid-update-complete',
@@ -11592,6 +11751,8 @@ export function createSphPhaseScene(container, {
         execution.requestedReadbackMode = requestedReadbackMode;
         execution.physicalLawGroups = { ...lawGroups };
         execution.signature = signature;
+        execution.residentExecutionGeneration = executionGeneration;
+        execution.currentResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
         const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
         const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
           'released-after-mls-mpm-resident-step-complete',
@@ -15141,6 +15302,17 @@ export function createSphPhaseScene(container, {
       || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
       || mlsMpmGpuParticleUpload
       || null;
+    const residentRenderSource = createResidentRenderSourceMetadata({
+      residentSteps,
+      finalStep,
+      residentExecutionGeneration: residentSteps?.residentExecutionGeneration
+        ?? finalStep?.residentExecutionGeneration
+        ?? mlsMpmResidentExecutionGeneration,
+      currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+      stepsSignature: residentSteps?.signature ?? mlsMpmResidentStepsSignature,
+      stepSignature: finalStep?.signature ?? mlsMpmResidentStepSignature,
+      source: 'resident-render-refresh'
+    });
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
       particleCount: nextSphParticleState?.particleCount ?? 0,
@@ -15170,6 +15342,33 @@ export function createSphPhaseScene(container, {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
+      applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
+      sphResidentRenderState.surfaceDrawSourceResidentExecutionGeneration =
+        sphResidentSurfaceDraw?.sourceResidentExecutionGeneration ?? null;
+      sphResidentRenderState.surfaceDrawSourceResidentCurrentExecutionGeneration =
+        sphResidentSurfaceDraw?.sourceResidentCurrentExecutionGeneration ?? null;
+      sphResidentRenderState.surfaceDrawSourceResidentExecutionGenerationMatchesCurrent =
+        sphResidentSurfaceDraw?.sourceResidentExecutionGenerationMatchesCurrent ?? null;
+      sphResidentRenderState.surfaceDrawSourceResidentNextStep =
+        sphResidentSurfaceDraw?.sourceResidentNextStep ?? null;
+      sphResidentRenderState.surfaceDrawSourceResidentNextTimeS =
+        sphResidentSurfaceDraw?.sourceResidentNextTimeS ?? null;
+      sphResidentRenderState.surfaceDrawSourceResidentRetainedPrevious =
+        Boolean(sphResidentSurfaceDraw?.sourceResidentRetainedPrevious);
+      sphResidentRenderState.surfaceDrawSourceResidentRetentionReason =
+        sphResidentSurfaceDraw?.sourceResidentRetentionReason ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentExecutionGeneration =
+        sphResidentSurfaceDrawRenderBridge?.sourceResidentExecutionGeneration ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentExecutionGenerationMatchesCurrent =
+        sphResidentSurfaceDrawRenderBridge?.sourceResidentExecutionGenerationMatchesCurrent ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentNextStep =
+        sphResidentSurfaceDrawRenderBridge?.sourceResidentNextStep ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentNextTimeS =
+        sphResidentSurfaceDrawRenderBridge?.sourceResidentNextTimeS ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentRetainedPrevious =
+        Boolean(sphResidentSurfaceDrawRenderBridge?.sourceResidentRetainedPrevious);
+      sphResidentRenderState.surfaceDrawRenderBridgeSourceResidentRetentionReason =
+        sphResidentSurfaceDrawRenderBridge?.sourceResidentRetentionReason ?? null;
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-refresh-unavailable', {
         stage: 'resident-render-refresh',
@@ -15456,6 +15655,7 @@ export function createSphPhaseScene(container, {
         readbackMode: requestedRenderRowsReadbackMode
       });
       renderRowsExecution = await extractRenderRowsForMode(requestedRenderRowsReadbackMode);
+      applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
       markSphResidentRenderProgress('resident-render-rows-complete', {
         stage: 'render-rows',
         particleCount: renderRowsExecution.particleCount,
@@ -15784,6 +15984,7 @@ export function createSphPhaseScene(container, {
             reason: 'empty-field-after-no-row-readback'
           });
           renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+          applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
           markSphResidentRenderProgress('resident-render-rows-retry-complete', {
             stage: 'render-rows',
             particleCount: renderRowsExecution.particleCount,
@@ -15882,6 +16083,7 @@ export function createSphPhaseScene(container, {
                 reason: 'empty-summary-after-no-row-readback'
               });
               renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+              applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
               markSphResidentRenderProgress('resident-render-rows-retry-complete', {
                 stage: 'render-rows',
                 particleCount: renderRowsExecution.particleCount,
@@ -16696,6 +16898,7 @@ export function createSphPhaseScene(container, {
           { renderFieldExecution }
         );
       }
+      applyResidentRenderSourceMetadata(renderFieldExecution, residentRenderSource);
       let retainingPreviousResidentSurfaceDraw = false;
       if (
         shouldUseNativeWebGpuSurfaceConsumerBridge
@@ -16732,6 +16935,59 @@ export function createSphPhaseScene(container, {
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
       ) {
+        if (retainingPreviousResidentSurfaceDraw) {
+          const surfaceRetentionReason = nextResidentSurfaceDraw.retentionReason
+            || 'previous surface draw retained during current resident render refresh';
+          nextResidentSurfaceDraw.residentRenderSourceStaleAfterPublish = true;
+          nextResidentSurfaceDraw.residentRenderSourceStaleReason = surfaceRetentionReason;
+          nextResidentSurfaceDraw.residentRenderSourceStaleAgainst = residentRenderSource;
+          nextResidentSurfaceDraw.sourceResidentRenderSourceStatus = 'resident-render-source-stale-or-unknown';
+          nextResidentSurfaceDraw.sourceResidentCurrentExecutionGeneration =
+            residentRenderSource.currentResidentExecutionGeneration;
+          nextResidentSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent = false;
+          nextResidentSurfaceDraw.sourceResidentRetainedPrevious = true;
+          nextResidentSurfaceDraw.sourceResidentRetentionReason = surfaceRetentionReason;
+          if (previousResidentRenderBridge) {
+            const bridgeRetentionReason = previousResidentRenderBridge.retentionReason
+              || 'previous render bridge retained during current resident render refresh';
+            previousResidentRenderBridge.residentRenderSourceStaleAfterPublish = true;
+            previousResidentRenderBridge.residentRenderSourceStaleReason = bridgeRetentionReason;
+            previousResidentRenderBridge.residentRenderSourceStaleAgainst = residentRenderSource;
+            previousResidentRenderBridge.sourceResidentRenderSourceStatus = 'resident-render-source-stale-or-unknown';
+            previousResidentRenderBridge.sourceResidentCurrentExecutionGeneration =
+              residentRenderSource.currentResidentExecutionGeneration;
+            previousResidentRenderBridge.sourceResidentExecutionGenerationMatchesCurrent = false;
+            previousResidentRenderBridge.sourceResidentRetainedPrevious = true;
+            previousResidentRenderBridge.sourceResidentRetentionReason = bridgeRetentionReason;
+            nextResidentSurfaceDraw.renderBridgeSourceResidentExecutionGeneration =
+              previousResidentRenderBridge.sourceResidentExecutionGeneration ?? null;
+            nextResidentSurfaceDraw.renderBridgeSourceResidentExecutionGenerationMatchesCurrent =
+              previousResidentRenderBridge.sourceResidentExecutionGenerationMatchesCurrent ?? null;
+            nextResidentSurfaceDraw.renderBridgeSourceResidentNextStep =
+              previousResidentRenderBridge.sourceResidentNextStep ?? null;
+            nextResidentSurfaceDraw.renderBridgeSourceResidentNextTimeS =
+              previousResidentRenderBridge.sourceResidentNextTimeS ?? null;
+            nextResidentSurfaceDraw.renderBridgeSourceResidentRetainedPrevious =
+              Boolean(previousResidentRenderBridge.sourceResidentRetainedPrevious);
+            nextResidentSurfaceDraw.renderBridgeSourceResidentRetentionReason =
+              previousResidentRenderBridge.sourceResidentRetentionReason ?? null;
+          }
+        } else {
+          applyResidentRenderSourceMetadata(nextResidentSurfaceDraw, residentRenderSource);
+          applyResidentRenderSourceMetadata(sphResidentSurfaceDrawRenderBridge, residentRenderSource);
+          nextResidentSurfaceDraw.renderBridgeSourceResidentExecutionGeneration =
+            sphResidentSurfaceDrawRenderBridge?.sourceResidentExecutionGeneration ?? null;
+          nextResidentSurfaceDraw.renderBridgeSourceResidentExecutionGenerationMatchesCurrent =
+            sphResidentSurfaceDrawRenderBridge?.sourceResidentExecutionGenerationMatchesCurrent ?? null;
+          nextResidentSurfaceDraw.renderBridgeSourceResidentNextStep =
+            sphResidentSurfaceDrawRenderBridge?.sourceResidentNextStep ?? null;
+          nextResidentSurfaceDraw.renderBridgeSourceResidentNextTimeS =
+            sphResidentSurfaceDrawRenderBridge?.sourceResidentNextTimeS ?? null;
+          nextResidentSurfaceDraw.renderBridgeSourceResidentRetainedPrevious =
+            Boolean(sphResidentSurfaceDrawRenderBridge?.sourceResidentRetainedPrevious);
+          nextResidentSurfaceDraw.renderBridgeSourceResidentRetentionReason =
+            sphResidentSurfaceDrawRenderBridge?.sourceResidentRetentionReason ?? null;
+        }
         sphResidentSurfaceDraw = nextResidentSurfaceDraw;
         scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
         if (!retainingPreviousResidentSurfaceDraw) {
@@ -16739,6 +16995,7 @@ export function createSphPhaseScene(container, {
         }
       } else {
         clearSphResidentSurfaceDrawArtifacts();
+        applyResidentRenderSourceMetadata(nextResidentSurfaceDraw, residentRenderSource);
         sphResidentSurfaceDraw = nextResidentSurfaceDraw;
         scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
       }

@@ -10892,3 +10892,30 @@ Explicit particle render modes and closure-PBR spheres, 2026-06-19 12:41 AKDT:
   - Particle radius range: about `0.10339145m` to `0.10339173m`.
   - Expected non-rendering probe issues in this tiny run:
     `missing-max-speed`, `no-positive-displacement`.
+
+Resident render-source freshness contract, 2026-06-19 14:00 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `git diff --check -- src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render source|visible GPU|surface buffer handoff|native"`
+  - Passed: `60/60`.
+  - New coverage verifies current resident render-source metadata and stale
+    retained surface metadata.
+- Browser probe:
+  `/tmp/ulg-native-render-source-probe.json`
+  - Passed with `status=good`.
+  - Browser console issues/warnings: `0/0`.
+  - Worker capability: ready, `12` workers.
+  - Native bridge: `native-webgpu-surface-consumer-rendered`.
+  - Surface draw source generation: current generation `2`, next step `8`,
+    next time `0.004s`, retained previous `false`.
+  - Analysis source evidence:
+    `residentRenderSourceCurrentSampleCount=3`,
+    `residentRenderSourceStaleSampleCount=0`,
+    `residentRenderSourceStepDelta=4`,
+    `residentRenderSourceTimeDeltaS=0.002`, and
+    `residentNoReadbackRenderSourceEvidenceAvailable=true`.

@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: native marching-cubes/extension surface
+buffers now publish a separate visible-GPU-consumer gate. A run can correctly
+report `surfaceDrawGpuBufferHandoffReady=true` for retained compact surface
+draw buffers while also reporting
+`surfaceDrawVisibleGpuConsumerReady=false` until an engine-owned WebGPU surface
+consumer is bound and browser pixel validated. Treat this as the guardrail for
+the weird-MC rendering class: retained buffers are direct-consumer inputs, not
+visible no-readback rendering evidence by themselves. The next todo remains
+the actual engine-owned WebGPU consumer/pixel-validation path, not fallback
+geometry or an overlay.
+
 Todo hygiene note, 2026-06-18 AKDT: completed planning artifacts
 `6-16-audit.md` and `critique.md` have moved to `plan/done/`. The older broad
 `perf-upgrade.md` has moved to `plan/moot/` because the active performance

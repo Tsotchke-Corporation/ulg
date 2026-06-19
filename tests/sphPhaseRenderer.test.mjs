@@ -43,6 +43,7 @@ import {
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
   resolveResidentSurfaceBufferHandoff,
+  resolveResidentSurfaceVisibleGpuConsumer,
   summarizeThreeWebGpuDeviceLimits,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
@@ -1836,6 +1837,112 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(renderFieldReady.renderFieldSurfaceBufferByteLength, 512);
   assert.equal(renderFieldReady.upperBoundVertexCount, 0);
   assert.equal(renderFieldReady.upperBoundTriangleCount, 0);
+});
+
+test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {
+  const handoff = resolveResidentSurfaceBufferHandoff({
+    surfaceDraw: {
+      readbackMode: 'no-full-readback',
+      surfaceDrawReadback: false,
+      surfaceDrawSummaryReadback: false,
+      fullSurfaceDrawReadback: false,
+      drawRowsBufferRetained: true,
+      drawRowsBufferByteLength: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      drawIndirectRowsBufferRetained: true,
+      drawIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
+      drawAggregateIndirectRowsBufferRetained: true,
+      drawAggregateIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
+      compactedVertexRowsBufferRetained: true,
+      compactedVertexRowsBufferByteLength: 18 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      sourceVertexRowCount: 18,
+      surfaceDrawGpuOnlyHandoff: true,
+      surfaceDrawGpuOnlyHandoffStatus: 'surface-draw-gpu-resident-draw-range-available',
+      surfaceDrawGpuOnlyUpperBoundVertexCount: 18,
+      surfaceDrawGpuOnlyUpperBoundTriangleCount: 6
+    }
+  });
+  const blockedRenderer = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'same-device-gpu-buffer-geometry-blocked-webgl-renderer',
+      reason: 'same-device GPUBuffer geometry requires Three WebGPU renderer',
+      rendererBackend: 'three-webgl',
+      visibleNoReadbackSupported: false
+    },
+    renderBridgeMode: 'extension-resident-surface-buffers-no-overlay',
+    renderBridgeStatus: 'extension-surface-buffers-retained-no-overlay'
+  });
+
+  assert.equal(blockedRenderer.ready, false);
+  assert.equal(
+    blockedRenderer.status,
+    'resident-surface-visible-gpu-consumer-blocked-renderer-capability'
+  );
+  assert.equal(blockedRenderer.inputReady, true);
+  assert.equal(blockedRenderer.inputKind, 'surface-draw-buffers');
+  assert.equal(blockedRenderer.runtimeConsumerReady, false);
+  assert.equal(blockedRenderer.pixelValidationStatus, 'not-run');
+
+  const pixelBlocked = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'same-device-gpu-buffer-geometry-supported',
+      reason: null,
+      rendererBackend: 'three-webgpu',
+      visibleNoReadbackSupported: true
+    },
+    renderBridgeMode: 'three-webgpu-surface-buffers',
+    renderBridgeStatus: 'three-webgpu-surface-buffers-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(pixelBlocked.ready, false);
+  assert.equal(
+    pixelBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(pixelBlocked.runtimeConsumerReady, true);
+  assert.equal(pixelBlocked.renderBridgeBound, true);
+
+  const validated = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'same-device-gpu-buffer-geometry-supported',
+      reason: null,
+      rendererBackend: 'three-webgpu',
+      visibleNoReadbackSupported: true
+    },
+    renderBridgeMode: 'three-webgpu-surface-buffers',
+    renderBridgeStatus: 'three-webgpu-surface-buffers-ready',
+    pixelValidationStatus: 'passed'
+  });
+  assert.equal(validated.ready, true);
+  assert.equal(validated.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(validated.pixelValidated, true);
+
+  const renderFieldBlocked = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff: resolveResidentSurfaceBufferHandoff({
+      readbackMode: 'no-full-readback',
+      surfaceDraw: {
+        surfaceDrawReadback: false,
+        surfaceDrawSummaryReadback: false,
+        fullSurfaceDrawReadback: false,
+        renderFieldRowsBufferRetained: true,
+        renderFieldRowsBufferByteLength: 4096,
+        renderFieldSurfaceBufferRetained: true,
+        renderFieldSurfaceBufferByteLength: 256
+      }
+    }),
+    rendererCapability: {
+      status: 'same-device-gpu-buffer-geometry-supported',
+      reason: null,
+      rendererBackend: 'three-webgpu',
+      visibleNoReadbackSupported: true
+    }
+  });
+  assert.equal(
+    renderFieldBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-surface-extraction-required'
+  );
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

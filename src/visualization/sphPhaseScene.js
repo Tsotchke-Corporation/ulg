@@ -840,6 +840,100 @@ export function resolveResidentSurfaceBufferHandoff({
   };
 }
 
+export function resolveResidentSurfaceVisibleGpuConsumer({
+  handoff = null,
+  rendererCapability = null,
+  renderBridgeStatus = null,
+  renderBridgeMode = null,
+  pixelValidationStatus = null
+} = {}) {
+  const inputReady = Boolean(handoff?.ready);
+  const inputKind = handoff?.handoffKind ?? null;
+  const rendererCapabilityStatus = rendererCapability?.status ?? null;
+  const rendererCapabilityReason = rendererCapability?.reason ?? null;
+  const visibleNoReadbackSupported = Boolean(rendererCapability?.visibleNoReadbackSupported);
+  const renderBridgeBound = Boolean(
+    renderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+    && renderBridgeStatus === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
+  );
+  const normalizedPixelValidationStatus = pixelValidationStatus || 'not-run';
+  const pixelValidated = normalizedPixelValidationStatus === 'passed';
+  const runtimeConsumerReady = Boolean(
+    inputReady
+    && inputKind === 'surface-draw-buffers'
+    && visibleNoReadbackSupported
+    && renderBridgeBound
+  );
+  let status = 'resident-surface-visible-gpu-consumer-blocked-input-not-ready';
+  let reason = handoff?.reason || 'resident GPU surface buffers are not ready for a visible direct consumer';
+  if (inputReady && inputKind === 'render-field-buffers') {
+    status = 'resident-surface-visible-gpu-consumer-blocked-surface-extraction-required';
+    reason = 'retained render-field buffers require native marching-cubes extraction before a visible direct GPU draw consumer can bind them';
+  } else if (inputReady && inputKind !== 'surface-draw-buffers') {
+    status = 'resident-surface-visible-gpu-consumer-blocked-unsupported-input-kind';
+    reason = 'visible direct GPU consumer requires retained surface draw buffers';
+  } else if (inputReady && !visibleNoReadbackSupported) {
+    status = 'resident-surface-visible-gpu-consumer-blocked-renderer-capability';
+    reason = rendererCapabilityReason || 'engine-owned renderer has no validated same-device GPUBuffer presentation path';
+  } else if (inputReady && visibleNoReadbackSupported && !renderBridgeBound) {
+    status = 'resident-surface-visible-gpu-consumer-blocked-render-bridge-not-bound';
+    reason = 'same-device renderer capability is present, but the engine-owned surface-buffer bridge is not bound';
+  } else if (runtimeConsumerReady && !pixelValidated) {
+    status = 'resident-surface-visible-gpu-consumer-blocked-pixel-validation';
+    reason = 'engine-owned GPU surface consumer must pass browser console and pixel validation before it can count as visible no-readback rendering';
+  } else if (runtimeConsumerReady && pixelValidated) {
+    status = 'resident-surface-visible-gpu-consumer-ready';
+    reason = null;
+  }
+  return {
+    schema: 'peercompute.ulg.sph-resident-surface-visible-gpu-consumer.v0',
+    status,
+    reason,
+    ready: status === 'resident-surface-visible-gpu-consumer-ready',
+    inputReady,
+    inputKind,
+    inputStatus: handoff?.status ?? null,
+    inputSchema: handoff?.directConsumerInputSchema ?? null,
+    runtimeConsumerReady,
+    renderBridgeMode,
+    renderBridgeStatus,
+    renderBridgeBound,
+    rendererCapabilityStatus,
+    rendererCapabilityReason,
+    rendererBackend: rendererCapability?.rendererBackend ?? null,
+    visibleNoReadbackSupported,
+    pixelValidationRequired: true,
+    pixelValidationStatus: normalizedPixelValidationStatus,
+    pixelValidated
+  };
+}
+
+function assignResidentSurfaceVisibleGpuConsumer(target, visibleGpuConsumer) {
+  if (!target || !visibleGpuConsumer) return target;
+  target.surfaceDrawVisibleGpuConsumerSchema = visibleGpuConsumer.schema;
+  target.surfaceDrawVisibleGpuConsumerReady = visibleGpuConsumer.ready;
+  target.surfaceDrawVisibleGpuConsumerStatus = visibleGpuConsumer.status;
+  target.surfaceDrawVisibleGpuConsumerReason = visibleGpuConsumer.reason;
+  target.surfaceDrawVisibleGpuConsumerInputReady = visibleGpuConsumer.inputReady;
+  target.surfaceDrawVisibleGpuConsumerInputKind = visibleGpuConsumer.inputKind;
+  target.surfaceDrawVisibleGpuConsumerInputStatus = visibleGpuConsumer.inputStatus;
+  target.surfaceDrawVisibleGpuConsumerInputSchema = visibleGpuConsumer.inputSchema;
+  target.surfaceDrawVisibleGpuConsumerRuntimeReady = visibleGpuConsumer.runtimeConsumerReady;
+  target.surfaceDrawVisibleGpuConsumerRenderBridgeMode = visibleGpuConsumer.renderBridgeMode;
+  target.surfaceDrawVisibleGpuConsumerRenderBridgeStatus = visibleGpuConsumer.renderBridgeStatus;
+  target.surfaceDrawVisibleGpuConsumerRenderBridgeBound = visibleGpuConsumer.renderBridgeBound;
+  target.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus = visibleGpuConsumer.rendererCapabilityStatus;
+  target.surfaceDrawVisibleGpuConsumerRendererCapabilityReason = visibleGpuConsumer.rendererCapabilityReason;
+  target.surfaceDrawVisibleGpuConsumerRendererBackend = visibleGpuConsumer.rendererBackend;
+  target.surfaceDrawVisibleGpuConsumerVisibleNoReadbackSupported =
+    visibleGpuConsumer.visibleNoReadbackSupported;
+  target.surfaceDrawVisibleGpuConsumerPixelValidationRequired =
+    visibleGpuConsumer.pixelValidationRequired;
+  target.surfaceDrawVisibleGpuConsumerPixelValidationStatus = visibleGpuConsumer.pixelValidationStatus;
+  target.surfaceDrawVisibleGpuConsumerPixelValidated = visibleGpuConsumer.pixelValidated;
+  return target;
+}
+
 export function createThreeWebGpuExternalInterleavedBufferAttribute({
   renderer = null,
   buffer = null,
@@ -12106,6 +12200,14 @@ export function createSphPhaseScene(container, {
         surfaceExtractionValidation: false,
         fullPhysicsValidation: false
       };
+      const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
+        handoff: gpuBufferHandoff,
+        rendererCapability,
+        renderBridgeMode: residentDraw.visibleRendererBridge,
+        renderBridgeStatus: residentDraw.renderBridgeStatus,
+        pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
+      });
+      assignResidentSurfaceVisibleGpuConsumer(residentDraw, visibleGpuConsumer);
       sphResidentSurfaceDraw = residentDraw;
       scene.userData.sphResidentSurfaceDraw = residentDraw;
       if (!renderBridgeReady) {
@@ -13463,6 +13565,30 @@ export function createSphPhaseScene(container, {
               gpuBufferHandoff.upperBoundTriangleCount;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange =
               gpuBufferHandoff.conservativeDrawRange;
+            const surfaceDrawRendererCapability = {
+              status: nextResidentSurfaceDraw.renderBridgeCapabilityStatus
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.status
+                ?? null,
+              reason: nextResidentSurfaceDraw.renderBridgeCapabilityReason
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.reason
+                ?? null,
+              rendererBackend: nextResidentSurfaceDraw.renderBridgeRendererBackend
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.rendererBackend
+                ?? scene.userData.sphRendererBackend
+                ?? null,
+              visibleNoReadbackSupported: Boolean(
+                nextResidentSurfaceDraw.renderBridgeVisibleNoReadbackSupported
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.visibleNoReadbackSupported
+              )
+            };
+            const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
+              handoff: gpuBufferHandoff,
+              rendererCapability: surfaceDrawRendererCapability,
+              renderBridgeMode: nextResidentSurfaceDraw.visibleRendererBridge,
+              renderBridgeStatus: nextResidentSurfaceDraw.renderBridgeStatus,
+              pixelValidationStatus: nextResidentSurfaceDraw.renderBridgePixelValidationStatus ?? 'not-run'
+            });
+            assignResidentSurfaceVisibleGpuConsumer(nextResidentSurfaceDraw, visibleGpuConsumer);
             if (!nativeMarchingCubesSurfaceDrawReady) {
               nextResidentSurfaceDraw.fullSurfaceDrawReadback = false;
               nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
@@ -13982,6 +14108,51 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
         surfaceDrawGpuBufferHandoffConservativeDrawRange: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffConservativeDrawRange
+        ),
+        surfaceDrawVisibleGpuConsumerSchema:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSchema ?? null,
+        surfaceDrawVisibleGpuConsumerReady: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+        ),
+        surfaceDrawVisibleGpuConsumerStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerStatus ?? null,
+        surfaceDrawVisibleGpuConsumerReason:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerReason ?? null,
+        surfaceDrawVisibleGpuConsumerInputReady: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady
+        ),
+        surfaceDrawVisibleGpuConsumerInputKind:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerInputKind ?? null,
+        surfaceDrawVisibleGpuConsumerInputStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
+        surfaceDrawVisibleGpuConsumerInputSchema:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerInputSchema ?? null,
+        surfaceDrawVisibleGpuConsumerRuntimeReady: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRuntimeReady
+        ),
+        surfaceDrawVisibleGpuConsumerRenderBridgeMode:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
+        surfaceDrawVisibleGpuConsumerRenderBridgeStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
+        surfaceDrawVisibleGpuConsumerRenderBridgeBound: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRenderBridgeBound
+        ),
+        surfaceDrawVisibleGpuConsumerRendererCapabilityStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
+        surfaceDrawVisibleGpuConsumerRendererCapabilityReason:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRendererCapabilityReason ?? null,
+        surfaceDrawVisibleGpuConsumerRendererBackend:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRendererBackend ?? null,
+        surfaceDrawVisibleGpuConsumerVisibleNoReadbackSupported: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerVisibleNoReadbackSupported
+        ),
+        surfaceDrawVisibleGpuConsumerPixelValidationRequired: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationRequired
+        ),
+        surfaceDrawVisibleGpuConsumerPixelValidationStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+        surfaceDrawVisibleGpuConsumerPixelValidated: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidated
         ),
         fullSurfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.fullSurfaceDrawReadback),
         surfaceDrawReadbackMode: sphResidentSurfaceDraw?.readbackMode ?? null,

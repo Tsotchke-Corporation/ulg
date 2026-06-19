@@ -10379,3 +10379,24 @@ Three WebGPU surface-buffer diagnostic flag, 2026-06-18 23:25 AKDT:
   - Page error: `Instance dropped in popErrorScope`.
   - Surface draw fell back to `resident-surface-draw-unavailable` before the
     external-buffer mesh bridge could bind retained MC rows.
+
+Visible GPU consumer validation gate, 2026-06-19 00:55 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `71/71`.
+  - New coverage proves resident surface input handoff can be ready while the
+    visible direct GPU consumer remains blocked on renderer capability or
+    pixel validation.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH WebGPU extension surface translation maps MC grid positions|SPH phase no-full render refresh can skip compact surface summary readback"`
+  - Passed: `2/2`.
+  - Browser coverage asserts retained native-MC surface draw buffers are
+    input-ready while
+    `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-renderer-capability`
+    under the current engine-owned WebGL fallback.

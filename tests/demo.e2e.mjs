@@ -5447,6 +5447,22 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       surfaceDrawGpuBufferHandoffNoFullReadback: renderState?.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
       surfaceDrawGpuBufferHandoffNoSummaryReadback:
         renderState?.surfaceDrawGpuBufferHandoffNoSummaryReadback ?? null,
+      surfaceDrawVisibleGpuConsumerReady: renderState?.surfaceDrawVisibleGpuConsumerReady ?? null,
+      surfaceDrawVisibleGpuConsumerStatus: renderState?.surfaceDrawVisibleGpuConsumerStatus ?? null,
+      surfaceDrawVisibleGpuConsumerReason: renderState?.surfaceDrawVisibleGpuConsumerReason ?? null,
+      surfaceDrawVisibleGpuConsumerInputReady: renderState?.surfaceDrawVisibleGpuConsumerInputReady ?? null,
+      surfaceDrawVisibleGpuConsumerInputKind: renderState?.surfaceDrawVisibleGpuConsumerInputKind ?? null,
+      surfaceDrawVisibleGpuConsumerInputStatus: renderState?.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
+      surfaceDrawVisibleGpuConsumerRuntimeReady:
+        renderState?.surfaceDrawVisibleGpuConsumerRuntimeReady ?? null,
+      surfaceDrawVisibleGpuConsumerRenderBridgeMode:
+        renderState?.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
+      surfaceDrawVisibleGpuConsumerRenderBridgeStatus:
+        renderState?.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
+      surfaceDrawVisibleGpuConsumerRendererCapabilityStatus:
+        renderState?.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
+      surfaceDrawVisibleGpuConsumerPixelValidationStatus:
+        renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
       surfaceDrawNativeMarchingCubesExtractionStatus:
         renderState?.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
       surfaceDrawNativeMarchingCubesExtractionReason:
@@ -5540,6 +5556,22 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason).toBe(null);
   expect(result.surfaceDrawGpuBufferHandoffNoFullReadback).toBe(true);
   expect(result.surfaceDrawGpuBufferHandoffNoSummaryReadback).toBe(true);
+  expect(result.surfaceDrawVisibleGpuConsumerReady).toBe(false);
+  expect(result.surfaceDrawVisibleGpuConsumerStatus)
+    .toBe('resident-surface-visible-gpu-consumer-blocked-renderer-capability');
+  expect(result.surfaceDrawVisibleGpuConsumerReason).toContain('same-device GPUBuffer geometry');
+  expect(result.surfaceDrawVisibleGpuConsumerInputReady).toBe(true);
+  expect(result.surfaceDrawVisibleGpuConsumerInputKind).toBe('surface-draw-buffers');
+  expect(result.surfaceDrawVisibleGpuConsumerInputStatus)
+    .toBe('resident-surface-buffer-direct-consumer-ready');
+  expect(result.surfaceDrawVisibleGpuConsumerRuntimeReady).toBe(false);
+  expect(result.surfaceDrawVisibleGpuConsumerRenderBridgeMode)
+    .toBe('extension-resident-surface-buffers-no-overlay');
+  expect(result.surfaceDrawVisibleGpuConsumerRenderBridgeStatus)
+    .toBe('extension-surface-buffers-retained-no-overlay');
+  expect(result.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus)
+    .toBe('same-device-gpu-buffer-geometry-blocked-webgl-renderer');
+  expect(result.surfaceDrawVisibleGpuConsumerPixelValidationStatus).toBe('not-run');
   expect(result.surfaceDrawNativeMarchingCubesExtractionStatus)
     .toBe('extension-surface-ready-needs-ulg-row-translation');
   expect(result.surfaceDrawNativeMarchingCubesExtractionReason).toBe(null);

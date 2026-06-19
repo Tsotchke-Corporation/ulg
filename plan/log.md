@@ -28200,3 +28200,44 @@ Remaining:
   error-scope/lifetime sequencing while resident compute uses the
   renderer-owned GPUDevice, then rerun the unsafe external-buffer diagnostic
   and only promote it after console-clean pixel validation.
+
+## 2026-06-19 00:55 AKDT - Visible GPU Consumer Validation Gate
+
+Status:
+
+- Split the resident surface-buffer contract into two explicit diagnostics:
+  input handoff readiness and visible no-readback GPU consumer readiness. Native
+  marching-cubes/extension surface buffers can now report
+  `surfaceDrawGpuBufferHandoffReady=true` while separately reporting
+  `surfaceDrawVisibleGpuConsumerReady=false` until the engine-owned WebGPU
+  surface consumer is actually bound and pixel-validated.
+- Added `peercompute.ulg.sph-resident-surface-visible-gpu-consumer.v0` status
+  fields to resident surface draw and resident render state. The gate blocks on
+  missing input buffers, render-field buffers that still require extraction,
+  renderer capability, unbound surface-buffer bridge, or missing pixel
+  validation.
+- The focused native-MC browser route now asserts the current honest state:
+  retained compact surface draw buffers are input-ready, but the visible
+  direct GPU consumer remains blocked on renderer capability under the
+  engine-owned WebGL fallback. This prevents weird native-MC geometry from
+  being treated as completed no-readback rendering evidence.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  reported `71/71`.
+- PASS: focused Playwright native/no-summary pair against
+  `https://127.0.0.1:5173` reported `2/2`:
+  `SPH phase no-full render refresh can skip compact surface summary readback`
+  and
+  `SPH WebGPU extension surface translation maps MC grid positions into ULG world meters`.
+
+Remaining:
+
+- Implement or fix the engine-owned WebGPU surface consumer itself. The new
+  gate keeps retained native-MC buffers available for that path, but does not
+  promote them to visible no-readback renderer status until console and pixel
+  validation pass.

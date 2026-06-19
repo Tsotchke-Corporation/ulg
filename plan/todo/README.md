@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: the native
+`native-webgpu-surface-consumer` contract now exists as the next renderer
+handoff target. It is intentionally fail-closed unless the engine owns the main
+canvas or provides a renderer-owned WebGPU texture view, uses the same
+`GPUDevice` as the retained resident buffers, has a render target ready, passes
+runtime validation, and then passes browser pixel validation. Separate overlay
+canvases are explicitly blocked. The latest MLS-MPM browser probe was
+console-clean and retained resident render-field buffers, but still classified
+`bad` because the runtime has no engine-owned native consumer yet:
+`native-webgpu-surface-consumer-blocked-engine-integration` and
+`resident-surface-visible-gpu-consumer-blocked-surface-extraction-required`.
+The next renderer slice is the actual engine-owned main-canvas/render-target
+binding plus native MC/direct-consumer draw pass; do not spend this slice on
+Three material polish, fallback overlays, or CPU geometry rebuilds.
+
 Current routing note, 2026-06-19 AKDT: unsafe Three WebGPU diagnostics now
 separate renderer-owned resident-device probing from presentation-only probing,
 and resident diagnostic meshes can force basic materials plus low-poly geometry.

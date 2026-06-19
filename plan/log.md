@@ -1,5 +1,48 @@
 # ULG Implementation Log
 
+## 2026-06-19 AKDT - Native WebGPU Surface Consumer Contract
+
+Status:
+
+- Added `native-webgpu-surface-consumer` as a first-class renderer bridge mode
+  for retained resident surface buffers. This is a direct engine integration
+  contract, not an overlay path.
+- The capability gate now requires an engine-owned main canvas or
+  renderer-owned WebGPU texture view, same-device resident GPU buffers, render
+  target readiness, runtime validation, and pixel validation before visible
+  no-readback readiness can be reported.
+- Threaded the native bridge through surface renderer capability planning,
+  render-field surface bridge construction, extension surface draw handoff,
+  visible GPU consumer readiness, mounted diagnostic routing, probe telemetry,
+  and the render-state summary.
+- Added focused renderer-policy tests proving separate overlay integration is
+  blocked, unvalidated engine-owned integration is blocked, validated native
+  integration can plan a no-readback bridge, and visible readiness still waits
+  for pixel validation.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- Browser diagnostic:
+  `/tmp/ulg-native-webgpu-surface-consumer-mlsmpm-probe.json` completed with
+  browser console `issueCount=0`, worker capability ready, five retained
+  resident render-field handoff samples, and
+  `surfaceDrawGpuBufferHandoffStatus=resident-render-field-buffer-direct-consumer-ready`.
+  It correctly classified `bad` because no engine-owned native surface
+  consumer is bound yet:
+  `native-webgpu-surface-consumer-blocked-engine-integration` and
+  `resident-surface-visible-gpu-consumer-blocked-surface-extraction-required`.
+
+Open:
+
+- Implement the actual engine-owned WebGPU main-canvas or renderer-owned
+  texture-view target and native MC/direct-consumer draw pass. Do not use a
+  separate overlay canvas and do not count retained buffers as visible rendering
+  until browser pixel validation passes.
+
 ## 2026-06-19 AKDT - Unsafe Three WebGPU Surface Diagnostics Still Blocked
 
 Status:

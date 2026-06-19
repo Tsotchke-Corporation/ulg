@@ -1,5 +1,39 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native WebGPU Surface Consumer Contract
+
+The native `native-webgpu-surface-consumer` bridge is now represented as an
+engine-owned WebGPU direct-consumer contract. It deliberately refuses separate
+overlay canvases and only reports visible no-readback support after same-device
+resident buffers, a real engine render target, runtime validation, and browser
+pixel validation are all present.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`, including
+  native capability gating, bridge planning, no-full-readback preservation, and
+  visible-consumer pixel-validation policy.
+- Browser diagnostics:
+  `/tmp/ulg-native-webgpu-surface-consumer-mlsmpm-probe.json` completed with
+  browser console `issueCount=0`, no page errors, worker capability ready, five
+  retained render-field buffer handoff samples, and
+  `surfaceDrawGpuBufferHandoffStatus=resident-render-field-buffer-direct-consumer-ready`.
+  It still classified `bad`, as expected, with
+  `native-webgpu-surface-consumer-blocked-engine-integration` and
+  `resident-surface-visible-gpu-consumer-blocked-surface-extraction-required`.
+
+Known residual risk:
+
+- This is the correct no-overlay contract boundary, not the finished renderer.
+  The next testable milestone is an engine-owned WebGPU render target/native
+  MC consumer that turns the retained buffers into visible pixels and passes
+  browser pixel validation on desktop and mobile.
+
 ## Current Focused Result - 2026-06-19 Unsafe Three WebGPU Surface Diagnostics
 
 The explicit unsafe Three WebGPU route now exposes two diagnostic shapes:

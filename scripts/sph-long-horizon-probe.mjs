@@ -25,6 +25,7 @@ const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'three-render-row-spheres',
   'webgpu-render-row-points',
   'webgpu-render-row-spheres',
+  'native-webgpu-surface-consumer',
   'three-points',
   'three-spheres',
   'webgpu-points',
@@ -1738,6 +1739,14 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeExternalGpuBufferIndirectRuntimeValidated ?? null,
             surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason:
               renderState.surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
+            surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumer:
+              renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumer ?? null,
+            surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
+              renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerEngineIntegration ?? null,
+            surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated:
+              renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
+            surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
+              renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
             surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
             surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
             surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
@@ -1833,6 +1842,14 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeExternalGpuBufferIndirectRuntimeValidated ?? null,
             renderBridgeExternalGpuBufferIndirectDisabledReason:
               surfaceDraw.renderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
+            renderBridgeNativeWebGpuSurfaceConsumer:
+              surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumer ?? null,
+            renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
+              surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration ?? null,
+            renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated:
+              surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
+            renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
+              surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
             renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)

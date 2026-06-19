@@ -390,6 +390,8 @@ const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE = 'three-webgpu-surface-buffer
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS = 'three-webgpu-surface-buffers-ready';
 const SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'resident-surface-buffers-no-overlay';
 const SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'extension-resident-surface-buffers-no-overlay';
+const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE = 'native-webgpu-surface-consumer';
+const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS = 'native-webgpu-surface-consumer-ready';
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED = false;
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON =
   'three-compact-vertices disabled: current WebGPU surface extraction emits tetrahedralized render-field cubes and compact readback can stall; using the engine-managed marching-cubes/render-field path until webgpu-marching-cubes direct-buffer integration is pixel validated';
@@ -518,7 +520,8 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   renderBridgeMode = null,
   readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   device = null,
-  surfaceBufferPresentationEnabled = SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED
+  surfaceBufferPresentationEnabled = SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED,
+  nativeWebGpuSurfaceConsumer = null
 } = {}) {
   const mode = String(renderBridgeMode || '').trim().toLowerCase() || null;
   const normalizedReadbackMode = String(readbackMode || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT).trim().toLowerCase();
@@ -560,6 +563,47 @@ export function resolveResidentExtensionSurfaceRendererCapability({
       ? 'runtime-validated'
       : 'unsafe-diagnostic-override')
     : 'unvalidated';
+  const nativeConsumer = nativeWebGpuSurfaceConsumer || renderer?.userData?.sphNativeWebGpuSurfaceConsumer || null;
+  const nativeSurfaceConsumerRequested = Boolean(
+    mode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+    || nativeConsumer?.requested
+  );
+  const nativeSurfaceConsumerEngineIntegration = String(
+    nativeConsumer?.engineIntegration || ''
+  ).trim().toLowerCase();
+  const nativeSurfaceConsumerOwnsMainCanvas = Boolean(
+    nativeSurfaceConsumerEngineIntegration === 'engine-owned-main-canvas'
+    || nativeSurfaceConsumerEngineIntegration === 'renderer-owned-webgpu-texture-view'
+  );
+  const nativeSurfaceConsumerDevice = nativeConsumer?.device || nativeConsumer?.gpuDevice || null;
+  const nativeSurfaceConsumerDeviceReady = Boolean(
+    nativeSurfaceConsumerDevice
+    || (nativeConsumer?.usesResidentDevice === true && device)
+  );
+  const nativeSurfaceConsumerSameDevice = Boolean(
+    nativeSurfaceConsumerDeviceReady
+    && (!device || !nativeSurfaceConsumerDevice || nativeSurfaceConsumerDevice === device)
+  );
+  const nativeSurfaceConsumerRenderTargetReady = Boolean(
+    nativeConsumer?.textureViewReady === true
+    || nativeConsumer?.renderTargetReady === true
+    || typeof nativeConsumer?.getCurrentTextureView === 'function'
+    || typeof nativeConsumer?.createRenderPass === 'function'
+  );
+  const nativeSurfaceConsumerRuntimeValidated = Boolean(nativeConsumer?.runtimeValidated);
+  const nativeSurfaceConsumerPixelValidationStatus = nativeConsumer?.pixelValidationStatus || null;
+  const nativeSurfaceConsumerAvailable = Boolean(
+    nativeSurfaceConsumerRequested
+    && nativeSurfaceConsumerOwnsMainCanvas
+    && nativeSurfaceConsumerDeviceReady
+    && nativeSurfaceConsumerSameDevice
+    && nativeSurfaceConsumerRenderTargetReady
+  );
+  const nativeSurfaceConsumerSupported = Boolean(
+    normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+    && nativeSurfaceConsumerAvailable
+    && nativeSurfaceConsumerRuntimeValidated
+  );
   const sameDeviceGpuBufferGeometryAvailable = Boolean(
     rendererBackend === 'three-webgpu'
     && backendBufferBindingAvailable
@@ -574,12 +618,33 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   );
   const requestedThreeCompactReadbackBridge = mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
   const noFullReadback = normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE;
-  const visibleNoReadbackSupported = Boolean(noFullReadback && sameDeviceGpuBufferGeometrySupported);
+  const visibleNoReadbackSupported = Boolean(
+    noFullReadback
+    && (sameDeviceGpuBufferGeometrySupported || nativeSurfaceConsumerSupported)
+  );
   let status = 'extension-surface-renderer-capability-blocked';
   let reason = 'extension surface renderer capability unavailable';
-  if (visibleNoReadbackSupported) {
+  if (nativeSurfaceConsumerSupported) {
+    status = 'native-webgpu-surface-consumer-supported';
+    reason = null;
+  } else if (visibleNoReadbackSupported) {
     status = 'same-device-gpu-buffer-geometry-supported';
     reason = null;
+  } else if (nativeSurfaceConsumerRequested && !nativeSurfaceConsumerOwnsMainCanvas) {
+    status = 'native-webgpu-surface-consumer-blocked-engine-integration';
+    reason = 'native WebGPU surface consumer must own the engine main canvas or a renderer-owned WebGPU texture view; separate overlay canvases are not accepted';
+  } else if (nativeSurfaceConsumerRequested && !nativeSurfaceConsumerDeviceReady) {
+    status = 'native-webgpu-surface-consumer-blocked-device';
+    reason = 'native WebGPU surface consumer needs a same-device GPUDevice or an explicit resident-device lease';
+  } else if (nativeSurfaceConsumerRequested && !nativeSurfaceConsumerSameDevice) {
+    status = 'native-webgpu-surface-consumer-blocked-cross-device';
+    reason = 'native WebGPU surface consumer device does not match the resident surface-buffer device';
+  } else if (nativeSurfaceConsumerRequested && !nativeSurfaceConsumerRenderTargetReady) {
+    status = 'native-webgpu-surface-consumer-blocked-render-target';
+    reason = 'native WebGPU surface consumer needs an engine-owned current GPUTextureView/render-pass target';
+  } else if (nativeSurfaceConsumerRequested && !nativeSurfaceConsumerRuntimeValidated) {
+    status = 'native-webgpu-surface-consumer-blocked-runtime-validation';
+    reason = 'native WebGPU surface consumer is wired as the next no-overlay path but must pass browser console and pixel validation before promotion';
   } else if (sameDeviceGpuBufferGeometryAvailable && !externalBufferPipelineRuntimeValidated) {
     status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-external-buffer-pipeline-unvalidated';
     reason = 'Three WebGPU external GPUBuffer surface presentation reaches retained buffers but currently fails renderer pipeline validation; retained buffers are exposed for native/direct renderer work but hidden from Three mesh presentation until that path is validated';
@@ -629,6 +694,16 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     externalBufferPipelineUnsafeDiagnosticOverride,
     externalBufferPipelineRuntimeValidated,
     externalBufferPipelineRuntimeValidationSource,
+    nativeSurfaceConsumerRequested,
+    nativeSurfaceConsumerEngineIntegration: nativeSurfaceConsumerEngineIntegration || null,
+    nativeSurfaceConsumerOwnsMainCanvas,
+    nativeSurfaceConsumerDeviceReady,
+    nativeSurfaceConsumerSameDevice,
+    nativeSurfaceConsumerRenderTargetReady,
+    nativeSurfaceConsumerRuntimeValidated,
+    nativeSurfaceConsumerPixelValidationStatus,
+    nativeSurfaceConsumerAvailable,
+    nativeSurfaceConsumerSupported,
     visibleNoReadbackSupported,
     requestedRenderBridgeMode: mode,
     requestedThreeCompactReadbackBridge,
@@ -648,34 +723,48 @@ export function resolveExtensionSurfaceRenderBridgePlan({
   const requestedThreeCompactBridge = requestedRenderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
   const requestedThreeWebGpuSurfaceBufferBridge =
     requestedRenderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
+  const requestedNativeWebGpuSurfaceConsumerBridge =
+    requestedRenderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+  const canUseNativeWebGpuSurfaceConsumerBridge = Boolean(
+    !requestedThreeCompactBridge
+    && rendererCapability?.nativeSurfaceConsumerSupported
+  );
   const canUseThreeWebGpuSurfaceBufferBridge = Boolean(
     !requestedThreeCompactBridge
+    && !canUseNativeWebGpuSurfaceConsumerBridge
     && rendererCapability?.visibleNoReadbackSupported
   );
   const compactBridgeBlocked = Boolean(requestedThreeCompactBridge && !compactVertexPresentationEnabled);
   const compactBridgeBlockedReason = compactBridgeBlocked
     ? SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON
     : null;
+  const canUseDirectGpuSurfaceConsumer = Boolean(
+    canUseNativeWebGpuSurfaceConsumerBridge
+    || canUseThreeWebGpuSurfaceBufferBridge
+  );
   const retainResidentSurfaceBufferHandoff = Boolean(
     (!requestedThreeCompactBridge || compactBridgeBlocked)
     && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
-    && !canUseThreeWebGpuSurfaceBufferBridge
+    && !canUseDirectGpuSurfaceConsumer
   );
   const fallbackThreeCompactBridge = Boolean(
     !requestedThreeCompactBridge
-    && !canUseThreeWebGpuSurfaceBufferBridge
+    && !canUseDirectGpuSurfaceConsumer
     && !retainResidentSurfaceBufferHandoff
   );
   const useThreeCompactBridge = Boolean((requestedThreeCompactBridge && !compactBridgeBlocked) || fallbackThreeCompactBridge);
   const useThreeWebGpuSurfaceBufferBridge = !useThreeCompactBridge && canUseThreeWebGpuSurfaceBufferBridge;
+  const useNativeWebGpuSurfaceConsumerBridge = !useThreeCompactBridge && canUseNativeWebGpuSurfaceConsumerBridge;
   const translationReadbackMode = useThreeCompactBridge
     ? RESIDENT_FULL_READBACK_MODE
     : requestedReadbackMode;
   const effectiveRenderBridgeMode = useThreeCompactBridge
     ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
-    : (useThreeWebGpuSurfaceBufferBridge
-      ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
-      : (retainResidentSurfaceBufferHandoff ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE : null));
+    : (useNativeWebGpuSurfaceConsumerBridge
+      ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      : (useThreeWebGpuSurfaceBufferBridge
+        ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+        : (retainResidentSurfaceBufferHandoff ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE : null)));
   const fallbackReason = fallbackThreeCompactBridge
     ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; using engine-owned Three compact geometry readback')
     : null;
@@ -684,23 +773,27 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     : null;
   return {
     schema: 'peercompute.ulg.sph-extension-surface-render-bridge-plan.v0',
-    status: useThreeWebGpuSurfaceBufferBridge
-      ? 'extension-surface-render-plan-three-webgpu-surface-buffers'
+    status: useNativeWebGpuSurfaceConsumerBridge
+      ? 'extension-surface-render-plan-native-webgpu-surface-consumer'
+      : (useThreeWebGpuSurfaceBufferBridge
+        ? 'extension-surface-render-plan-three-webgpu-surface-buffers'
       : (useThreeCompactBridge
         ? (fallbackThreeCompactBridge
           ? 'extension-surface-render-plan-three-compact-fallback'
           : 'extension-surface-render-plan-three-compact-requested')
         : (retainResidentSurfaceBufferHandoff
           ? 'extension-surface-render-plan-resident-surface-buffer-handoff'
-          : 'extension-surface-render-plan-unavailable')),
+          : 'extension-surface-render-plan-unavailable'))),
     requestedRenderBridgeMode,
     effectiveRenderBridgeMode,
     requestedReadbackMode,
     translationReadbackMode,
     requestedThreeCompactBridge,
     requestedThreeWebGpuSurfaceBufferBridge,
+    requestedNativeWebGpuSurfaceConsumerBridge,
     useThreeCompactBridge,
     useThreeWebGpuSurfaceBufferBridge,
+    useNativeWebGpuSurfaceConsumerBridge,
     retainResidentSurfaceBufferHandoff,
     fallbackThreeCompactBridge,
     compactBridgeBlocked,
@@ -709,6 +802,7 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     handoffReason,
     rendererCapabilityStatus: rendererCapability?.status ?? null,
     rendererCapabilityReason: rendererCapability?.reason ?? null,
+    nativeSurfaceConsumerSupported: Boolean(rendererCapability?.nativeSurfaceConsumerSupported),
     visibleNoReadbackSupported: Boolean(rendererCapability?.visibleNoReadbackSupported)
   };
 }
@@ -895,10 +989,15 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
   const rendererCapabilityStatus = rendererCapability?.status ?? null;
   const rendererCapabilityReason = rendererCapability?.reason ?? null;
   const visibleNoReadbackSupported = Boolean(rendererCapability?.visibleNoReadbackSupported);
-  const renderBridgeBound = Boolean(
+  const threeWebGpuBridgeBound = Boolean(
     renderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
     && renderBridgeStatus === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
   );
+  const nativeWebGpuBridgeBound = Boolean(
+    renderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+    && renderBridgeStatus === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS
+  );
+  const renderBridgeBound = Boolean(threeWebGpuBridgeBound || nativeWebGpuBridgeBound);
   const normalizedPixelValidationStatus = pixelValidationStatus || 'not-run';
   const pixelValidated = normalizedPixelValidationStatus === 'passed';
   const runtimeConsumerReady = Boolean(
@@ -1148,6 +1247,7 @@ function isThreeResidentSurfaceBridgeMode(value) {
     || mode === 'three-spheres'
     || mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
     || mode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+    || mode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
     || mode === 'three'
     || mode === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE
     || mode === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
@@ -7711,6 +7811,118 @@ export function createSphPhaseScene(container, {
     return bridge;
   }
 
+  function createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
+    surfaceDrawExecution,
+    rendererCapability = null
+  } = {}) {
+    const schema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
+    const rendererBridge = SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+    if (!rendererCapability?.nativeSurfaceConsumerSupported) {
+      return {
+        schema,
+        status: 'native-webgpu-surface-consumer-unavailable',
+        reason: rendererCapability?.reason || 'native WebGPU surface consumer is not runtime validated',
+        rendererBridge,
+        visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+        engineIntegration: 'native-webgpu-engine-main-canvas-no-overlay',
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const vertexRowsBuffer = surfaceDrawExecution?.compactedVertexRowsBuffer || null;
+    const vertexRowsBufferByteLength = Math.max(0, Math.round(Number(
+      surfaceDrawExecution?.compactedVertexRowsBufferByteLength
+    ) || 0));
+    const sourceVertexRowCount = Math.max(
+      0,
+      Math.floor(Number(
+        surfaceDrawExecution?.sourceVertexRowCount
+          ?? surfaceDrawExecution?.vertexCount
+          ?? (vertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT))
+      ) || 0)
+    );
+    if (!vertexRowsBuffer || sourceVertexRowCount < 3) {
+      return {
+        schema,
+        status: 'native-webgpu-surface-consumer-unavailable',
+        reason: 'retained compact vertex row GPUBuffer with at least one triangle is required',
+        rendererBridge,
+        visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+        engineIntegration: 'native-webgpu-engine-main-canvas-no-overlay',
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const drawRecords = resolveThreeWebGpuSurfaceBufferDrawRecords({
+      surfaceDrawExecution,
+      rowStride: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    });
+    const bridge = {
+      schema,
+      status: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS,
+      rendererBridge,
+      visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
+      reason: null,
+      overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+      engineIntegration: 'native-webgpu-engine-main-canvas-no-overlay',
+      externalGpuBufferGeometry: true,
+      externalGpuBufferByteLength: vertexRowsBufferByteLength,
+      externalGpuBufferVertexRowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+      externalGpuBufferIndirect: Boolean(surfaceDrawExecution?.drawAggregateIndirectRowsBufferRetained),
+      nativeWebGpuSurfaceConsumer: true,
+      nativeWebGpuSurfaceConsumerEngineIntegration:
+        rendererCapability.nativeSurfaceConsumerEngineIntegration ?? null,
+      nativeWebGpuSurfaceConsumerRuntimeValidated:
+        Boolean(rendererCapability.nativeSurfaceConsumerRuntimeValidated),
+      nativeWebGpuSurfaceConsumerPixelValidationStatus:
+        rendererCapability.nativeSurfaceConsumerPixelValidationStatus || 'not-run',
+      pixelValidationStatus:
+        rendererCapability.nativeSurfaceConsumerPixelValidationStatus || 'not-run',
+      drawRecordsStatus: drawRecords.status,
+      drawRecordsReason: drawRecords.reason,
+      aggregateVertexCount: drawRecords.aggregateVertexCount,
+      conservativeNoReadbackDrawRange: Boolean(drawRecords.conservativeNoReadbackDrawRange),
+      frameCount: 0,
+      lastRenderStatus: 'native-webgpu-surface-consumer-bound',
+      drawOrderingPolicy: 'native-webgpu-engine-consumer-draw-order',
+      drawOrderCount: drawRecords.records.length,
+      drawOrderSurfaceIndices: drawRecords.records.map((record) => record.surfaceIndex),
+      drawOrderIndirectOffsets: [],
+      depthPolicy: 'engine-owned-webgpu-depth-buffer',
+      depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+      depthAttachmentReady: true,
+      transparencyCompositeMode: 'engine-owned-webgpu-surface-composite',
+      oitAccumFormat: null,
+      oitRevealFormat: null,
+      oitTargetsReady: false,
+      lastOpaqueDrawCount: 0,
+      lastTransparentDrawCount: drawRecords.records.length,
+      opticalRenderSource: 'closure-derived-optical-gpu-table',
+      opticalRecordCount: opticalGpuTable?.recordCount ?? 0,
+      opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
+      opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
+      opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      materialRenderPolicy: resolveSceneSurfaceMaterialRenderPolicy(),
+      temporalSwapPolicy: null,
+      retainedPreviousOverlay: false,
+      vertexCount: drawRecords.aggregateVertexCount,
+      triangleCount: Math.floor(drawRecords.aggregateVertexCount / 3),
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+    sphResidentSurfaceDrawRenderBridge = bridge;
+    scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
+    return bridge;
+  }
+
   function createSphResidentSurfaceDrawRenderBridge({
     device,
     surfaceDrawExecution
@@ -11482,6 +11694,8 @@ export function createSphPhaseScene(container, {
     try {
       const useThreeCompactVertexBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
       const useThreeWebGpuSurfaceBufferBridge = renderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
+      const useNativeWebGpuSurfaceConsumerBridge =
+        renderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
       const useResidentSurfaceBufferHandoffBridge =
         renderBridgeMode === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
       markSphResidentRenderProgress('surface-draw-bridge-started', {
@@ -11495,9 +11709,11 @@ export function createSphPhaseScene(container, {
           ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
           : (useThreeWebGpuSurfaceBufferBridge
             ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
-            : (useResidentSurfaceBufferHandoffBridge
+            : (useNativeWebGpuSurfaceConsumerBridge
+              ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+              : (useResidentSurfaceBufferHandoffBridge
               ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
-              : 'resident-overlay'))
+              : 'resident-overlay')))
       });
       if (
         renderFieldExecution?.schema !== 'peercompute.ulg.sph-gpu-render-field.v0'
@@ -11523,9 +11739,11 @@ export function createSphPhaseScene(container, {
           ? 'three-webgpu-surface-buffers-unavailable'
           : (useThreeCompactVertexBridge
             ? 'three-compact-surface-geometry-unavailable'
-            : (useResidentSurfaceBufferHandoffBridge
+            : (useNativeWebGpuSurfaceConsumerBridge
+              ? 'native-webgpu-surface-consumer-empty'
+              : (useResidentSurfaceBufferHandoffBridge
               ? 'resident-surface-buffers-empty-no-overlay'
-              : 'empty-render-field-no-overlay'));
+              : 'empty-render-field-no-overlay')));
         unavailable.visibleRenderSource = 'resident-render-field-empty';
         unavailable.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
         unavailable.renderBridgeStatus = 'surface-draw-empty-render-field';
@@ -11538,17 +11756,22 @@ export function createSphPhaseScene(container, {
             ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
             : (useThreeCompactVertexBridge
               ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
-              : (useResidentSurfaceBufferHandoffBridge
+              : (useNativeWebGpuSurfaceConsumerBridge
+                ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+                : (useResidentSurfaceBufferHandoffBridge
                 ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
-                : 'resident-overlay')),
+                : 'resident-overlay'))),
           reason: unavailable.reason
         });
         return unavailable;
       }
       const rendererCapability = useThreeWebGpuSurfaceBufferBridge
+        || useNativeWebGpuSurfaceConsumerBridge
         ? resolveResidentExtensionSurfaceRendererCapability({
           renderer,
-          renderBridgeMode: SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
+          renderBridgeMode: useNativeWebGpuSurfaceConsumerBridge
+            ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+            : SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
           readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
           device
         })
@@ -11569,7 +11792,11 @@ export function createSphPhaseScene(container, {
         ? RESIDENT_FULL_READBACK_MODE
         : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
       const waitForSurfaceDrawMetadataQueueCompletion = Boolean(
-        (useThreeWebGpuSurfaceBufferBridge || useResidentSurfaceBufferHandoffBridge)
+        (
+          useThreeWebGpuSurfaceBufferBridge
+          || useNativeWebGpuSurfaceConsumerBridge
+          || useResidentSurfaceBufferHandoffBridge
+        )
         && !rendererOwnedDevice
       );
       markSphResidentRenderProgress('surface-draw-vertices-started', {
@@ -11774,9 +12001,11 @@ export function createSphPhaseScene(container, {
           ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
           : (useThreeWebGpuSurfaceBufferBridge
             ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
-            : (useResidentSurfaceBufferHandoffBridge
+            : (useNativeWebGpuSurfaceConsumerBridge
+              ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+              : (useResidentSurfaceBufferHandoffBridge
               ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
-              : 'resident-overlay')),
+              : 'resident-overlay'))),
         requestedRenderBridgeMode: renderBridgeMode,
         fallbackReason: fallbackThreeWebGpuSurfaceBuffersToCompact
           ? rendererCapability?.reason ?? 'same-device Three WebGPU surface buffers unavailable'
@@ -11793,19 +12022,29 @@ export function createSphPhaseScene(container, {
             materialProperties,
             rendererCapability
           })
+          : (useNativeWebGpuSurfaceConsumerBridge
+            ? createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
+              surfaceDrawExecution,
+              rendererCapability
+            })
           : createSphResidentSurfaceDrawRenderBridge({
           device,
           surfaceDrawExecution
-        }));
+        })));
       const renderBridgeReady = renderBridge?.status === 'webgpu-storage-indirect-overlay-ready'
         || renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
-        || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS;
+        || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
+        || renderBridge?.status === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS;
       const overlayPolicy = renderBridge?.overlayPolicy || resolveSceneResidentSurfaceDrawOverlayPolicy();
       const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
         surfaceDraw: surfaceDrawExecution
       });
       const retainedResidentSurfaceBufferHandoff = Boolean(
-        (useThreeWebGpuSurfaceBufferBridge || useResidentSurfaceBufferHandoffBridge)
+        (
+          useThreeWebGpuSurfaceBufferBridge
+          || useNativeWebGpuSurfaceConsumerBridge
+          || useResidentSurfaceBufferHandoffBridge
+        )
         && !renderBridgeReady
         && gpuBufferHandoff.ready
       );
@@ -11918,9 +12157,11 @@ export function createSphPhaseScene(container, {
           ? 'three-compact-vertex-readback'
           : (useThreeWebGpuSurfaceBufferBridge
             ? 'three-webgpu-retained-surface-draw-buffers'
-            : (useResidentSurfaceBufferHandoffBridge
+            : (useNativeWebGpuSurfaceConsumerBridge
+              ? 'native-webgpu-retained-surface-draw-buffers'
+              : (useResidentSurfaceBufferHandoffBridge
               ? 'retained-resident-surface-draw-buffers'
-              : 'retained-compact-draw-buffers')),
+              : 'retained-compact-draw-buffers'))),
         surfaceDrawInputBuffersReleased: true,
         visibleRendererBridge: renderBridgeReady
           ? renderBridge.rendererBridge
@@ -11958,7 +12199,9 @@ export function createSphPhaseScene(container, {
         renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
         renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeEngineIntegration: renderBridge?.externalGpuBufferGeometry
-          ? 'three-webgpu-renderer-owned-scene-object-external-buffer'
+          ? (renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+            ? 'native-webgpu-engine-main-canvas-no-overlay'
+            : 'three-webgpu-renderer-owned-scene-object-external-buffer')
           : (retainedResidentSurfaceBufferHandoff
             ? 'engine-resident-surface-buffer-handoff-no-overlay'
             : (renderBridgeReady
@@ -11973,6 +12216,13 @@ export function createSphPhaseScene(container, {
           Boolean(renderBridge?.externalGpuBufferIndirectRuntimeValidated),
         renderBridgeExternalGpuBufferIndirectDisabledReason:
           renderBridge?.externalGpuBufferIndirectDisabledReason ?? null,
+        renderBridgeNativeWebGpuSurfaceConsumer: Boolean(renderBridge?.nativeWebGpuSurfaceConsumer),
+        renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
+          renderBridge?.nativeWebGpuSurfaceConsumerEngineIntegration ?? null,
+        renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated:
+          Boolean(renderBridge?.nativeWebGpuSurfaceConsumerRuntimeValidated),
+        renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
+          renderBridge?.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
@@ -12205,9 +12455,15 @@ export function createSphPhaseScene(container, {
             materialProperties,
             rendererCapability
           })
-          : null);
+          : (renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge
+            ? createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
+              surfaceDrawExecution,
+              rendererCapability
+            })
+          : null));
       const renderBridgeReady = renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
-        || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS;
+        || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
+        || renderBridge?.status === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS;
       const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
         surfaceDraw: surfaceDrawExecution
       });
@@ -12303,6 +12559,8 @@ export function createSphPhaseScene(container, {
         renderBridgePlanTranslationReadbackMode: renderBridgePlan.translationReadbackMode,
         renderBridgePlanEffectiveMode: renderBridgePlan.effectiveRenderBridgeMode,
         renderBridgePlanRetainResidentSurfaceBufferHandoff: renderBridgePlan.retainResidentSurfaceBufferHandoff,
+        renderBridgePlanUseNativeWebGpuSurfaceConsumer:
+          Boolean(renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge),
         renderBridgePlanHandoffReason: renderBridgePlan.handoffReason,
         renderBridgePlanFallbackThreeCompact: renderBridgePlan.fallbackThreeCompactBridge,
         renderBridgePlanFallbackReason: renderBridgePlan.fallbackReason,
@@ -12332,10 +12590,19 @@ export function createSphPhaseScene(container, {
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
         renderBridgeEngineIntegration: renderBridgeReady
-          ? (renderBridge.rendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+          ? (renderBridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+            ? 'native-webgpu-engine-main-canvas-no-overlay'
+            : (renderBridge.rendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
             ? 'three-webgpu-renderer-owned-scene-object-external-buffer'
-            : 'three-renderer-owned-scene-object-no-overlay')
+            : 'three-renderer-owned-scene-object-no-overlay'))
           : 'three-renderer-owned-scene-state-no-overlay',
+        renderBridgeNativeWebGpuSurfaceConsumer: Boolean(renderBridge?.nativeWebGpuSurfaceConsumer),
+        renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
+          renderBridge?.nativeWebGpuSurfaceConsumerEngineIntegration ?? null,
+        renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated:
+          Boolean(renderBridge?.nativeWebGpuSurfaceConsumerRuntimeValidated),
+        renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
+          renderBridge?.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
         renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
         renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
@@ -12650,6 +12917,7 @@ export function createSphPhaseScene(container, {
         SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE,
         SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE,
         SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE,
+        SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE,
         'three-points',
         'three-spheres',
         'three',
@@ -12671,10 +12939,15 @@ export function createSphPhaseScene(container, {
       const normalizedSurfaceDrawDiagnosticMode = surfaceDrawDiagnosticPresentationMode.effectiveMode;
       const requestedThreeWebGpuSurfaceBufferBridge = normalizedSurfaceDrawDiagnosticMode
         === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
+      const requestedNativeWebGpuSurfaceConsumerBridge = normalizedSurfaceDrawDiagnosticMode
+        === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
       const requestedThreeWebGpuSurfaceBufferCapability = requestedThreeWebGpuSurfaceBufferBridge
+        || requestedNativeWebGpuSurfaceConsumerBridge
         ? resolveResidentExtensionSurfaceRendererCapability({
           renderer,
-          renderBridgeMode: SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
+          renderBridgeMode: requestedNativeWebGpuSurfaceConsumerBridge
+            ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+            : SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
           readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
           device: resolvedDeviceResult.device
         })
@@ -12683,7 +12956,7 @@ export function createSphPhaseScene(container, {
         scene.userData.sphResidentExtensionSurfaceRendererCapability = requestedThreeWebGpuSurfaceBufferCapability;
       }
       const threeWebGpuSurfaceBufferRetainResidentHandoff = Boolean(
-        requestedThreeWebGpuSurfaceBufferBridge
+        (requestedThreeWebGpuSurfaceBufferBridge || requestedNativeWebGpuSurfaceConsumerBridge)
         && !requestedThreeWebGpuSurfaceBufferCapability?.visibleNoReadbackSupported
       );
       const requestedSurfaceDrawDiagnosticMode = normalizedSurfaceDrawDiagnosticMode;
@@ -12714,6 +12987,9 @@ export function createSphPhaseScene(container, {
         requestedSurfaceDrawDiagnosticMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
       const shouldUseThreeWebGpuSurfaceBufferBridge =
         requestedSurfaceDrawDiagnosticMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+        && !threeWebGpuSurfaceBufferRetainResidentHandoff;
+      const shouldUseNativeWebGpuSurfaceConsumerBridge =
+        requestedSurfaceDrawDiagnosticMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
         && !threeWebGpuSurfaceBufferRetainResidentHandoff;
       const shouldUseThreeWebGpuSurfaceBufferHandoffBridge = Boolean(
         threeWebGpuSurfaceBufferRetainResidentHandoff
@@ -13622,7 +13898,11 @@ export function createSphPhaseScene(container, {
                     positionClampMaxM: [...dims],
                     readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
                     rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-                    renderBridgeMode: SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE,
+                    renderBridgeMode: shouldUseNativeWebGpuSurfaceConsumerBridge
+                      ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+                      : (shouldUseThreeWebGpuSurfaceBufferBridge
+                        ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+                        : SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE),
                     materialProperties,
                     waitForQueueCompletion: true
                   });
@@ -13753,7 +14033,19 @@ export function createSphPhaseScene(container, {
               visibleNoReadbackSupported: Boolean(
                 nextResidentSurfaceDraw.renderBridgeVisibleNoReadbackSupported
                 ?? requestedThreeWebGpuSurfaceBufferCapability?.visibleNoReadbackSupported
-              )
+              ),
+              nativeSurfaceConsumerSupported: Boolean(
+                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumer
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerSupported
+              ),
+              nativeSurfaceConsumerRuntimeValidated: Boolean(
+                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerRuntimeValidated
+              ),
+              nativeSurfaceConsumerPixelValidationStatus:
+                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
+                ?? null
             };
             const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
               handoff: gpuBufferHandoff,
@@ -13852,6 +14144,18 @@ export function createSphPhaseScene(container, {
               diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
               diagnosticSurfaceTableMaxResolution
             });
+            const surfaceDrawBridgeMode = shouldUseThreeCompactSurfaceDrawBridge
+              ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+              : (shouldUseThreeWebGpuSurfaceBufferBridge
+                ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+                : (shouldUseNativeWebGpuSurfaceConsumerBridge
+                  ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+                  : (
+                    shouldUseExplicitResidentSurfaceBufferHandoffBridge
+                    || shouldAutoRetainSurfaceBufferHandoff
+                  )
+                    ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
+                    : null));
             nextResidentSurfaceDraw = await buildSphResidentSurfaceDrawBridge({
               device: resolvedDeviceResult.device,
               renderFieldExecution,
@@ -13859,16 +14163,7 @@ export function createSphPhaseScene(container, {
                 requestedSurfaceDrawDiagnosticMode === 'metadata'
                 && !surfaceOverlayPolicy.enabled
               ),
-              renderBridgeMode: shouldUseThreeCompactSurfaceDrawBridge
-                ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
-                : (shouldUseThreeWebGpuSurfaceBufferBridge
-                  ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
-                  : (
-                    shouldUseExplicitResidentSurfaceBufferHandoffBridge
-                    || shouldAutoRetainSurfaceBufferHandoff
-                  )
-                    ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
-                    : null),
+              renderBridgeMode: surfaceDrawBridgeMode,
               materialProperties,
               rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice)
             });
@@ -13901,15 +14196,19 @@ export function createSphPhaseScene(container, {
               nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
               || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+              || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
             ) {
+              const suppressionReason = nextResidentSurfaceDraw.visibleRendererBridge === 'three-compact-surface-geometry'
+                ? 'resident-surface-draw-three-compact-active'
+                : (nextResidentSurfaceDraw.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+                  ? 'resident-surface-draw-three-webgpu-buffers-active'
+                  : (nextResidentSurfaceDraw.visibleRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+                    ? 'resident-surface-draw-native-webgpu-consumer-active'
+                    : 'resident-surface-draw-overlay-active'));
               suppressThreeSurfaceMeshesForResidentOverlay(
-                nextResidentSurfaceDraw.visibleRendererBridge === 'three-compact-surface-geometry'
-                  ? 'resident-surface-draw-three-compact-active'
-                  : (nextResidentSurfaceDraw.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
-                    ? 'resident-surface-draw-three-webgpu-buffers-active'
-                    : 'resident-surface-draw-overlay-active')
+                suppressionReason
               );
             }
           }
@@ -13942,6 +14241,7 @@ export function createSphPhaseScene(container, {
         nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+        || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-points'
@@ -14372,6 +14672,14 @@ export function createSphPhaseScene(container, {
           Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectRuntimeValidated),
         surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason:
           sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
+        surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumer:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumer),
+        surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
+          sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration ?? null,
+        surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated),
+        surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
+          sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
         surfaceDrawRenderBridgeReused: Boolean(
           sphResidentSurfaceDraw?.renderBridgeReused
           || sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused

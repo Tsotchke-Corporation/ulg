@@ -451,6 +451,59 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(crossDevice.status, 'same-device-gpu-buffer-geometry-blocked-cross-device');
   assert.equal(crossDevice.visibleNoReadbackSupported, false);
   assert.equal(crossDevice.sameDeviceAsResident, false);
+
+  const nativeDevice = { label: 'native-main-canvas-device' };
+  const nativeOverlay = resolveResidentExtensionSurfaceRendererCapability({
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    readbackMode: 'no-full-readback',
+    device: nativeDevice,
+    nativeWebGpuSurfaceConsumer: {
+      requested: true,
+      engineIntegration: 'separate-overlay-canvas',
+      usesResidentDevice: true,
+      textureViewReady: true,
+      runtimeValidated: true
+    }
+  });
+  assert.equal(nativeOverlay.status, 'native-webgpu-surface-consumer-blocked-engine-integration');
+  assert.equal(nativeOverlay.nativeSurfaceConsumerOwnsMainCanvas, false);
+  assert.equal(nativeOverlay.visibleNoReadbackSupported, false);
+
+  const nativeUnvalidated = resolveResidentExtensionSurfaceRendererCapability({
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    readbackMode: 'no-full-readback',
+    device: nativeDevice,
+    nativeWebGpuSurfaceConsumer: {
+      requested: true,
+      engineIntegration: 'engine-owned-main-canvas',
+      usesResidentDevice: true,
+      textureViewReady: true,
+      runtimeValidated: false
+    }
+  });
+  assert.equal(nativeUnvalidated.status, 'native-webgpu-surface-consumer-blocked-runtime-validation');
+  assert.equal(nativeUnvalidated.nativeSurfaceConsumerAvailable, true);
+  assert.equal(nativeUnvalidated.nativeSurfaceConsumerSupported, false);
+  assert.equal(nativeUnvalidated.visibleNoReadbackSupported, false);
+
+  const nativeSupported = resolveResidentExtensionSurfaceRendererCapability({
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    readbackMode: 'no-full-readback',
+    device: nativeDevice,
+    nativeWebGpuSurfaceConsumer: {
+      requested: true,
+      engineIntegration: 'engine-owned-main-canvas',
+      usesResidentDevice: true,
+      textureViewReady: true,
+      runtimeValidated: true,
+      pixelValidationStatus: 'not-run'
+    }
+  });
+  assert.equal(nativeSupported.status, 'native-webgpu-surface-consumer-supported');
+  assert.equal(nativeSupported.nativeSurfaceConsumerOwnsMainCanvas, true);
+  assert.equal(nativeSupported.nativeSurfaceConsumerAvailable, true);
+  assert.equal(nativeSupported.nativeSurfaceConsumerSupported, true);
+  assert.equal(nativeSupported.visibleNoReadbackSupported, true);
 });
 
 test('SPH surface draw presentation blocks compact tetrahedral geometry by default', () => {
@@ -529,6 +582,31 @@ test('SPH extension surface bridge planner keeps no-full resident buffers by def
   assert.equal(requestedSurfaceBufferHandoffPlan.translationReadbackMode, 'no-full-readback');
   assert.equal(requestedSurfaceBufferHandoffPlan.effectiveRenderBridgeMode, 'resident-surface-buffers-no-overlay');
   assert.match(requestedSurfaceBufferHandoffPlan.handoffReason, /pipeline validation/);
+
+  const nativeDevice = { label: 'native-main-canvas-device' };
+  const nativeCapability = resolveResidentExtensionSurfaceRendererCapability({
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    readbackMode: 'no-full-readback',
+    device: nativeDevice,
+    nativeWebGpuSurfaceConsumer: {
+      requested: true,
+      engineIntegration: 'engine-owned-main-canvas',
+      usesResidentDevice: true,
+      textureViewReady: true,
+      runtimeValidated: true
+    }
+  });
+  const nativePlan = resolveExtensionSurfaceRenderBridgePlan({
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    rendererCapability: nativeCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(nativePlan.status, 'extension-surface-render-plan-native-webgpu-surface-consumer');
+  assert.equal(nativePlan.useNativeWebGpuSurfaceConsumerBridge, true);
+  assert.equal(nativePlan.useThreeWebGpuSurfaceBufferBridge, false);
+  assert.equal(nativePlan.effectiveRenderBridgeMode, 'native-webgpu-surface-consumer');
+  assert.equal(nativePlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(nativePlan.nativeSurfaceConsumerSupported, true);
 
   const webgpuOptInCapability = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
@@ -1993,6 +2071,27 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(pixelBlocked.runtimeConsumerReady, true);
   assert.equal(pixelBlocked.renderBridgeBound, true);
 
+  const nativePixelBlocked = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativePixelBlocked.ready, false);
+  assert.equal(
+    nativePixelBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(nativePixelBlocked.runtimeConsumerReady, true);
+  assert.equal(nativePixelBlocked.renderBridgeBound, true);
+
   const validated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {
@@ -2008,6 +2107,23 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(validated.ready, true);
   assert.equal(validated.status, 'resident-surface-visible-gpu-consumer-ready');
   assert.equal(validated.pixelValidated, true);
+
+  const nativeValidated = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'passed'
+  });
+  assert.equal(nativeValidated.ready, true);
+  assert.equal(nativeValidated.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativeValidated.pixelValidated, true);
 
   const renderFieldBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff: resolveResidentSurfaceBufferHandoff({

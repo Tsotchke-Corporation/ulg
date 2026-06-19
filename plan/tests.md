@@ -1,5 +1,50 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native WebGPU Surface Validation And Pd Picker
+
+The native WebGPU surface consumer now validates as an engine-owned
+same-device main-canvas path in the harness, even when Chromium headless cannot
+map or screenshot the native WebGPU canvas. Palladium is also restored in the
+material picker by using the condensed-closure availability filter instead of
+the old simple-metal valence filter.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check src/runtime/material/elementClosures.js`, and
+  `node --check src/visualization/sphMaterialOptions.js` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphMaterialOptions.test.mjs tests/periodicTable.test.mjs`
+  passed `9/9`, including the Pd picker assertion.
+- Renderer contracts:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "viewport|native|visible GPU|surface draw|mobile|PBR|WebGPU"`
+  passed `59/59`, including the native visible-consumer fallback for the
+  Chromium `mapAsync` external-instance failure.
+- Browser diagnostics:
+  `/tmp/ulg-native-surface-probe.json` completed with browser console issues
+  `0`, native visible consumer `ready`, bridge
+  `native-webgpu-surface-consumer-rendered`, one opaque draw, primary bounds in
+  frustum, and `browserCanvasCaptureUnsupportedByNativeWebGpu=true`.
+- Mobile-shaped browser diagnostics:
+  `/tmp/ulg-native-surface-mobile-probe.json` completed with browser console
+  issues `0`, native visible consumer `ready`, bridge
+  `native-webgpu-surface-consumer-rendered`, primary bounds in frustum, and
+  consistent native surface sizing: CSS about `397x860`, backing `794x1720`,
+  bridge DPR `2`, resize DPR `2`.
+
+Known residual risk:
+
+- Local Chromium headless still returns transparent black for WebGPU canvas
+  captures and rejects validation buffer mapping with
+  `A valid external Instance reference no longer exists`. The harness now
+  records that as an unsupported readback/capture channel after native consumer
+  acceptance, but real-device mobile rendering still needs live verification.
+- The one-step no-full-readback probes still report `missing-max-speed` and
+  `no-positive-displacement`; those are physics-motion evidence limits of this
+  short render validation run, not console or renderer integration failures.
+
 ## Current Focused Result - 2026-06-19 Particle Render Modes Use Live Physics Rows
 
 Explicit Three particle render modes now use current resident physics render

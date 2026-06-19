@@ -269,10 +269,10 @@ const elementClosureCache = new Map();
 
 /**
  * Build a demo-ready material closure (solid + liquid phases) for element Z, with EVERY value
- * derived from the underlying simulation (jellium + atomic DFT) plus universal physical rules
- * (Lindemann melting, Poisson shear, Richards fusion entropy) — no per-element reference constants.
- * Returns null for elements outside the free-electron metal model (noble gases, non-metals).
- * Cached per Z (the derivation runs an atomic-DFT solve for the core radius).
+ * derived from the underlying simulation (jellium or radial-density packing + atomic DFT) plus
+ * universal physical rules (Lindemann melting, Poisson shear, Richards fusion entropy) — no
+ * per-element reference constants. Returns null for noble gases, which have no condensed closure
+ * in this first pass. Cached per Z (the derivation runs an atomic-DFT solve for the core radius).
  */
 export function elementMaterialClosure(atomicNumberZ, options = {}) {
   const allowReducedEstimates = options.allowReducedEstimates === true;
@@ -371,6 +371,16 @@ export function metallicElementSymbols() {
   for (let Z = 1; Z <= 118; Z += 1) {
     const v = valenceElectronCount(Z);
     if (v >= 1 && v < 8 && ![2, 10, 18, 36, 54, 86, 118].includes(Z)) out.push({ Z, symbol: symbolForZ(Z) });
+  }
+  return out;
+}
+
+/** Symbols with a demo material closure. This mirrors elementMaterialClosure's cheap availability gate. */
+export function condensedElementSymbols() {
+  const out = [];
+  for (let Z = 1; Z <= 118; Z += 1) {
+    if (NOBLE_GAS_Z.has(Z)) continue;
+    out.push({ Z, symbol: symbolForZ(Z) });
   }
   return out;
 }

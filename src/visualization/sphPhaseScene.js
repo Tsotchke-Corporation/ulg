@@ -762,6 +762,7 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   );
   const nativeSurfaceConsumerRuntimeValidated = Boolean(nativeConsumer?.runtimeValidated);
   const nativeSurfaceConsumerPixelValidationStatus = nativeConsumer?.pixelValidationStatus || null;
+  const nativeSurfaceConsumerPixelValidationReason = nativeConsumer?.pixelValidationReason || null;
   const nativeSurfaceConsumerAvailable = Boolean(
     nativeSurfaceConsumerRequested
     && nativeSurfaceConsumerOwnsMainCanvas
@@ -876,6 +877,7 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     nativeSurfaceConsumerRenderTargetReady,
     nativeSurfaceConsumerRuntimeValidated,
     nativeSurfaceConsumerPixelValidationStatus,
+    nativeSurfaceConsumerPixelValidationReason,
     nativeSurfaceConsumerAvailable,
     nativeSurfaceConsumerSupported,
     visibleNoReadbackSupported,
@@ -1173,6 +1175,8 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
   );
   const renderBridgeBound = Boolean(threeWebGpuBridgeBound || nativeWebGpuBridgeBound);
   const normalizedPixelValidationStatus = pixelValidationStatus || 'not-run';
+  const pixelValidationReason =
+    rendererCapability?.nativeSurfaceConsumerPixelValidationReason ?? null;
   const readbackSmokeValidationStatus =
     rendererCapability?.nativeSurfaceConsumerReadbackSmokeValidationStatus ?? null;
   const readbackSmokeValidationReason =
@@ -1184,7 +1188,7 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
   const deviceMapSmokeStatus =
     rendererCapability?.nativeSurfaceConsumerDeviceMapSmokeStatus ?? null;
   const textureReadbackUnavailable = /external Instance reference no longer exists|texture readback unavailable/i.test(
-    `${readbackSmokeValidationReason || ''} ${offscreenValidationReason || ''}`
+    `${pixelValidationReason || ''} ${readbackSmokeValidationReason || ''} ${offscreenValidationReason || ''}`
   );
   const nativeReadbackFallbackValidated = Boolean(
     nativeWebGpuBridgeBound
@@ -1246,6 +1250,7 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     visibleNoReadbackSupported,
     pixelValidationRequired: !nativeReadbackFallbackValidated,
     pixelValidationStatus: normalizedPixelValidationStatus,
+    pixelValidationReason,
     pixelValidated,
     consumerValidated,
     nativeReadbackFallbackValidated,
@@ -3724,7 +3729,9 @@ function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
   bridge.lastCanvasHeight = bridge.canvas?.height ?? null;
   bridge.lastCanvasClientWidth = finiteNumberOrNull(bridge.canvas?.clientWidth);
   bridge.lastCanvasClientHeight = finiteNumberOrNull(bridge.canvas?.clientHeight);
-  bridge.lastDevicePixelRatio = finiteNumberOrNull(globalThis.devicePixelRatio);
+  const bridgeWindow = bridge.canvas?.ownerDocument?.defaultView || globalThis;
+  bridge.lastDevicePixelRatio = bridge.lastCanvasResizePixelRatio
+    ?? finiteNumberOrNull(resolveSphScenePixelRatio(bridgeWindow.devicePixelRatio ?? globalThis.devicePixelRatio));
   bridge.lastDrawOrderCount = Array.isArray(drawOrder) ? drawOrder.length : 0;
   bridge.lastOpaqueDrawCount = Array.isArray(opaqueDraws) ? opaqueDraws.length : 0;
   bridge.lastTransparentDrawCount = Array.isArray(transparentDraws) ? transparentDraws.length : 0;
@@ -7620,10 +7627,11 @@ export function createSphPhaseScene(container, {
             ?? null,
           visibleNoReadbackSupported: true,
           nativeSurfaceConsumerSupported: true,
-          nativeSurfaceConsumerRuntimeValidated: true,
-          nativeSurfaceConsumerPixelValidationStatus: normalizedStatus,
-          nativeSurfaceConsumerReadbackSmokeValidationStatus:
-            bridge.readbackSmokeValidationStatus ?? null,
+	          nativeSurfaceConsumerRuntimeValidated: true,
+	          nativeSurfaceConsumerPixelValidationStatus: normalizedStatus,
+	          nativeSurfaceConsumerPixelValidationReason: reason,
+	          nativeSurfaceConsumerReadbackSmokeValidationStatus:
+	            bridge.readbackSmokeValidationStatus ?? null,
           nativeSurfaceConsumerReadbackSmokeValidationReason:
             bridge.readbackSmokeValidationReason ?? null,
           nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
@@ -7861,11 +7869,12 @@ export function createSphPhaseScene(container, {
         rendererBackend: sphResidentSurfaceDraw.renderBridgeRendererBackend
           ?? scene.userData.sphRendererBackend
           ?? null,
-        visibleNoReadbackSupported: true,
-        nativeSurfaceConsumerSupported: true,
-        nativeSurfaceConsumerRuntimeValidated: true,
-        nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
-        nativeSurfaceConsumerReadbackSmokeValidationStatus: bridge.readbackSmokeValidationStatus ?? null,
+	        visibleNoReadbackSupported: true,
+	        nativeSurfaceConsumerSupported: true,
+	        nativeSurfaceConsumerRuntimeValidated: true,
+	        nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
+	        nativeSurfaceConsumerPixelValidationReason: bridge.pixelValidationReason ?? null,
+	        nativeSurfaceConsumerReadbackSmokeValidationStatus: bridge.readbackSmokeValidationStatus ?? null,
         nativeSurfaceConsumerReadbackSmokeValidationReason: bridge.readbackSmokeValidationReason ?? null,
         nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
         nativeSurfaceConsumerOffscreenValidationReason: bridge.offscreenValidationReason ?? null,
@@ -10523,19 +10532,20 @@ export function createSphPhaseScene(container, {
         }
         transparentPass.end();
       }
-		      const completeNativePixelValidation = (
-	        nativeSurfaceClearOnly
-	        || bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	      )
-	        ? null
-	        : beginSphNativeWebGpuSurfaceConsumerPixelValidation(
-	          bridge,
-	          encoder,
-	          {
-	            drawCount: submittedDrawCount,
-	            sourceTexture: canvasTexture
-	          }
-	        );
+		      const nativeSurfacePixelValidationDrawCount = nativeSurfaceClearOnly
+		        ? 1
+		        : submittedDrawCount;
+		      const completeNativePixelValidation =
+		        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+		          ? beginSphNativeWebGpuSurfaceConsumerPixelValidation(
+		            bridge,
+		            encoder,
+		            {
+		              drawCount: nativeSurfacePixelValidationDrawCount,
+		              sourceTexture: canvasTexture
+		            }
+		          )
+		          : null;
 	      bridge.device.queue.submit([encoder.finish()]);
 	      trackResidentSurfaceDrawSubmitFence(bridge, {
 	        reason: 'resident-surface-draw-overlay-submit',
@@ -10594,10 +10604,11 @@ export function createSphPhaseScene(container, {
                 ?? null,
               visibleNoReadbackSupported: true,
               nativeSurfaceConsumerSupported: true,
-              nativeSurfaceConsumerRuntimeValidated: true,
-              nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
-              nativeSurfaceConsumerReadbackSmokeValidationStatus:
-                bridge.readbackSmokeValidationStatus ?? null,
+	              nativeSurfaceConsumerRuntimeValidated: true,
+	              nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
+	              nativeSurfaceConsumerPixelValidationReason: bridge.pixelValidationReason ?? null,
+	              nativeSurfaceConsumerReadbackSmokeValidationStatus:
+	                bridge.readbackSmokeValidationStatus ?? null,
               nativeSurfaceConsumerReadbackSmokeValidationReason:
                 bridge.readbackSmokeValidationReason ?? null,
               nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
@@ -16486,11 +16497,15 @@ export function createSphPhaseScene(container, {
                 nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated
                 ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerRuntimeValidated
               ),
-              nativeSurfaceConsumerPixelValidationStatus:
-                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
-                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
-                ?? null
-            };
+	              nativeSurfaceConsumerPixelValidationStatus:
+	                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
+	                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
+	                ?? null,
+	              nativeSurfaceConsumerPixelValidationReason:
+	                nextResidentSurfaceDraw.renderBridgePixelValidationReason
+	                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationReason
+	                ?? null
+	            };
             const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
               handoff: gpuBufferHandoff,
               rendererCapability: surfaceDrawRendererCapability,

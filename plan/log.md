@@ -1,5 +1,60 @@
 # ULG Implementation Log
 
+## 2026-06-19 13:12 AKDT - Native WebGPU Surface Validation And Pd Picker
+
+Status:
+
+- Fixed the periodic-table material picker so Palladium (`Pd`) is selectable.
+  The full UI table already contained Pd, but the selector still used the old
+  free-electron/simple-metal filter. The picker now follows
+  `elementMaterialClosure()` availability: all non-noble elements with a
+  condensed closure are selectable, while noble gases remain excluded.
+- Wired native WebGPU surface-consumer current-texture validation for the
+  engine-owned main-canvas path, including the `clear-only` diagnostic sentinel.
+- Extended the native visible-consumer contract to treat Chromium's
+  `A valid external Instance reference no longer exists` mapAsync failure as an
+  unavailable readback channel when the native bridge and resident-device smoke
+  have otherwise validated. This keeps headless browser readback limitations
+  from masquerading as renderer integration failures.
+- Updated the long-horizon probe so all-blank Playwright canvas captures do not
+  fail native WebGPU surface runs once the resident visible GPU consumer is
+  accepted. The analysis now records
+  `browserCanvasCaptureUnsupportedByNativeWebGpu=true` for that case.
+- Fixed native surface bridge DPR diagnostics on mobile-shaped viewports. The
+  bridge now reports the same clamped pixel ratio used to size the WebGPU canvas
+  backing store instead of the raw device DPR.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check src/runtime/material/elementClosures.js`.
+- PASS: `node --check src/visualization/sphMaterialOptions.js`.
+- PASS: `node --test tests/sphMaterialOptions.test.mjs tests/periodicTable.test.mjs`
+  reported `9/9`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "viewport|native|visible GPU|surface draw|mobile|PBR|WebGPU"`
+  reported `59/59`.
+- PASS: `/tmp/ulg-native-surface-probe.json` completed with browser console
+  issues `0`, native visible consumer `ready`, bridge
+  `native-webgpu-surface-consumer-rendered`, one opaque draw, primary bounds in
+  frustum, and `browserCanvasCaptureUnsupportedByNativeWebGpu=true`. The probe
+  status is still `bad` only because this one-step no-full-readback run has no
+  CPU motion evidence (`missing-max-speed`, `no-positive-displacement`).
+- PASS: `/tmp/ulg-native-surface-mobile-probe.json` completed with browser
+  console issues `0`, native visible consumer `ready`, bridge
+  `native-webgpu-surface-consumer-rendered`, primary bounds in frustum, and
+  consistent mobile canvas scaling: CSS about `397x860`, backing `794x1720`,
+  bridge DPR `2`, resize DPR `2`.
+
+Remaining:
+
+- The local Chromium headless path still cannot screenshot/read back native
+  WebGPU canvas pixels directly, so real-device mobile rendering still needs
+  live browser/device checks. The native bridge is now console-clean and
+  accepted by same-device validation/fallback in the harness.
+- The one-step native probes intentionally do not prove physics motion. Longer
+  physics/performance probes remain separate from this renderer validation.
+
 ## 2026-06-19 12:52 AKDT - Particle Render Modes Use Live Physics Rows
 
 Status:

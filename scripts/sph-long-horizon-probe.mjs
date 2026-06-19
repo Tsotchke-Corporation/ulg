@@ -4559,6 +4559,10 @@ function analyzeTimeline(timeline, {
     residentSurfaceBufferHandoffProbe
     && residentSurfaceVisibleGpuConsumerSampleCount > 0
   );
+  const nativeWebGpuSurfaceConsumerAccepted = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && residentSurfaceVisibleGpuConsumerAccepted
+  );
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
     (metric.surfaces?.h2oVisibleCount ?? 0) > 0
     || residentOverlayH2oVisible(metric)
@@ -5166,7 +5170,16 @@ function analyzeTimeline(timeline, {
   if (pngAnalyzedVisualFrames.length > 0 && nonblankVisualFrameCount === 0) {
     issues.push('visual-frames-all-blank');
   }
-  if (pngAnalyzedCanvasFrames.length > 0 && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length) {
+  const browserCanvasCaptureUnsupportedByNativeWebGpu = Boolean(
+    nativeWebGpuSurfaceConsumerAccepted
+    && pngAnalyzedCanvasFrames.length > 0
+    && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length
+  );
+  if (
+    pngAnalyzedCanvasFrames.length > 0
+    && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length
+    && !browserCanvasCaptureUnsupportedByNativeWebGpu
+  ) {
     issues.push('visual-canvas-frames-all-blank');
   }
   if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
@@ -5293,6 +5306,7 @@ function analyzeTimeline(timeline, {
     blankCanvasFrameCount,
     nonblankCanvasFrameCount,
     browserCanvasPixelValidated,
+    browserCanvasCaptureUnsupportedByNativeWebGpu,
     visualFrameTimesS,
     visualFrameTimeSpanS,
     meanBatchMs,

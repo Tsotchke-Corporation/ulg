@@ -1,7 +1,7 @@
 // Material selector metadata for the SPH phase demo. Element names/layout mirror the MoonLab
 // orbital picker data shape, but stay vanilla JS so ULG does not take a React dependency.
 
-import { metallicElementSymbols } from '../runtime/material/elementClosures.js';
+import { condensedElementSymbols } from '../runtime/material/elementClosures.js';
 
 export const ELEMENT_UI_METADATA = Object.freeze([
   { symbol: 'H', name: 'Hydrogen', Z: 1, period: 1, group: 1, category: 'nonmetal' },
@@ -124,7 +124,7 @@ export const ELEMENT_UI_METADATA = Object.freeze([
   { symbol: 'Og', name: 'Oganesson', Z: 118, period: 7, group: 18, category: 'noble' },
 ]);
 
-const selectableSymbols = new Set(metallicElementSymbols().map((entry) => entry.symbol));
+const selectableSymbols = new Set(condensedElementSymbols().map((entry) => entry.symbol));
 
 function keyForElementSymbol(symbol) {
   return symbol === 'Fe' ? 'fe' : symbol;

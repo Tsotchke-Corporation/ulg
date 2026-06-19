@@ -10,6 +10,7 @@ test('SPH material options expose element names in dropdown labels', () => {
   const labels = MATERIAL_OPTIONS.map((option) => option.label);
   assert.ok(labels.includes('Iron (Fe, Z=26) - derived element'));
   assert.ok(labels.includes('Gold (Au, Z=79) - derived element'));
+  assert.ok(labels.includes('Palladium (Pd, Z=46) - derived element'));
   assert.ok(labels.includes('Sodium (Na, Z=11) - derived element'));
   assert.ok(labels.includes('Water (H2O) - derived compound'));
 });
@@ -40,5 +41,6 @@ test('SPH element picker excludes unavailable noble-gas material closures', () =
   assert.equal(ELEMENT_UI_METADATA.length, 118);
   assert.equal(ELEMENT_MATERIAL_OPTIONS.some((option) => option.symbol === 'He'), false);
   assert.equal(ELEMENT_MATERIAL_OPTIONS.some((option) => option.symbol === 'Og'), false);
+  assert.equal(ELEMENT_MATERIAL_OPTIONS.some((option) => option.symbol === 'Pd'), true);
   assert.equal(ELEMENT_MATERIAL_OPTIONS.some((option) => option.symbol === 'Na'), true);
 });

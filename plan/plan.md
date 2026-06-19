@@ -2,6 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: retained thermal and mechanics-refresh
+outputs no longer pay full zero-upload costs before the shader overwrites
+them. The thermal WebGPU kernel now allocates output state/thermo storage
+buffers directly and records
+`outputBufferInitializationMode=shader-writes-all-particle-rows`; the
+mechanics-refresh WebGPU kernel does the same for output mechanics with
+`shader-copies-source-mechanics-rows`.
+Focused tests assert the queue does not write
+`ulg-sph-thermal-output-state`, `ulg-sph-thermal-output-thermo`, or
+`ulg-mls-mpm-mechanics-refresh-output-mechanics` on the resident no-full path.
+Fresh native 10k-ish benchmark evidence is `status=good`,
+`probeStatus=good`, browser-console clean, zero render-row readback, active
+grid used, actual particles `9826`, mean batch `77.5 ms`, max batch
+`107.6 ms`, resident completed stage `6.7 ms`, fused mechanics `0.8 ms`,
+thermal `0.3 ms`, mechanics refresh `3.5 ms`, native surface total `4.2 ms`,
+translation `1.4 ms`, and visible native GPU consumer ready. This closes the
+remaining obvious output-clear waste in the current GUI path; next throughput
+work should target resident batch cadence, thermal-aware fused sequencing, and
+renderer setup reuse.
+
 Current checkpoint, 2026-06-19 AKDT: native no-full surface extraction now
 reuses the sibling marching-cubes adapter/volume wrapper by descriptor and
 borrows a persistent ULG render-field rows buffer for the native visible

@@ -91,13 +91,17 @@ function fakeThermalDeviceWithFence() {
   });
   const destroyed = [];
   const buffers = [];
+  const queueWrites = [];
   const device = {
     destroyed,
     buffers,
+    queueWrites,
     fenceRequestedCount: 0,
     resolveFence,
     queue: {
-      writeBuffer() {},
+      writeBuffer(buffer, offset, data) {
+        queueWrites.push({ label: buffer?.label ?? null, offset, byteLength: data?.byteLength ?? 0 });
+      },
       submit() {},
       onSubmittedWorkDone() {
         device.fenceRequestedCount += 1;
@@ -572,6 +576,9 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   });
 
   assert.equal(result.retainedOutputParticleBuffers, true);
+  assert.equal(result.outputBufferInitializationMode, 'shader-writes-all-particle-rows');
+  assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-state'), false);
+  assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-thermo'), false);
   assert.equal(typeof result.destroyOutputParticleBuffers, 'function');
   result.destroyOutputParticleBuffers();
   result.destroyOutputParticleBuffers();

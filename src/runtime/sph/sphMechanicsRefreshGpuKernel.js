@@ -94,6 +94,14 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
+  });
+}
+
 function createParamsArray({ particleCount, phaseRecordCount }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
@@ -130,6 +138,7 @@ function outputEnvelope({
   mechanicsBufferByteLength = 0,
   retainedOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE,
+  outputBufferInitializationMode = null,
   destroyOutputParticleBuffers = null
 }) {
   return {
@@ -147,6 +156,7 @@ function outputEnvelope({
     mechanicsBufferByteLength,
     retainedOutputParticleBuffers,
     readbackMode,
+    outputBufferInitializationMode,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     destroyOutputParticleBuffers,
     scientificValidation: false,
@@ -241,10 +251,11 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     'ulg-mls-mpm-mechanics-material-phase-records',
     mechanicsMaterialTable.records
   );
-  const outMechanicsBuffer = writeStorageBuffer(
+  const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
+  const outMechanicsBuffer = createOutputStorageBuffer(
     device,
     'ulg-mls-mpm-mechanics-refresh-output-mechanics',
-    new Float32Array(sphParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS),
+    mlsMpmParticleState.mechanics.byteLength,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({
@@ -315,6 +326,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     readbackMode,
+    outputBufferInitializationMode,
     destroyOutputParticleBuffers() {
       outMechanicsBuffer.destroy?.();
     }

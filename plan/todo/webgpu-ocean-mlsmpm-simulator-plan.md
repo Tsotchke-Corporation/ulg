@@ -52,6 +52,23 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Retained thermal and mechanics-refresh output buffers now skip CPU-side
+  zero uploads in the resident no-full GUI path. The thermal shader owns every
+  output state/thermo row write and reports
+  `outputBufferInitializationMode=shader-writes-all-particle-rows`; the
+  mechanics-refresh shader copies every source mechanics row before phase
+  edits and reports `shader-copies-source-mechanics-rows`. Focused tests
+  assert no `queue.writeBuffer()` to `ulg-sph-thermal-output-state`,
+  `ulg-sph-thermal-output-thermo`, or
+  `ulg-mls-mpm-mechanics-refresh-output-mechanics`. Fresh 10k-ish native
+  benchmark evidence is `status=good`, `probeStatus=good`, zero browser
+  console issues, zero render-row readback, active grid used, actual particles
+  `9826`, mean batch `77.5 ms`, resident completed stage `6.7 ms`, fused
+  mechanics `0.8 ms`, thermal `0.3 ms`, mechanics refresh `3.5 ms`, native
+  surface total `4.2 ms`, translation `1.4 ms`, and visible native GPU
+  consumer ready. The next performance step should be thermal-aware fused
+  sequence/cadence work and render-bridge reuse, not more output buffer clear
+  shaving.
 - Extension-to-ULG native surface translation now uses cached compute pipeline
   creation and skips the full upper-bound compact vertex-row clear in
   no-full-readback indirect draw mode. Focused adapter coverage asserts

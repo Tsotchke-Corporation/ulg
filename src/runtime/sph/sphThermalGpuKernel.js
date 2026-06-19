@@ -930,7 +930,8 @@ function outputEnvelope({
   thermoBufferByteLength = thermo.byteLength,
   retainedOutputParticleBuffers = false,
   destroyOutputParticleBuffers = null,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  outputBufferInitializationMode = null
 }) {
   return {
     schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
@@ -975,6 +976,7 @@ function outputEnvelope({
     retainedOutputParticleBuffers,
     destroyOutputParticleBuffers,
     readbackMode,
+    outputBufferInitializationMode,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     wallHeatJ: { ...wallHeatJ },
@@ -1122,6 +1124,14 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
+  return device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | extraUsage
+  });
 }
 
 function resolveThermalResponseGraphArtifacts({
@@ -1338,8 +1348,19 @@ export async function runSphThermalStepWebGpu({
   const responseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
   const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
-  const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-state', new Float32Array(sphParticleState.state.length), GPU_BUFFER_USAGE.COPY_SRC);
-  const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-thermo', new Float32Array(sphParticleState.thermo.length), GPU_BUFFER_USAGE.COPY_SRC);
+  const outputBufferInitializationMode = 'shader-writes-all-particle-rows';
+  const outStateBuffer = createOutputStorageBuffer(
+    device,
+    'ulg-sph-thermal-output-state',
+    sphParticleState.state.byteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const outThermoBuffer = createOutputStorageBuffer(
+    device,
+    'ulg-sph-thermal-output-thermo',
+    sphParticleState.thermo.byteLength,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-thermal-params',
     size: 80,
@@ -1455,6 +1476,7 @@ export async function runSphThermalStepWebGpu({
     thermoBufferByteLength: sphParticleState.thermo.byteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
+    outputBufferInitializationMode,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
   });
 }

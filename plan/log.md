@@ -29395,3 +29395,40 @@ Remaining:
   by expanding the paired base edge to `14`; full resident stepping at that
   higher count remains part of the broader performance roadmap rather than a
   drop-edge reset blocker.
+
+## 2026-06-19 AKDT - Render-Row Support-Radius Scale Guard
+
+Status:
+
+- Added a support-radius guard to render-row particle sizing so aggregate
+  product/rest-volume radius cannot create unbounded individual render spheres.
+- CPU render rows now cap visual radius to
+  `SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO * smoothingLengthM` and
+  record `max-support-radius` samples in
+  `peercompute.ulg.sph-render-row-particle-scale-stability.v0`.
+- WebGPU render rows now carry `max_support_radius_m` in the uniform params and
+  apply the same radius-to-volume clamp in WGSL after the existing max
+  radius-growth/max-`J` policy.
+- Scene and long-horizon probe diagnostics now expose the derived support cap
+  and `supportRadiusPolicyAppliedInShader` for retained WebGPU render rows.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `52/52`.
+- PASS: browser probe `/tmp/ulg-reaction-support-radius-cap-probe.json`
+  completed `status=good`, analysis `good`, browser console
+  issues/warnings `0/0`, and four nonblank captured visual frames. The final
+  resident batch reported max sphere radius `0.5263000726699829 m`, decoded max
+  `J=1.0000579357147217`, no decoded `J=64` cap-boundary rows, and retained
+  shader support policy `maxSupportRadiusM=0.6203504908994 m`.
+
+Remaining:
+
+- Add a browser reaction fixture that actually trips the support-radius cap.
+- Split gas/foam/product expansion from individual visual particle radius so
+  reaction volume is not represented by giant per-particle spheres.

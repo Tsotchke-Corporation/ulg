@@ -105,6 +105,7 @@ export const SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT = 64 
 export const SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
 export const SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO = 4;
 export const SPH_RENDER_ROW_MAX_VOLUME_RATIO_J = SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO ** 3;
+export const SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO = 2;
 export const ULG_SPH_RENDER_ROW_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.sph-render-row-particle-scale-stability.v0';
 
@@ -409,7 +410,16 @@ function particleRadiusMFromVolume(volumeM3) {
   return Math.cbrt((3 * volume) / (4 * Math.PI));
 }
 
-function createParticleScaleStabilitySummary({ particleCount, rowProducer }) {
+function particleVolumeM3FromRadius(radiusM) {
+  const radius = finiteNumber(radiusM, 0);
+  return radius > 0 ? (4 * Math.PI * radius ** 3) / 3 : 0;
+}
+
+function createParticleScaleStabilitySummary({
+  particleCount,
+  rowProducer,
+  maxSupportRadiusM = 0
+}) {
   return {
     schema: ULG_SPH_RENDER_ROW_PARTICLE_SCALE_STABILITY_SCHEMA,
     status: 'particle-scale-bounded',
@@ -417,6 +427,9 @@ function createParticleScaleStabilitySummary({ particleCount, rowProducer }) {
     particleCount,
     maxRadiusGrowthRatioAllowed: SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO,
     maxVolumeRatioJAllowed: SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
+    maxSupportRadiusSmoothingRatioAllowed: SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO,
+    maxSupportRadiusM: Math.max(0, finiteNumber(maxSupportRadiusM, 0)),
+    supportRadiusPolicyAppliedInShader: false,
     capAppliedCount: 0,
     maxRawParticleRadiusM: 0,
     maxParticleRadiusM: 0,
@@ -485,7 +498,11 @@ function trackParticleScaleStability(summary, volumeState, {
   });
 }
 
-function renderParticleScaleStabilityPolicy({ particleCount, rowProducer }) {
+function renderParticleScaleStabilityPolicy({
+  particleCount,
+  rowProducer,
+  maxSupportRadiusM = 0
+}) {
   return {
     schema: ULG_SPH_RENDER_ROW_PARTICLE_SCALE_STABILITY_SCHEMA,
     status: 'gpu-row-cap-policy-applied-in-shader',
@@ -493,9 +510,12 @@ function renderParticleScaleStabilityPolicy({ particleCount, rowProducer }) {
     particleCount,
     maxRadiusGrowthRatioAllowed: SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO,
     maxVolumeRatioJAllowed: SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
+    maxSupportRadiusSmoothingRatioAllowed: SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO,
+    maxSupportRadiusM: Math.max(0, finiteNumber(maxSupportRadiusM, 0)),
+    supportRadiusPolicyAppliedInShader: true,
     capAppliedCount: null,
     capAppliedCountKnown: false,
-    reason: 'WebGPU retained render rows apply the cap in shader without a CPU particle scan',
+    reason: 'WebGPU retained render rows apply radius growth, J, and support-radius caps in shader without a CPU particle scan',
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -508,7 +528,8 @@ function renderVolumeStateForParticle({
   mlsMpmParticleState = null,
   particleIndex,
   massKg,
-  restDensityKgPerM3
+  restDensityKgPerM3,
+  maxSupportRadiusM = 0
 } = {}) {
   const fallbackRestVolumeM3 = particleVolumeM3FromMassDensity(massKg, restDensityKgPerM3);
   let restVolumeM3 = fallbackRestVolumeM3;
@@ -555,6 +576,21 @@ function renderVolumeStateForParticle({
     effectiveVolumeRatioJ = SPH_RENDER_ROW_MAX_VOLUME_RATIO_J;
     effectiveRadiusGrowthRatio = SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO;
   }
+  const supportRadiusCapM = finiteNumber(maxSupportRadiusM, 0);
+  if (supportRadiusCapM > 0 && particleRadiusM > supportRadiusCapM) {
+    radiusCapApplied = true;
+    radiusCapReason = radiusCapReason
+      ? `${radiusCapReason}+max-support-radius`
+      : 'max-support-radius';
+    particleRadiusM = supportRadiusCapM;
+    currentVolumeM3 = particleVolumeM3FromRadius(supportRadiusCapM);
+    effectiveVolumeRatioJ = restVolumeM3 > 0
+      ? Math.max(currentVolumeM3 / restVolumeM3, 1e-9)
+      : effectiveVolumeRatioJ;
+    effectiveRadiusGrowthRatio = restParticleRadiusM > 0
+      ? particleRadiusM / restParticleRadiusM
+      : 0;
+  }
   return {
     currentVolumeM3,
     particleRadiusM,
@@ -580,9 +616,12 @@ export function extractSphRenderRowsCpu({
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   const renderRows = new Float32Array(sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS);
+  const maxSupportRadiusM = finiteNumber(sphParticleState.smoothingLengthM, 0)
+    * SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO;
   const particleScaleStability = createParticleScaleStabilitySummary({
     particleCount: sphParticleState.particleCount,
-    rowProducer: 'cpu-reference'
+    rowProducer: 'cpu-reference',
+    maxSupportRadiusM
   });
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -597,7 +636,8 @@ export function extractSphRenderRowsCpu({
       mlsMpmParticleState,
       particleIndex: index,
       massKg,
-      restDensityKgPerM3
+      restDensityKgPerM3,
+      maxSupportRadiusM
     });
     trackParticleScaleStability(particleScaleStability, volumeState, {
       index,
@@ -726,14 +766,16 @@ function createParamsArray({
   particleCount,
   renderDomainBaseCount = 0,
   renderDomainDropCount = 0,
-  hasMechanics = false
+  hasMechanics = false,
+  maxSupportRadiusM = 0
 } = {}) {
-  const buffer = new ArrayBuffer(16);
+  const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(renderDomainDropCount, 0))), true);
   view.setUint32(12, hasMechanics ? 1 : 0, true);
+  view.setFloat32(16, Math.max(0, finiteNumber(maxSupportRadiusM, 0)), true);
   return buffer;
 }
 
@@ -5782,17 +5824,20 @@ export async function extractSphRenderRowsWebGpu({
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
     })
     : renderRowsBuffer;
+  const maxSupportRadiusM = finiteNumber(sphParticleState.smoothingLengthM, 0)
+    * SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-render-rows-params',
-    size: 16,
+    size: 32,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
-    renderDomainBaseCount,
-    renderDomainDropCount,
-    hasMechanics: Boolean(borrowedMechanicsBuffer || mechanicsReady)
-  }));
+	    renderDomainBaseCount,
+	    renderDomainDropCount,
+	    hasMechanics: Boolean(borrowedMechanicsBuffer || mechanicsReady),
+	    maxSupportRadiusM
+	  }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-render-rows', code: sphRenderRowsWgsl });
   const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
@@ -5907,10 +5952,11 @@ export async function extractSphRenderRowsWebGpu({
 	    queueCompletionStatus,
 	    queueCompletionMethod,
 	    renderRowsDeferredCleanup: deferNoFullReadbackCleanup,
-	    particleScaleStability: renderParticleScaleStabilityPolicy({
-	      particleCount: sphParticleState.particleCount,
-	      rowProducer: 'webgpu-shader'
-	    }),
+		    particleScaleStability: renderParticleScaleStabilityPolicy({
+		      particleCount: sphParticleState.particleCount,
+		      rowProducer: 'webgpu-shader',
+		      maxSupportRadiusM
+		    }),
 	    scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

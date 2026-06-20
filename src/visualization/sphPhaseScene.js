@@ -90,6 +90,7 @@ import {
   decodeSphRenderRows,
   extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
+  SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
   splitSphRenderFieldBySurface,
   summarizeSphResidentParticleUploadWebGpu,
   summarizeSphRenderFieldSurfacesWebGpu
@@ -13820,6 +13821,11 @@ export function createSphPhaseScene(container, {
     let totalMassKg = 0;
     let minParticleRadiusM = Number.POSITIVE_INFINITY;
     let maxParticleRadiusM = Number.NEGATIVE_INFINITY;
+    let maxVolumeRatioJ = Number.NEGATIVE_INFINITY;
+    let volumeRatioCapBoundaryCount = 0;
+    const volumeRatioCapBoundaryMaterialPhaseCounts = {};
+    const volumeRatioCapBoundaryRows = [];
+    const capBoundaryEpsilon = Math.max(1e-6, SPH_RENDER_ROW_MAX_VOLUME_RATIO_J * 1e-6);
     for (const row of decoded.rows) {
       const key = `${row.material ?? 'unknown'}|${row.phase ?? 'unknown'}`;
       materialPhaseCounts[key] = (materialPhaseCounts[key] || 0) + 1;
@@ -13869,6 +13875,28 @@ export function createSphPhaseScene(container, {
         minParticleRadiusM = Math.min(minParticleRadiusM, particleRadiusM);
         maxParticleRadiusM = Math.max(maxParticleRadiusM, particleRadiusM);
       }
+      const volumeRatioJ = Number(row.volumeRatioJ);
+      if (Number.isFinite(volumeRatioJ)) {
+        maxVolumeRatioJ = Math.max(maxVolumeRatioJ, volumeRatioJ);
+        if (volumeRatioJ >= SPH_RENDER_ROW_MAX_VOLUME_RATIO_J - capBoundaryEpsilon) {
+          volumeRatioCapBoundaryCount += 1;
+          volumeRatioCapBoundaryMaterialPhaseCounts[key] =
+            (volumeRatioCapBoundaryMaterialPhaseCounts[key] || 0) + 1;
+          if (volumeRatioCapBoundaryRows.length < 8) {
+            volumeRatioCapBoundaryRows.push({
+              index: row.index,
+              materialId: row.materialId,
+              material: row.material,
+              phaseId: row.phaseId,
+              phase: row.phase,
+              renderDomainId: row.renderDomainId,
+              renderDomainKey: row.renderDomainKey,
+              particleRadiusM: row.particleRadiusM,
+              volumeRatioJ: row.volumeRatioJ
+            });
+          }
+        }
+      }
     }
     for (const bounds of Object.values(materialPhaseDomainBounds)) {
       bounds.size = bounds.max.map((value, axis) => value - bounds.min[axis]);
@@ -13894,6 +13922,12 @@ export function createSphPhaseScene(container, {
       materialPhaseDomainBounds,
       minParticleRadiusM: Number.isFinite(minParticleRadiusM) ? minParticleRadiusM : null,
       maxParticleRadiusM: Number.isFinite(maxParticleRadiusM) ? maxParticleRadiusM : null,
+      maxVolumeRatioJ: Number.isFinite(maxVolumeRatioJ) ? maxVolumeRatioJ : null,
+      volumeRatioCapBoundary: volumeRatioCapBoundaryCount > 0,
+      volumeRatioCapBoundaryCount,
+      volumeRatioCapBoundaryJ: SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
+      volumeRatioCapBoundaryMaterialPhaseCounts,
+      volumeRatioCapBoundaryRows,
       sampleRows: sampleRows.map((row) => ({
         index: row.index,
         materialId: row.materialId,
@@ -17518,10 +17552,24 @@ export function createSphPhaseScene(container, {
 	            renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed =
 	            renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed =
+	            renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusM =
+	            renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader =
+	            renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio =
 	            renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio =
 	            renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null;
+            nextResidentSurfaceDraw.renderRowsDecodedMaxVolumeRatioJ =
+              decodedRenderRowsSummary?.maxVolumeRatioJ ?? null;
+            nextResidentSurfaceDraw.renderRowsDecodedVolumeRatioCapBoundary =
+              decodedRenderRowsSummary?.volumeRatioCapBoundary ?? null;
+            nextResidentSurfaceDraw.renderRowsDecodedVolumeRatioCapBoundaryCount =
+              decodedRenderRowsSummary?.volumeRatioCapBoundaryCount ?? null;
+            nextResidentSurfaceDraw.renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts =
+              decodedRenderRowsSummary?.volumeRatioCapBoundaryMaterialPhaseCounts ?? null;
 	        } else if (
           !shouldBuildRetainedSurfaceDrawDiagnostics
           && !renderFieldExecution?.renderFieldReadback
@@ -18302,6 +18350,12 @@ export function createSphPhaseScene(container, {
 	          renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null,
 	        renderRowsParticleScaleMaxVolumeRatioJAllowed:
 	          renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null,
+	        renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed:
+	          renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null,
+	        renderRowsParticleScaleMaxSupportRadiusM:
+	          renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null,
+	        renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
+	          renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null,
 	        renderRowsParticleScaleMaxRawRadiusGrowthRatio:
 	          renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null,
 	        renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
@@ -18316,6 +18370,15 @@ export function createSphPhaseScene(container, {
         renderRowsDecodedPositionBoundsM: decodedRenderRowsSummary?.positionBoundsM ?? null,
         renderRowsDecodedMinParticleRadiusM: decodedRenderRowsSummary?.minParticleRadiusM ?? null,
         renderRowsDecodedMaxParticleRadiusM: decodedRenderRowsSummary?.maxParticleRadiusM ?? null,
+        renderRowsDecodedMaxVolumeRatioJ: decodedRenderRowsSummary?.maxVolumeRatioJ ?? null,
+        renderRowsDecodedVolumeRatioCapBoundary:
+          decodedRenderRowsSummary?.volumeRatioCapBoundary ?? null,
+        renderRowsDecodedVolumeRatioCapBoundaryCount:
+          decodedRenderRowsSummary?.volumeRatioCapBoundaryCount ?? null,
+        renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts:
+          decodedRenderRowsSummary?.volumeRatioCapBoundaryMaterialPhaseCounts ?? null,
+        renderRowsDecodedVolumeRatioCapBoundaryRows:
+          decodedRenderRowsSummary?.volumeRatioCapBoundaryRows ?? null,
         renderRowsDecodedSampleRows: decodedRenderRowsSummary?.sampleRows ?? null,
         renderFieldCellStrideFloats: renderFieldExecution?.rowStrideFloats ?? null,
         renderFieldByteLength: renderFieldExecution?.fieldRowByteLength ?? 0,

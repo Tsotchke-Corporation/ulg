@@ -3002,6 +3002,10 @@ struct RenderRowsParams {
   render_domain_base_count: u32,
   render_domain_drop_count: u32,
   has_mechanics: u32,
+  max_support_radius_m: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -3019,6 +3023,13 @@ fn radius_from_volume_m(volume_m3: f32) -> f32 {
     return 0.0;
   }
   return pow((3.0 * volume_m3) / (4.0 * 3.141592653589793), 1.0 / 3.0);
+}
+
+fn volume_from_radius_m(radius_m: f32) -> f32 {
+  if (radius_m <= 0.0) {
+    return 0.0;
+  }
+  return (4.0 * 3.141592653589793 * radius_m * radius_m * radius_m) / 3.0;
 }
 
 @compute @workgroup_size(64)
@@ -3061,6 +3072,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     particle_radius_m = rest_particle_radius_m * RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO;
     current_volume_m3 = rest_volume_m3 * RENDER_ROW_MAX_VOLUME_RATIO_J;
     effective_volume_ratio_j = RENDER_ROW_MAX_VOLUME_RATIO_J;
+  }
+  if (params.max_support_radius_m > 0.0 && particle_radius_m > params.max_support_radius_m) {
+    particle_radius_m = params.max_support_radius_m;
+    current_volume_m3 = volume_from_radius_m(params.max_support_radius_m);
+    if (rest_volume_m3 > 0.0) {
+      effective_volume_ratio_j = max(current_volume_m3 / rest_volume_m3, 1.0e-9);
+    }
   }
   var render_domain_id: f32 = 0.0;
   if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {

@@ -11223,3 +11223,25 @@ Resident G2P particle-scale guard, 2026-06-19 18:44 AKDT:
     `particleScaleStabilityStatus=gpu-g2p-cap-policy-applied-in-shader`,
     `particleScalePolicySource=webgpu-fused-g2p-shader`, max `J=64`, and max
     radius growth `4`.
+
+Render-row support-radius particle-scale guard, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphRenderGpuKernel.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check tests/sphRenderGpuKernel.test.mjs`, and
+  `node --check ulg-gpu-abi/src/wgsl.js` passed.
+- Focused tests:
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `52/52`.
+  - New coverage proves render-row extraction caps an aggregate/product visual
+    radius to `2 * smoothingLengthM` even when `J=1`, records
+    `max-support-radius`, and keeps the WebGPU WGSL cap branch in lockstep.
+- Browser probe:
+  `/tmp/ulg-reaction-support-radius-cap-probe.json`
+  - Passed with `status=good`, analysis `good`, browser console
+    issues/warnings `0/0`, four nonblank captured visual frames, final
+    resident sphere max radius `0.5263000726699829 m`, decoded max
+    `J=1.0000579357147217`, no decoded `J=64` cap-boundary rows, and retained
+    shader support policy `maxSupportRadiusM=0.6203504908994 m`.

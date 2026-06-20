@@ -2147,6 +2147,20 @@ async function runBrowserProbe({
             renderRowsDecodedTotalMassKg: finiteOrNull(renderState.renderRowsDecodedTotalMassKg),
             renderRowsDecodedCenterOfMassM: cloneFiniteVector(renderState.renderRowsDecodedCenterOfMassM),
             renderRowsDecodedPositionBoundsM: compactPositionBounds(renderState.renderRowsDecodedPositionBoundsM),
+            renderRowsDecodedMaxVolumeRatioJ:
+              finiteOrNull(renderState.renderRowsDecodedMaxVolumeRatioJ),
+            renderRowsDecodedVolumeRatioCapBoundary:
+              renderState.renderRowsDecodedVolumeRatioCapBoundary ?? null,
+            renderRowsDecodedVolumeRatioCapBoundaryCount:
+              renderState.renderRowsDecodedVolumeRatioCapBoundaryCount ?? null,
+            renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts:
+              renderState.renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts ?? null,
+            renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed:
+              renderState.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed ?? null,
+            renderRowsParticleScaleMaxSupportRadiusM:
+              finiteOrNull(renderState.renderRowsParticleScaleMaxSupportRadiusM),
+            renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
+              renderState.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader ?? null,
             renderRowsDecodedSampleRows: renderState.renderRowsDecodedSampleRows ?? null,
             gasPressureSummaryStatus: renderState.gasPressureSummaryStatus ?? null,
             gasPressureSummarySource: renderState.gasPressureSummarySource ?? null,
@@ -2745,10 +2759,24 @@ async function runBrowserProbe({
 	              surfaceDraw.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed ?? null,
 	            renderRowsParticleScaleMaxVolumeRatioJAllowed:
 	              surfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed ?? null,
+	            renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed:
+	              surfaceDraw.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed ?? null,
+	            renderRowsParticleScaleMaxSupportRadiusM:
+	              finiteOrNull(surfaceDraw.renderRowsParticleScaleMaxSupportRadiusM),
+	            renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
+	              surfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader ?? null,
 	            renderRowsParticleScaleMaxRawRadiusGrowthRatio:
 	              surfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio ?? null,
 	            renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
 	              surfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio ?? null,
+            renderRowsDecodedMaxVolumeRatioJ:
+              finiteOrNull(surfaceDraw.renderRowsDecodedMaxVolumeRatioJ),
+            renderRowsDecodedVolumeRatioCapBoundary:
+              surfaceDraw.renderRowsDecodedVolumeRatioCapBoundary ?? null,
+            renderRowsDecodedVolumeRatioCapBoundaryCount:
+              surfaceDraw.renderRowsDecodedVolumeRatioCapBoundaryCount ?? null,
+            renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts:
+              surfaceDraw.renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts ?? null,
 	            renderRowsParticleScaleStability:
 	              surfaceDraw.renderRowsParticleScaleStability ?? null
 	          } : null,

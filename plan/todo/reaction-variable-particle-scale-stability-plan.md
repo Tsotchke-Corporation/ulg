@@ -148,3 +148,47 @@ Remaining:
 - Add active-grid/support-radius admission checks if a future product-expansion
   path can grow per-particle support before G2P sees `J`.
 - Add reset/lockup regression coverage after the reset functionality fix lands.
+
+## Implementation Status - 2026-06-19 AKDT
+
+Added a render-row support-radius guard for aggregate/product visual radius:
+
+- CPU render-row extraction now also records the support-radius policy:
+  `maxSupportRadiusSmoothingRatioAllowed=2`, the derived `maxSupportRadiusM`,
+  and cap samples with reason `max-support-radius`.
+- WebGPU render-row extraction passes the same derived support radius into the
+  uniform block and clamps `particle_radius_m` in WGSL after the existing
+  max-growth/max-`J` guard. Retained/no-full runs expose
+  `supportRadiusPolicyAppliedInShader=true` without adding a CPU particle scan.
+- Scene and long-horizon probe diagnostics now surface
+  `renderRowsParticleScaleMaxSupportRadiusM` and
+  `renderRowsParticleScaleSupportRadiusPolicyAppliedInShader` alongside the
+  existing decoded `J` cap-boundary fields.
+- Focused tests now cover a synthetic aggregate product radius case where
+  `J=1` but mass/density would otherwise produce a visual particle larger than
+  the solver support radius.
+
+Validation:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check scripts/sph-long-horizon-probe.mjs`
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/sphRenderGpuKernel.test.mjs` passed `52/52`.
+- Browser probe `/tmp/ulg-reaction-support-radius-cap-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`, four
+  nonblank captured visual frames, final resident sphere max radius
+  `0.5263000726699829 m`, decoded max `J=1.0000579357147217`, no decoded
+  `J=64` cap-boundary rows, and retained shader support policy
+  `maxSupportRadiusM=0.6203504908994 m`.
+
+Remaining:
+
+- Add a targeted browser reaction or harness fixture that actually trips the
+  support-radius cap in browser telemetry, not only the unit-level synthetic
+  aggregate radius fixture.
+- Split gas/foam product expansion from individual particle visual radius so
+  reaction volume can route through product/gas fields instead of giant
+  per-particle spheres.
+- Add reset/lockup regression coverage after the reset functionality fix lands.

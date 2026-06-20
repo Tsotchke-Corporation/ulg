@@ -1057,7 +1057,12 @@ state that moves on screen is the state the laws actually mutated.
      WebGPU queue fence so previous reaction/product buffers are not destroyed
      while continuation work still references them;
    - thermal state, thermo rows, and refreshed mechanics constitutive fields
-     advance together after a phase transition;
+     advance together after a phase transition: covered by the retained
+     thermal GPU mechanics-refresh regression, which now reports a thermal
+     phase transition and asserts that the next resident particle source uses
+     the thermal state buffer, thermal thermo buffer, and refreshed mechanics
+     buffer together with `phase-transition-thermal-thermo-mechanics-advanced`
+     diagnostics;
    - stale CPU mirrors cannot drive authoritative mutation;
    - compact summaries report diagnostics only unless admitted.
 7. Fix the highest-impact broken path first, even if the implementation stays

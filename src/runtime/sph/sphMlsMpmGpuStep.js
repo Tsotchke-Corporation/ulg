@@ -3838,6 +3838,33 @@ function retainedThermalOutputBuffers(thermalStep) {
   };
 }
 
+function thermalPhaseTransitionDiagnostics(thermalStep) {
+  const source = thermalStep?.result || thermalStep;
+  if (!source) {
+    return {
+      thermalPhaseTransitionStatus: null,
+      thermalPhaseTransitionCount: 0,
+      thermalPhaseTransitionRowsRetained: false
+    };
+  }
+  const explicitCount = Number(source.phaseTransitionCount ?? source.phaseChangeCount);
+  const phaseTransitions = Array.isArray(source.phaseTransitions) ? source.phaseTransitions : [];
+  const count = Number.isFinite(explicitCount)
+    ? Math.max(0, Math.round(explicitCount))
+    : phaseTransitions.length;
+  const status = source.thermalPhaseTransitionStatus
+    || source.phaseTransitionStatus
+    || source.phaseChangeStatus
+    || (count > 0 ? 'thermal-phase-transition-detected' : 'thermal-phase-transition-not-detected');
+  return {
+    thermalPhaseTransitionStatus: status,
+    thermalPhaseTransitionCount: count,
+    thermalPhaseTransitionRowsRetained: Boolean(source.stateBuffer && source.thermoBuffer),
+    thermalPhaseTransitionSourcePhaseId: source.phaseTransitionSourcePhaseId ?? source.sourcePhaseId ?? null,
+    thermalPhaseTransitionNextPhaseId: source.phaseTransitionNextPhaseId ?? source.nextPhaseId ?? null
+  };
+}
+
 function retainedReactionOutputBuffers(reactionStep) {
   const source = reactionStep?.result || reactionStep;
   const residentProductMass = residentProductMassFromReactionStep(reactionStep);
@@ -11508,6 +11535,7 @@ async function residentStepEnvelope({
   const stageBuffersRetained = hasRetainedStageBuffers({ p2gGridProjection, gridUpdate });
   const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+  const thermalPhaseTransition = thermalPhaseTransitionDiagnostics(thermalStep);
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const reactionOutputParticleMutation = reactionOutputMutatesParticles(reactionStep);
@@ -11525,6 +11553,13 @@ async function residentStepEnvelope({
             : (nextUsesThermalState
             ? 'mechanics-constitutive-refresh-pending-after-thermal-state'
             : 'mechanics-constitutive-refresh-not-required')))
+    : null;
+  const thermalPhaseTransitionCouplingStatus = thermalStep
+    ? (thermalPhaseTransition.thermalPhaseTransitionCount > 0
+        ? (nextUsesThermalState && nextUsesThermalThermo && (nextUsesMechanicsRefresh || nextUsesReactionMechanics)
+            ? 'phase-transition-thermal-thermo-mechanics-advanced'
+            : 'phase-transition-coupling-incomplete')
+        : 'thermal-phase-transition-not-detected')
     : null;
   const emittedResidentProductMass = reactionOutput.residentProductMass || null;
   const residentProductMass = await mergeResidentProductMassBuffersWebGpu({
@@ -11664,6 +11699,8 @@ async function residentStepEnvelope({
     residentAuthorityMechanicsOwner: residentAuthoritySummary.familyOwners.mechanics?.ownerStage ?? null,
     residentAuthorityThermoOwner: residentAuthoritySummary.familyOwners['thermo-phase']?.ownerStage ?? null,
     thermalMechanicsRefreshStatus,
+    ...thermalPhaseTransition,
+    thermalPhaseTransitionCouplingStatus,
     residentBufferLeaseLedgerStatus: residentBufferLeaseLedger.status,
     residentBufferLeaseResourceCount: residentBufferLeaseLedger.resourceCount,
     residentBufferLeaseActiveLeaseCount: residentBufferLeaseLedger.activeLeaseCount,
@@ -11793,6 +11830,8 @@ async function residentStepEnvelope({
     reactionOutputBuffersRetained,
     mechanicsRefreshOutputBuffersRetained,
     thermalMechanicsRefreshStatus,
+    ...thermalPhaseTransition,
+    thermalPhaseTransitionCouplingStatus,
     residentBufferMode: residentBuffersRetained ? 'retained-stage-and-output-buffers' : 'cpu-artifact-fallback',
     particlePingPong,
     residentActiveGridDispatchPlanHint: activeGridDispatchPlanHint,

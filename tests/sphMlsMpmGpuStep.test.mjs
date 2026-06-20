@@ -4422,6 +4422,10 @@ test('MLS-MPM resident step refreshes mechanics after a retained thermal GPU ste
         schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
         backend: 'webgpu',
         status: 'thermal-step-executed',
+        phaseTransitionStatus: 'thermal-phase-transition-applied',
+        phaseTransitionCount: 1,
+        phaseTransitionSourcePhaseId: 1,
+        phaseTransitionNextPhaseId: 2,
         particleCount: buffers.sphParticleState.particleCount,
         state: new Float32Array(),
         thermo: new Float32Array(),
@@ -4462,8 +4466,20 @@ test('MLS-MPM resident step refreshes mechanics after a retained thermal GPU ste
   assert.equal(step.stageBackends.mechanicsRefresh, 'webgpu');
   assert.equal(step.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
   assert.equal(step.diagnostics.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
+  assert.equal(step.thermalPhaseTransitionStatus, 'thermal-phase-transition-applied');
+  assert.equal(step.thermalPhaseTransitionCount, 1);
+  assert.equal(step.thermalPhaseTransitionRowsRetained, true);
+  assert.equal(step.thermalPhaseTransitionSourcePhaseId, 1);
+  assert.equal(step.thermalPhaseTransitionNextPhaseId, 2);
+  assert.equal(step.thermalPhaseTransitionCouplingStatus, 'phase-transition-thermal-thermo-mechanics-advanced');
+  assert.equal(step.diagnostics.thermalPhaseTransitionStatus, 'thermal-phase-transition-applied');
+  assert.equal(step.diagnostics.thermalPhaseTransitionCount, 1);
+  assert.equal(step.diagnostics.thermalPhaseTransitionRowsRetained, true);
+  assert.equal(step.diagnostics.thermalPhaseTransitionCouplingStatus, 'phase-transition-thermal-thermo-mechanics-advanced');
   assert.equal(step.g2pMechanicsBufferReplacedByMechanicsRefresh, true);
   assert.equal(step.nextParticleBufferMode, 'retained-thermal-output-and-refreshed-mechanics-buffers');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'thermal-state-for-mechanics-refresh');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer.label, 'thermal-thermo-for-mechanics-refresh');
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'refreshed-mechanics-after-thermal');
   assert.equal(step.residentAuthorityFamilyOwners.mechanics.ownerStage, 'mechanics-constitutive-refresh');
   assert.equal(step.residentAuthorityFamilyOwners.mechanics.status, 'mechanics-constitutive-refresh-drives-next-particles');

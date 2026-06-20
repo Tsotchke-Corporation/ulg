@@ -1,5 +1,32 @@
 # ULG Implementation Log
 
+## 2026-06-19 23:05 AKDT - Alkali Resident Reaction Scale Browser Coverage
+
+Status:
+
+- Extended the mounted resident reaction pressure test from Na/H2O-only to an
+  alkali/H2O harness. The test still runs the full Na/H2O first pass,
+  consecutive pass, reset, and post-reset resident pressure/render pass.
+- Added a K/H2O scenario in the same console-guarded browser harness. It opens
+  a fresh resident scene, runs two consecutive no-full resident
+  pressure/render passes, and requires the promoted
+  `gpu-resident-pressure-interface-spatial-gas-ledger` pressure source,
+  pressure above baseline, retained product mass, KOH/H2 material keys, G2P
+  scale policy, render-row scale caps, and support-radius bounds.
+- Kept Na/H2O-specific decoded gas render-row and gas-proxy radius assertions
+  on Na. K/H2O exercises the product/gas ledger and pressure route without
+  assuming the largest rendered row is gas.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check -- tests/demo.e2e.mjs`.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas
+  pressure"` passed `1/1` with the WebGPU console issue guard active.
+
 ## 2026-06-19 22:10 AKDT - WebGPU-Ocean P2G Backend Policy Switch
 
 Status:

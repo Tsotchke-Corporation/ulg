@@ -60,8 +60,11 @@ consumes `gpu-resident-pressure-interface-spatial-gas-ledger` instead of the
 baseline fallback. The browser gate now also runs a consecutive resident
 reaction/render pass before reset, proving the promoted pressure source remains
 active across multiple resident batches. Remaining gap: broaden long-horizon
-browser coverage beyond Na/H2O and beyond the focused three-pass sequence. Do
-not treat these caps as the final physics model.
+browser coverage beyond the focused resident sequences. K/H2O now has a
+console-guarded two-pass resident pressure/render regression with retained
+product mass, KOH/H2 material keys, promoted spatial gas pressure, scale
+policies, and support-radius bounds. Do not treat these caps as the final
+physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

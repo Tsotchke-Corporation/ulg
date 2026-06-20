@@ -329,5 +329,36 @@ Validation:
 
 Remaining:
 
-- Add broader long-horizon browser coverage with more resident batches and
-  representative reaction pairs beyond Na/H2O.
+- Superseded by the alkali/H2O browser expansion below. Remaining browser
+  coverage is broader long-horizon resident batches and additional
+  non-alkali/multivalent reaction pairs.
+
+## Implementation Status - 2026-06-19 AKDT
+
+Extended mounted resident reaction browser coverage beyond Na/H2O:
+
+- The focused Playwright harness now opens Na/H2O first and preserves the
+  existing first pass, consecutive pass, reset, and post-reset resident
+  pressure/render assertions.
+- The same console-guarded harness then opens K/H2O and runs two consecutive
+  no-full resident pressure/render passes. K/H2O requires retained product
+  mass, KOH/H2 material keys, promoted
+  `gpu-resident-pressure-interface-spatial-gas-ledger` pressure, pressure above
+  baseline, G2P particle-scale policy, render-row particle-scale caps, and
+  support-radius bounds.
+- Na/H2O still requires decoded gas render rows and max decoded radius under
+  the gas visual proxy cap. K/H2O keeps product/gas ledger pressure coverage
+  without assuming the global max rendered particle is a gas row.
+
+Validation:
+
+- `node --check tests/demo.e2e.mjs`
+- `git diff --check -- tests/demo.e2e.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas pressure"` passed `1/1`.
+
+Remaining:
+
+- Add broader long-horizon resident batches beyond the current two-pass K/H2O
+  sequence.
+- Add representative non-alkali or multivalent reaction pairs once their
+  pressure/product routes have stable browser-ready expectations.

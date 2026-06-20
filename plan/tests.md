@@ -1,5 +1,25 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Alkali Resident Reaction Scale Browser Coverage
+
+Mounted resident reaction coverage now extends beyond Na/H2O. The Playwright
+path keeps the Na/H2O reset/lockup sequence and adds K/H2O consecutive
+resident pressure/render passes under the same WebGPU console guard.
+
+Focused checks:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs` passed.
+- Browser regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas
+  pressure"` passed `1/1`. The run asserted Na/H2O first, consecutive, reset,
+  and post-reset passes, then K/H2O first and consecutive passes with promoted
+  spatial gas pressure, retained product mass, scale policies, and support
+  bounds.
+
 ## Current Focused Result - 2026-06-19 WebGPU-Ocean P2G Backend Policy Switch
 
 The P2G projection contract now exposes an explicit backend policy for the

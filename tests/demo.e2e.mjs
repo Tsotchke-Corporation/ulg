@@ -5447,8 +5447,8 @@ test('SPH phase demo reacts room-temperature Na + H2O through derived product cl
   expect(stepped.gasPressureSummary.totalPressurePa).toBeGreaterThan(101325);
 });
 
-test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({ page }) => {
-  test.setTimeout(240_000);
+test('SPH phase mounted resident alkali/H2O promotes product gas pressure', async ({ page }) => {
+  test.setTimeout(360_000);
   const consoleIssues = [];
   page.on('console', (message) => {
     const text = message.text();
@@ -5457,24 +5457,28 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     }
   });
 
-  await page.goto('/?drop=Na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=sph&residentAuto=0&visualCapture=1&blob=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
-  await page.waitForFunction(() => {
-    const overlay = document.querySelector('#sph-phase-overlay');
-    const scene = overlay?.__sphScene;
-    return Boolean(
-      !overlay?.__sphCpuClosureTask?.active
-      && scene?.getSphGpuParticleState?.()?.schema
-      && scene?.getMlsMpmGpuParticleState?.()?.schema
-      && scene?.getSphReactionTable?.()?.reactionCount > 0
-      && typeof scene?.refreshMlsMpmResidentSteps === 'function'
-      && typeof scene?.refreshSphResidentRenderState === 'function'
-      && typeof overlay?.__sphUpdateResidentGasPressureSummary === 'function'
-    );
-  }, null, { timeout: 120_000 });
+  const openResidentReactionScenario = async (dropMaterial) => {
+    await page.goto(`/?drop=${encodeURIComponent(dropMaterial)}&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=sph&residentAuto=0&visualCapture=1&blob=1`);
+    if (await page.locator('#sph-phase-overlay').count() === 0) {
+      await page.locator('#run-sph-phase').click();
+    }
+    await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+    await page.waitForFunction(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const scene = overlay?.__sphScene;
+      return Boolean(
+        !overlay?.__sphCpuClosureTask?.active
+        && scene?.getSphGpuParticleState?.()?.schema
+        && scene?.getMlsMpmGpuParticleState?.()?.schema
+        && scene?.getSphReactionTable?.()?.reactionCount > 0
+        && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+        && typeof scene?.refreshSphResidentRenderState === 'function'
+        && typeof overlay?.__sphUpdateResidentGasPressureSummary === 'function'
+      );
+    }, null, { timeout: 120_000 });
+  };
+
+  await openResidentReactionScenario('Na');
 
   const runResidentReactionRefresh = async (reason) => page.evaluate(async (refreshReason) => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -5632,7 +5636,15 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     };
   }, reason);
 
-  const expectResidentReactionRefresh = (result, { expectPressureInterface = true } = {}) => {
+  const expectResidentReactionRefresh = (
+    result,
+    {
+      expectPressureInterface = true,
+      expectedMaterialKeys = ['Na', 'h2o', 'naoh', 'h2'],
+      expectDecodedMaxUnderGasCap = true,
+      expectGasRenderRows = true
+    } = {}
+  ) => {
     expect(result.status, JSON.stringify(result, null, 2))
       .toBe('resident-render-refresh-complete');
     expect(result.stepBackend).toBe('webgpu');
@@ -5708,11 +5720,15 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM).toBeGreaterThan(0);
     expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
       .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxSupportRadiusM + 1e-6);
-    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
-      .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxGasParticleRadiusM + 1e-5);
-    expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
-      .some((key) => key.endsWith('|gas'))).toBe(true);
-    expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(['Na', 'h2o', 'naoh', 'h2']));
+    if (expectDecodedMaxUnderGasCap) {
+      expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
+        .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxGasParticleRadiusM + 1e-5);
+    }
+    if (expectGasRenderRows) {
+      expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
+        .some((key) => key.endsWith('|gas'))).toBe(true);
+    }
+    expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(expectedMaterialKeys));
     expect(result.statusText).toContain('resident product');
     expect(result.statusText).toContain('render pressure  : source=gpu-resident-pressure-interface-spatial-gas-ledger');
   };
@@ -5745,6 +5761,24 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
   expect(afterReset.resetStatus?.schema).toBe('peercompute.ulg.sph-demo-reset-status.v0');
   expect(afterReset.resetStatus?.status).toBe('particle-state-resynced-after-reset');
   expectResidentReactionRefresh(afterReset, { expectPressureInterface: false });
+
+  await openResidentReactionScenario('K');
+  const potassium = await runResidentReactionRefresh('test-k-h2o-resident-product-pressure');
+  expectResidentReactionRefresh(potassium, {
+    expectedMaterialKeys: ['K', 'h2o', 'koh', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false
+  });
+  const potassiumContinued = await runResidentReactionRefresh('test-k-h2o-resident-product-pressure-continued');
+  expectResidentReactionRefresh(potassiumContinued, {
+    expectPressureInterface: false,
+    expectedMaterialKeys: ['K', 'h2o', 'koh', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false
+  });
+  expect(potassiumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+  expect(potassiumContinued.renderState?.gasPressureSummarySource)
+    .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
   expect(consoleIssues).toEqual([]);
 });
 

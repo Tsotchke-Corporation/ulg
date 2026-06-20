@@ -28,6 +28,10 @@ Status:
   the bank to 54 rows and leaving 57 selectable non-noble targets. This tranche
   exposed enough generator cost that the next coverage step should add
   generator-side intermediate caching before deeper lanthanide/actinide rows.
+- Added a local generator record cache under
+  `.cache/material-properties/element-records`, with `--cache-dir` override and
+  `--no-cache` escape hatch. Generation summaries now report cache hit, miss,
+  write, and stale counts.
 
 Validation:
 
@@ -36,6 +40,8 @@ Validation:
 - PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
   and `node --check tests/materialPropertyBank.test.mjs`.
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.
+- PASS: two `Nd` dry runs with `--cache-dir` default behavior showed first-run
+  `writeCount=1` and second-run `hitCount=1`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

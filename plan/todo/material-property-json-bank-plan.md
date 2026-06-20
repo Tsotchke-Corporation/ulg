@@ -112,6 +112,14 @@ pass, so the next implementation step should add a generator-side intermediate
 cache for closure/electronic-structure solves before pushing deep lanthanide,
 actinide, and superheavy coverage.
 
+Status update, 2026-06-19 AKDT: the generator now has a local intermediate
+record cache under `.cache/material-properties/element-records` by default.
+`--cache-dir=<path>` overrides it, `--no-cache` disables it, and generation
+JSON reports `cache.hitCount`, `missCount`, `writeCount`, and `staleCount`.
+This keeps dry-run/write review loops from recomputing expensive lanthanide and
+actinide rows. `.cache/` is ignored, so these intermediate closure artifacts
+stay local instead of becoming source-controlled material truth.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius
@@ -211,6 +219,9 @@ model, and element records have passed acceptance gates.
 - Cache generator intermediate closure/electronic-structure solves before
   expanding the remaining lanthanide, actinide, and superheavy rows; repeated
   dry-run/write passes are now slow enough to waste development time.
+  - Implemented first local record cache for generated element rows; remaining
+    improvement is deeper shared electronic-structure cache reuse across
+    multiple generator tools.
 
 ## Proposed File Layout
 

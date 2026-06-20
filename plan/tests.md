@@ -24,7 +24,12 @@ Focused checks:
   passed with `recordCount=54`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
-  the generated tranche and a bounded generator dry run.
+  the generated tranche and a bounded generator dry run with cache write/hit
+  assertions.
+- Generator cache smoke:
+  two manual `Nd` dry runs showed first-run cache `writeCount=1` and second-run
+  `hitCount=1`, proving repeated dry-run/write loops can avoid recomputing the
+  same row.
 - Build hygiene:
   `npm run build`, `git diff --check`, and `npm run icc:update` passed; the
   Vite build retained the existing large-chunk warning.

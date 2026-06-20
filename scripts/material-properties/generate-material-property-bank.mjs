@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
 import { ELEMENT_UI_METADATA } from '../../src/visualization/sphMaterialOptions.js';
@@ -25,6 +25,12 @@ const regenerate = args.has('--regenerate');
 const progress = args.has('--progress');
 const gridArg = process.argv.find((arg) => arg.startsWith('--grid='));
 const gridPointsN = Number.parseInt(gridArg?.split('=')[1] ?? '120', 10);
+const useCache = !args.has('--no-cache');
+const cacheDirArg = process.argv.find((arg) => arg.startsWith('--cache-dir='));
+const cacheDir = path.resolve(
+  repoDir,
+  cacheDirArg?.split('=').slice(1).join('=') || path.join('.cache', 'material-properties', 'element-records')
+);
 const limitArg = process.argv.find((arg) => arg.startsWith('--limit='));
 const generationLimit = limitArg ? Number.parseInt(limitArg.split('=')[1], 10) : Infinity;
 const symbolsArg = process.argv.find((arg) => arg.startsWith('--symbols='));
@@ -33,6 +39,14 @@ const requestedSymbols = symbolsArg
   : null;
 const generatedAtArg = process.argv.find((arg) => arg.startsWith('--generated-at='));
 const generatedAt = generatedAtArg?.split('=').slice(1).join('=') || '2026-06-19T00:00:00-08:00';
+const cacheStats = {
+  enabled: useCache,
+  cacheDir,
+  hitCount: 0,
+  missCount: 0,
+  writeCount: 0,
+  staleCount: 0
+};
 
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'));
@@ -132,6 +146,68 @@ function transitionRecord(transition) {
   };
 }
 
+function recordCacheKey(symbol) {
+  const metadata = categoryMetadata(symbol);
+  return hashPayload({
+    generator: 'scripts/material-properties/generate-material-property-bank.mjs',
+    cacheVersion: 1,
+    recordSchema: MATERIAL_PROPERTY_BANK_RECORD_SCHEMA,
+    bankSchemaVersion: MATERIAL_PROPERTY_BANK_SCHEMA_VERSION,
+    symbol,
+    atomicNumber: zForSymbol(symbol),
+    atomicMassU: cleanNumber(ATOMIC_MASS_U[zForSymbol(symbol) - 1], 0),
+    category: metadata.category,
+    gridPointsN
+  });
+}
+
+function recordCachePath(symbol) {
+  return path.join(cacheDir, `element-${symbol}-grid${gridPointsN}.json`);
+}
+
+async function readCachedRecord(symbol, cacheKey) {
+  if (!useCache) return null;
+  try {
+    const entry = await readJson(recordCachePath(symbol));
+    if (entry?.schema !== 'peercompute.ulg.material-property-bank-generator-cache.v0') {
+      cacheStats.staleCount += 1;
+      return null;
+    }
+    if (entry.cacheKey !== cacheKey || entry.gridPointsN !== gridPointsN || entry.symbol !== symbol) {
+      cacheStats.staleCount += 1;
+      return null;
+    }
+    normalizeMaterialPropertyBank({
+      schema: MATERIAL_PROPERTY_BANK_SCHEMA,
+      schemaVersion: MATERIAL_PROPERTY_BANK_SCHEMA_VERSION,
+      bankFamily: 'elements',
+      generatorFingerprint: 'cache-validation',
+      generatedAt,
+      records: [entry.record]
+    });
+    cacheStats.hitCount += 1;
+    return entry.record;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      cacheStats.staleCount += 1;
+    }
+    return null;
+  }
+}
+
+async function writeCachedRecord(symbol, cacheKey, record) {
+  if (!useCache || !record) return;
+  await mkdir(cacheDir, { recursive: true });
+  await writeFile(recordCachePath(symbol), `${JSON.stringify({
+    schema: 'peercompute.ulg.material-property-bank-generator-cache.v0',
+    cacheKey,
+    symbol,
+    gridPointsN,
+    record
+  }, null, 2)}\n`);
+  cacheStats.writeCount += 1;
+}
+
 function recordForSymbol(symbol) {
   const metadata = categoryMetadata(symbol);
   const Z = zForSymbol(symbol);
@@ -198,6 +274,22 @@ function recordForSymbol(symbol) {
   };
 }
 
+async function recordForSymbolCached(symbol) {
+  const cacheKey = recordCacheKey(symbol);
+  const cached = await readCachedRecord(symbol, cacheKey);
+  if (cached) {
+    if (progress) process.stderr.write(`[material-bank] cache hit ${symbol}\n`);
+    return cached;
+  }
+  cacheStats.missCount += useCache ? 1 : 0;
+  if (progress) {
+    process.stderr.write(`[material-bank] deriving ${symbol} (${generated.length + 1}/${Number.isFinite(generationLimit) ? generationLimit : 'all'})\n`);
+  }
+  const record = recordForSymbol(symbol);
+  await writeCachedRecord(symbol, cacheKey, record);
+  return record;
+}
+
 const existingBank = normalizeMaterialPropertyBank(await readJson(bankPath));
 const existingBySymbol = new Map(existingBank.records.map((record) => [record.symbol, record]));
 const allTargetSymbols = condensedElementSymbols().map((entry) => entry.symbol);
@@ -215,10 +307,7 @@ for (const symbol of targetSymbols) {
     continue;
   }
   if (generated.length >= generationLimit) continue;
-  if (progress) {
-    process.stderr.write(`[material-bank] deriving ${symbol} (${generated.length + 1}/${Number.isFinite(generationLimit) ? generationLimit : 'all'})\n`);
-  }
-  const record = recordForSymbol(symbol);
+  const record = await recordForSymbolCached(symbol);
   if (!record) continue;
   generated.push(symbol);
   records.push(record);
@@ -257,6 +346,7 @@ process.stdout.write(`${JSON.stringify({
   recordCount: records.length,
   preservedCount: preserved.length,
   generatedCount: generated.length,
+  cache: cacheStats,
   remainingMissingCount: remainingMissing.length,
   remainingMissing,
   generated

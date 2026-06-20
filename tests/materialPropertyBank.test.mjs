@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -100,14 +102,17 @@ test('element material property bank includes the generated selectable prefix', 
   }
 });
 
-test('material property bank generator can plan a bounded dry-run tranche', async () => {
-  const { stdout } = await execFileAsync(process.execPath, [
+test('material property bank generator can plan and cache a bounded dry-run tranche', async () => {
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'ulg-material-bank-cache-'));
+  const args = [
     'scripts/material-properties/generate-material-property-bank.mjs',
     '--symbols=Be',
     '--regenerate',
     '--grid=32',
-    '--limit=1'
-  ], {
+    '--limit=1',
+    `--cache-dir=${cacheDir}`
+  ];
+  const { stdout } = await execFileAsync(process.execPath, args, {
     cwd: new URL('..', import.meta.url),
     maxBuffer: 1024 * 1024
   });
@@ -118,7 +123,18 @@ test('material property bank generator can plan a bounded dry-run tranche', asyn
   assert.equal(result.gridPointsN, 32);
   assert.equal(result.recordCount, 1);
   assert.deepEqual(result.generated, ['Be']);
+  assert.equal(result.cache.enabled, true);
+  assert.equal(result.cache.hitCount, 0);
+  assert.equal(result.cache.writeCount, 1);
   assert.ok(result.remainingMissingCount > 0);
+
+  const cached = JSON.parse((await execFileAsync(process.execPath, args, {
+    cwd: new URL('..', import.meta.url),
+    maxBuffer: 1024 * 1024
+  })).stdout);
+  assert.equal(cached.cache.hitCount, 1);
+  assert.equal(cached.cache.writeCount, 0);
+  assert.deepEqual(cached.generated, ['Be']);
 });
 
 test('material property bank rejects stale schema and invalid provenance rows', async () => {

@@ -128,7 +128,10 @@ current upload buffers into shader-side consumers. The sixth tranche reaches
 `Pr` with `Ba`, `La`, `Ce`, and `Pr`, bringing the bank to 54 rows and leaving
 57 targets; further lanthanide/actinide expansion should first add
 generator-side intermediate caching because repeated dry-run/write passes are
-now taking about a minute per four rows.
+now taking about a minute per four rows. That first cache is now present:
+generator runs read/write ignored local records under
+`.cache/material-properties/element-records`, expose cache hit/write counts in
+the JSON summary, and support `--cache-dir` plus `--no-cache`.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

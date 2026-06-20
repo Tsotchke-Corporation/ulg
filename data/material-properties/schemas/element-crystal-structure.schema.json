@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "element-crystal-structure.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "symbol",
+    "phase",
+    "structureKey",
+    "structureName",
+    "crystalSystem",
+    "spaceGroup",
+    "latticeConstants",
+    "unitCell",
+    "validity",
+    "fallbackPolicy",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "peercompute.ulg.material-property-bank.element-crystal-structure.v0" },
+    "symbol": { "type": "string", "pattern": "^[A-Z][a-z]?$" },
+    "phase": { "type": "string", "enum": ["solid"] },
+    "structureKey": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "structureName": { "type": "string", "minLength": 1 },
+    "strukturbericht": { "type": ["string", "null"] },
+    "crystalSystem": { "type": "string", "minLength": 1 },
+    "spaceGroup": {
+      "type": "object",
+      "required": ["number", "symbol"],
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": "integer", "minimum": 1, "maximum": 230 },
+        "symbol": { "type": "string", "minLength": 1 }
+      }
+    },
+    "latticeConstants": {
+      "type": "object",
+      "required": ["aAngstrom", "bAngstrom", "cAngstrom", "alphaDeg", "betaDeg", "gammaDeg"],
+      "additionalProperties": false,
+      "properties": {
+        "aAngstrom": { "type": "number", "exclusiveMinimum": 0 },
+        "bAngstrom": { "type": "number", "exclusiveMinimum": 0 },
+        "cAngstrom": { "type": "number", "exclusiveMinimum": 0 },
+        "alphaDeg": { "type": "number", "exclusiveMinimum": 0, "maximum": 180 },
+        "betaDeg": { "type": "number", "exclusiveMinimum": 0, "maximum": 180 },
+        "gammaDeg": { "type": "number", "exclusiveMinimum": 0, "maximum": 180 }
+      }
+    },
+    "unitCell": {
+      "type": "object",
+      "required": [
+        "atomsPerConventionalCell",
+        "densityKgPerM3",
+        "packingFraction",
+        "coordinationNumber"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "atomsPerConventionalCell": { "type": "number", "exclusiveMinimum": 0 },
+        "densityKgPerM3": { "type": "number", "exclusiveMinimum": 0 },
+        "packingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "coordinationNumber": { "type": "number", "minimum": 0 }
+      }
+    },
+    "validity": {
+      "type": "object",
+      "required": ["temperatureRangeK", "pressureRangePa", "referenceState"],
+      "additionalProperties": false,
+      "properties": {
+        "temperatureRangeK": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": 0 }
+        },
+        "pressureRangePa": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": 0 }
+        },
+        "referenceState": {
+          "type": "object",
+          "required": ["temperatureK", "pressurePa"],
+          "additionalProperties": false,
+          "properties": {
+            "temperatureK": { "type": "number", "minimum": 0 },
+            "pressurePa": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "fallbackPolicy": {
+      "type": "object",
+      "required": ["whenUnspecified", "particleInitialization"],
+      "additionalProperties": false,
+      "properties": {
+        "whenUnspecified": { "type": "string", "minLength": 1 },
+        "particleInitialization": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" }
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["family", "source", "method", "status", "units", "referenceState"],
+        "additionalProperties": false,
+        "properties": {
+          "family": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "method": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": [
+              "precomputed-json-bank",
+              "reference-fallback",
+              "reduced-estimate",
+              "exact-constant"
+            ]
+          },
+          "units": { "type": "string", "minLength": 1 },
+          "referenceState": { "type": "string", "minLength": 1 },
+          "quality": { "type": "string" },
+          "inputHash": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -311,6 +311,13 @@ This phase should feed particle initialization. Initial spacing or particle size
 should derive from material, temperature, pressure, phase/rest-density closure,
 target neighbor count, crystal/packing hints, and support-radius constraints.
 
+Current status, 2026-06-20 AKDT: the first Phase 2 seed is checked in and
+validated for active solid Li, Na, K, Rb, Cs, Fe, and Pd rows. The bank has
+schema/provenance/reference-state gates plus runtime lookup by symbol and
+structure key. It is still a warm-input seed; the open work is consuming these
+crystal/packing hints through algorithm-derived initialization, contact,
+MLS-MPM, and marching-cubes row schemas.
+
 ### Phase 3 - Common Compound Bank
 
 Create `data/material-properties/common-compounds.json` for the top 1000 common

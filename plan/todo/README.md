@@ -47,6 +47,30 @@ ready, but still fails closed on the existing
 rendering lane by fixing validation/presentation evidence, not by adding an
 overlay or reviving CPU mesh fallback.
 
+Current routing note, 2026-06-20 AKDT: the native browser console harness is
+clean after the submit-pacing slice, and frame capture can analyze captured PNG
+data in memory without artifact output. Native same-device readback validation
+now fails closed as `browser-frame-validation-required` when runtime pixel
+readback is disabled. The remaining native harness blocker is not WGSL or
+console spam: headless Chromium can destroy the native main-canvas WebGPU
+device after repeated native canvas submits, even in debug clear-only mode.
+The bridge now avoids duplicate bridge-ready RAF renders, bounds submit-fence
+waits, and pauses automatic redraw after a native submit timeout. Continue this
+lane by moving native presentation/physics synchronization into the planned
+engine/worker ownership split, keeping the consumer engine-integrated and
+fail-closed rather than adding an overlay.
+
+Current routing note, 2026-06-20 AKDT: the material JSON bank now has the first
+Phase 2 element crystalline-structure seed checked in and validated. The
+`element-crystal-structures` bank covers active solid Li, Na, K, Rb, Cs, Fe,
+and Pd rows with schema, provenance, reference-state, lattice, unit-cell,
+packing-fraction, and fallback-policy gates. Runtime normalization rejects
+stale/future crystal bank versions, duplicate structure keys, unknown
+provenance statuses, and missing units. Next material-bank work is to feed
+these crystal/packing hints into the algorithm-derived particle initialization,
+MLS-MPM/contact, and marching-cubes row contracts rather than treating them as
+renderer constants.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

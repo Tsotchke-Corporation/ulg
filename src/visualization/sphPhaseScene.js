@@ -475,6 +475,7 @@ const SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'extension-resident-s
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE = 'native-webgpu-surface-consumer';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS = 'native-webgpu-surface-consumer-ready';
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_DEBUG_MODES = new Set(['none', 'clear-only']);
+const SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS = 32;
 const SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE = Object.freeze({
   r: 0.08,
   g: 0.48,
@@ -620,6 +621,12 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
   const normalizedRendererBridge = rendererBridge ?? bridge?.rendererBridge ?? null;
   const nativeSurfaceConsumer =
     normalizedRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+  const bridgeControlsRuntimeReadback = Boolean(
+    bridge && Object.prototype.hasOwnProperty.call(bridge, 'enableRuntimePixelReadback')
+  );
+  const sameDeviceReadbackValidationEnabled = bridgeControlsRuntimeReadback
+    ? bridge.enableRuntimePixelReadback === true
+    : true;
   const normalizedMaxAttempts = Math.max(0, Math.round(Number(maxAttempts) || 0));
   const normalizedSubmittedDrawCount = Math.max(0, Math.round(Number(submittedDrawCount) || 0));
   const nativeSurfaceDebugClearOnly = Boolean(nativeSurfaceConsumer && debugClearOnly);
@@ -652,6 +659,7 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
   );
   const readbackSmokeValidationNeeded = Boolean(
     nativeSurfaceConsumer
+    && sameDeviceReadbackValidationEnabled
     && !readbackPending
     && !readbackPassedCurrentFormat
     && !readbackAttemptsExhausted
@@ -685,6 +693,9 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
     && nativeSurfaceSubmittedDrawsAvailable
   );
   const offscreenValidationSkippedReason = (() => {
+    if (nativeSurfaceConsumer && !sameDeviceReadbackValidationEnabled) {
+      return 'native WebGPU same-device validation readback is disabled; browser harness composited-frame analysis owns visible-output validation';
+    }
     if (!nativeSurfaceConsumer || offscreenValidationEligible || offscreenPassedCurrentFormat) return null;
     if (nativeSurfaceDebugClearOnly) {
       return 'native WebGPU debug clear-only validates the current texture; offscreen surface validation requires submitted surface draws';
@@ -693,6 +704,7 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
   })();
   const offscreenValidationNeeded = Boolean(
     offscreenValidationEligible
+    && sameDeviceReadbackValidationEnabled
     && !offscreenPending
     && !offscreenPassedCurrentFormat
     && !offscreenAttemptsExhausted
@@ -708,6 +720,9 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
     reason = nativeSurfaceDebugClearOnly
       ? 'native WebGPU debug clear-only still needs same-device readback smoke validation'
       : 'one or more native surface validation stages still need GPU work';
+  } else if (nativeSurfaceConsumer && !sameDeviceReadbackValidationEnabled) {
+    status = 'native-webgpu-surface-validation-browser-frame-required';
+    reason = 'native WebGPU same-device validation readback is disabled; browser harness composited-frame analysis owns visible-output validation';
   } else if (nativeSurfaceConsumer && (readbackPending || offscreenPending)) {
     status = 'native-webgpu-surface-validation-pending';
     reason = 'native surface validation readback is already pending';
@@ -753,6 +768,7 @@ export function resolveSphNativeWebGpuSurfaceValidationCadence({
     debugClearOnly: nativeSurfaceDebugClearOnly,
     validationScope,
     maxAttempts: normalizedMaxAttempts,
+    sameDeviceReadbackValidationEnabled,
     readbackSmokeValidationNeeded,
     readbackSmokeValidationPending: readbackPending,
     readbackSmokeValidationStatus: normalizedReadbackStatus,
@@ -4259,6 +4275,16 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.lastNativeSurfaceConsumerRafScheduleReason ?? null;
   target.renderBridgeNativeSurfaceConsumerRafBlockedReason =
     bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFencePending =
+    Boolean(bridge.nativeSurfaceConsumerSubmitFencePending);
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceSerial =
+    bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceReason =
+    bridge.nativeSurfaceConsumerSubmitFenceReason ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs =
+    bridge.nativeSurfaceConsumerSubmitFenceElapsedMs ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceTimedOut =
+    bridge.nativeSurfaceConsumerSubmitFenceTimedOut ?? null;
   target.renderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.renderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
   target.renderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
@@ -4358,6 +4384,16 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.lastNativeSurfaceConsumerRafScheduleReason ?? null;
   target.surfaceDrawRenderBridgeNativeSurfaceConsumerRafBlockedReason =
     bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFencePending =
+    Boolean(bridge.nativeSurfaceConsumerSubmitFencePending);
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceSerial =
+    bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceReason =
+    bridge.nativeSurfaceConsumerSubmitFenceReason ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs =
+    bridge.nativeSurfaceConsumerSubmitFenceElapsedMs ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceTimedOut =
+    bridge.nativeSurfaceConsumerSubmitFenceTimedOut ?? null;
   target.surfaceDrawRenderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.surfaceDrawRenderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
   target.surfaceDrawRenderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
@@ -11010,9 +11046,6 @@ export function createSphPhaseScene(container, {
         });
         sphResidentSurfaceDrawRenderBridge = previousBridge;
         scene.userData.sphResidentSurfaceDrawRenderBridge = previousBridge;
-        scheduleSphNativeWebGpuSurfaceConsumerFrame({
-          reason: 'native-webgpu-surface-consumer-bridge-reused'
-        });
         return previousBridge;
       }
       const module = device.createShaderModule({
@@ -11350,11 +11383,6 @@ export function createSphPhaseScene(container, {
       };
       sphResidentSurfaceDrawRenderBridge = bridge;
       scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
-      if (useNativeConsumer) {
-        scheduleSphNativeWebGpuSurfaceConsumerFrame({
-          reason: 'native-webgpu-surface-consumer-bridge-ready'
-        });
-      }
       return bridge;
     } catch (error) {
       return {
@@ -11391,6 +11419,11 @@ export function createSphPhaseScene(container, {
       bridge.nativeSurfaceConsumerRafBlockedReason = 'scene-not-running';
       return;
     }
+    if (bridge.nativeSurfaceConsumerSubmitFencePending) {
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending';
+      bridge.nativeSurfaceConsumerRafSustain = true;
+      return;
+    }
     if (nativeWebGpuSurfaceConsumerRaf != null) {
       bridge.nativeSurfaceConsumerRafBlockedReason = 'raf-already-pending';
       bridge.nativeSurfaceConsumerRafSustain = true;
@@ -11409,7 +11442,9 @@ export function createSphPhaseScene(container, {
       nativeWebGpuSurfaceConsumerRafHost = null;
       if (!running || sphResidentSurfaceDrawRenderBridge !== bridge) return;
       renderSphResidentSurfaceDrawOverlay({ reason });
-      scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
+      if (bridge.nativeSurfaceConsumerContinuousRaf === true) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
+      }
     });
   }
 
@@ -11419,6 +11454,18 @@ export function createSphPhaseScene(container, {
     rafHost.cancelAnimationFrame?.(nativeWebGpuSurfaceConsumerRaf);
     nativeWebGpuSurfaceConsumerRaf = null;
     nativeWebGpuSurfaceConsumerRafHost = null;
+  }
+
+  function isAutomaticSphNativeWebGpuSurfaceConsumerRenderReason(reason) {
+    const text = String(reason || '');
+    return (
+      text === 'animation-frame'
+      || text.includes('raf')
+      || text.includes('retry')
+      || text.includes('bridge-ready')
+      || text.includes('bridge-reused')
+      || text.includes('after-submit-fence')
+    );
   }
 
   function renderSphResidentSurfaceDrawOverlay({ reason = 'animation-frame' } = {}) {
@@ -11470,6 +11517,71 @@ export function createSphPhaseScene(container, {
         scheduleSphNativeWebGpuSurfaceConsumerFrame({
           reason: 'native-webgpu-surface-consumer-retry-after-gpu-work'
         });
+      }
+      return;
+    }
+    if (
+      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && bridge.nativeSurfaceConsumerSubmitFenceTimedOut === true
+      && isAutomaticSphNativeWebGpuSurfaceConsumerRenderReason(reason)
+    ) {
+      const status = 'resident-surface-draw-skipped-native-submit-fence-timeout';
+      bridge.lastRenderStatusPreservedAfterNativeSubmitFence = true;
+      bridge.lastRenderStatusPreservedReason = status;
+      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
+      bridge.lastRenderSkipStatus = status;
+      bridge.lastRenderSkipReason =
+        'native WebGPU surface submit fence timed out; automatic native redraw is paused until a fresh resident draw is ready';
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-timeout';
+      scene.userData.sphResidentSurfaceDrawRenderSkip = {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
+        status,
+        reason: bridge.lastRenderSkipReason,
+        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      if (sphResidentSurfaceDraw) {
+        sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
+      }
+      if (sphResidentRenderState) {
+        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
+      }
+      return;
+    }
+    if (
+      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && bridge.nativeSurfaceConsumerSubmitFencePending
+    ) {
+      const status = 'resident-surface-draw-skipped-native-submit-fence-pending';
+      bridge.lastRenderStatusPreservedAfterNativeSubmitFence = true;
+      bridge.lastRenderStatusPreservedReason = status;
+      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
+      bridge.lastRenderSkipStatus = status;
+      bridge.lastRenderSkipReason = 'native WebGPU surface submit fence is pending';
+      scene.userData.sphResidentSurfaceDrawRenderSkip = {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
+        status,
+        reason: bridge.lastRenderSkipReason,
+        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      if (sphResidentSurfaceDraw) {
+        sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
+      }
+      if (sphResidentRenderState) {
+        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
       }
       return;
     }
@@ -19806,14 +19918,6 @@ export function createSphPhaseScene(container, {
     reason = 'resident-surface-draw-submit',
     renderStatus = bridge?.lastRenderStatus ?? null
   } = {}) {
-    if (bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
-      bridge.lastSubmitFenceStatus = 'skipped-native-webgpu-surface-consumer';
-      publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-skipped-native-webgpu-surface-consumer', {
-        reason,
-        renderStatus
-      });
-      return null;
-    }
     if (typeof bridge?.device?.queue?.onSubmittedWorkDone !== 'function') {
       bridge.lastSubmitFenceStatus = 'unsupported';
       publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-unsupported', {
@@ -19825,36 +19929,103 @@ export function createSphPhaseScene(container, {
     const serial = residentSurfaceDrawSubmitFenceSerial + 1;
     residentSurfaceDrawSubmitFenceSerial = serial;
     const startedAtMs = nowMs();
+    const nativeConsumerFence = bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
     bridge.lastSubmitFenceSerial = serial;
     bridge.lastSubmitFenceStatus = 'pending';
+    if (nativeConsumerFence) {
+      bridge.nativeSurfaceConsumerSubmitFencePending = true;
+      bridge.nativeSurfaceConsumerSubmitFenceSerial = serial;
+      bridge.nativeSurfaceConsumerSubmitFenceReason = reason;
+      bridge.nativeSurfaceConsumerSubmitFenceStartedAtMs = startedAtMs;
+      bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = null;
+      bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
+      bridge.nativeSurfaceConsumerRafBlockedReason = null;
+    }
     publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-pending', {
       reason,
       renderStatus,
       startedAtMs
     });
-    const fence = bridge.device.queue.onSubmittedWorkDone()
-      .then(() => {
+    let nativeFenceTimeoutHandle = null;
+    const queueFence = bridge.device.queue.onSubmittedWorkDone()
+      .then(
+        () => ({ status: 'resolved' }),
+        (error) => ({ status: 'error', error })
+      );
+    const fenceSource = nativeConsumerFence
+      ? Promise.race([
+          queueFence,
+          new Promise((resolve) => {
+            nativeFenceTimeoutHandle = setTimeout(() => {
+              resolve({ status: 'timeout' });
+            }, SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS);
+          })
+        ])
+      : queueFence;
+    const fence = fenceSource
+      .then((result = { status: 'resolved' }) => {
+        if (nativeFenceTimeoutHandle != null) {
+          clearTimeout(nativeFenceTimeoutHandle);
+          nativeFenceTimeoutHandle = null;
+        }
         const elapsedMs = Math.max(0, nowMs() - startedAtMs);
-        bridge.lastSubmitFenceStatus = 'resolved';
+        if (result.status === 'error') {
+          const error = result.error;
+          const message = error instanceof Error ? error.message : String(error);
+          bridge.lastSubmitFenceStatus = 'error';
+          bridge.lastSubmitFenceReason = message;
+          if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
+            bridge.nativeSurfaceConsumerSubmitFencePending = false;
+            bridge.nativeSurfaceConsumerSubmitFenceReason = message;
+            if (
+              bridge.nativeSurfaceConsumerContinuousRaf === true
+              && running
+              && sphResidentSurfaceDrawRenderBridge === bridge
+            ) {
+              scheduleSphNativeWebGpuSurfaceConsumerFrame({
+                reason: 'native-webgpu-surface-consumer-after-submit-fence-error'
+              });
+            }
+          }
+          if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
+          return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-error', {
+            reason,
+            renderStatus,
+            error: message
+          });
+        }
+        const timedOut = result.status === 'timeout';
+        bridge.lastSubmitFenceStatus = timedOut ? 'timeout' : 'resolved';
         bridge.lastSubmitFenceElapsedMs = elapsedMs;
+        if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
+          bridge.nativeSurfaceConsumerSubmitFencePending = false;
+          bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
+          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = timedOut;
+          bridge.nativeSurfaceConsumerSubmitFenceReason = timedOut
+            ? `native WebGPU surface submit fence timed out after ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms`
+            : reason;
+          if (
+            bridge.nativeSurfaceConsumerContinuousRaf === true
+            && running
+            && sphResidentSurfaceDrawRenderBridge === bridge
+          ) {
+            scheduleSphNativeWebGpuSurfaceConsumerFrame({
+              reason: timedOut
+                ? 'native-webgpu-surface-consumer-after-submit-fence-timeout'
+                : 'native-webgpu-surface-consumer-after-submit-fence'
+            });
+          }
+        }
         if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
-        publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-resolved', {
+        publishResidentSurfaceDrawSubmitFence(timedOut
+          ? 'resident-surface-draw-submit-fence-timeout'
+          : 'resident-surface-draw-submit-fence-resolved', {
           reason,
           renderStatus,
-          elapsedMs
+          elapsedMs,
+          timeoutMs: timedOut ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null
         });
         return scene.userData.sphResidentSurfaceDrawSubmitFence;
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        bridge.lastSubmitFenceStatus = 'error';
-        bridge.lastSubmitFenceReason = message;
-        if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
-        return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-error', {
-          reason,
-          renderStatus,
-          error: message
-        });
       });
     residentSurfaceDrawSubmitFence = fence;
     bridge.lastSubmitFence = fence;
@@ -19974,9 +20145,14 @@ export function createSphPhaseScene(container, {
   }
   function animate() {
     if (!running) return;
-    controls.update();
+    const controlsChanged = Boolean(controls.update());
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
-    if (rendered) renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
+    const nativeSurfaceConsumerActive = Boolean(
+      sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+    );
+    if (rendered && (!nativeSurfaceConsumerActive || controlsChanged)) {
+      renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
+    }
     requestAnimationFrame(animate);
   }
   animate();

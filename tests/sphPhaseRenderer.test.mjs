@@ -2764,6 +2764,34 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(initial.validationScope, 'native-surface-draw');
   assert.equal(initial.status, 'native-webgpu-surface-validation-needed');
 
+  const browserFrameValidation = resolveSphNativeWebGpuSurfaceValidationCadence({
+    bridge: {
+      rendererBridge: 'native-webgpu-surface-consumer',
+      format: 'bgra8unorm',
+      enableRuntimePixelReadback: false,
+      readbackSmokeValidationStatus: 'not-run',
+      offscreenValidationStatus: 'not-run'
+    },
+    submittedDrawCount: 4
+  });
+  assert.equal(browserFrameValidation.validationEncoderRequired, false);
+  assert.equal(browserFrameValidation.sameDeviceReadbackValidationEnabled, false);
+  assert.equal(browserFrameValidation.readbackSmokeValidationNeeded, false);
+  assert.equal(browserFrameValidation.offscreenValidationNeeded, false);
+  assert.equal(browserFrameValidation.offscreenValidationEligible, true);
+  assert.equal(
+    browserFrameValidation.status,
+    'native-webgpu-surface-validation-browser-frame-required'
+  );
+  assert.match(
+    browserFrameValidation.reason,
+    /browser harness composited-frame analysis owns visible-output validation/
+  );
+  assert.match(
+    browserFrameValidation.offscreenValidationSkippedReason,
+    /same-device validation readback is disabled/
+  );
+
   const debugClearOnly = resolveSphNativeWebGpuSurfaceValidationCadence({
     rendererBridge: 'native-webgpu-surface-consumer',
     submittedDrawCount: 0,

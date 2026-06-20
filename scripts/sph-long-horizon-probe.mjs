@@ -586,17 +586,22 @@ function analyzePngFrame(bytes) {
 }
 
 async function persistCapturedFrames({ frames, frameDir }) {
-  if (!frameDir) {
+  const capturedFrames = Array.isArray(frames) ? frames : [];
+  if (!frameDir && capturedFrames.length === 0) {
     return {
       schema: 'peercompute.ulg.sph-probe-visual-frame-artifacts.v0',
       status: 'disabled',
       frameCount: 0,
+      analyzedFrameCount: 0,
+      writtenFrameCount: 0,
       frames: []
     };
   }
-  const capturedFrames = Array.isArray(frames) ? frames : [];
-  await mkdir(frameDir, { recursive: true });
+  const shouldWriteFrames = Boolean(frameDir);
+  if (shouldWriteFrames) await mkdir(frameDir, { recursive: true });
   const artifacts = [];
+  let writtenFrameCount = 0;
+  let analyzedFrameCount = 0;
   for (let index = 0; index < capturedFrames.length; index += 1) {
     const frame = capturedFrames[index] || {};
     const base = {
@@ -629,19 +634,26 @@ async function persistCapturedFrames({ frames, frameDir }) {
         ...base,
         status: base.status === 'captured' ? 'capture-missing-data-url' : base.status,
         path: null,
-        byteLength: 0
+        byteLength: 0,
+        png: null,
+        blankFrame: null
       });
       continue;
     }
-    const fileName = [
-      String(index).padStart(4, '0'),
-      `b${String(frame.batchIndex ?? 0).padStart(3, '0')}`,
-      safeArtifactToken(frame.phase || 'frame')
-    ].join('-') + '.png';
-    const filePath = path.join(frameDir, fileName);
     const bytes = Buffer.from(match[1], 'base64');
-    await writeFile(filePath, bytes);
+    let filePath = null;
+    if (shouldWriteFrames) {
+      const fileName = [
+        String(index).padStart(4, '0'),
+        `b${String(frame.batchIndex ?? 0).padStart(3, '0')}`,
+        safeArtifactToken(frame.phase || 'frame')
+      ].join('-') + '.png';
+      filePath = path.join(frameDir, fileName);
+      await writeFile(filePath, bytes);
+      writtenFrameCount += 1;
+    }
     const png = analyzePngFrame(bytes);
+    if (png?.status === 'ready') analyzedFrameCount += 1;
     artifacts.push({
       ...base,
       status: 'captured',
@@ -653,9 +665,11 @@ async function persistCapturedFrames({ frames, frameDir }) {
   }
   return {
     schema: 'peercompute.ulg.sph-probe-visual-frame-artifacts.v0',
-    status: 'ready',
-    frameDir,
+    status: shouldWriteFrames ? 'ready' : 'analyzed-in-memory',
+    frameDir: frameDir ?? null,
     frameCount: artifacts.filter((frame) => frame.status === 'captured').length,
+    analyzedFrameCount,
+    writtenFrameCount,
     frames: artifacts
   };
 }
@@ -2466,6 +2480,16 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
             surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFencePending:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFencePending ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceSerial:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceSerial ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceReason:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceReason ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceElapsedMs ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceTimedOut:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerSubmitFenceTimedOut ?? null,
             surfaceDrawRenderBridgeOffscreenValidationStatus:
               renderState.surfaceDrawRenderBridgeOffscreenValidationStatus ?? null,
             surfaceDrawRenderBridgeOffscreenValidationReason:
@@ -5821,6 +5845,7 @@ function analyzeTimeline(timeline, {
     && (
       nativeWebGpuSurfaceConsumerAccepted
       || nativeWebGpuSurfaceConsumerTextureReadbackUnavailable
+      || nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired
     )
   );
   if (
@@ -6235,7 +6260,8 @@ async function main() {
     if (timeline?.visualFrameCapture) {
       timeline.visualFrameCapture.artifactStatus = visualFrameArtifacts.status;
       timeline.visualFrameCapture.frameDir = visualFrameArtifacts.frameDir ?? null;
-      timeline.visualFrameCapture.writtenFrameCount = visualFrameArtifacts.frameCount ?? 0;
+      timeline.visualFrameCapture.analyzedFrameCount = visualFrameArtifacts.analyzedFrameCount ?? 0;
+      timeline.visualFrameCapture.writtenFrameCount = visualFrameArtifacts.writtenFrameCount ?? 0;
     }
     const analysis = analyzeTimeline(timeline, {
       ...thresholds,

@@ -12,15 +12,20 @@ import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { condensedElementSymbols } from '../src/runtime/material/elementClosures.js';
 import { createFirstPrinciplesMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
+  MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK_SCHEMA,
+  MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK_SCHEMA_VERSION,
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
   MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA,
   MATERIAL_PROPERTY_BANK_SCHEMA,
   MATERIAL_PROPERTY_BANK_SCHEMA_VERSION,
   buildMaterialPropertyBankGpuWarmInputTable,
   buildMaterialPropertyBankParticleSizePackingTable,
+  materialPropertyCrystalStructureByKey,
+  materialPropertyCrystalStructuresForSymbol,
   materialPropertyBankRecordBySymbol,
   materialPropertyBankWarmInput,
-  normalizeMaterialPropertyBank
+  normalizeMaterialPropertyBank,
+  normalizeMaterialPropertyCrystalStructureBank
 } from '../src/runtime/material/materialPropertyBank.js';
 
 async function readJson(path) {
@@ -34,6 +39,7 @@ function clone(value) {
 }
 
 const ACTIVE_ELEMENT_BANK_SYMBOLS = Object.freeze(['H', 'O', 'Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
+const ACTIVE_SOLID_CRYSTAL_BANK_SYMBOLS = Object.freeze(['Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
 const GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL = 'Ts';
 
 function selectablePrefixThrough(symbol) {
@@ -80,6 +86,81 @@ test('element material property bank covers active alkali and PBR probe elements
   assert.equal(palladium.symbol, 'Pd');
   assert.equal(palladium.mechanics.mlsMpmMaterialClass, 'transition-metal');
   assert.equal(palladium.opticalPbr.metalness, 1);
+});
+
+test('element crystal structure bank validates active solid packing seeds', async () => {
+  const bank = await readJson('../data/material-properties/element-crystal-structures.json');
+  const bankSchema = await readJson('../data/material-properties/schemas/element-crystal-structure-bank.schema.json');
+  const crystalSchema = await readJson('../data/material-properties/schemas/element-crystal-structure.schema.json');
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  ajv.addSchema(crystalSchema, crystalSchema.$id);
+  const validate = ajv.compile(bankSchema);
+
+  assert.equal(validate(bank), true, ajv.errorsText(validate.errors));
+  const normalized = normalizeMaterialPropertyCrystalStructureBank(bank);
+  assert.equal(normalized.schema, MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK_SCHEMA);
+  assert.equal(normalized.schemaVersion, MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK_SCHEMA_VERSION);
+  assert.equal(normalized.recordCount, ACTIVE_SOLID_CRYSTAL_BANK_SYMBOLS.length);
+
+  for (const symbol of ACTIVE_SOLID_CRYSTAL_BANK_SYMBOLS) {
+    const rows = materialPropertyCrystalStructuresForSymbol(normalized, symbol, { phase: 'solid' });
+    assert.equal(rows.length, 1, `${symbol} must have one active solid crystal row`);
+    assert.equal(rows[0].symbol, symbol);
+    assert.equal(rows[0].unitCell.densityKgPerM3 > 0, true);
+    assert.equal(rows[0].strictSourceOfTruth, undefined);
+    assert.ok(rows[0].provenance.some((entry) => entry.status === 'reference-fallback'));
+  }
+
+  const iron = materialPropertyCrystalStructureByKey(normalized, 'fe-bcc-alpha');
+  assert.equal(iron.symbol, 'Fe');
+  assert.equal(iron.strukturbericht, 'A2');
+  assert.equal(iron.spaceGroup.number, 229);
+  assert.equal(iron.unitCell.coordinationNumber, 8);
+
+  const palladium = materialPropertyCrystalStructureByKey(normalized, 'pd-fcc');
+  assert.equal(palladium.symbol, 'Pd');
+  assert.equal(palladium.strukturbericht, 'A1');
+  assert.equal(palladium.spaceGroup.number, 225);
+  assert.equal(palladium.unitCell.packingFraction, 0.74);
+});
+
+test('element crystal structure bank rejects stale schemas and invalid provenance rows', async () => {
+  const bank = await readJson('../data/material-properties/element-crystal-structures.json');
+
+  const stale = clone(bank);
+  stale.schemaVersion = 0;
+  assert.throws(
+    () => normalizeMaterialPropertyCrystalStructureBank(stale),
+    /unsupported material crystal structure bank schemaVersion: 0/
+  );
+
+  const future = clone(bank);
+  future.schemaVersion = MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK_SCHEMA_VERSION + 1;
+  assert.throws(
+    () => normalizeMaterialPropertyCrystalStructureBank(future),
+    /unsupported material crystal structure bank schemaVersion: 2/
+  );
+
+  const unknownProvenance = clone(bank);
+  unknownProvenance.records[0].provenance[0].status = 'unreviewed-table';
+  assert.throws(
+    () => normalizeMaterialPropertyCrystalStructureBank(unknownProvenance),
+    /material crystal structure provenance has unknown status: unreviewed-table/
+  );
+
+  const missingUnits = clone(bank);
+  delete missingUnits.records[0].provenance[0].units;
+  assert.throws(
+    () => normalizeMaterialPropertyCrystalStructureBank(missingUnits),
+    /material crystal structure provenance missing units/
+  );
+
+  const duplicateStructureKey = clone(bank);
+  duplicateStructureKey.records[1].structureKey = duplicateStructureKey.records[0].structureKey;
+  assert.throws(
+    () => normalizeMaterialPropertyCrystalStructureBank(duplicateStructureKey),
+    /duplicate material crystal structure key:/
+  );
 });
 
 test('element material property bank includes the generated selectable prefix', async () => {

@@ -1,0 +1,324 @@
+{
+  "schema": "peercompute.ulg.material-property-bank.element-crystal-structures.v0",
+  "schemaVersion": 1,
+  "bankFamily": "element-crystal-structures",
+  "generatorFingerprint": "ulg-element-crystal-structures-phase2-seed-2026-06-20",
+  "generatedAt": "2026-06-20T00:00:00-08:00",
+  "records": [
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Li",
+      "phase": "solid",
+      "structureKey": "li-bcc-alpha",
+      "structureName": "body-centered cubic lithium",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 3.51,
+        "bAngstrom": 3.51,
+        "cAngstrom": 3.51,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 534,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 453.65],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Phase 2 seed provides a non-authoritative crystal packing warm input for solid lithium."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid lithium alpha phase",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Na",
+      "phase": "solid",
+      "structureKey": "na-bcc-alpha",
+      "structureName": "body-centered cubic sodium",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 4.29,
+        "bAngstrom": 4.29,
+        "cAngstrom": 4.29,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 968,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 370.87],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Active Na/H2O reaction probes need a stable solid sodium packing warm input."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid sodium alpha phase",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "K",
+      "phase": "solid",
+      "structureKey": "k-bcc-alpha",
+      "structureName": "body-centered cubic potassium",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 5.23,
+        "bAngstrom": 5.23,
+        "cAngstrom": 5.23,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 862,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 336.53],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Active alkali/H2O coverage should use a crystal packing seed when solid K is initialized."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid potassium alpha phase",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Rb",
+      "phase": "solid",
+      "structureKey": "rb-bcc-alpha",
+      "structureName": "body-centered cubic rubidium",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 5.59,
+        "bAngstrom": 5.59,
+        "cAngstrom": 5.59,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 1532,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 312.46],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "The selectable alkali material family should share the same Phase 2 crystal warm-input contract."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid rubidium alpha phase",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Cs",
+      "phase": "solid",
+      "structureKey": "cs-bcc-alpha",
+      "structureName": "body-centered cubic cesium",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 6.05,
+        "bAngstrom": 6.05,
+        "cAngstrom": 6.05,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 1873,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 301.59],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Active Cs/H2O reaction coverage needs a stable solid cesium packing warm input near room temperature."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid cesium alpha phase",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Fe",
+      "phase": "solid",
+      "structureKey": "fe-bcc-alpha",
+      "structureName": "body-centered cubic alpha iron",
+      "strukturbericht": "A2",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 229, "symbol": "Im-3m" },
+      "latticeConstants": {
+        "aAngstrom": 2.866,
+        "bAngstrom": 2.866,
+        "cAngstrom": 2.866,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 2,
+        "densityKgPerM3": 7874,
+        "packingFraction": 0.68,
+        "coordinationNumber": 8
+      },
+      "validity": {
+        "temperatureRangeK": [0, 1185],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-alpha-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Fe/H2O and iron-on-ice scenarios need a crystal packing hint for solid iron particles."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient alpha iron",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element-crystal-structure.v0",
+      "symbol": "Pd",
+      "phase": "solid",
+      "structureKey": "pd-fcc",
+      "structureName": "face-centered cubic palladium",
+      "strukturbericht": "A1",
+      "crystalSystem": "cubic",
+      "spaceGroup": { "number": 225, "symbol": "Fm-3m" },
+      "latticeConstants": {
+        "aAngstrom": 3.89,
+        "bAngstrom": 3.89,
+        "cAngstrom": 3.89,
+        "alphaDeg": 90,
+        "betaDeg": 90,
+        "gammaDeg": 90
+      },
+      "unitCell": {
+        "atomsPerConventionalCell": 4,
+        "densityKgPerM3": 12023,
+        "packingFraction": 0.74,
+        "coordinationNumber": 12
+      },
+      "validity": {
+        "temperatureRangeK": [0, 1828.05],
+        "pressureRangePa": [0, 200000000],
+        "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 }
+      },
+      "fallbackPolicy": {
+        "whenUnspecified": "use-ambient-fcc-solid-structure",
+        "particleInitialization": "derive spacing from rest density, packing fraction, and target neighbor count",
+        "reason": "Pd PBR/mobile probes need solid transition-metal crystal packing metadata."
+      },
+      "provenance": [
+        {
+          "family": "element-crystal-structure",
+          "source": "ULG Phase 2 reviewed seed",
+          "method": "ambient crystallographic reference rounded for warm-start use",
+          "status": "reference-fallback",
+          "units": "angstrom, kg/m3, dimensionless packing fraction",
+          "referenceState": "ambient solid palladium",
+          "quality": "approximate-warm-input"
+        }
+      ]
+    }
+  ]
+}

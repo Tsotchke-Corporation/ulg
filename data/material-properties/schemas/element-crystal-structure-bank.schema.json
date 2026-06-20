@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peercompute.ulg.material-property-bank.element-crystal-structure-bank.schema.v0",
+  "type": "object",
+  "required": [
+    "schema",
+    "schemaVersion",
+    "bankFamily",
+    "generatorFingerprint",
+    "records"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "peercompute.ulg.material-property-bank.element-crystal-structures.v0" },
+    "schemaVersion": { "const": 1 },
+    "bankFamily": { "const": "element-crystal-structures" },
+    "generatorFingerprint": { "type": "string", "minLength": 1 },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "element-crystal-structure.schema.json" }
+    }
+  }
+}

@@ -48,6 +48,7 @@ import {
   materialPropertyBankWarmInput,
   normalizeMaterialPropertyBank
 } from './material/materialPropertyBank.js';
+import { DEFAULT_MATERIAL_PROPERTY_BANK } from './material/defaultMaterialPropertyBank.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -954,7 +955,7 @@ export function buildSphPhaseDemoState({
   adaptiveParticleSpacing = true,
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
-  materialPropertyBank = null,
+  materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {

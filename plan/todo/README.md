@@ -554,6 +554,13 @@ roles such as `h2o` instead of inventing compound rows. The remaining runtime
 work is default browser bank loading and actual GPU material-table /
 particle-size packing consumption.
 
+Current routing note, 2026-06-19 AKDT: default demo builds now load the
+checked-in element JSON bank via `defaultMaterialPropertyBank.js`; Vite bundles
+the JSON import successfully. Explicit callers can still pass
+`materialPropertyBank: null` to suppress bank metadata. The remaining
+material-bank runtime work is GPU material-table and particle-size packing
+consumption, plus full selectable non-noble element coverage.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

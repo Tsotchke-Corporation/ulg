@@ -30137,3 +30137,34 @@ Remaining:
 - Load/pass the JSON bank by default in the browser/demo path.
 - Convert attached warm inputs into accepted GPU material-table and
   particle-size packing rows.
+
+## 2026-06-19 AKDT - Default Material Bank Loader
+
+Status:
+
+- Added `src/runtime/material/defaultMaterialPropertyBank.js`, importing the
+  checked-in element JSON bank as a module.
+- `buildSphPhaseDemoState()` now uses the default bank unless callers pass
+  `materialPropertyBank: null`, so normal demo/view-state builds publish
+  particle-spacing warm-input metadata.
+- Verified Vite bundles the JSON import successfully.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/defaultMaterialPropertyBank.js`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "default material bank warm inputs|initial particle spacing adapts"` with `41/41`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` with `6/6`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=9`.
+- PASS: `npm run build` with the existing large chunk warning only.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Convert attached warm inputs into accepted GPU material-table and
+  particle-size packing rows.
+- Expand from active-row coverage to the full selectable non-noble element
+  list.

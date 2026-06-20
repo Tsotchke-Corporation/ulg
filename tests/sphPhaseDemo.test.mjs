@@ -127,10 +127,9 @@ test('demo initial particle spacing adapts to material density at role temperatu
   near(demo.state.smoothingLengthM, spacing.smoothingLengthM);
 });
 
-test('demo initial particle spacing carries accepted material bank warm inputs when supplied', async () => {
+test('demo initial particle spacing carries default material bank warm inputs', async () => {
   const materialPropertyBank = await readJson('../data/material-properties/elements.json');
   const demo = buildSphPhaseDemoState({
-    materialPropertyBank,
     dropParticleEdge: 1,
     baseParticleEdge: 1
   });

@@ -11738,3 +11738,25 @@ Material bank particle-spacing warm input hook, 2026-06-19 AKDT:
     compound row, and confirms the view-state handoff carries the metadata.
 - Whitespace:
   `git diff --check` passed.
+
+Default material bank loader, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/defaultMaterialPropertyBank.js`,
+  `node --check src/runtime/sphPhaseDemo.js`, and
+  `node --check tests/sphPhaseDemo.test.mjs` passed.
+- SPH demo suite command:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "default material bank warm inputs|initial particle spacing adapts"`
+  - Passed: `41/41`.
+  - The default demo path now publishes Fe warm-input metadata from the
+    checked-in element JSON bank without explicitly passing the bank option.
+- Material bank suite:
+  `node --test tests/materialPropertyBank.test.mjs` passed `6/6`.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=9`.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.
+- Whitespace:
+  `git diff --check` passed.

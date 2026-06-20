@@ -48,6 +48,14 @@ compound roles such as `h2o` are reported as absent instead of fabricated.
 This is the first particle-size packing hook; default browser loading of the
 JSON bank and GPU material-table packing are still open.
 
+Status update, 2026-06-19 AKDT: the checked-in element JSON bank now loads by
+default through `src/runtime/material/defaultMaterialPropertyBank.js` and Vite
+bundles the JSON import successfully. `buildSphPhaseDemoState()` still accepts
+`materialPropertyBank: null` for explicit no-bank scenarios, but normal demo
+builds now publish the warm-input metadata. The remaining integration gap is
+turning those attached rows into GPU material-table and particle-size packing
+buffers.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

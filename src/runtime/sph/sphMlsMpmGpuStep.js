@@ -112,6 +112,9 @@ const NO_FULL_READBACK_MODE = 'no-full-readback';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE = 'none';
+export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP = 'every-step';
+export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
+export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE = 'none';
 const P2G_ACCUMULATOR_COMPONENTS = 4;
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
 const ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA = 'peercompute.ulg.mls-mpm-resident-dispatch-topology.v0';
@@ -181,6 +184,21 @@ export function normalizeMlsMpmResidentCompactSummaryMode(value) {
     return MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE;
   }
   return MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP;
+}
+
+export function normalizeMlsMpmActiveGridPlanRefreshMode(value) {
+  const mode = String(value || MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP).trim().toLowerCase();
+  if (mode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY) {
+    return MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY;
+  }
+  if (
+    mode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE
+    || mode === 'skip'
+    || mode === 'disabled'
+  ) {
+    return MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE;
+  }
+  return MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP;
 }
 
 function compactSummaryStepCountForMode({
@@ -4127,9 +4145,13 @@ function createResidentActiveGridDispatchPolicy({
   stepCount = 1,
   readbackMode = FULL_READBACK_MODE,
   compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
+  activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   safetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
 } = {}) {
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
+  const normalizedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+    activeGridDispatchPlanRefreshMode
+  );
   const activeRequested = requested === true;
   const sequenceRequested = fusedResidentSequence === true;
   const enabled = activeRequested && sequenceRequested;
@@ -4142,6 +4164,7 @@ function createResidentActiveGridDispatchPolicy({
     stepCount,
     readbackMode,
     compactSummaryMode: normalizedCompactSummaryMode,
+    activeGridDispatchPlanRefreshMode: normalizedActiveGridDispatchPlanRefreshMode,
     safetyCells: enabled
       ? Math.max(1, Math.round(finiteNumber(
           safetyCells == null ? DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS : safetyCells,
@@ -4150,6 +4173,8 @@ function createResidentActiveGridDispatchPolicy({
       : 0,
     requiresNoFullReadback: enabled,
     requiresFinalOnlyCompactSummary: enabled,
+    allowsFinalOnlyActiveGridPlanRefresh:
+      normalizedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY,
     requiresFusedResidentSequence: activeRequested,
     requiresTrustworthyPositionBounds: enabled,
     requiresGridClearBeforeG2p: enabled,
@@ -4459,12 +4484,16 @@ export function createMlsMpmResidentStepsComputeTask({
   const readbackMode = taskStepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const stepCount = Math.max(1, Math.round(finiteNumber(taskStepOptions.stepCount, 1)));
   const compactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(taskStepOptions.compactSummaryMode);
+  const activeGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+    taskStepOptions.activeGridDispatchPlanRefreshMode
+  );
   const activeGridDispatchPolicy = createResidentActiveGridDispatchPolicy({
     requested: Boolean(taskStepOptions.fuseNoFullResidentMechanicsActiveGrid || taskStepOptions.fuseNoFullResidentActiveGrid),
     fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence),
     stepCount,
     readbackMode,
     compactSummaryMode,
+    activeGridDispatchPlanRefreshMode,
     safetyCells: taskStepOptions.activeGridSafetyCells ?? taskStepOptions.fusedActiveGridSafetyCells
   });
   const residentSequenceLaneContract = createResidentSequenceLaneContract({
@@ -4567,6 +4596,7 @@ export function createMlsMpmResidentStepsComputeTask({
       stepCount,
       readbackMode,
       compactSummaryMode,
+      activeGridDispatchPlanRefreshMode,
       activeGridDispatchPolicy,
       residentSequenceLaneContract,
       gpuFenceRequirement: gpuFence,
@@ -11681,6 +11711,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   fuseNoFullResidentMechanics = false,
   fuseNoFullResidentMechanicsActiveGrid = false,
   fuseNoFullResidentActiveGrid = false,
+  activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   activeGridSafetyCells = undefined,
   fusedActiveGridSafetyCells = undefined,
   onResidentStageProgress = null
@@ -11699,6 +11730,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const dtSeconds = finiteNumber(dt, 0);
   const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
+  const resolvedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+    activeGridDispatchPlanRefreshMode
+  );
+  const activeGridDispatchPlanRefreshFinalStep = sequenceIndex == null
+    || sequenceStepCount == null
+    || Math.max(0, Math.round(finiteNumber(sequenceIndex, 0))) >= Math.max(0, Math.round(finiteNumber(sequenceStepCount, 1)) - 1);
   const residentLaneCopyBudget = gpuResidentLaneCopyBudgetOverride || estimateResidentGpuLaneCopyBudget({
     sphParticleState,
     mlsMpmParticleState,
@@ -11999,9 +12036,23 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
   const compactSummaryRequested = requestedReadbackMode === NO_FULL_READBACK_MODE
     && typeof summaryRunner === 'function';
-  const activeGridDispatchPlanOnlyRequested = requestedReadbackMode === NO_FULL_READBACK_MODE
+  const activeGridDispatchPlanRefreshRequested = resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP
+    || (
+      resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY
+      && activeGridDispatchPlanRefreshFinalStep
+    );
+  const activeGridDispatchPlanOnlyEligible = requestedReadbackMode === NO_FULL_READBACK_MODE
     && !compactSummaryRequested
     && fusedMechanics?.activeGridDispatch?.useActiveGrid === true;
+  const activeGridDispatchPlanOnlyRequested = activeGridDispatchPlanOnlyEligible
+    && activeGridDispatchPlanRefreshRequested;
+  const activeGridDispatchPlanRefreshSkippedReason = activeGridDispatchPlanOnlyEligible && !activeGridDispatchPlanOnlyRequested
+    ? (
+      resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE
+        ? 'active-grid-plan-refresh-disabled'
+        : 'active-grid-plan-refresh-deferred-until-final-step'
+    )
+    : null;
   let compactGpuSummary = null;
   stageMs.compactSummary = 0;
   if (
@@ -12113,6 +12164,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     preferWebGpu,
     compactSummaryRequested,
     activeGridDispatchPlanOnlyRequested,
+    activeGridDispatchPlanOnlyEligible,
+    activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
+    activeGridDispatchPlanRefreshRequested,
+    activeGridDispatchPlanRefreshFinalStep,
+    activeGridDispatchPlanRefreshSkippedReason,
     compactSummaryScope: resolvedCompactSummaryScope,
     thermalRequested: Boolean(thermalMaterialTable),
     mechanicsRefreshRequested: Boolean(thermalStep && mechanicsMaterialTable),
@@ -12720,6 +12776,12 @@ function summarizeResidentStepForSequence(step, index) {
           dispatchTopology: step.stageTiming.dispatchTopology || step.dispatchTopology || null,
           activeGridDispatch: step.stageTiming.activeGridDispatch || null,
           activeGridIndirectDispatch: step.stageTiming.activeGridIndirectDispatch || null,
+          activeGridDispatchPlanOnlyRequested: step.stageTiming.activeGridDispatchPlanOnlyRequested ?? null,
+          activeGridDispatchPlanOnlyEligible: step.stageTiming.activeGridDispatchPlanOnlyEligible ?? null,
+          activeGridDispatchPlanRefreshMode: step.stageTiming.activeGridDispatchPlanRefreshMode ?? null,
+          activeGridDispatchPlanRefreshRequested: step.stageTiming.activeGridDispatchPlanRefreshRequested ?? null,
+          activeGridDispatchPlanRefreshFinalStep: step.stageTiming.activeGridDispatchPlanRefreshFinalStep ?? null,
+          activeGridDispatchPlanRefreshSkippedReason: step.stageTiming.activeGridDispatchPlanRefreshSkippedReason ?? null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null
         }
       : null,
@@ -12871,12 +12933,16 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   retainIntermediateSteps = false,
   compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
   compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
+  activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   onResidentStageProgress = null,
   ...args
 } = {}) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const resolvedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
+  const resolvedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+    activeGridDispatchPlanRefreshMode
+  );
   let sphParticleState = args.sphParticleState;
   let mlsMpmParticleState = args.mlsMpmParticleState;
   let sphParticleUpload = args.sphParticleUpload ?? null;
@@ -12895,6 +12961,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         stepCount: count,
         compactSummaryMode: resolvedCompactSummaryMode,
         compactSummaryScope: resolvedCompactSummaryScope,
+        activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
         updatedAtMs: nowMs(),
         ...extra
       });
@@ -12992,6 +13059,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       completedStepCount: count,
       compactSummaryMode: resolvedCompactSummaryMode,
       compactSummaryScope: resolvedCompactSummaryScope,
+      activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
       retainIntermediateSteps,
       retainedIntermediateStepCount: 0,
       retainedSteps,
@@ -13042,6 +13110,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       sourceSlot,
       compactSummaryScope: resolvedCompactSummaryScope,
       fuseNoFullResidentMechanics: requestPerStepFusedNoFullMechanics,
+      activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
       sequenceIndex: index,
       sequenceStepCount: count,
       onResidentStageProgress(progress = {}) {
@@ -13099,6 +13168,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     completedStepCount: stepSummaries.length,
     compactSummaryMode: resolvedCompactSummaryMode,
     compactSummaryScope: resolvedCompactSummaryScope,
+    activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
     retainIntermediateSteps,
     retainedIntermediateStepCount: retainedSteps.length,
     retainedSteps,

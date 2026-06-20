@@ -52,6 +52,25 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Active-grid plan-only summary work now has an explicit refresh cadence.
+  `runMlsMpmResidentStepWithOptionalWebGpu()` records whether a plan-only
+  active-grid summary was eligible, requested, deferred, or skipped, and
+  `runMlsMpmResidentStepsWithOptionalWebGpu()` accepts
+  `activeGridDispatchPlanRefreshMode`. The scene and probe default no-full /
+  no-summary resident runs to `final-only`, so intermediate thermal/reaction
+  batches can continue from conservative resident bounds without regenerating
+  the active-grid dispatch sidecar every substep. Focused coverage proves
+  thermal-blocked fused sequences defer intermediate plan-only summaries and
+  refresh the plan on the final step. Fresh 10k-ish three-batch native evidence
+  is `status=good`, `probeStatus=good`, zero browser console issues, zero
+  estimated readback bytes, active grid used, actual particles `9826`,
+  `activeGridDispatchPlanRefreshMode=final-only`,
+  `activeGridDispatchPlanOnlyRequested=true` on the final sampled step,
+  resident completed stage `9.9 ms`, thermal `0.3 ms`, mechanics refresh
+  `0.5 ms`, compact plan-only summary `3.2 ms`, native extraction `2.7 ms`,
+  translation `1.6 ms`, bridge reused, and visible native GPU consumer ready.
+  This is a cadence cleanup inside the current architecture; full
+  thermal-aware fused multi-step sequencing remains the larger target.
 - Mechanics-refresh material phase rows now have a resident WebGPU upload
   cache. `runMlsMpmMechanicsRefreshWebGpu()` can borrow
   `mechanicsMaterialPhaseUpload`, the scene maintains a signature-keyed

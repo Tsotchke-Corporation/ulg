@@ -29050,6 +29050,69 @@ Remaining:
   performance work. Local headless WebGPU canvas pixel readback still remains
   unreliable, so probe status is based on pipeline/render-source evidence.
 
+## 2026-06-19 16:20 AKDT - Added Particle Stability, PBR, And Drop Edge Todos
+
+Status:
+
+- Added `plan/todo/reaction-variable-particle-scale-stability-plan.md` for the
+  silent reaction-driven variable particle scale blow-up/reset failure. The
+  todo requires derived-radius invariants, physical caps, diagnostics, and
+  visual-sequence reproduction rather than a renderer-only clamp.
+- Added `plan/todo/particle-pbr-material-closure-rendering-plan.md` for black
+  particle/sphere PBR rendering, including sodium and common materials. The
+  todo requires particle modes to consume closure-derived optical/PBR rows and
+  explicit mobile/WebGL proxy diagnostics.
+- Added `plan/todo/drop-edge-large-size-respect-plan.md` for the report that
+  drop edge is not respected above `6`. The todo requires requested/effective
+  drop dimensions, particle placement, render bounds, resident uploads, and
+  reset state to agree or publish a concrete clamp reason.
+- Routed all three todos through `plan/todo/README.md`.
+
+Remaining:
+
+- Resume the active-grid plan-refresh cadence performance slice and validate
+  it with focused tests plus browser benchmark evidence.
+
+## 2026-06-19 16:30 AKDT - Active-Grid Plan Refresh Cadence
+
+Status:
+
+- Added `activeGridDispatchPlanRefreshMode` for resident MLS-MPM active-grid
+  plan-only summaries. The resident step timing now reports whether plan-only
+  active-grid summary generation was eligible, requested, final-step gated, or
+  deferred.
+- The scene and probe default no-full/no-summary resident runs to
+  `final-only`, which avoids regenerating the active-grid dispatch sidecar on
+  intermediate thermal/reaction substeps while preserving a final continuation
+  plan for the next resident batch.
+- The benchmark harness forwards and flattens the cadence mode and final-step
+  diagnostics.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` (`60/60`).
+- PASS:
+  `/tmp/ulg-bench-native-10k-active-grid-plan-final-only.json` completed
+  `status=complete`, scenario `status=good`, `probeStatus=good`, browser
+  console issues `0`, `estimatedReadbackBytesPerStep=0`,
+  `activeGridDispatchPlanRefreshMode=final-only`,
+  `activeGridDispatchPlanOnlyEligible=true`,
+  `activeGridDispatchPlanOnlyRequested=true`,
+  final sampled resident stage `9.9 ms`, native extraction `2.7 ms`, ULG
+  translation `1.6 ms`, and visible native GPU consumer ready.
+
+Remaining:
+
+- This reduces current-architecture plan-only summary cadence. The larger
+  architecture item is still a thermal-aware fused multi-step resident
+  sequence so thermal, reaction, mechanics refresh, and continuation plan
+  updates can share one lane-owned command sequence.
+
 ## 2026-06-19 14:55 AKDT - Benchmark Active-Grid Telemetry Repair
 
 Status:

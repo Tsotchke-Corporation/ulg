@@ -5997,6 +5997,97 @@ test('MLS-MPM resident steps avoid full-grid per-step fused fallback when therma
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
+test('MLS-MPM resident steps can defer active-grid plan-only summary until final thermal step', async () => {
+  const buffers = manualBuffers({
+    position: [1.25, 1.25, 1.25],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const thermalInputs = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 3,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    activeGridSafetyCells: 1,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    thermalStepRunner(args) {
+      thermalInputs.push({
+        sourceStateBuffer: args.sourceStateBuffer?.label ?? null,
+        readbackMode: args.readbackMode
+      });
+      const index = thermalInputs.length;
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer(`deferred-thermal-state-${index}`),
+        thermoBuffer: tracker.buffer(`deferred-thermal-thermo-${index}`),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(execution.activeGridDispatchPlanRefreshMode, 'final-only');
+  assert.equal(execution.fusedResidentSequence, undefined);
+  assert.equal(thermalInputs.length, 3);
+  assert.equal(execution.stepSummaries.length, 3);
+  for (const summary of execution.stepSummaries.slice(0, 2)) {
+    assert.equal(summary.stageTiming.activeGridDispatchPlanOnlyEligible, true);
+    assert.equal(summary.stageTiming.activeGridDispatchPlanOnlyRequested, false);
+    assert.equal(summary.stageTiming.activeGridDispatchPlanRefreshMode, 'final-only');
+    assert.equal(summary.stageTiming.activeGridDispatchPlanRefreshFinalStep, false);
+    assert.equal(
+      summary.stageTiming.activeGridDispatchPlanRefreshSkippedReason,
+      'active-grid-plan-refresh-deferred-until-final-step'
+    );
+    assert.equal(summary.diagnostics.activeGridDispatchPlanStatus ?? null, null);
+  }
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanOnlyEligible, true);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanOnlyRequested, true);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanRefreshMode, 'final-only');
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanRefreshFinalStep, true);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanRefreshSkippedReason, null);
+  assert.equal(execution.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(execution.finalStep.compactGpuSummary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(
+    execution.nextSphParticleState.residentActiveGridDispatchPlanHint.status,
+    'active-grid-summary-dispatch-plan-hint-ready'
+  );
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
 test('MLS-MPM resident steps ping-pong unread retained buffers across repeated steps', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

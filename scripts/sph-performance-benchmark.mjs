@@ -57,6 +57,14 @@ const compactSummaryMode = ['none', 'final-only', 'every-step'].includes(
 )
   ? String(process.env.ULG_BENCH_COMPACT_SUMMARY_MODE).toLowerCase()
   : 'none';
+const activeGridPlanRefreshModeEnv = String(
+  process.env.ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE
+    || process.env.ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH
+    || ''
+).toLowerCase();
+const activeGridDispatchPlanRefreshMode = ['none', 'final-only', 'every-step'].includes(activeGridPlanRefreshModeEnv)
+  ? activeGridPlanRefreshModeEnv
+  : (compactSummaryMode === 'none' ? 'final-only' : 'every-step');
 const fuseResidentMechanicsSequence = !['0', 'false', 'off', 'no'].includes(
   String(process.env.ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE || '1').toLowerCase()
 );
@@ -729,6 +737,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     fusedResidentSequenceStepCount: residentStageTiming?.fusedResidentSequenceStepCount ?? null,
     fusedResidentSequenceRequested: fuseResidentMechanicsSequence,
     fusedResidentActiveGridRequested: fuseResidentMechanicsActiveGrid,
+    activeGridDispatchPlanRefreshModeRequested: activeGridDispatchPlanRefreshMode,
+    activeGridDispatchPlanRefreshMode: residentStageTiming?.activeGridDispatchPlanRefreshMode ?? null,
+    activeGridDispatchPlanRefreshRequested: residentStageTiming?.activeGridDispatchPlanRefreshRequested ?? null,
+    activeGridDispatchPlanRefreshFinalStep: residentStageTiming?.activeGridDispatchPlanRefreshFinalStep ?? null,
+    activeGridDispatchPlanOnlyEligible: residentStageTiming?.activeGridDispatchPlanOnlyEligible ?? null,
+    activeGridDispatchPlanOnlyRequested: residentStageTiming?.activeGridDispatchPlanOnlyRequested ?? null,
+    activeGridDispatchPlanRefreshSkippedReason: residentStageTiming?.activeGridDispatchPlanRefreshSkippedReason ?? null,
     gridNodeCount,
     activeGridNodeCount,
     activeGridNodeCountAvailable,
@@ -862,6 +877,7 @@ async function main() {
       ULG_PROBE_COMPACT_SUMMARY_SCOPE: 'particle-visual',
       ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE: fuseResidentMechanicsSequence ? '1' : '0',
       ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID: fuseResidentMechanicsActiveGrid ? '1' : '0',
+      ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE: activeGridDispatchPlanRefreshMode,
       ULG_PROBE_MEASURE_GPU_QUEUE_FENCE: measureGpuQueueFence ? '1' : '0',
       ...(fusedActiveGridSafetyCells ? {
         ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS: String(fusedActiveGridSafetyCells)
@@ -918,6 +934,7 @@ async function main() {
     surfaceDrawMode,
     fusedResidentMechanicsSequence: fuseResidentMechanicsSequence,
     fusedResidentMechanicsActiveGrid: fuseResidentMechanicsActiveGrid,
+    activeGridDispatchPlanRefreshMode,
     fusedActiveGridSafetyCells,
     measureGpuQueueFence,
     performanceGate: {

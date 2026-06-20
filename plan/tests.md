@@ -11016,3 +11016,32 @@ Native surface extraction timing split, 2026-06-19 15:25 AKDT:
     `residentRenderSourceStepDelta=4`,
     `residentRenderSourceTimeDeltaS=0.002`, and
     `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+
+Active-grid plan-refresh cadence, 2026-06-19 16:30 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check scripts/sph-performance-benchmark.mjs`, and
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
+- Focused tests:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `60/60`.
+  - New coverage proves thermal-blocked active-grid resident batches can defer
+    intermediate plan-only summaries with
+    `activeGridDispatchPlanRefreshMode=final-only`, then publish the next
+    active-grid dispatch plan on the final step.
+- Native no-full 10k-ish scene benchmark:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_OUTPUT=/tmp/ulg-bench-native-10k-active-grid-plan-final-only.json ULG_BENCH_PORT=5246 ULG_BENCH_TIMEOUT_MS=240000 npm run bench:sph-performance`
+  - Passed with scenario `status=good`, `probeStatus=good`, browser console
+    issues `0`, and `estimatedReadbackBytesPerStep=0`.
+  - Cadence telemetry: `activeGridDispatchPlanRefreshMode=final-only`,
+    `activeGridDispatchPlanOnlyEligible=true`,
+    `activeGridDispatchPlanOnlyRequested=true`,
+    `activeGridDispatchPlanRefreshFinalStep=true`, and no skipped reason on
+    the final sampled step.
+  - Timing: actual particles `9826`, resident completed stage `9.9 ms`,
+    thermal `0.3 ms`, mechanics refresh `0.5 ms`, compact plan-only summary
+    `3.2 ms`, native extraction `2.7 ms`, ULG translation `1.6 ms`, bridge
+    reused, and visible native GPU consumer ready.

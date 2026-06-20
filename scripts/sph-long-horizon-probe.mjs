@@ -401,6 +401,13 @@ function normalizedCompactSummaryScope(value, fallback = 'full') {
   return 'full';
 }
 
+function normalizedActiveGridPlanRefreshMode(value, fallback = 'final-only') {
+  const mode = String(value || fallback).trim().toLowerCase();
+  if (mode === 'none' || mode === 'skip' || mode === 'disabled') return 'none';
+  if (mode === 'final-only') return 'final-only';
+  return 'every-step';
+}
+
 function safeArtifactToken(value, fallback = 'frame') {
   const token = String(value || fallback)
     .trim()
@@ -996,6 +1003,7 @@ async function runBrowserProbe({
   renderEvery,
 	  readbackMode,
 	  compactSummaryMode,
+	  activeGridDispatchPlanRefreshMode = 'final-only',
 	  renderReadbackMode,
 	  renderRowsReadbackMode,
 	  renderFieldSurfaceSummaryMode,
@@ -1069,6 +1077,7 @@ async function runBrowserProbe({
       renderEvery: requestedRenderEvery,
       readbackMode: requestedReadbackMode,
       compactSummaryMode: requestedCompactSummaryMode,
+      activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       renderReadbackMode: requestedRenderReadbackMode,
       renderRowsReadbackMode: requestedRenderRowsReadbackMode,
       renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
@@ -1262,6 +1271,11 @@ async function runBrowserProbe({
         activeGridIndirectDispatch: stageTiming.activeGridIndirectDispatch
           ? { ...stageTiming.activeGridIndirectDispatch }
           : null,
+        activeGridDispatchPlanOnlyEligible: stageTiming.activeGridDispatchPlanOnlyEligible ?? null,
+        activeGridDispatchPlanRefreshMode: stageTiming.activeGridDispatchPlanRefreshMode ?? null,
+        activeGridDispatchPlanRefreshRequested: stageTiming.activeGridDispatchPlanRefreshRequested ?? null,
+        activeGridDispatchPlanRefreshFinalStep: stageTiming.activeGridDispatchPlanRefreshFinalStep ?? null,
+        activeGridDispatchPlanRefreshSkippedReason: stageTiming.activeGridDispatchPlanRefreshSkippedReason ?? null,
         thermalRequested: stageTiming.thermalRequested ?? null,
         mechanicsRefreshRequested: stageTiming.mechanicsRefreshRequested ?? null,
         reactionRequested: stageTiming.reactionRequested ?? null
@@ -1298,6 +1312,12 @@ async function runBrowserProbe({
         const number = Math.round(Number(value));
         return Number.isFinite(number) && number > 0 ? number : null;
       };
+      const activeGridPlanRefreshModeUrlParam = (value, fallback = 'final-only') => {
+        const mode = String(value || fallback).trim().toLowerCase();
+        if (mode === 'none' || mode === 'skip' || mode === 'disabled') return 'none';
+        if (mode === 'final-only') return 'final-only';
+        return 'every-step';
+      };
       const residentExecutionPolicyFromLocation = () => {
         const url = new URL(window.location.href);
         const query = new URLSearchParams(url.search);
@@ -1320,12 +1340,25 @@ async function runBrowserProbe({
           activeGridSafetyCells: positiveIntegerUrlParam(
             hash.get('residentActiveGridSafety') ?? query.get('residentActiveGridSafety')
           ),
+          activeGridDispatchPlanRefreshMode: activeGridPlanRefreshModeUrlParam(
+            hash.get('residentActiveGridPlanRefresh')
+              ?? query.get('residentActiveGridPlanRefresh')
+              ?? hash.get('activeGridPlanRefresh')
+              ?? query.get('activeGridPlanRefresh'),
+            'final-only'
+          ),
           measureFusedSequenceQueueFence: queueFence
         };
       };
-      const residentExecutionPolicy = overlay?.__mlsMpmResidentExecutionPolicy
+      const residentExecutionPolicyBase = overlay?.__mlsMpmResidentExecutionPolicy
         || overlay?.__mlsMpmResidentAutoSchedule?.residentExecutionPolicy
         || residentExecutionPolicyFromLocation();
+      const residentExecutionPolicy = {
+        ...residentExecutionPolicyBase,
+        activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode
+          || residentExecutionPolicyBase?.activeGridDispatchPlanRefreshMode
+          || 'final-only'
+      };
       if (overlay) overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
       const cohortRangesFromCounts = (counts = {}) => {
         const baseCount = Math.max(0, Math.round(Number(counts?.base) || 0));
@@ -3017,6 +3050,7 @@ async function runBrowserProbe({
       renderEvery,
       readbackMode,
       compactSummaryMode,
+      activeGridDispatchPlanRefreshMode,
       renderReadbackMode,
       renderRowsReadbackMode,
       renderFieldSurfaceSummaryMode,
@@ -3164,6 +3198,7 @@ async function runDirectResidentProbe({
   fuseResidentMechanicsSequence = false,
   fuseResidentMechanicsActiveGrid = false,
   fusedActiveGridSafetyCells = null,
+  activeGridDispatchPlanRefreshMode = 'final-only',
   measureGpuQueueFence = false
 }) {
   const browser = await launchProbeBrowser();
@@ -3189,6 +3224,7 @@ async function runDirectResidentProbe({
       fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
       fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
       fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells,
+      activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       measureGpuQueueFence: requestedMeasureGpuQueueFence,
       defaults
     }) => {
@@ -4144,6 +4180,7 @@ async function runDirectResidentProbe({
               fuseNoFullResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
               fuseNoFullResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
               activeGridSafetyCells: requestedFusedActiveGridSafetyCells,
+              activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
               measureFusedSequenceQueueFence: requestedMeasureGpuQueueFence
             });
             metrics.push(sample({
@@ -4215,6 +4252,7 @@ async function runDirectResidentProbe({
         fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
         fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
         fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells ?? null,
+        activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
         measureGpuQueueFence: requestedMeasureGpuQueueFence,
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         renderEveryBatches: 0,
@@ -4240,6 +4278,7 @@ async function runDirectResidentProbe({
       fuseResidentMechanicsSequence,
       fuseResidentMechanicsActiveGrid,
       fusedActiveGridSafetyCells,
+      activeGridDispatchPlanRefreshMode,
       measureGpuQueueFence,
       defaults: {
         wallTemperatureK: DEFAULT_WALL_TEMPERATURE_K,
@@ -5716,6 +5755,12 @@ async function main() {
   const fusedActiveGridSafetyCells = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS == null
     ? null
     : positiveInteger(process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS, null);
+  const activeGridDispatchPlanRefreshMode = normalizedActiveGridPlanRefreshMode(
+    process.env.ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE
+      ?? process.env.ULG_PROBE_RESIDENT_ACTIVE_GRID_PLAN_REFRESH
+      ?? process.env.ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH,
+    compactSummaryMode === 'none' ? 'final-only' : 'every-step'
+  );
   const measureGpuQueueFence = booleanEnv(
     process.env.ULG_PROBE_MEASURE_GPU_QUEUE_FENCE
     ?? process.env.ULG_PROBE_MEASURE_FUSED_SEQUENCE_QUEUE_FENCE,
@@ -5871,6 +5916,7 @@ async function main() {
         fuseResidentMechanicsSequence,
         fuseResidentMechanicsActiveGrid,
         fusedActiveGridSafetyCells,
+        activeGridDispatchPlanRefreshMode,
         measureGpuQueueFence
       })
       : await runBrowserProbe({
@@ -5881,8 +5927,9 @@ async function main() {
         batchSteps,
       renderEvery,
       readbackMode,
-      compactSummaryMode,
-      renderReadbackMode,
+        compactSummaryMode,
+        activeGridDispatchPlanRefreshMode,
+        renderReadbackMode,
         renderRowsReadbackMode,
         renderFieldSurfaceSummaryMode,
         surfaceDrawDiagnosticMode,

@@ -43,9 +43,12 @@ import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.j
 import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+  MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
+  MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE,
   destroyMlsMpmResidentStepsBuffers,
+  normalizeMlsMpmActiveGridPlanRefreshMode,
   normalizeMlsMpmResidentCompactSummaryMode,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runMlsMpmResidentStepsWithOptionalWebGpu,
@@ -7048,6 +7051,7 @@ export function createSphPhaseScene(container, {
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
     measureFusedSequenceQueueFence = false,
+    activeGridDispatchPlanRefreshMode = null,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined
   } = {}) {
@@ -7059,6 +7063,9 @@ export function createSphPhaseScene(container, {
     const normalizedActiveGridSafetyCells = Number.isFinite(Number(activeGridSafetyValue)) && Number(activeGridSafetyValue) > 0
       ? Math.max(1, Math.round(Number(activeGridSafetyValue)))
       : 'default';
+    const normalizedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+      activeGridDispatchPlanRefreshMode ?? MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP
+    );
     return [
       sphSignature,
       mlsSignature,
@@ -7076,6 +7083,7 @@ export function createSphPhaseScene(container, {
       dims.join(','),
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid) ? 1 : 0}`,
+      `activeGridPlanRefresh=${normalizedActiveGridDispatchPlanRefreshMode}`,
       `activeGridSafety=${normalizedActiveGridSafetyCells}`,
       `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`
     ].join('|');
@@ -12453,6 +12461,7 @@ export function createSphPhaseScene(container, {
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
     measureFusedSequenceQueueFence = false,
+    activeGridDispatchPlanRefreshMode = null,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined,
     thermalStepOptions: thermalStepOptionOverrides = null,
@@ -12504,6 +12513,14 @@ export function createSphPhaseScene(container, {
       fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
     );
     const requestedMeasureFusedSequenceQueueFence = Boolean(measureFusedSequenceQueueFence);
+    const requestedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+      activeGridDispatchPlanRefreshMode ?? (
+        requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+        && requestedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+          ? MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY
+          : MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP
+      )
+    );
     const activeGridSafetyValue = fusedActiveGridSafetyCells ?? activeGridSafetyCells;
     const normalizedActiveGridSafetyCells = Number.isFinite(Number(activeGridSafetyValue)) && Number(activeGridSafetyValue) > 0
       ? Math.max(1, Math.round(Number(activeGridSafetyValue)))
@@ -12513,6 +12530,7 @@ export function createSphPhaseScene(container, {
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+      activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
       compactSummaryMode: requestedCompactSummaryMode
     };
@@ -12556,6 +12574,7 @@ export function createSphPhaseScene(container, {
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+      activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
@@ -12761,6 +12780,7 @@ export function createSphPhaseScene(container, {
           fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
           fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
           measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+          activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
           activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
         let execution = null;
@@ -12935,6 +12955,7 @@ export function createSphPhaseScene(container, {
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
             fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
             measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+            activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
             activeGridSafetyCells: normalizedActiveGridSafetyCells
           }) !== signature
         ) {

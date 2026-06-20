@@ -35,6 +35,29 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: variable scaled particles can explode
+in apparent size during some chemical reactions, then reset or lock up the sim
+without console errors. Track this in
+`plan/todo/reaction-variable-particle-scale-stability-plan.md`. Treat it as a
+physics/runtime stability issue: radius/support must be derived from
+mass-density-phase-temperature-pressure closures with bounded per-step growth,
+explicit cap diagnostics, and browser visual-sequence evidence. Do not paper
+over it with a renderer-only clamp.
+
+Current routing note, 2026-06-19 AKDT: particle/sphere render modes can lose
+material PBR and show sodium or most substances as black spheres. Track this in
+`plan/todo/particle-pbr-material-closure-rendering-plan.md`. Treat it as an
+engine material-resolution bug: particle render modes must consume the same
+closure-derived optical/PBR rows as surfaces, with mobile/WebGL proxy material
+diagnostics when full PBR is unsupported.
+
+Current routing note, 2026-06-19 AKDT: the drop edge setting appears not to be
+respected for values larger than `6`. Track this in
+`plan/todo/drop-edge-large-size-respect-plan.md`. Treat it as a state
+initialization/particle placement bug: requested and effective drop dimensions,
+particle counts, render bounds, resident uploads, and reset flows must agree or
+publish an explicit clamp reason.
+
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
 retained GPU vertex counter into the surface-row translation pass. This

@@ -11476,3 +11476,19 @@ Retained spatial gas pressure promotion, 2026-06-19 AKDT:
     `gpu-resident-pressure-interface-spatial-gas-ledger`, ready retained
     spatial gas ledger cells, ready gas-cell EOS feedback, and render-state
     pressure from the promoted summary instead of baseline fallback.
+
+Consecutive resident reaction pressure sequence, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs` passed.
+- Whitespace:
+  `git diff --check` passed.
+- Mounted browser regression:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"`
+  - Passed: `1/1`.
+  - The harness now covers first resident pressure/render pass, consecutive
+    no-reset resident pressure/render pass, reset, and post-reset resident
+    pressure/render pass in one console-clean browser run.
+  - The consecutive pass keeps promoted pressure source
+    `gpu-resident-pressure-interface-spatial-gas-ledger`, pressure above
+    baseline, and render-state pressure input from the promoted summary.

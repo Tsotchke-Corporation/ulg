@@ -267,9 +267,8 @@ Validation:
 
 Remaining:
 
-- Add a longer browser reaction sequence once pressure-summary promotion is
-  wired, so gas/product ledgers feed later gas pressure and field visualization
-  without reintroducing giant visible gas particles.
+- Superseded by the consecutive resident reaction pressure sequence below; the
+  remaining sequence work is broader long-horizon coverage beyond Na/H2O.
 
 ## Implementation Status - 2026-06-19 AKDT
 
@@ -309,3 +308,26 @@ Remaining:
 - Add a longer browser reaction sequence so promoted gas/product ledgers feed
   subsequent gas pressure and field visualization over multiple resident
   batches without reintroducing giant visible gas particles.
+
+## Implementation Status - 2026-06-19 AKDT
+
+Extended the mounted Na/H2O browser sequence across consecutive resident
+batches:
+
+- The focused Playwright harness now runs first resident pressure/render pass,
+  a second consecutive resident pressure/render pass without reset, then reset,
+  then a post-reset resident pressure/render pass.
+- The consecutive pass requires the promoted pressure source to stay
+  `gpu-resident-pressure-interface-spatial-gas-ledger`, pressure to remain above
+  baseline, render state to consume the promoted pressure source, and all
+  existing G2P/render-row particle-scale bounds to remain active.
+
+Validation:
+
+- `node --check tests/demo.e2e.mjs`
+- `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"` passed `1/1`.
+
+Remaining:
+
+- Add broader long-horizon browser coverage with more resident batches and
+  representative reaction pairs beyond Na/H2O.

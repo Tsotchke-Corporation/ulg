@@ -57,10 +57,11 @@ readback. The retained spatial gas ledger is now promoted back into the sealed
 resident gas-pressure summary as
 `gpu-resident-pressure-interface-spatial-gas-summary`, and render refresh
 consumes `gpu-resident-pressure-interface-spatial-gas-ledger` instead of the
-baseline fallback. Remaining gap: add a longer browser reaction sequence that
-proves promoted gas/product ledgers keep feeding later pressure and field
-visualization over multiple resident batches. Do not treat these caps as the
-final physics model.
+baseline fallback. The browser gate now also runs a consecutive resident
+reaction/render pass before reset, proving the promoted pressure source remains
+active across multiple resident batches. Remaining gap: broaden long-horizon
+browser coverage beyond Na/H2O and beyond the focused three-pass sequence. Do
+not treat these caps as the final physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

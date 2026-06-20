@@ -29735,3 +29735,30 @@ Remaining:
 - Add a longer browser reaction sequence that keeps promoted gas/product
   ledgers feeding subsequent pressure and field visualization across multiple
   resident batches.
+
+## 2026-06-19 AKDT - Consecutive Resident Reaction Pressure Sequence
+
+Status:
+
+- Extended the focused mounted Na/H2O resident browser gate from first pass plus
+  reset pass to a three-pass sequence: first resident pressure/render pass,
+  second consecutive resident pressure/render pass without reset, then reset
+  and post-reset pass.
+- The consecutive pass requires promoted pressure source
+  `gpu-resident-pressure-interface-spatial-gas-ledger`, pressure above baseline,
+  render-state pressure from that same promoted source, and the existing
+  resident G2P/render-row particle-scale bounds.
+- This gives the pressure-promotion path a multi-batch browser guard without
+  adding a separate slow test file.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check`.
+- PASS:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"` with `1/1`.
+
+Remaining:
+
+- Broaden long-horizon browser coverage beyond Na/H2O and beyond this focused
+  three-pass sequence.

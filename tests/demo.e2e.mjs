@@ -5719,6 +5719,12 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
   const result = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure');
   expectResidentReactionRefresh(result);
 
+  const continued = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure-continued');
+  expectResidentReactionRefresh(continued, { expectPressureInterface: false });
+  expect(continued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+  expect(continued.renderState?.gasPressureSummarySource)
+    .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
+
   await page.evaluate(() => document.querySelector('#sph-reset')?.click());
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');

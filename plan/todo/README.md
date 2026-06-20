@@ -106,6 +106,21 @@ this CPU fence. Browser evidence at
 console-clean, and reports `particle-bin-overflow-readback-completed` with
 overflow count `0`.
 
+Current routing note, 2026-06-20 AKDT: the interim Three render-row bridge no
+longer forces full CPU render-row readback on every no-full visual refresh once
+the requested bridge kind already has visible geometry. The first
+`three-render-row-spheres`/points refresh still forces `full-parity-readback`
+to build CPU-owned Three geometry; subsequent explicit `no-full-readback`
+refreshes retain the previous matching bridge, report
+`resident-render-row-three-bridge-retained-no-full-readback`, and stamp the
+surface draw as stale retained visual evidence rather than current physics
+geometry. Browser evidence at `/tmp/ulg-render-row-retain-browser-probe.json`
+is console-clean and shows `renderRowsReadbackEffectiveMode=no-full-readback`,
+`renderRowsReadbackForcedForThreeBridge=false`, and
+`renderRowsReadbackRetainedPreviousBridge=true`. This is an interim cadence
+reduction only: fresh visible particle motion without CPU row readback still
+requires the native/engine-owned GPU render consumer path.
+
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by
 MLS-MPM packing. `createUlgRenderFieldBufferVolumeDescriptor()` selects the

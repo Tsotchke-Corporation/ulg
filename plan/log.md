@@ -31061,3 +31061,48 @@ Remaining:
 
 - Keep prefix-scan compact reaction bins conditional on measured overflow in
   dense chemistry scenarios; default no-full reaction runs remain readback-free.
+
+## 2026-06-20 AKDT - Three Render-Row No-Full Retention Slice
+
+Status:
+
+- The Three render-row readback planner now separates first-render correctness
+  from steady-state cadence. A Three points/spheres request still uses
+  `full-parity-readback` when no matching visible bridge exists, but an explicit
+  `no-full-readback` refresh with a matching visible bridge now keeps the
+  effective mode at `no-full-readback`.
+- The retained path reuses the existing Three bridge, sets
+  `renderRowsReadbackRetainedPreviousBridge=true`, and no longer reports
+  `renderRowsReadbackForcedForThreeBridge=true` on those steady-state frames.
+- Retained Three render-row visuals are now stamped as stale retained surface
+  evidence against the advanced resident physics source, rather than pretending
+  the old CPU geometry is current.
+
+Validation:
+
+- PASS:
+  `node --check src/visualization/sphPhaseScene.js`
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row particle|render-row sphere|resident render source"`
+  with `69/69`.
+- PASS:
+  `git diff --check -- src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`
+- Browser probe:
+  `/tmp/ulg-render-row-retain-browser-probe.json`
+  - Browser console issue/warning counts: `0/0`.
+  - Final retained surface draw reports
+    `status=resident-render-row-three-bridge-retained-no-full-readback`,
+    `visibleRendererBridge=three-render-row-spheres`,
+    `renderRowsReadbackEffectiveMode=no-full-readback`,
+    `renderRowsReadbackForcedForThreeBridge=false`, and
+    `renderRowsReadbackRetainedPreviousBridge=true`.
+  - Probe analysis remains `bad` by design for this interim path because the
+    retained no-full Three bridge is stale visual evidence and cannot prove
+    fresh CPU-visible motion (`resident-render-source-stale`,
+    `missing-max-speed`, `no-positive-displacement`).
+
+Remaining:
+
+- Finish the native/engine-owned GPU render consumer so visible particle/surface
+  motion can update from retained GPU buffers without CPU render-row readback
+  or stale retained Three geometry.

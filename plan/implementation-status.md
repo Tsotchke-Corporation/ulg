@@ -5976,3 +5976,28 @@ Still open:
 - Prefix-scan compact reaction bins should stay conditional on measured dense
   chemistry overflow. Next higher-leverage performance work remains resident
   sequence/cadence and reducing render-row readback pressure.
+
+## 2026-06-20 Status Update - Three Render-Row No-Full Retention
+
+Current state:
+
+- The interim Three render-row particle bridge no longer coerces every explicit
+  no-full refresh back to full CPU render-row readback. It still forces
+  `full-parity-readback` for the first frame or when the requested bridge kind
+  does not match the existing visible bridge.
+- When a matching Three render-row bridge is already visible, no-full refreshes
+  retain that bridge and report
+  `resident-render-row-three-bridge-retained-no-full-readback`,
+  `renderRowsReadbackEffectiveMode=no-full-readback`,
+  `renderRowsReadbackForcedForThreeBridge=false`, and
+  `renderRowsReadbackRetainedPreviousBridge=true`.
+- Retained Three geometry is now marked as stale retained visual evidence
+  against the advanced resident physics source. The browser probe is
+  console-clean, but the scientific analysis remains `bad` because stale Three
+  CPU geometry cannot prove fresh visible motion.
+
+Still open:
+
+- The actual performance/correctness fix is still the native/engine-owned GPU
+  render consumer: visible particles/surfaces must update from retained GPU
+  buffers without CPU render-row readback or stale retained Three geometry.

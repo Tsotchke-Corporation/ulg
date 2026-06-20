@@ -12272,3 +12272,31 @@ Reaction-bin overflow metadata debug readback, 2026-06-20 AKDT:
     `reactionParticleBinOverflowStatus=particle-bin-overflow-readback-completed`,
     `reactionParticleBinOverflowCount=0`, and
     `reactionParticleBinOverflowMetadataReadbackRequested=true`.
+
+Three render-row no-full retention slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Focused renderer tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row particle|render-row sphere|resident render source"`
+  - Passed: `69/69`.
+  - Covers first-frame full readback for Three render-row particles and
+    steady-state no-full retention when a matching bridge is already visible.
+- Whitespace:
+  `git diff --check -- src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`
+  passed.
+- Browser retention probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-render-row-retain-browser-probe.json ULG_PROBE_PORT=5679 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_REACTION_BIN_METADATA_READBACK=0 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=Na&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&renderer=native-webgpu&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
+  - Browser console issue/warning counts: `0/0`.
+  - Final retained surface draw at `timeline.metrics[2].surfaceDraw` reported
+    `status=resident-render-row-three-bridge-retained-no-full-readback`,
+    `visibleRendererBridge=three-render-row-spheres`,
+    `renderRowsReadbackEffectiveMode=no-full-readback`,
+    `renderRowsReadbackForcedForThreeBridge=false`,
+    `renderRowsReadbackRetainedPreviousBridge=true`,
+    `sourceResidentRenderSourceStatus=resident-render-source-stale-or-unknown`,
+    and `sourceResidentRetainedPrevious=true`.
+  - Overall probe status remains `bad` because this interim retained-Three path
+    intentionally lacks fresh CPU motion evidence (`resident-render-source-stale`,
+    `missing-max-speed`, `no-positive-displacement`).

@@ -569,23 +569,30 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
       : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   const threeBridge = Boolean(useThreeRenderRowBridge);
   const webGpuOverlayBridge = Boolean(useWebGpuRenderRowOverlayBridge);
-  const requestedRenderRowsReadbackModeResolved = webGpuOverlayBridge
-    ? RESIDENT_NO_FULL_READBACK_MODE
-    : (threeBridge
-      ? RESIDENT_FULL_READBACK_MODE
-      : requestedRenderRowsReadbackModeFromCaller);
-  const renderRowsReadbackModeCoercionReason = threeBridge
+  const retainPreviousThreeRenderRowBridgeNoFull = Boolean(
+    threeBridge
+    && previousThreeRenderRowBridgeVisible
     && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-    ? 'three-render-row-bridge-requires-fresh-physics-readback'
-    : null;
+  );
+  let requestedRenderRowsReadbackModeResolved = requestedRenderRowsReadbackModeFromCaller;
+  if (webGpuOverlayBridge || retainPreviousThreeRenderRowBridgeNoFull) {
+    requestedRenderRowsReadbackModeResolved = RESIDENT_NO_FULL_READBACK_MODE;
+  } else if (threeBridge) {
+    requestedRenderRowsReadbackModeResolved = RESIDENT_FULL_READBACK_MODE;
+  }
+  const renderRowsReadbackModeCoercionReason = retainPreviousThreeRenderRowBridgeNoFull
+    ? 'three-render-row-bridge-retains-previous-no-full-readback'
+    : (threeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+      ? 'three-render-row-bridge-requires-fresh-physics-readback'
+      : null);
   return {
     schema: 'peercompute.ulg.sph-resident-render-row-bridge-readback-plan.v0',
     requestedRenderRowsReadbackModeFromCaller,
     requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeResolved,
     renderRowsReadbackModeCoercionReason,
-    retainPreviousThreeRenderRowBridgeNoFull: false,
+    retainPreviousThreeRenderRowBridgeNoFull,
     previousThreeRenderRowBridgeVisible: Boolean(previousThreeRenderRowBridgeVisible),
-    freshPhysicsReadbackRequired: threeBridge,
+    freshPhysicsReadbackRequired: threeBridge && !retainPreviousThreeRenderRowBridgeNoFull,
     webGpuOverlayNoFullReadback: webGpuOverlayBridge
   };
 }
@@ -17554,12 +17561,15 @@ export function createSphPhaseScene(container, {
         || renderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
         ? renderRowsReadbackMode
         : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+      const requestedThreeRenderRowBridgeMode = (
+        requestedSurfaceDrawDiagnosticMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        || requestedSurfaceDrawDiagnosticMode === 'three-spheres'
+      )
+        ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        : SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE;
       const previousThreeRenderRowBridgeVisible = Boolean(
         previousResidentRenderBridge
-        && (
-          previousResidentRenderBridge.rendererBridge === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
-          || previousResidentRenderBridge.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
-        )
+        && previousResidentRenderBridge.rendererBridge === requestedThreeRenderRowBridgeMode
         && hasVisibleResidentSurfaceDrawBridge(previousResidentRenderBridge)
       );
       const renderRowReadbackPlan = resolveResidentRenderRowBridgeReadbackPlan({
@@ -18234,6 +18244,7 @@ export function createSphPhaseScene(container, {
             renderBridge.retainedPreviousOverlay = true;
             renderBridge.retentionReason = renderRowsReadbackModeCoercionReason;
             renderBridge.lastRenderStatus = `${renderBridge.rendererBridge || 'three-render-row'}-retained-no-full-readback`;
+            sphResidentSurfaceDrawRenderBridge = renderBridge;
             scene.userData.sphResidentSurfaceDrawRenderBridge = renderBridge;
           }
           const renderBridgeReady = renderBridge?.status === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS
@@ -18354,6 +18365,13 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeMaxParticleRadiusM = renderBridge?.maxParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
           nextResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = Boolean(renderBridge?.retainedPreviousOverlay);
+          if (renderBridgeRetainedPrevious) {
+            nextResidentSurfaceDraw.temporalSwapPolicy = SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY;
+            nextResidentSurfaceDraw.retainedPreviousOverlay = true;
+            nextResidentSurfaceDraw.retentionReason =
+              renderRowsReadbackModeCoercionReason
+              || 'previous Three render-row bridge retained for no-full render refresh';
+          }
           nextResidentSurfaceDraw.renderRowsReadbackRequestedMode = requestedRenderRowsReadbackModeFromCaller;
           nextResidentSurfaceDraw.renderRowsReadbackEffectiveMode = requestedRenderRowsReadbackMode;
           nextResidentSurfaceDraw.renderRowsReadbackCoercionReason = renderRowsReadbackModeCoercionReason;
@@ -18979,7 +18997,9 @@ export function createSphPhaseScene(container, {
         );
       }
       applyResidentRenderSourceMetadata(renderFieldExecution, residentRenderSource);
-      let retainingPreviousResidentSurfaceDraw = false;
+      let retainingPreviousResidentSurfaceDraw = Boolean(
+        nextResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
+      );
       if (
         shouldUseNativeWebGpuSurfaceConsumerBridge
         && nextResidentSurfaceDraw?.status === 'resident-surface-draw-unavailable'

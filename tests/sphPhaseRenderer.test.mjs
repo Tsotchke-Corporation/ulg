@@ -1607,11 +1607,11 @@ test('SPH render-row sphere bridge contract uses variable-size closure PBR', () 
   assert.equal(pointContract.pointsVertexColorOnly, true);
 });
 
-test('SPH Three render-row particle modes force fresh physics readback', () => {
+test('SPH Three render-row particle modes force initial fresh physics readback', () => {
   const plan = resolveResidentRenderRowBridgeReadbackPlan({
     requestedRenderRowsReadbackMode: 'no-full-readback',
     useThreeRenderRowBridge: true,
-    previousThreeRenderRowBridgeVisible: true
+    previousThreeRenderRowBridgeVisible: false
   });
 
   assert.equal(plan.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
@@ -1621,6 +1621,23 @@ test('SPH Three render-row particle modes force fresh physics readback', () => {
   assert.equal(
     plan.renderRowsReadbackModeCoercionReason,
     'three-render-row-bridge-requires-fresh-physics-readback'
+  );
+});
+
+test('SPH Three render-row particle modes retain previous bridge on no-full refresh', () => {
+  const retained = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useThreeRenderRowBridge: true,
+    previousThreeRenderRowBridgeVisible: true
+  });
+
+  assert.equal(retained.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
+  assert.equal(retained.requestedRenderRowsReadbackMode, 'no-full-readback');
+  assert.equal(retained.retainPreviousThreeRenderRowBridgeNoFull, true);
+  assert.equal(retained.freshPhysicsReadbackRequired, false);
+  assert.equal(
+    retained.renderRowsReadbackModeCoercionReason,
+    'three-render-row-bridge-retains-previous-no-full-readback'
   );
 
   const webgpu = resolveResidentRenderRowBridgeReadbackPlan({

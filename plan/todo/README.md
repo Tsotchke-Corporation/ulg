@@ -108,6 +108,15 @@ repro outside these covered URL paths or resident render-state bridge batches
 that actually publish more detail; do not hide this behind a visual scale or
 loosen the initialized edge contract.
 
+Current routing note, 2026-06-19 AKDT: material-property JSON bank Phase 1 is
+now an active bounded-generation lane instead of a hand-authored seed only.
+`npm run generate:material-properties` preserves existing rows unless
+`--regenerate` is passed, supports `--limit`/`--symbols` dry runs, and has
+checked-in first-tranche coverage for `Be`, `B`, `C`, `N`, and `F` on top of
+the nine active/PBR probe rows. Continue `plan/todo/material-property-json-bank-plan.md`
+by adding selectable non-noble elements in reviewable batches and then binding
+the packed rows from the current upload buffers into shader-side consumers.
+
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
 retained GPU vertex counter into the surface-row translation pass. This

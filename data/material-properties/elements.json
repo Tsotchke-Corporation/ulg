@@ -2,7 +2,7 @@
   "schema": "peercompute.ulg.material-property-bank.elements.v0",
   "schemaVersion": 1,
   "bankFamily": "elements",
-  "generatorFingerprint": "ulg-manual-element-seed-2026-06-19.v1",
+  "generatorFingerprint": "ulg:f158e645",
   "generatedAt": "2026-06-19T00:00:00-08:00",
   "records": [
     {
@@ -11,11 +11,17 @@
       "name": "Hydrogen",
       "atomicNumber": 1,
       "atomicMassU": 1.008,
-      "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 },
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
       "phases": [
         {
           "name": "gas",
-          "temperatureRangeK": [13.99, 2000],
+          "temperatureRangeK": [
+            13.99,
+            2000
+          ],
           "densityKgPerM3": 0.08375,
           "heatCapacityJPerKgK": 14300,
           "thermalConductivityWPerMK": 0.1805,
@@ -26,7 +32,11 @@
         }
       ],
       "transitions": [
-        { "name": "boiling", "temperatureK": 20.271, "latentHeatJPerKg": 445000 }
+        {
+          "name": "boiling",
+          "temperatureK": 20.271,
+          "latentHeatJPerKg": 445000
+        }
       ],
       "mechanics": {
         "mlsMpmMaterialClass": "gas",
@@ -35,7 +45,11 @@
         "spacingPolicy": "derive-from-eos-volume-not-lattice"
       },
       "opticalPbr": {
-        "baseColorSrgb": [0.92, 0.96, 1],
+        "baseColorSrgb": [
+          0.92,
+          0.96,
+          1
+        ],
         "metalness": 0,
         "roughness": 0.15,
         "ior": 1.000132,
@@ -145,15 +159,361 @@
     },
     {
       "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Be",
+      "name": "Beryllium",
+      "atomicNumber": 4,
+      "atomicMassU": 9.0122,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            1926.61353289
+          ],
+          "densityKgPerM3": 541.854340119,
+          "heatCapacityJPerKgK": 1936.47644206,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 38812507771.1,
+          "shearModulusPa": 17913465125.1,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            1926.61353289,
+            1000000
+          ],
+          "densityKgPerM3": 533.889081319,
+          "heatCapacityJPerKgK": 2072.02979301,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 38241963906.9,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 1926.61353289,
+          "latentHeatJPerKg": 1777452.36503
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "alkaline-earth-metal",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "close-packed-alkaline-earth-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.948628582883,
+          0.929494122159
+        ],
+        "metalness": 1,
+        "roughness": 0.42,
+        "ior": null,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:cdade4aa"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "B",
+      "name": "Boron",
+      "atomicNumber": 5,
+      "atomicMassU": 10.81,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            4491.16450825
+          ],
+          "densityKgPerM3": 935.293870426,
+          "heatCapacityJPerKgK": 1036.75048147,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 130198721657,
+          "shearModulusPa": 60091717688,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            4491.16450825,
+            1000000
+          ],
+          "densityKgPerM3": 921.54505053,
+          "heatCapacityJPerKgK": 1109.32301518,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 128284800449,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 4491.16450825,
+          "latentHeatJPerKg": 3454358.87401
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "metalloid-condensed-element",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "covalent-network-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.949120630319,
+          0.930184600582
+        ],
+        "metalness": 0.35,
+        "roughness": 0.55,
+        "ior": 1.5,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:b6b803b0"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "C",
+      "name": "Carbon",
+      "atomicNumber": 6,
+      "atomicMassU": 12.011,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            7978.9563843
+          ],
+          "densityKgPerM3": 1150.56651106,
+          "heatCapacityJPerKgK": 604.904853971,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 256096719832,
+          "shearModulusPa": 118198486076,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            7978.9563843,
+            1000000
+          ],
+          "densityKgPerM3": 1133.65318335,
+          "heatCapacityJPerKgK": 647.248193749,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 252332098050,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 7978.9563843,
+          "latentHeatJPerKg": 5523331.49703
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "condensed-nonmetal-element",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "condensed-nonmetal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.949304274023,
+          0.930401441095
+        ],
+        "metalness": 0,
+        "roughness": 0.7,
+        "ior": 1.5,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:e64f717c"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "N",
+      "name": "Nitrogen",
+      "atomicNumber": 7,
+      "atomicMassU": 14.007,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            12833.9133165
+          ],
+          "densityKgPerM3": 1605.13080762,
+          "heatCapacityJPerKgK": 325.460332191,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 492776247469,
+          "shearModulusPa": 227435191140,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            12833.9133165,
+            1000000
+          ],
+          "densityKgPerM3": 1581.53538475,
+          "heatCapacityJPerKgK": 348.242555445,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 485532436632,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 12833.9133165,
+          "latentHeatJPerKg": 7618126.11907
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "condensed-nonmetal-element",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "condensed-nonmetal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.949490057532,
+          0.930588757859
+        ],
+        "metalness": 0,
+        "roughness": 0.7,
+        "ior": 1.5,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:44aa23b2"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
       "symbol": "O",
       "name": "Oxygen",
       "atomicNumber": 8,
       "atomicMassU": 15.999,
-      "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 },
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
       "phases": [
         {
           "name": "gas",
-          "temperatureRangeK": [54.36, 2000],
+          "temperatureRangeK": [
+            54.36,
+            2000
+          ],
           "densityKgPerM3": 1.331,
           "heatCapacityJPerKgK": 918,
           "thermalConductivityWPerMK": 0.0266,
@@ -164,7 +524,11 @@
         }
       ],
       "transitions": [
-        { "name": "boiling", "temperatureK": 90.188, "latentHeatJPerKg": 213000 }
+        {
+          "name": "boiling",
+          "temperatureK": 90.188,
+          "latentHeatJPerKg": 213000
+        }
       ],
       "mechanics": {
         "mlsMpmMaterialClass": "gas",
@@ -173,7 +537,11 @@
         "spacingPolicy": "derive-from-eos-volume-not-lattice"
       },
       "opticalPbr": {
-        "baseColorSrgb": [0.85, 0.9, 1],
+        "baseColorSrgb": [
+          0.85,
+          0.9,
+          1
+        ],
         "metalness": 0,
         "roughness": 0.1,
         "ior": 1.000271,
@@ -201,38 +569,140 @@
     },
     {
       "schema": "peercompute.ulg.material-property-bank.element.v0",
-      "symbol": "Na",
-      "name": "Sodium",
-      "atomicNumber": 11,
-      "atomicMassU": 22.99,
-      "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 },
+      "symbol": "F",
+      "name": "Fluorine",
+      "atomicNumber": 9,
+      "atomicMassU": 18.998,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
       "phases": [
         {
           "name": "solid",
-          "temperatureRangeK": [0, 370.944],
-          "densityKgPerM3": 968,
-          "heatCapacityJPerKgK": 1230,
-          "thermalConductivityWPerMK": 142,
-          "bulkModulusPa": 6.3e9,
-          "shearModulusPa": 3.3e9,
+          "temperatureRangeK": [
+            0,
+            27829.3182411
+          ],
+          "densityKgPerM3": 3516.79847889,
+          "heatCapacityJPerKgK": 84.7629743146,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 1726106267410,
+          "shearModulusPa": 796664431111,
           "dynamicViscosityPaS": null,
           "surfaceTensionNPerM": null
         },
         {
           "name": "liquid",
-          "temperatureRangeK": [370.944, 1156.09],
+          "temperatureRangeK": [
+            27829.3182411,
+            1000000
+          ],
+          "densityKgPerM3": 3465.10154125,
+          "heatCapacityJPerKgK": 90.6963825166,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 1700732505280,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 27829.3182411,
+          "latentHeatJPerKg": 12179483.434
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "condensed-halogen-element",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "condensed-halogen-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.94996704877,
+          0.930977163482
+        ],
+        "metalness": 0,
+        "roughness": 0.7,
+        "ior": 1.5,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:4300a430"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Na",
+      "name": "Sodium",
+      "atomicNumber": 11,
+      "atomicMassU": 22.99,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            370.944
+          ],
+          "densityKgPerM3": 968,
+          "heatCapacityJPerKgK": 1230,
+          "thermalConductivityWPerMK": 142,
+          "bulkModulusPa": 6300000000,
+          "shearModulusPa": 3300000000,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            370.944,
+            1156.09
+          ],
           "densityKgPerM3": 927,
           "heatCapacityJPerKgK": 1300,
           "thermalConductivityWPerMK": 73,
-          "bulkModulusPa": 4.8e9,
+          "bulkModulusPa": 4800000000,
           "shearModulusPa": 0,
           "dynamicViscosityPaS": 0.00068,
           "surfaceTensionNPerM": 0.197
         }
       ],
       "transitions": [
-        { "name": "melting", "temperatureK": 370.944, "latentHeatJPerKg": 113000 },
-        { "name": "boiling", "temperatureK": 1156.09, "latentHeatJPerKg": 4230000 }
+        {
+          "name": "melting",
+          "temperatureK": 370.944,
+          "latentHeatJPerKg": 113000
+        },
+        {
+          "name": "boiling",
+          "temperatureK": 1156.09,
+          "latentHeatJPerKg": 4230000
+        }
       ],
       "mechanics": {
         "mlsMpmMaterialClass": "alkali-metal",
@@ -241,7 +711,11 @@
         "spacingPolicy": "derive-from-rest-density-and-phase"
       },
       "opticalPbr": {
-        "baseColorSrgb": [0.78, 0.74, 0.66],
+        "baseColorSrgb": [
+          0.78,
+          0.74,
+          0.66
+        ],
         "metalness": 1,
         "roughness": 0.32,
         "ior": null,
@@ -355,34 +829,51 @@
       "name": "Iron",
       "atomicNumber": 26,
       "atomicMassU": 55.845,
-      "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 },
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
       "phases": [
         {
           "name": "solid",
-          "temperatureRangeK": [0, 1811],
+          "temperatureRangeK": [
+            0,
+            1811
+          ],
           "densityKgPerM3": 7874,
           "heatCapacityJPerKgK": 449,
           "thermalConductivityWPerMK": 80.4,
-          "bulkModulusPa": 170e9,
-          "shearModulusPa": 82e9,
+          "bulkModulusPa": 170000000000,
+          "shearModulusPa": 82000000000,
           "dynamicViscosityPaS": null,
           "surfaceTensionNPerM": null
         },
         {
           "name": "liquid",
-          "temperatureRangeK": [1811, 3134],
+          "temperatureRangeK": [
+            1811,
+            3134
+          ],
           "densityKgPerM3": 6980,
           "heatCapacityJPerKgK": 820,
           "thermalConductivityWPerMK": 40,
-          "bulkModulusPa": 110e9,
+          "bulkModulusPa": 110000000000,
           "shearModulusPa": 0,
           "dynamicViscosityPaS": 0.006,
           "surfaceTensionNPerM": 1.9
         }
       ],
       "transitions": [
-        { "name": "melting", "temperatureK": 1811, "latentHeatJPerKg": 247000 },
-        { "name": "boiling", "temperatureK": 3134, "latentHeatJPerKg": 6090000 }
+        {
+          "name": "melting",
+          "temperatureK": 1811,
+          "latentHeatJPerKg": 247000
+        },
+        {
+          "name": "boiling",
+          "temperatureK": 3134,
+          "latentHeatJPerKg": 6090000
+        }
       ],
       "mechanics": {
         "mlsMpmMaterialClass": "transition-metal",
@@ -391,7 +882,11 @@
         "spacingPolicy": "derive-from-rest-density-and-phase"
       },
       "opticalPbr": {
-        "baseColorSrgb": [0.56, 0.53, 0.49],
+        "baseColorSrgb": [
+          0.56,
+          0.53,
+          0.49
+        ],
         "metalness": 1,
         "roughness": 0.38,
         "ior": null,
@@ -587,34 +1082,51 @@
       "name": "Cesium",
       "atomicNumber": 55,
       "atomicMassU": 132.91,
-      "referenceState": { "temperatureK": 293.15, "pressurePa": 101325 },
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
       "phases": [
         {
           "name": "solid",
-          "temperatureRangeK": [0, 301.59],
+          "temperatureRangeK": [
+            0,
+            301.59
+          ],
           "densityKgPerM3": 1930,
           "heatCapacityJPerKgK": 242,
           "thermalConductivityWPerMK": 35.9,
-          "bulkModulusPa": 1.6e9,
-          "shearModulusPa": 1.0e9,
+          "bulkModulusPa": 1600000000,
+          "shearModulusPa": 1000000000,
           "dynamicViscosityPaS": null,
           "surfaceTensionNPerM": null
         },
         {
           "name": "liquid",
-          "temperatureRangeK": [301.59, 944],
+          "temperatureRangeK": [
+            301.59,
+            944
+          ],
           "densityKgPerM3": 1840,
           "heatCapacityJPerKgK": 250,
           "thermalConductivityWPerMK": 17,
-          "bulkModulusPa": 1.2e9,
+          "bulkModulusPa": 1200000000,
           "shearModulusPa": 0,
           "dynamicViscosityPaS": 0.00065,
           "surfaceTensionNPerM": 0.07
         }
       ],
       "transitions": [
-        { "name": "melting", "temperatureK": 301.59, "latentHeatJPerKg": 15600 },
-        { "name": "boiling", "temperatureK": 944, "latentHeatJPerKg": 497000 }
+        {
+          "name": "melting",
+          "temperatureK": 301.59,
+          "latentHeatJPerKg": 15600
+        },
+        {
+          "name": "boiling",
+          "temperatureK": 944,
+          "latentHeatJPerKg": 497000
+        }
       ],
       "mechanics": {
         "mlsMpmMaterialClass": "alkali-metal",
@@ -623,7 +1135,11 @@
         "spacingPolicy": "derive-from-rest-density-and-phase"
       },
       "opticalPbr": {
-        "baseColorSrgb": [0.9, 0.78, 0.58],
+        "baseColorSrgb": [
+          0.9,
+          0.78,
+          0.58
+        ],
         "metalness": 1,
         "roughness": 0.28,
         "ior": null,

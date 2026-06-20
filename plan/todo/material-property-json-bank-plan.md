@@ -67,6 +67,17 @@ include it in the graph cache hash. Remaining Phase 1 work is full selectable
 non-noble element coverage and shader-side consumers that actually bind these
 rows beyond descriptor/upload availability.
 
+Status update, 2026-06-19 AKDT: the element bank now has a bounded generator
+entrypoint, `npm run generate:material-properties`, backed by
+`scripts/material-properties/generate-material-property-bank.mjs`. The generator
+preserves existing reviewed rows by default, can dry-run or write bounded
+tranches with `--limit`, and emits `reduced-estimate` rows from
+`elementMaterialClosure` with explicit `gridPointsN` provenance. The first
+generated selectable tranche adds `Be`, `B`, `C`, `N`, and `F`, bringing the
+checked-in bank to 14 rows. Full selectable non-noble coverage is still open:
+97 target rows remain after this tranche, so continue expanding in reviewable
+bounded batches instead of blocking on one full sweep.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

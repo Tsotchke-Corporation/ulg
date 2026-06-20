@@ -3,9 +3,9 @@
 # Architecture Summary
 
 - repo root: `/home/cos/projects/ulg`
-- files indexed: `349`
-- total lines indexed: `234210`
-- languages: `{"markdown": 133, "javascript": 109, "text": 89, "json": 17, "c": 1}`
+- files indexed: `350`
+- total lines indexed: `235085`
+- languages: `{"markdown": 133, "javascript": 109, "text": 90, "json": 17, "c": 1}`
 
 ## Important Files
 
@@ -47,18 +47,18 @@
 ## Top Modules
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
-- `tests`: 76 files, 46132 lines, symbols=0, tests=76, languages={"text": 76}
+- `tests`: 76 files, 46171 lines, symbols=0, tests=76, languages={"text": 76}
 - `src/runtime`: 31 files, 18793 lines, symbols=413, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 28 files, 39141 lines, symbols=861, tests=0, languages={"javascript": 28}
-- `plan/todo`: 24 files, 12760 lines, symbols=0, tests=0, languages={"markdown": 24}
+- `plan/todo`: 24 files, 12780 lines, symbols=0, tests=0, languages={"markdown": 24}
 - `src/runtime/material`: 20 files, 5227 lines, symbols=221, tests=0, languages={"javascript": 20}
-- `.`: 10 files, 2231 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
+- `.`: 10 files, 2232 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
 - `scripts`: 6 files, 9212 lines, symbols=0, tests=0, languages={"text": 6}
 - `src/services`: 5 files, 2195 lines, symbols=57, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 50935 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 50970 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `plan/moot`: 5 files, 1771 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `src/visualization`: 4 files, 26158 lines, symbols=526, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8620 lines, symbols=53, tests=0, languages={"javascript": 4}
@@ -66,21 +66,21 @@
 - `src`: 3 files, 684 lines, symbols=12, tests=0, languages={"javascript": 2, "text": 1}
 - `src/runtime/chemistry`: 2 files, 493 lines, symbols=33, tests=0, languages={"javascript": 2}
 - `data/material-properties/schemas`: 2 files, 155 lines, symbols=0, tests=0, languages={"json": 2}
+- `scripts/material-properties`: 2 files, 300 lines, symbols=0, tests=0, languages={"text": 2}
 - `tools/moonlab-microphysics`: 2 files, 98 lines, symbols=0, tests=0, languages={"markdown": 1, "c": 1}
 - `ulg-gpu-abi`: 2 files, 87 lines, symbols=0, tests=0, languages={"markdown": 1, "json": 1}
 - `src/runtime/materials`: 1 files, 158 lines, symbols=5, tests=0, languages={"javascript": 1}
-- `data/material-properties`: 1 files, 654 lines, symbols=0, tests=0, languages={"json": 1}
-- `scripts/material-properties`: 1 files, 36 lines, symbols=0, tests=0, languages={"text": 1}
+- `data/material-properties`: 1 files, 1170 lines, symbols=0, tests=0, languages={"json": 1}
 - `tests/fixtures`: 1 files, 79 lines, symbols=0, tests=1, languages={"text": 1}
 
 ## Largest source files (>=500 lines)
 
 | Lines | Path | Language |
 |---:|---|---|
-| 30216 | `plan/log.md` | markdown |
+| 30235 | `plan/log.md` | markdown |
 | 20145 | `src/visualization/sphPhaseScene.js` | javascript |
 | 13576 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
-| 11805 | `plan/tests.md` | markdown |
+| 11821 | `plan/tests.md` | markdown |
 | 8801 | `tests/demo.e2e.mjs` | text |
 | 6459 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
 | 6403 | `ulg-gpu-abi/src/wgsl.js` | javascript |
@@ -93,7 +93,7 @@
 | 3679 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 3651 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2955 | `plan/plan.md` | markdown |
-| 2632 | `plan/todo/README.md` | markdown |
+| 2641 | `plan/todo/README.md` | markdown |
 | 2551 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2173 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2091 | `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js` | javascript |

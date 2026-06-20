@@ -1,5 +1,30 @@
 # ULG Implementation Log
 
+## 2026-06-19 23:32 AKDT - Material Bank Generator First Tranche
+
+Status:
+
+- Added `scripts/material-properties/generate-material-property-bank.mjs` and
+  `npm run generate:material-properties` so the element JSON bank can be
+  expanded in bounded dry-run or write tranches.
+- Preserved existing bank rows by default and generated the first missing
+  selectable tranche, adding `Be`, `B`, `C`, `N`, and `F` as
+  `reduced-estimate` warm seeds from `elementMaterialClosure` with
+  `gridPointsN=80` provenance.
+- The checked-in element bank now contains 14 rows; 97 selectable non-noble
+  targets remain for later bounded batches before Phase 1 coverage is done.
+
+Validation:
+
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  reported `recordCount=14`.
+- PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
+  and `node --check tests/materialPropertyBank.test.mjs`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.
+- PASS: `npm run build` completed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: `npm run icc:update`.
+
 ## 2026-06-19 23:05 AKDT - Alkali Resident Reaction Scale Browser Coverage
 
 Status:

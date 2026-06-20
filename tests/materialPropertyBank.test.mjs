@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
@@ -22,11 +24,14 @@ async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'));
 }
 
+const execFileAsync = promisify(execFile);
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
 const ACTIVE_ELEMENT_BANK_SYMBOLS = Object.freeze(['H', 'O', 'Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
+const GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS = Object.freeze(['Be', 'B', 'C', 'N', 'F']);
 
 test('element material property bank validates against schema and normalizes lookup keys', async () => {
   const bank = await readJson('../data/material-properties/elements.json');
@@ -65,6 +70,40 @@ test('element material property bank covers active alkali and PBR probe elements
   assert.equal(palladium.symbol, 'Pd');
   assert.equal(palladium.mechanics.mlsMpmMaterialClass, 'transition-metal');
   assert.equal(palladium.opticalPbr.metalness, 1);
+});
+
+test('element material property bank includes the first generated selectable tranche', async () => {
+  const bank = normalizeMaterialPropertyBank(await readJson('../data/material-properties/elements.json'));
+  for (const symbol of GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS) {
+    const record = materialPropertyBankRecordBySymbol(bank, symbol);
+    assert.ok(record, `${symbol} must have a generated material bank row`);
+    assert.equal(record.provenance[0].status, 'exact-constant');
+    assert.ok(record.provenance.some((entry) => entry.status === 'reduced-estimate'));
+    assert.ok(record.provenance.some((entry) => entry.method.includes('gridPointsN=80')));
+    assert.equal(record.mechanics.spacingPolicy, 'derive-from-rest-density-and-phase');
+    assert.ok(record.opticalPbr, `${symbol} must have a PBR seed`);
+  }
+});
+
+test('material property bank generator can plan a bounded dry-run tranche', async () => {
+  const { stdout } = await execFileAsync(process.execPath, [
+    'scripts/material-properties/generate-material-property-bank.mjs',
+    '--symbols=Be',
+    '--regenerate',
+    '--grid=32',
+    '--limit=1'
+  ], {
+    cwd: new URL('..', import.meta.url),
+    maxBuffer: 1024 * 1024
+  });
+  const result = JSON.parse(stdout);
+
+  assert.equal(result.schema, 'peercompute.ulg.material-property-bank-generation.v0');
+  assert.equal(result.status, 'planned');
+  assert.equal(result.gridPointsN, 32);
+  assert.equal(result.recordCount, 1);
+  assert.deepEqual(result.generated, ['Be']);
+  assert.ok(result.remainingMissingCount > 0);
 });
 
 test('material property bank rejects stale schema and invalid provenance rows', async () => {

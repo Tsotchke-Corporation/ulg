@@ -10,6 +10,7 @@
     "icc:update": "node scripts/update-icc.mjs",
     "stage:service-assets": "node scripts/stage-service-assets.mjs",
     "status:live": "node scripts/live-status.mjs",
+    "generate:material-properties": "node scripts/material-properties/generate-material-property-bank.mjs",
     "validate:material-properties": "node scripts/material-properties/validate-material-property-bank.mjs",
     "bench:sph-performance": "node scripts/sph-performance-benchmark.mjs",
     "probe:sph-long-horizon": "node scripts/sph-long-horizon-probe.mjs",

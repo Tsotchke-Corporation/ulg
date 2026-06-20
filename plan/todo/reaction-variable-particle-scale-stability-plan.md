@@ -367,3 +367,29 @@ Remaining:
   and Cs/H2O sequences.
 - Add representative non-alkali or multivalent reaction pairs once their
   pressure/product routes have stable browser-ready expectations.
+
+## Implementation Status - 2026-06-20 AKDT
+
+Extended mounted alkali/H2O resident browser coverage into longer consecutive
+K/H2O and Cs/H2O sequences:
+
+- K/H2O now runs first pass plus two consecutive no-full resident continuation
+  batches. The second continuation asserts resident product carry-forward from
+  the first continuation, promoted spatial gas pressure above baseline, render
+  pressure consumption from `gpu-resident-pressure-interface-spatial-gas-ledger`,
+  and the same G2P/render-row particle-scale policies and support-radius bounds.
+- Cs/H2O now mirrors the same first pass plus two consecutive no-full resident
+  continuation batches for the heavier `Cs`, `csoh`, and `h2` path.
+- Na/H2O still covers first pass, continuation, reset, and post-reset resident
+  reaction/render behavior.
+
+Validation:
+
+- `node --check tests/demo.e2e.mjs`
+- `git diff --check -- tests/demo.e2e.mjs`
+- `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas pressure"` passed `1/1` in `4.7m`.
+
+Remaining:
+
+- Add representative non-alkali or multivalent reaction pairs once their
+  pressure/product routes have stable browser-ready expectations.

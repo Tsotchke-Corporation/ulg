@@ -6259,6 +6259,20 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
   expect(potassiumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(potassiumContinued.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
+  const potassiumLongHorizon = await runResidentReactionRefresh('test-k-h2o-resident-product-pressure-long-horizon', {
+    continueFromResidentState: true
+  });
+  expectResidentReactionRefresh(potassiumLongHorizon, {
+    expectPressureInterface: false,
+    expectedMaterialKeys: ['K', 'h2o', 'koh', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false,
+    expectContinuation: true
+  });
+  expectResidentProductCarryForward(potassiumContinued, potassiumLongHorizon);
+  expect(potassiumLongHorizon.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+  expect(potassiumLongHorizon.renderState?.gasPressureSummarySource)
+    .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
 
   await openResidentReactionScenario('Cs');
   const cesium = await runResidentReactionRefresh('test-cs-h2o-resident-product-pressure');
@@ -6280,6 +6294,20 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
   expectResidentProductCarryForward(cesium, cesiumContinued);
   expect(cesiumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(cesiumContinued.renderState?.gasPressureSummarySource)
+    .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
+  const cesiumLongHorizon = await runResidentReactionRefresh('test-cs-h2o-resident-product-pressure-long-horizon', {
+    continueFromResidentState: true
+  });
+  expectResidentReactionRefresh(cesiumLongHorizon, {
+    expectPressureInterface: false,
+    expectedMaterialKeys: ['Cs', 'h2o', 'csoh', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false,
+    expectContinuation: true
+  });
+  expectResidentProductCarryForward(cesiumContinued, cesiumLongHorizon);
+  expect(cesiumLongHorizon.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+  expect(cesiumLongHorizon.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
   expect(consoleIssues).toEqual([]);
 });

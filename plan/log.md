@@ -29692,7 +29692,46 @@ Validation:
 
 Remaining:
 
-- No-full resident pressure still reports
-  `gpu-resident-reaction-pressure-unavailable` /
-  `baseline-no-resident-reaction-ledger` until the retained spatial gas ledger
-  or gas-cell EOS output is promoted back into the sealed gas-pressure summary.
+- Superseded by the retained spatial gas pressure promotion below; the
+  remaining work is now longer multi-batch reaction pressure/field visualization
+  coverage.
+
+## 2026-06-19 AKDT - Retained Spatial Gas Pressure Promotion
+
+Status:
+
+- Promoted pressure-interface spatial gas ledgers back into the no-full
+  resident sealed gas-pressure summary. When the compact gas species ledger is
+  intentionally absent, `gasPressureSummaryFromResidentReaction()` can now
+  consume the retained spatial gas species ledger produced from resident
+  product-event rows and emit
+  `gpu-resident-pressure-interface-spatial-gas-summary` without full
+  product-event readback.
+- Imported gas-cell EOS fields now keep
+  `resident-spatial-gas-species-ledger-eos-ready` status when already
+  local-gradient ready, avoiding the previous "empty or invalid" label on
+  valid producer fields.
+- The mounted resident hot loop now re-promotes gas pressure after
+  pressure-interface refresh and render refresh, then passes
+  `gpu-resident-pressure-interface-spatial-gas-ledger` into render refresh
+  instead of the baseline fallback.
+- The focused Na/H2O browser regression now requires promoted resident pressure,
+  ready spatial gas ledger counts, ready gas-cell EOS feedback, render-state
+  pressure from the promoted source, and clean WebGPU console output.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` with `38/38`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `53/53`.
+- PASS:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"` with `1/1`.
+
+Remaining:
+
+- Add a longer browser reaction sequence that keeps promoted gas/product
+  ledgers feeding subsequent pressure and field visualization across multiple
+  resident batches.

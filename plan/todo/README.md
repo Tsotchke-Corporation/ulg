@@ -53,11 +53,14 @@ then runs a second pass while asserting clean WebGPU console output, G2P and
 render-row scale policies, decoded gas-phase rows, and bounded gas visual
 radius. The first pass also proves the retained product-event buffer feeds the
 spatial gas ledger producer and gas-cell EOS stage without full product-event
-readback. Remaining gap: promote that retained spatial gas ledger / gas-cell
-EOS result back into the sealed gas-pressure summary; no-full resident runs can
-still report `gpu-resident-reaction-pressure-unavailable` while product gas is
-visibly and spatially present. Do not treat these caps as the final physics
-model.
+readback. The retained spatial gas ledger is now promoted back into the sealed
+resident gas-pressure summary as
+`gpu-resident-pressure-interface-spatial-gas-summary`, and render refresh
+consumes `gpu-resident-pressure-interface-spatial-gas-ledger` instead of the
+baseline fallback. Remaining gap: add a longer browser reaction sequence that
+proves promoted gas/product ledgers keep feeding later pressure and field
+visualization over multiple resident batches. Do not treat these caps as the
+final physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

@@ -41,6 +41,19 @@ resident GPU uploads, and reset/rebuild flows.
 
 ## Implementation Status
 
+2026-06-19 AKDT live report update:
+
+- User still reports that drop edge is not respected for anything larger than
+  `6` in the live demo. Keep this task open despite the prior `dropn=7`
+  initialization/reset evidence.
+- Next diagnostic pass should reproduce from the exact URL/UI path, include
+  values `7`, `8`, and a visibly larger value, and compare requested edge,
+  effective initialized edge, render-domain counts, resident upload counts,
+  surface/sphere bounds, reset state, and mobile render bounds.
+- Treat failures above `6` as likely downstream of initialization or render
+  domain consumption until proven otherwise; do not mask it with a visual-only
+  scale or overlay workaround.
+
 2026-06-19 AKDT update:
 
 - Added render-domain position bounds to

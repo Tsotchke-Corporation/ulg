@@ -2573,6 +2573,9 @@ export async function mountSphPhaseDemoOverlay({
       baselineSummary,
       reactionSummary,
       residentProductMass,
+      pressureInterfaceState: scene.getSphResidentPressureInterfaceState?.()
+        || overlay.__sphResidentPressureInterfaceState
+        || null,
       reactionTable: scene.getSphReactionTable?.() || overlay.__sphReactionTable || null,
       materialProperties: activeMaterialProperties(),
       fallbackTemperatureK: driver?.demo?.scenario?.gas?.initialTemperatureK
@@ -4116,6 +4119,7 @@ export async function mountSphPhaseDemoOverlay({
           source: 'resident-physics-loop-pressure-interface-refresh',
           sourceCadence: 'resident-step-completed'
         });
+        updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
         overlay.__sphResidentMaterialInterfaceStateError = null;
         overlay.__sphResidentPressureInterfaceStateError = null;
       } catch (error) {
@@ -4219,6 +4223,7 @@ export async function mountSphPhaseDemoOverlay({
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
             overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+            updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
             residentRenderReadbackCount += 1;
             residentAccumulatedSubvisibleMotionM = 0;
             residentSubvisibleMotionBurstCount = 0;
@@ -4259,6 +4264,7 @@ export async function mountSphPhaseDemoOverlay({
             overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.()
               || overlay.__sphResidentPressureInterfaceState
               || null;
+            updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
             updateResidentPerf({
               residentStepsPerSchedule: normalizedStepCount,
               renderReadbacks: residentRenderReadbackCount,

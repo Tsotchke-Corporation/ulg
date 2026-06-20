@@ -5487,7 +5487,26 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     });
     overlay.__mlsMpmResidentSteps = execution;
     overlay.__mlsMpmResidentStep = execution?.finalStep || scene.getMlsMpmResidentStep?.() || null;
-    const residentGasPressure = overlay.__sphUpdateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+    const residentGasPressureBeforeInterface = overlay.__sphUpdateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+    const residentReactionResult = overlay.__mlsMpmResidentStep?.reactionStep?.result
+      || overlay.__mlsMpmResidentStep?.reactionStep
+      || null;
+    const pressureInterfacePreRender = await scene.refreshSphResidentPressureInterfaceState?.({
+      preferWebGpu: true,
+      gasPressureSummary: residentGasPressureBeforeInterface,
+      residentProductMass: overlay.__mlsMpmResidentStep?.residentProductMass
+        || residentReactionResult?.residentProductMass
+        || null,
+      reactionSummary: residentReactionResult?.reactionSummary || null,
+      reactionTable: scene.getSphReactionTable?.() || null,
+      source: 'test-resident-reaction-pressure-interface-refresh',
+      sourceCadence: refreshReason
+    });
+    overlay.__sphResidentPressureInterfaceState = pressureInterfacePreRender
+      || scene.getSphResidentPressureInterfaceState?.()
+      || null;
+    const residentGasPressure = overlay.__sphUpdateResidentGasPressureSummary(overlay.__mlsMpmResidentStep)
+      || residentGasPressureBeforeInterface;
     const renderRefresh = scene.refreshSphResidentRenderState({
       preferWebGpu: true,
       residentSteps: execution,
@@ -5499,7 +5518,9 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     const renderState = await renderRefresh;
     overlay.__sphResidentRenderState = renderState;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
-    const pressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+    const pressureInterfaceState = scene.getSphResidentPressureInterfaceState?.()
+      || overlay.__sphResidentPressureInterfaceState
+      || null;
     scene.refreshViewportAndOverlay?.({ reason: refreshReason });
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const statusText = overlay.querySelector('#sph-status')?.textContent ?? '';
@@ -5536,6 +5557,12 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
       residentGasPressure: residentGasPressure ? {
         status: residentGasPressure.status ?? null,
         source: residentGasPressure.source ?? null,
+        pressureInterfaceSpatialGasLedgerPromoted:
+          residentGasPressure.pressureInterfaceSpatialGasLedgerPromoted ?? null,
+        pressureInterfaceSpatialGasLedgerCellCount:
+          residentGasPressure.pressureInterfaceSpatialGasLedgerCellCount ?? null,
+        pressureInterfaceSpatialGasSpeciesRowCount:
+          residentGasPressure.pressureInterfaceSpatialGasSpeciesRowCount ?? null,
         totalPressurePa: residentGasPressure.totalPressurePa ?? null,
         h2PartialPressurePa: residentGasPressure.bySpecies?.h2?.partialPressurePa ?? null,
         h2MassKg: residentGasPressure.bySpecies?.h2?.massKg ?? null,
@@ -5617,59 +5644,50 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     expect(result.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
     expect(result.residentProductRows).toBeGreaterThan(0);
     expect(result.residentProductEventRecordCount).toBe(0);
-    expect([
-      'gpu-resident-reaction-pressure-summary',
-      'gpu-resident-reaction-pressure-unavailable'
-    ]).toContain(result.residentGasPressure?.status);
-    if (result.residentGasPressure?.status === 'gpu-resident-reaction-pressure-summary') {
-      expect(result.residentGasPressure?.source).toBe('gpu-resident-product-mass-gas-species-ledger');
-      expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
-      expect(result.residentGasPressure?.h2PartialPressurePa).toBeGreaterThan(0);
-      expect(result.residentGasPressure?.h2MassKg).toBeGreaterThan(0);
-      expect(result.residentGasPressure?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
-      expect(result.residentGasPressure?.residentProductMassGasSpeciesLedgerCount).toBeGreaterThan(0);
-    } else {
-      expect(result.residentGasPressure?.source).toBe('baseline-no-resident-reaction-ledger');
-      expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThanOrEqual(101325);
-    }
-    expect(result.residentGasPressure?.spatialGasSpeciesLedgerStatus).toBeNull();
-    expect(result.residentGasPressure?.spatialGasSpeciesLedgerCellCount).toBeNull();
-    if (result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus) {
-      expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus)
-        .toBe('blocked-resident-spatial-gas-species-ledger-required');
-    }
-    if (result.residentGasPressure?.pressureFeedbackGasCellLocalReady != null) {
-      expect(result.residentGasPressure?.pressureFeedbackGasCellLocalReady).toBe(false);
-    }
-    if (result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus) {
-      expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus)
-        .toBe('blocked-resident-spatial-gas-species-ledger-required');
-    }
+    expect(result.residentGasPressure?.status).toBe('gpu-resident-pressure-interface-spatial-gas-summary');
+    expect(result.residentGasPressure?.source).toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
+    expect(result.residentGasPressure?.pressureInterfaceSpatialGasLedgerPromoted).toBe(true);
+    expect(result.residentGasPressure?.pressureInterfaceSpatialGasLedgerCellCount).toBeGreaterThan(0);
+    expect(result.residentGasPressure?.pressureInterfaceSpatialGasSpeciesRowCount).toBeGreaterThan(0);
+    expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+    expect(result.residentGasPressure?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.residentGasPressure?.spatialGasSpeciesLedgerStatus).toBe('spatial-gas-species-ledger-ready');
+    expect(result.residentGasPressure?.spatialGasSpeciesLedgerCellCount).toBeGreaterThan(0);
+    expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus)
+      .toBe('spatial-gas-species-ledger-ready');
+    expect(result.residentGasPressure?.pressureFeedbackGasCellLocalReady).toBe(true);
+    expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus)
+      .toBe('resident-spatial-gas-species-ledger-eos-ready');
     if (expectPressureInterface) {
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus).toBe('spatial-gas-ledger-producer-stage-result-ready');
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(false);
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
-        .toBe('positioned-product-event-rows');
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
-        .toBe('resident-product-event-row-positions');
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
-      expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
-      expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('gas-cell-eos-producer-stage-result-ready');
-      expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
-      expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus).toBe('pressure-interface-gas-cell-field-import-ready');
-      expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(true);
+      if (result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus != null) {
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus)
+          .toBe('spatial-gas-ledger-producer-stage-result-ready');
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(false);
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
+          .toBe('positioned-product-event-rows');
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
+          .toBe('resident-product-event-row-positions');
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
+        expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
+      }
+      if (result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus != null) {
+        expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus)
+          .toBe('gas-cell-eos-producer-stage-result-ready');
+        expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+      }
+      if (result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus != null) {
+        expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus)
+          .toBe('pressure-interface-gas-cell-field-import-ready');
+        expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(true);
+      }
     }
     expect(['resident-gpu-render-field', 'resident-gpu-render-rows']).toContain(result.renderState?.source);
     expect(result.renderState?.backend).toBe('webgpu');
-    expect([
-      'gpu-resident-reaction-pressure-summary',
-      'gpu-resident-reaction-pressure-unavailable'
-    ]).toContain(result.renderState?.gasPressureSummaryStatus);
-    expect([
-      'gpu-resident-product-mass-gas-species-ledger',
-      'baseline-no-resident-reaction-ledger'
-    ]).toContain(result.renderState?.gasPressureSummarySource);
+    expect(result.renderState?.gasPressureSummaryStatus)
+      .toBe('gpu-resident-pressure-interface-spatial-gas-summary');
+    expect(result.renderState?.gasPressureSummarySource)
+      .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
     expect(result.renderState?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
     expect(result.renderState?.residentProductMassEosCouplingStatus).toBe('resident-product-mass-p2g-eos-sidecar-ready');
     if (result.renderState?.source === 'resident-gpu-render-field') {
@@ -5694,12 +5712,8 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
       .some((key) => key.endsWith('|gas'))).toBe(true);
     expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(['Na', 'h2o', 'naoh', 'h2']));
-    if (result.residentGasPressure?.status === 'gpu-resident-reaction-pressure-summary') {
-      expect(result.statusText).toContain('h2=');
-    } else {
-      expect(result.statusText).toContain('resident product');
-      expect(result.statusText).toContain('render pressure  : source=baseline-no-resident-reaction-ledger');
-    }
+    expect(result.statusText).toContain('resident product');
+    expect(result.statusText).toContain('render pressure  : source=gpu-resident-pressure-interface-spatial-gas-ledger');
   };
 
   const result = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure');

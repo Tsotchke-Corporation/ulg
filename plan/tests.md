@@ -11447,7 +11447,32 @@ Reaction variable particle scale reset guard, 2026-06-19 AKDT:
     particle-scale policy diagnostics, max radius growth `4`, max `J=64`,
     positive support/gas radius caps, decoded gas-phase rows, and max decoded
     particle radius under the gas visual proxy cap.
-  - The test records the current pressure-summary gap: no-full resident gas can
-    still report `gpu-resident-reaction-pressure-unavailable` /
-    `baseline-no-resident-reaction-ledger` even though the retained spatial gas
-    producer and render rows prove product gas is present.
+  - Superseded by the retained spatial gas pressure promotion below: the
+    pressure-summary gap is no longer the active blocker.
+
+Retained spatial gas pressure promotion, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check tests/sphPhaseDemo.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Focused Node suites:
+  `node --test tests/sphPhaseDemo.test.mjs`
+  - Passed: `38/38`.
+  - Added a no-full resident pressure unit guard proving a pressure-interface
+    spatial gas species ledger can produce
+    `gpu-resident-pressure-interface-spatial-gas-summary` without compact gas
+    ledger readback.
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `53/53`.
+- Mounted browser regression:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"`
+  - Passed: `1/1`.
+  - The browser path now runs resident step, pressure-interface refresh,
+    pressure promotion, render refresh, reset, and a second pass while
+    requiring clean WebGPU console output.
+  - The first pass requires promoted resident pressure source
+    `gpu-resident-pressure-interface-spatial-gas-ledger`, ready retained
+    spatial gas ledger cells, ready gas-cell EOS feedback, and render-state
+    pressure from the promoted summary instead of baseline fallback.

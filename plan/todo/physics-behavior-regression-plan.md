@@ -1045,8 +1045,10 @@ state that moves on screen is the state the laws actually mutated.
      cadence jumps;
    - post-reset resident substeps keep nonzero active grid nodes and visible
      displacement: covered by the mounted reset regression;
-   - pressure force rows refresh even when render refresh is skipped;
-   - pressure rows are actually consumed by grid/resident mechanics;
+   - pressure force rows refresh even when render refresh is skipped: covered
+     by the no-full render-summary skip regression;
+   - pressure rows are actually consumed by grid/resident mechanics: covered
+     by the no-full render-summary skip regression follow-up resident step;
    - reaction/product/gas ledgers persist across repeated no-full-readback
      steps;
    - thermal state, thermo rows, and refreshed mechanics constitutive fields
@@ -1373,6 +1375,16 @@ Current evidence:
   surface-summary readback on resident-batch render samples.
 - Focused Playwright regression for the skip mode passes.
 - Combined Playwright skip-mode plus CPU-SPH lifecycle run passes `2/2`.
+- 2026-06-19 AKDT update: the skip-mode Playwright regression now also
+  refreshes the scene pressure-interface rows before render validation,
+  requests render refresh with `skipPressureInterfaceRefresh=true`, and runs a
+  follow-up no-full resident WebGPU step. The scene pressure refresh only
+  promotes a ready solver into grid-consumable state after an explicit
+  `pressure-interface-grid-force-consumption-approved` admission, so row upload
+  and later grid consumption no longer depend on render cadence. Validation:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase no-full render refresh can skip compact surface summary readback"`
+  passed with no captured WebGPU validation warnings; the only warning strings
+  were Node `NO_COLOR` / `FORCE_COLOR` notices.
 
 Remaining gates:
 

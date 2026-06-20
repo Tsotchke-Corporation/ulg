@@ -6537,6 +6537,35 @@ export function createSphPhaseScene(container, {
     };
   }
 
+  function admitPressureInterfaceForceSolverForGridUpload({
+    pressureInterfaceForceSolver = null,
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission()
+  } = {}) {
+    if (
+      !pressureInterfaceForceSolver
+      || pressureInterfaceForceSolver.status !== 'pressure-interface-force-solver-ready'
+      || pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver)
+    ) {
+      return pressureInterfaceForceSolver;
+    }
+    const rows = pressureInterfaceForceRowsFromSolver(pressureInterfaceForceSolver);
+    const forceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
+    if (!(rows instanceof Float32Array) || forceRowCount <= 0) return pressureInterfaceForceSolver;
+    const admission = pressureInterfaceGridForceAdmissionAllowsApplication({
+      pressureInterfaceGridForceAdmission,
+      pressureInterfaceForceSolver,
+      forceRowCount
+    });
+    if (admission.approved !== true) return pressureInterfaceForceSolver;
+    return {
+      ...pressureInterfaceForceSolver,
+      forceApplicationStatus: 'pressure-interface-grid-force-consumer-approved',
+      gridForceApplicationApproved: true,
+      gridForceApplicationAdmission: pressureInterfaceGridForceAdmission,
+      gridForceApplicationAdmissionSummary: admission
+    };
+  }
+
   function blockedPressureInterfaceForceRowsUpload({
     pressureInterfaceForceSolver = null,
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
@@ -7376,11 +7405,15 @@ export function createSphPhaseScene(container, {
       materialInterfaceField,
       pressureInterfaceCoupling
     });
+    const admittedPressureInterfaceForceSolver = admitPressureInterfaceForceSolverForGridUpload({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission
+    });
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
     const pressureInterfaceForceRowsUploadForState = uploadPressureInterfaceForceRowsBuffer({
-      pressureInterfaceForceSolver,
+      pressureInterfaceForceSolver: admittedPressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
       device: device || resolvedDeviceResult?.device || null
     });
@@ -7389,7 +7422,7 @@ export function createSphPhaseScene(container, {
       gasPressureSummary: effectiveGasPressureSummary,
       pressureInterfaceCoupling,
       pressureInterfaceForcePreview,
-      pressureInterfaceForceSolver,
+      pressureInterfaceForceSolver: admittedPressureInterfaceForceSolver,
       pressureInterfaceForceRowsUpload: pressureInterfaceForceRowsUploadForState,
       pressureInterfaceGridForceAdmission,
       pressureInterfaceGasCellFieldImportPublication,

@@ -6232,6 +6232,9 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       && scene?.getMlsMpmGpuParticleState?.()?.schema
       && typeof scene?.refreshMlsMpmResidentSteps === 'function'
       && typeof scene?.refreshSphResidentRenderState === 'function'
+      && typeof scene?.refreshSphResidentMaterialInterfaceState === 'function'
+      && typeof scene?.refreshSphResidentPressureInterfaceState === 'function'
+      && typeof overlay?.__sphUpdateResidentGasPressureSummary === 'function'
     );
   }, null, { timeout: 90_000 });
 
@@ -6247,6 +6250,53 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     });
     overlay.__mlsMpmResidentSteps = execution;
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+    const residentGasPressure = overlay.__sphUpdateResidentGasPressureSummary(overlay.__mlsMpmResidentStep)
+      || overlay.__sphResidentGasPressureSummary
+      || overlay.__sphPhaseViewState?.gasPressureSummary
+      || null;
+    const materialInterfaceState = await scene.refreshSphResidentMaterialInterfaceState({
+      preferWebGpu: true,
+      residentSteps: execution,
+      materialProperties: overlay.__sphPhaseViewState?.materialProperties || {},
+      gasPressureSummary: residentGasPressure,
+      source: 'test-resident-physics-material-interface-before-skipped-render',
+      sourceCadence: 'resident-physics-before-skipped-render'
+    });
+    const pressureAdmission = {
+      schema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+      status: 'pressure-interface-grid-force-consumption-approved',
+      gridForceApplicationApproved: true,
+      committed: true,
+      hotBufferKey: 'ulg:test:pressure-before-skipped-render',
+      sourceHotBufferKey: 'ulg:test:pressure-before-skipped-render',
+      pressureInterfaceForceRowCount: 1_000_000,
+      outputFamilies: ['pressure-interface-force-rows']
+    };
+    const pressureInterfaceBeforeSkippedRender = await scene.refreshSphResidentPressureInterfaceState({
+      preferWebGpu: true,
+      materialInterfaceField: materialInterfaceState,
+      gasPressureSummary: residentGasPressure,
+      pressureInterfaceGridForceAdmission: pressureAdmission,
+      source: 'test-resident-pressure-interface-before-skipped-render',
+      sourceCadence: 'resident-physics-before-skipped-render'
+    });
+    const summarizePressureInterfaceState = (state) => state ? {
+      schema: state.schema ?? null,
+      status: state.status ?? null,
+      source: state.source ?? null,
+      sourceCadence: state.sourceCadence ?? null,
+      solverStatus: state.pressureInterfaceForceSolverStatus ?? null,
+      solverForceRowCount: state.pressureInterfaceSolverForceRowCount ?? null,
+      forceRowsUploadStatus: state.pressureInterfaceForceRowsUploadStatus ?? null,
+      forceRowsBufferRetained: state.pressureInterfaceForceRowsBufferRetained ?? null,
+      forceRowsBufferByteLength: state.pressureInterfaceForceRowsBufferByteLength ?? null,
+      gridForceAdmissionApproved: state.pressureInterfaceGridForceAdmissionApproved ?? null,
+      gridForceAdmissionStatus: state.pressureInterfaceGridForceAdmissionStatus ?? null,
+      uploadQueueCompletionStatus: state.pressureInterfaceForceRowsUploadQueueCompletionStatus ?? null,
+      uploadQueueCompletionMethod: state.pressureInterfaceForceRowsUploadQueueCompletionMethod ?? null
+    } : null;
+    const pressureInterfaceBeforeSkippedRenderSummary =
+      summarizePressureInterfaceState(pressureInterfaceBeforeSkippedRender);
     const renderState = await scene.refreshSphResidentRenderState({
       preferWebGpu: true,
       residentSteps: execution,
@@ -6257,6 +6307,21 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     });
     overlay.__sphResidentRenderState = renderState;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+    const pressureInterfaceAfterSkippedRender = scene.getSphResidentPressureInterfaceState?.()
+      || overlay.__sphResidentPressureInterfaceState
+      || null;
+    const pressureInterfaceAfterSkippedRenderSummary =
+      summarizePressureInterfaceState(pressureInterfaceAfterSkippedRender);
+    const followupExecution = await scene.refreshMlsMpmResidentSteps({
+      preferWebGpu: true,
+      stepCount: 1,
+      readbackMode: 'no-full-readback',
+      compactSummaryScope: 'particle-visual',
+      continueFromResidentState: true,
+      force: true,
+      gasPressureSummary: residentGasPressure
+    });
+    const followupStep = followupExecution?.finalStep || null;
     scene.refreshViewportAndOverlay?.({ reason: 'test-no-full-render-summary-skip' });
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const residentSurfaceDraw = overlay.__sphResidentSurfaceDraw;
@@ -6266,6 +6331,32 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       stepBackend: execution?.backend ?? null,
       stepReadbackMode: execution?.readbackMode ?? null,
       compactSummaryScope: execution?.compactSummaryScope ?? null,
+      materialInterfaceStateStatus: materialInterfaceState?.status ?? null,
+      materialInterfaceReadySurfaceCount: materialInterfaceState?.readySurfaceCount ?? null,
+      materialInterfaceRenderRowsReadback: materialInterfaceState?.renderRowsReadback ?? null,
+      materialInterfaceRenderFieldReadback: materialInterfaceState?.renderFieldReadback ?? null,
+      pressureBeforeSkippedRender: pressureInterfaceBeforeSkippedRenderSummary,
+      pressureAfterSkippedRender: pressureInterfaceAfterSkippedRenderSummary,
+      followupPressure: {
+        backend: followupExecution?.backend ?? null,
+        readbackMode: followupExecution?.readbackMode ?? null,
+        finalStepStatus: followupStep?.status ?? null,
+        forceRowCount: followupStep?.pressureInterfaceForceRowCount
+          ?? followupStep?.diagnostics?.pressureInterfaceForceRowCount
+          ?? null,
+        forceConsumerStatus: followupStep?.pressureInterfaceForceConsumerStatus
+          ?? followupStep?.diagnostics?.pressureInterfaceForceConsumerStatus
+          ?? null,
+        forceApplicationStatus: followupStep?.pressureInterfaceForceApplicationStatus
+          ?? followupStep?.diagnostics?.pressureInterfaceForceApplicationStatus
+          ?? null,
+        gridForceAdmissionApproved: followupStep?.pressureInterfaceGridForceAdmissionApproved
+          ?? followupStep?.diagnostics?.pressureInterfaceGridForceAdmissionApproved
+          ?? null,
+        appliedImpulseMagnitudeNSeconds: followupStep?.pressureInterfaceAppliedImpulseMagnitudeNSeconds
+          ?? followupStep?.diagnostics?.pressureInterfaceAppliedImpulseMagnitudeNSeconds
+          ?? null
+      },
       renderFieldReadback: renderState?.renderFieldReadback ?? null,
       renderRowsReadback: renderState?.renderRowsReadback ?? null,
       renderRowsReadbackMode: renderState?.renderRowsReadbackMode ?? null,
@@ -6275,6 +6366,10 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       renderFieldSurfaceSummaryReadback: renderState?.renderFieldSurfaceSummaryReadback ?? null,
       renderFieldSurfaceSummaryByteLength: renderState?.renderFieldSurfaceSummaryByteLength ?? null,
       renderFieldSurfaceSummarySkipReason: renderState?.renderFieldSurfaceSummarySkipReason ?? null,
+      residentPressureInterfaceStateStatus: renderState?.residentPressureInterfaceStateStatus ?? null,
+      residentPressureInterfaceStateSource: renderState?.residentPressureInterfaceStateSource ?? null,
+      residentPressureInterfaceStateSourceCadence:
+        renderState?.residentPressureInterfaceStateSourceCadence ?? null,
       surfaceDrawStatus: renderState?.surfaceDrawStatus ?? null,
       surfaceDrawVisibleRendererBridge: renderState?.surfaceDrawVisibleRendererBridge ?? null,
       surfaceDrawVisibleRenderSource: renderState?.surfaceDrawVisibleRenderSource ?? null,
@@ -6383,6 +6478,27 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.stepBackend).toBe('webgpu');
   expect(result.stepReadbackMode).toBe('no-full-readback');
   expect(result.compactSummaryScope).toBe('particle-visual');
+  expect(result.materialInterfaceStateStatus).toBe('material-interface-field-ready');
+  expect(result.materialInterfaceReadySurfaceCount).toBeGreaterThan(0);
+  expect(result.pressureBeforeSkippedRender?.schema)
+    .toBe('peercompute.ulg.sph-resident-pressure-interface-state.v0');
+  expect(result.pressureBeforeSkippedRender?.status)
+    .toBe('resident-pressure-interface-force-rows-ready');
+  expect(result.pressureBeforeSkippedRender?.source)
+    .toBe('test-resident-pressure-interface-before-skipped-render');
+  expect(result.pressureBeforeSkippedRender?.sourceCadence)
+    .toBe('resident-physics-before-skipped-render');
+  expect(result.pressureBeforeSkippedRender?.solverStatus).toBe('pressure-interface-force-solver-ready');
+  expect(result.pressureBeforeSkippedRender?.solverForceRowCount).toBeGreaterThan(0);
+  expect(result.pressureBeforeSkippedRender?.forceRowsUploadStatus)
+    .toBe('webgpu-pressure-interface-force-rows-uploaded');
+  expect(result.pressureBeforeSkippedRender?.forceRowsBufferRetained).toBe(true);
+  expect(result.pressureBeforeSkippedRender?.forceRowsBufferByteLength).toBeGreaterThan(0);
+  expect(result.pressureBeforeSkippedRender?.gridForceAdmissionApproved).toBe(true);
+  expect(result.pressureBeforeSkippedRender?.gridForceAdmissionStatus)
+    .toBe('pressure-interface-grid-force-consumption-approved');
+  expect(result.pressureBeforeSkippedRender?.uploadQueueCompletionStatus).toBe('queue-write-enqueued');
+  expect(result.pressureBeforeSkippedRender?.uploadQueueCompletionMethod).toBe('queue.writeBuffer');
   expect(result.renderFieldReadback).toBe(false);
   expect(result.renderRowsReadback).toBe(false);
   expect(result.renderRowsReadbackMode).toBe('no-full-readback');
@@ -6392,6 +6508,28 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.renderFieldSurfaceSummaryReadback).toBe(false);
   expect(result.renderFieldSurfaceSummaryByteLength).toBe(0);
   expect(result.renderFieldSurfaceSummarySkipReason).toContain('no compact surface-summary readback');
+  expect(result.residentPressureInterfaceStateStatus).toBe('pressure-interface-refresh-skipped');
+  expect(result.residentPressureInterfaceStateSource).toBe('resident-render-validation');
+  expect(result.residentPressureInterfaceStateSourceCadence).toBe('visual-render-refresh');
+  expect(result.pressureAfterSkippedRender?.status)
+    .toBe('resident-pressure-interface-force-rows-ready');
+  expect(result.pressureAfterSkippedRender?.source)
+    .toBe('test-resident-pressure-interface-before-skipped-render');
+  expect(result.pressureAfterSkippedRender?.sourceCadence)
+    .toBe('resident-physics-before-skipped-render');
+  expect(result.pressureAfterSkippedRender?.solverForceRowCount).toBeGreaterThan(0);
+  expect(result.pressureAfterSkippedRender?.forceRowsBufferRetained).toBe(true);
+  expect(result.pressureAfterSkippedRender?.forceRowsBufferByteLength).toBeGreaterThan(0);
+  expect(result.followupPressure.backend).toBe('webgpu');
+  expect(result.followupPressure.readbackMode).toBe('no-full-readback');
+  expect(result.followupPressure.finalStepStatus).toBe('resident-step-webgpu-executed');
+  expect(result.followupPressure.forceRowCount).toBeGreaterThan(0);
+  expect(result.followupPressure.gridForceAdmissionApproved).toBe(true);
+  expect(result.followupPressure.forceApplicationStatus)
+    .toBe('pressure-interface-grid-force-consumer-submitted-unverified');
+  expect(result.followupPressure.forceConsumerStatus)
+    .toBe('grid-momentum-impulse-submitted-unverified-no-full-readback');
+  expect(result.followupPressure.appliedImpulseMagnitudeNSeconds).toBeGreaterThan(0);
   expect(result.surfaceDrawStatus).toBe('resident-extension-surface-draw-buffers-retained');
   expect(result.surfaceDrawVisibleRendererBridge).toBe('extension-resident-surface-buffers-no-overlay');
   expect(result.surfaceDrawVisibleRenderSource).toBe('webgpu-marching-cubes-extension-same-device-surface');

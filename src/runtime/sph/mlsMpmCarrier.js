@@ -154,6 +154,7 @@ export function createMlsMpmCarrier({
   trackFluidVolume = true,
   liquidVelocityDiffusionAlpha = 0,
   liquidVelocityDiffusionRadiusM = null,
+  liquidVelocityDiffusionStartS = 0,
   liquidWallDampingAlpha = 0,
   liquidWallDampingDistanceM = null,
   cflFactor = 0.6 // max grid-node displacement per step, as a fraction of a cell (stability guard)
@@ -175,6 +176,7 @@ export function createMlsMpmCarrier({
     1e-9
   );
   const liquidDiffusionRadius2 = liquidDiffusionRadius * liquidDiffusionRadius;
+  const liquidDiffusionStartS = Math.max(Number(liquidVelocityDiffusionStartS) || 0, 0);
   const wallDampingAlpha = clamp(Number(liquidWallDampingAlpha) || 0, 0, 1);
   const wallDampingDistance = Math.max(Number(liquidWallDampingDistanceM) || (1.5 * dx), 1e-9);
   const gridMass = new Float64Array(ng);
@@ -220,8 +222,9 @@ export function createMlsMpmCarrier({
       : clearance;
   }
 
-  function applyLiquidVelocityDiffusion(particles) {
+  function applyLiquidVelocityDiffusion(particles, timeS) {
     if (!(liquidDiffusionAlpha > 0) || particles.length < 2) return;
+    if ((Number(timeS) || 0) < liquidDiffusionStartS) return;
     const dv = Array.from({ length: particles.length }, () => [0, 0, 0]);
     for (let i = 0; i < particles.length - 1; i += 1) {
       const a = particles[i];
@@ -466,7 +469,7 @@ export function createMlsMpmCarrier({
       }
     }
     applyLiquidWallDamping(particles);
-    applyLiquidVelocityDiffusion(particles);
+    applyLiquidVelocityDiffusion(particles, state.time);
     for (const p of particles) {
       const clearance = particleWallClearanceM(p);
       for (let d = 0; d < 3; d += 1) {
@@ -497,6 +500,7 @@ export function createMlsMpmCarrier({
     gridNodesPerAxis: [gnx, gny, gnz],
     liquidVelocityDiffusionAlpha: liquidDiffusionAlpha,
     liquidVelocityDiffusionRadiusM: liquidDiffusionRadius,
+    liquidVelocityDiffusionStartS: liquidDiffusionStartS,
     liquidWallDampingAlpha: wallDampingAlpha,
     liquidWallDampingDistanceM: wallDampingDistance,
     step

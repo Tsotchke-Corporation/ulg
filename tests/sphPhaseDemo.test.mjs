@@ -670,6 +670,9 @@ test('fluid law groups expose implemented viscosity and pending surface tension'
   const viewState = createSphPhaseViewState(driver);
   assert.equal(viewState.physicalLawGroups.viscosity, true);
   assert.equal(viewState.physicalLawGroups.surfaceTension, true);
+  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidVelocityDiffusionAlpha, 0.1);
+  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidVelocityDiffusionStartS, 0.16);
+  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidWallDampingAlpha, 0.2);
   assert.deepEqual(viewState.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);
   driver.step();
   assert.deepEqual(driver.demo.lastStepTiming.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);

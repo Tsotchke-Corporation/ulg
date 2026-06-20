@@ -1484,3 +1484,45 @@ Remaining gates:
    for fresh no-full visual correctness.
 3. Once retained metadata builds, reconnect it to visual sequence analysis so
    no-full resident state can be checked without full CPU readback.
+
+## CPU MLS-MPM Liquid Settling Regression - 2026-06-20 AKDT
+
+The current tree re-exposed the monolithic CPU MLS-MPM H2O/H2O liquid speed
+gate while broader material spacing and support-radius work remained correct:
+
+- Before this slice, `npm run test:physics-liquid-atomic` failed only
+  `H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop
+  motion` with final drop speed `0.7090136178921271 m/s` after
+  `1.0239999999999427 s`.
+- A constant same-material velocity diffusion default could fix the long
+  speed gate, but it also damped initial contact closure. `0.1` fixed
+  long-horizon speed while failing the short EOS-on descent gate
+  (`1.2499999999999991 -> 1.2176045931608872`, below the required
+  `0.05 m` descent).
+- The accepted fix makes MLS-MPM liquid velocity diffusion an explicit
+  viscosity-law late-settling term: default alpha `0.1`, radius `2 * dx`, start
+  time `20 * mechanicalSubsteps * dt` (`0.16 s` with current defaults).
+  Short gravity/contact closure is therefore not hidden by the artificial
+  slosh damping, while the long-horizon gate can damp residual same-material
+  liquid motion.
+
+Current evidence:
+
+- `node --test --test-name-pattern "H2O/H2O EOS-on MLS-MPM contact stays incompressible and closes under gravity" tests/physicsBehaviorInvariants.test.mjs`
+  passes.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test --test-name-pattern "H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop motion" tests/physicsBehaviorInvariants.test.mjs`
+  passes.
+- `npm run test:physics-liquid-atomic` passes `14/14`, including the short
+  EOS-on contact gate, long monolithic MLS-MPM liquid gate, plain SPH long
+  gate, and resident MLS-MPM free-surface oracle.
+
+Remaining gates:
+
+1. This is not a surface-tension/free-surface law completion. Keep the explicit
+   surface tension and longer visual horizon work open.
+2. The split resident/GPU path still needs retained no-full visual diagnostics
+   and browser sequence evidence; do not treat the CPU oracle as a fresh
+   retained-GPU render proof.
+3. Any future particle-spacing/material-size change must rerun
+   `npm run test:physics-liquid-atomic`, because this regression was caused by
+   a correct material-spacing change invalidating the older damping envelope.

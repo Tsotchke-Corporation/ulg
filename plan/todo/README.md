@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-20 AKDT: the monolithic CPU MLS-MPM
+H2O/H2O liquid gate regressed after material/spacing work because wall-only
+damping no longer killed long-horizon residual slosh. MLS-MPM now uses a
+viscosity-law same-material liquid velocity diffusion default of `0.1`, delayed
+until `20` demo steps (`0.16 s` with current defaults) so short contact closure
+still descends under gravity before late-settling diffusion engages. Evidence:
+`npm run test:physics-liquid-atomic` passes `14/14`, including the short
+EOS-on contact gate, the long monolithic MLS-MPM settle/speed/free-surface
+gate, the plain SPH long gate, and the resident free-surface oracle. This
+closes the current CPU liquid-settling regression but does not close retained
+GPU no-full visual diagnostics, mobile rendering, or explicit surface-tension
+law work.
+
 Current routing note, 2026-06-19 AKDT: variable scaled particle rendering now
 has fail-closed render-row and resident G2P mechanics bounds in CPU and WGSL
 (`max radius growth = 4`, `max J = 64`). Render extraction also clamps visual

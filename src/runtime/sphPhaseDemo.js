@@ -3251,8 +3251,9 @@ export function createSphPhaseDemo(options = {}) {
   const cflSafety = options.cflSafety ?? 0.4;
   const gridCflFactor = options.gridCflFactor ?? 0.6;
   const mlsMpmArtificialViscosityAlpha = options.mlsMpmArtificialViscosityAlpha ?? 0.04;
-  const mlsMpmLiquidVelocityDiffusionAlpha = options.mlsMpmLiquidVelocityDiffusionAlpha ?? 0;
+  const mlsMpmLiquidVelocityDiffusionAlpha = options.mlsMpmLiquidVelocityDiffusionAlpha ?? 0.1;
   const mlsMpmLiquidVelocityDiffusionRadiusM = options.mlsMpmLiquidVelocityDiffusionRadiusM ?? (2 * gridSpacingM);
+  const mlsMpmLiquidVelocityDiffusionStartS = options.mlsMpmLiquidVelocityDiffusionStartS ?? (20 * mechanicalSubsteps * carrierDt);
   const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
   const sphLiquidVelocityDiffusionAlpha = options.sphLiquidVelocityDiffusionAlpha ?? 0.04;
@@ -3314,6 +3315,7 @@ export function createSphPhaseDemo(options = {}) {
     mlsMpmArtificialViscosityAlpha,
     mlsMpmLiquidVelocityDiffusionAlpha,
     mlsMpmLiquidVelocityDiffusionRadiusM,
+    mlsMpmLiquidVelocityDiffusionStartS,
     mlsMpmLiquidWallDampingAlpha,
     mlsMpmLiquidWallDampingDistanceM,
     gravityMPerS2,
@@ -3397,6 +3399,7 @@ export function createSphPhaseDemo(options = {}) {
       trackFluidVolume: physicalLawGroups.eos,
       liquidVelocityDiffusionAlpha: physicalLawGroups.viscosity ? mlsMpmLiquidVelocityDiffusionAlpha : 0,
       liquidVelocityDiffusionRadiusM: mlsMpmLiquidVelocityDiffusionRadiusM,
+      liquidVelocityDiffusionStartS: mlsMpmLiquidVelocityDiffusionStartS,
       liquidWallDampingAlpha: physicalLawGroups.viscosity ? mlsMpmLiquidWallDampingAlpha : 0,
       liquidWallDampingDistanceM: mlsMpmLiquidWallDampingDistanceM,
       cflFactor: gridCflFactor

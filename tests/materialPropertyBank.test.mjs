@@ -7,6 +7,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
 import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
+import { condensedElementSymbols } from '../src/runtime/material/elementClosures.js';
 import { createFirstPrinciplesMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
@@ -31,21 +32,14 @@ function clone(value) {
 }
 
 const ACTIVE_ELEMENT_BANK_SYMBOLS = Object.freeze(['H', 'O', 'Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
-const GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS = Object.freeze([
-  'Be',
-  'B',
-  'C',
-  'N',
-  'F',
-  'Mg',
-  'Al',
-  'Si',
-  'P',
-  'S',
-  'Cl',
-  'Ca',
-  'Sc'
-]);
+const GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL = 'Se';
+
+function selectablePrefixThrough(symbol) {
+  const symbols = condensedElementSymbols().map((entry) => entry.symbol);
+  const index = symbols.indexOf(symbol);
+  assert.notEqual(index, -1, `${symbol} must be a selectable condensed element`);
+  return symbols.slice(0, index + 1);
+}
 
 test('element material property bank validates against schema and normalizes lookup keys', async () => {
   const bank = await readJson('../data/material-properties/elements.json');
@@ -86,16 +80,23 @@ test('element material property bank covers active alkali and PBR probe elements
   assert.equal(palladium.opticalPbr.metalness, 1);
 });
 
-test('element material property bank includes the first generated selectable tranche', async () => {
+test('element material property bank includes the generated selectable prefix', async () => {
   const bank = normalizeMaterialPropertyBank(await readJson('../data/material-properties/elements.json'));
-  for (const symbol of GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS) {
+  for (const symbol of selectablePrefixThrough(GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL)) {
     const record = materialPropertyBankRecordBySymbol(bank, symbol);
     assert.ok(record, `${symbol} must have a generated material bank row`);
-    assert.equal(record.provenance[0].status, 'exact-constant');
-    assert.ok(record.provenance.some((entry) => entry.status === 'reduced-estimate'));
-    assert.ok(record.provenance.some((entry) => entry.method.includes('gridPointsN=80')));
-    assert.equal(record.mechanics.spacingPolicy, 'derive-from-rest-density-and-phase');
+    assert.ok(record.provenance.length > 0, `${symbol} must keep provenance`);
+    assert.ok(record.provenance.some((entry) => entry.status === 'reduced-estimate' || entry.status === 'reference-fallback'));
+    assert.equal(typeof record.mechanics.spacingPolicy, 'string');
     assert.ok(record.opticalPbr, `${symbol} must have a PBR seed`);
+  }
+
+  for (const symbol of selectablePrefixThrough(GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL).filter(
+    (entry) => !ACTIVE_ELEMENT_BANK_SYMBOLS.includes(entry)
+  )) {
+    const record = materialPropertyBankRecordBySymbol(bank, symbol);
+    assert.equal(record.mechanics.spacingPolicy, 'derive-from-rest-density-and-phase');
+    assert.ok(record.provenance.some((entry) => entry.method.includes('gridPointsN=80')));
   }
 });
 

@@ -5,8 +5,10 @@
 The element JSON bank now has a bounded generator path and first generated
 selectable tranche. Existing reviewed rows remain warm inputs rather than
 strict truth, while generated `Be`, `B`, `C`, `N`, `F`, `Mg`, `Al`, `Si`, `P`,
-`S`, `Cl`, `Ca`, and `Sc` rows carry `reduced-estimate` provenance and explicit
-`gridPointsN=80` closure metadata.
+`S`, `Cl`, `Ca`, `Sc`, `Ti`, `V`, `Cr`, `Mn`, `Co`, `Ni`, `Cu`, `Zn`, `Ga`,
+`Ge`, `As`, and `Se` rows carry `reduced-estimate` provenance and explicit
+`gridPointsN=80` closure metadata. The unit guard now verifies the selectable
+prefix through `Se` rather than a hand-maintained first-tranche-only list.
 
 Focused checks:
 
@@ -15,7 +17,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=22`.
+  passed with `recordCount=34`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run.

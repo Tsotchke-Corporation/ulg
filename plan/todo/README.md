@@ -115,9 +115,11 @@ now an active bounded-generation lane instead of a hand-authored seed only.
 checked-in first-tranche coverage for `Be`, `B`, `C`, `N`, and `F` on top of
 the nine active/PBR probe rows. A second tranche now adds `Mg`, `Al`, `Si`,
 `P`, `S`, `Cl`, `Ca`, and `Sc`, leaving 89 selectable non-noble targets.
-Continue `plan/todo/material-property-json-bank-plan.md` by adding selectable
-non-noble elements in reviewable batches and then binding the packed rows from
-the current upload buffers into shader-side consumers.
+A slower third tranche now adds the selectable prefix through `Se`, bringing
+the bank to 34 rows and leaving 77 selectable non-noble targets. Continue
+`plan/todo/material-property-json-bank-plan.md` by adding selectable non-noble
+elements in reviewable batches and then binding the packed rows from the
+current upload buffers into shader-side consumers.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

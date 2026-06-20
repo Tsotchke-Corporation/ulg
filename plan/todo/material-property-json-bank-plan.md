@@ -84,6 +84,13 @@ Status update, 2026-06-19 AKDT: the second bounded selectable tranche adds
 is still intentionally non-authoritative and uses `reduced-estimate` closure
 rows as warm starts until reference/crystal/compound records replace them.
 
+Status update, 2026-06-19 AKDT: the third bounded selectable tranche adds
+`Ti`, `V`, `Cr`, `Mn`, `Co`, `Ni`, `Cu`, `Zn`, `Ga`, `Ge`, `As`, and `Se`.
+The checked-in bank now covers the selectable prefix through `Se`, contains 34
+element rows, and leaves 77 selectable non-noble target rows for later bounded
+generation. This tranche was slower than the first two, so keep future writes
+bounded and console-progress visible.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

@@ -16,11 +16,14 @@ Status:
 - Continued the bounded expansion with `Mg`, `Al`, `Si`, `P`, `S`, `Cl`, `Ca`,
   and `Sc`. The checked-in bank now contains 22 rows, leaving 89 selectable
   non-noble targets.
+- Continued with the slower transition/metalloid tranche `Ti`, `V`, `Cr`,
+  `Mn`, `Co`, `Ni`, `Cu`, `Zn`, `Ga`, `Ge`, `As`, and `Se`, bringing the bank
+  to 34 rows and leaving 77 selectable non-noble targets.
 
 Validation:
 
 - PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
-  reported `recordCount=22`.
+  reported `recordCount=34`.
 - PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
   and `node --check tests/materialPropertyBank.test.mjs`.
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.

@@ -3397,6 +3397,7 @@ test('SPH phase demo clear cache removes static table storage and reports cleare
 
 test('SPH phase reset preserves drop edge above six through mounted render diagnostics', async ({ page }) => {
   test.setTimeout(120_000);
+  const requestedEdge = 8;
   const consoleIssues = [];
   page.on('console', (message) => {
     const text = message.text();
@@ -3406,7 +3407,7 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
   });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=7&basen=7&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1');
+  await page.goto(`/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedEdge}&basen=${requestedEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
   }
@@ -3415,8 +3416,8 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
     const overlay = document.querySelector('#sph-phase-overlay');
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
       || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
-    return diagnostics?.effectiveDropParticlesPerEdge === 7
-      && diagnostics?.effectiveBaseParticlesPerEdge === 7
+    return diagnostics?.effectiveDropParticlesPerEdge === 8
+      && diagnostics?.effectiveBaseParticlesPerEdge === 8
       && overlay?.__sphSetParticlesTiming?.particleCount === diagnostics.totalGeneratedParticleCount;
   }, null, { timeout: 60_000 });
 
@@ -3427,8 +3428,8 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
       || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
     const setParticlesTiming = overlay?.__sphSetParticlesTiming || null;
     return overlay?.__sphResetStatus?.status === 'particle-state-resynced-after-reset'
-      && diagnostics?.effectiveDropParticlesPerEdge === 7
-      && diagnostics?.effectiveBaseParticlesPerEdge === 7
+      && diagnostics?.effectiveDropParticlesPerEdge === 8
+      && diagnostics?.effectiveBaseParticlesPerEdge === 8
       && setParticlesTiming?.particleCount === diagnostics.totalGeneratedParticleCount;
   }, null, { timeout: 60_000 });
   await page.evaluate(() => document.querySelector('#sph-step')?.click());
@@ -3484,15 +3485,15 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
     };
   });
 
-  const expectedDropCount = 7 ** 3;
-  const expectedBaseCount = 7 ** 3;
+  const expectedDropCount = requestedEdge ** 3;
+  const expectedBaseCount = requestedEdge ** 3;
   const expectedTotalCount = expectedDropCount + expectedBaseCount;
   expect(summary.resetStatus?.schema).toBe('peercompute.ulg.sph-demo-reset-status.v0');
   expect(summary.resetStatus?.status).toBe('particle-state-resynced-after-reset');
   expect(summary.diagnostics?.schema).toBe('peercompute.ulg.sph-initial-particle-edge-diagnostics.v0');
-  expect(summary.diagnostics?.requestedDropParticlesPerEdge).toBe(7);
-  expect(summary.diagnostics?.effectiveDropParticlesPerEdge).toBe(7);
-  expect(summary.diagnostics?.effectiveBaseParticlesPerEdge).toBe(7);
+  expect(summary.diagnostics?.requestedDropParticlesPerEdge).toBe(requestedEdge);
+  expect(summary.diagnostics?.effectiveDropParticlesPerEdge).toBe(requestedEdge);
+  expect(summary.diagnostics?.effectiveBaseParticlesPerEdge).toBe(requestedEdge);
   expect(summary.diagnostics?.requestedEdgePreservationStatus).toBe('preserved');
   expect(summary.diagnostics?.totalGeneratedParticleCount).toBe(expectedTotalCount);
   expect(summary.counts).toEqual({ drop: expectedDropCount, base: expectedBaseCount, total: expectedTotalCount });
@@ -5875,6 +5876,8 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
         renderState?.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
       surfaceDrawVisibleGpuConsumerPixelValidationStatus:
         renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+      surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
+        renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
       surfaceDrawNativeMarchingCubesExtractionStatus:
         renderState?.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
       surfaceDrawNativeMarchingCubesExtractionReason:

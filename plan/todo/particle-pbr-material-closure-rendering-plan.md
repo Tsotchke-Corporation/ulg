@@ -65,11 +65,21 @@ material, phase, temperature, and pressure are known.
 ## Remaining
 
 - Extend browser evidence to air as an actual visible gas-particle path once the
-  renderer has a cheap air particle scenario. Air now has a packed transparent
-  Rayleigh PBR optical row instead of a blocked black row, but current sphere
-  probes do not instantiate air particles.
+  mounted demo has a cheap valid air-particle scenario. Air now has a packed
+  transparent Rayleigh PBR optical row and a render-row sphere bridge unit guard
+  proving it stays visible without a metallic fallback; an ad hoc
+  `drop=air&base=air` mounted probe did not reach ready state inside 90s, so
+  do not add that as a flaky e2e gate yet.
 - Audit the Three WebGPU material-proxy path separately; this slice covered the
   mobile WebGL sphere bridge that was rendering sodium as black.
+
+## Progress - 2026-06-19 AKDT, Air Sphere Bridge Guard
+
+- Added `SPH render-row sphere bridge keeps air particle PBR visible without
+  metallic fallback` in `tests/sphPhaseRenderer.test.mjs`. It asserts dry air
+  keeps `gas-rayleigh-transparent-pbr`, uses the transmissive visibility proxy,
+  remains bright, and does not enter the conductor metallic proxy path.
+- Focused renderer coverage now passes `65/65` with the air guard included.
 
 ## Progress - 2026-06-19 AKDT, Air/Pd/Fe Audit
 

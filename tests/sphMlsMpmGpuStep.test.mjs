@@ -25,6 +25,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
@@ -71,7 +72,8 @@ import {
   runMlsMpmMechanicsP2gStageComputeTask,
   runMlsMpmMechanicsG2pStageComputeTask,
   submitMlsMpmResidentStepComputeTask,
-  submitMlsMpmResidentStepsComputeTask
+  submitMlsMpmResidentStepsComputeTask,
+  summarizeMlsMpmResidentHotLoopBudget
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
@@ -3736,6 +3738,47 @@ test('MLS-MPM resident steps compute task can budget no compact-summary readback
   assert.equal(task.webgpu.copyBudget.compactSummaryBytes, 0);
   assert.equal(task.gpuResidentLane.residentSequenceLaneContract.compactSummaryMode, 'none');
   assert.equal(task.gpuResidentLane.residentSequenceLaneContract.sequenceRunnable, false);
+});
+
+test('MLS-MPM resident steps expose WebGPU-Ocean hot-loop budget diagnostics', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const budget = summarizeMlsMpmResidentHotLoopBudget({
+    ...options,
+    stepCount: 4,
+    compactSummaryMode: 'none'
+  });
+
+  assert.equal(budget.schema, ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA);
+  assert.equal(budget.status, 'webgpu-ocean-hot-loop-no-readback-budget');
+  assert.equal(budget.normalHotLoopReadbackFree, true);
+  assert.equal(budget.noSummaryReadback, true);
+  assert.equal(budget.compactSummaryStepCount, 0);
+  assert.equal(budget.readbackBytes, 0);
+  assert.equal(budget.compactSummaryBytes, 0);
+
+  const activeGridTask = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-hot-loop-budget-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    domainKey: 'ulg:test-domain',
+    stepCount: 4,
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true
+  });
+
+  assert.equal(activeGridTask.webgpu.hotLoopBudget.schema, ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA);
+  assert.equal(activeGridTask.webgpu.hotLoopBudget.status, 'webgpu-ocean-hot-loop-no-readback-budget');
+  assert.equal(activeGridTask.webgpu.hotLoopBudget.activeGridEnabled, true);
+  assert.equal(activeGridTask.webgpu.hotLoopBudget.activeGridDispatchPlanFinalOnly, true);
+  assert.equal(activeGridTask.webgpu.hotLoopBudget.readbackBytes, 0);
+  assert.equal(activeGridTask.gpuResidentLane.hotLoopBudget, activeGridTask.webgpu.hotLoopBudget);
+  assert.equal(activeGridTask.lawGraphNode.hotLoopBudget.status, 'webgpu-ocean-hot-loop-no-readback-budget');
+  assert.equal(activeGridTask.data.hotLoopBudget.copyBudget.readbackBytes, 0);
+  assert.equal(activeGridTask.gpuResidentLane.copyBudget.readbackBytes, 0);
 });
 
 test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {

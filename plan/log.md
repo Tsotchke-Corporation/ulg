@@ -1,5 +1,44 @@
 # ULG Implementation Log
 
+## 2026-06-19 21:40 AKDT - Immediate Todo Guardrails And Hot-Loop Budget Telemetry
+
+Status:
+
+- Broadened large drop-edge coverage to explicit `dropn=8, basen=8` for both
+  unit initialization and the mounted mobile-shaped MLS-MPM reset/upload
+  browser path.
+- Added an air render-row sphere PBR guard proving transparent
+  `gas-rayleigh-transparent-pbr` stays bright and does not use the conductor
+  metallic proxy. A direct mounted `drop=air&base=air` probe did not reach demo
+  readiness within 90s, so that scenario remains a todo instead of a flaky
+  e2e.
+- Added native visible-consumer blocker-family diagnostics. The native path
+  remains fail-closed, but the render-state summary now distinguishes surface
+  readback lifetime failures, device texture readback failures, browser pixel
+  readback failures, and pending validation.
+- Added `peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0` and threaded
+  it through resident single-step, resident multi-step, and mechanics-only
+  task envelopes. No-full/no-summary active-grid tasks now report zero
+  readback bytes through `webgpu`, `gpuResidentLane`, `lawGraphNode`, and
+  `data`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs && node --check
+  tests/sphPhaseDemo.test.mjs && node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` reported `39/39`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `65/65`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `61/61`.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase reset preserves drop edge above
+  six through mounted render diagnostics"` passed `1/1` with the browser
+  console issue guard active.
+
 ## 2026-06-19 19:18 AKDT - Native Validation Wait And Headless Capture Classification
 
 Status:

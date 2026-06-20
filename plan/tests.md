@@ -1,5 +1,46 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Immediate Todo Guardrails And Hot-Loop Budget Telemetry
+
+The immediate MLS-MPM/rendering todo lanes now have focused coverage for
+large same-material particle edges, transparent particle PBR bridge behavior,
+native visible-consumer blocker classification, and resident WebGPU-Ocean
+hot-loop budget diagnostics.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`,
+  `node --check tests/sphPhaseRenderer.test.mjs`,
+  `node --check tests/sphPhaseDemo.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseDemo.test.mjs` passed `39/39`,
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `65/65`, and
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `61/61`.
+- Mounted browser regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase reset preserves drop edge
+  above six through mounted render diagnostics"` passed `1/1` against the
+  live Vite server with the console issue guard active. The mounted
+  `dropn=8, basen=8` reset path preserved effective drop/base edges `8/8`
+  and kept generated/render-domain counts at `1024`.
+- Renderer guardrails:
+  the air render-row sphere bridge now keeps transparent Rayleigh-style PBR
+  visible without switching to the metallic proxy fallback, and native
+  visible-consumer diagnostics expose blocker families for pending validation,
+  resident texture readback unavailability, and browser pixel-validation
+  external-instance lifetime failures.
+- Resident performance telemetry:
+  MLS-MPM resident steps expose
+  `peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0`, reporting
+  no-full-readback and compact-summary budgets so the WebGPU-Ocean lane can be
+  evaluated separately from legacy CPU readback paths.
+
 ## Current Focused Result - 2026-06-19 Native Validation Wait And Headless Capture Classification
 
 The native WebGPU probe now waits for browser-side validation when requested,

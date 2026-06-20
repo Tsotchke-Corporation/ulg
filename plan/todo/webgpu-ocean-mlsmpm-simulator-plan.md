@@ -52,6 +52,23 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Resident MLS-MPM task envelopes now expose
+  `peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0`. The helper
+  normalizes no-full/no-summary readback budgets, compact-summary step counts,
+  active-grid enablement, final-only active-grid plan refresh, and the
+  resulting upload/readback/retained byte counts. Single-step, multi-step, and
+  mechanics-only resident task factories carry the same budget through
+  `webgpu`, `gpuResidentLane`, `lawGraphNode`, and `data`. Focused coverage
+  proves `compactSummaryMode=none` and active-grid/final-only resident
+  sequences report zero readback bytes without changing kernel behavior.
+- Native visible-consumer diagnostics now classify blocked validation by
+  family while staying fail-closed. `resolveResidentSurfaceVisibleGpuConsumer()`
+  distinguishes `native-surface-validation-readback-lifetime`,
+  `resident-device-texture-readback-unavailable`,
+  `browser-pixel-validation-readback-lifetime`, and pending validation, then
+  publishes the classification through resident render-state summaries. This is
+  diagnostic plumbing only; it does not mark native rendering ready without
+  pixel/readback validation.
 - Active-grid plan-only summary work now has an explicit refresh cadence.
   `runMlsMpmResidentStepWithOptionalWebGpu()` records whether a plan-only
   active-grid summary was eligible, requested, deferred, or skipped, and

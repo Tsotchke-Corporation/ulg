@@ -41,6 +41,24 @@ resident GPU uploads, and reset/rebuild flows.
 
 ## Implementation Status
 
+2026-06-19 AKDT update:
+
+- Broadened the explicit same-material mounted reset/rebuild regression from
+  `dropn=7, basen=7` to `dropn=8, basen=8`, keeping the mobile-shaped MLS-MPM
+  render-row sphere path. The browser test now verifies requested/effective
+  drop/base edges `8/8`, generated counts `8^3 + 8^3`, render-domain counts,
+  reset resync, and SPH plus MLS-MPM upload counts.
+- Added unit coverage for `dropn=8, basen=8` in
+  `tests/sphPhaseDemo.test.mjs`, asserting the same-material strategy
+  `preserve-both-requested-edges`, total count `1024`, and preservation
+  diagnostics.
+- Focused evidence:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase reset preserves drop edge above
+  six through mounted render diagnostics"` passed `1/1` with the console issue
+  guard active.
+
 2026-06-19 AKDT live report update:
 
 - User still reports that drop edge is not respected for anything larger than

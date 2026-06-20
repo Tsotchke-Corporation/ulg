@@ -1916,6 +1916,44 @@ test('SPH render-row sphere bridge leaves non-metal particle PBR out of metallic
   assert.equal(material.metalness, 0);
 });
 
+test('SPH render-row sphere bridge keeps air particle PBR visible without metallic fallback', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.94, 0.97, 1),
+    metalness: 0,
+    roughness: 0.92,
+    transmission: 0.9995,
+    thickness: 0.05,
+    transparent: true,
+    opacity: 0.0006
+  });
+  material.userData.optical = {
+    material: 'air',
+    phase: 'gas',
+    baseColorSrgb: [0.94, 0.97, 1],
+    metalness: 0,
+    roughness: 0.92,
+    transmission: 0.9995,
+    opacity: 0.0006,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'gas-rayleigh-transparent-pbr'
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'air', renderKey: 'air', phase: 'gas' },
+    fallbackColorSrgb: [0.72, 0.86, 1]
+  });
+
+  assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, undefined);
+  assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
+  assert.equal(material.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
+  assert.equal(material.metalness, 0);
+  assert.equal(material.transmission, 0);
+  assert.equal(material.thickness, 0);
+  assert.ok(material.opacity >= 0.66);
+  assert.ok(material.color.r + material.color.g + material.color.b > 2.4);
+});
+
 test('SPH surface mesh material proxies transmissive PBR on mobile WebGL paths', () => {
   const policy = resolveSphSurfaceRendererMaterialPolicy({
     rendererBackend: 'three-webgl',
@@ -2345,6 +2383,10 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   );
   assert.equal(nativePendingValidationWithFrame.nativeValidationPendingWithRenderedFrame, true);
   assert.equal(nativePendingValidationWithFrame.consumerValidated, false);
+  assert.equal(
+    nativePendingValidationWithFrame.nativeSurfaceConsumerValidationBlockerFamily,
+    'native-surface-validation-pending'
+  );
 
   const nativeReadbackPassedFallback = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2391,6 +2433,10 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativeReadbackUnavailableBlocked.pixelValidationRequired, true);
   assert.equal(nativeReadbackUnavailableBlocked.nativeReadbackFallbackValidated, false);
   assert.equal(nativeReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+  assert.equal(
+    nativeReadbackUnavailableBlocked.nativeSurfaceConsumerValidationBlockerFamily,
+    'native-surface-validation-readback-lifetime'
+  );
 
   const nativeDeviceTextureReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2419,6 +2465,10 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     'not-run'
   );
   assert.equal(nativeDeviceTextureReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+  assert.equal(
+    nativeDeviceTextureReadbackUnavailableBlocked.nativeSurfaceConsumerValidationBlockerFamily,
+    'resident-device-texture-readback-unavailable'
+  );
 
   const nativePixelReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2444,6 +2494,10 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativePixelReadbackUnavailableBlocked.pixelValidationRequired, true);
   assert.equal(nativePixelReadbackUnavailableBlocked.nativeReadbackFallbackValidated, false);
   assert.equal(nativePixelReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+  assert.equal(
+    nativePixelReadbackUnavailableBlocked.nativeSurfaceConsumerValidationBlockerFamily,
+    'browser-pixel-validation-readback-lifetime'
+  );
 
   const validated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,

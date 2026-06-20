@@ -1815,6 +1815,73 @@ test('SPH render-row sphere bridge brightens dark transmissive proxy materials o
   assert.equal(material.userData.renderRowSphereFallbackReason, 'transmissive-proxy-low-luminance');
 });
 
+test('SPH render-row sphere bridge uses closure-derived visible proxy for metallic particles', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.02, 0.018, 0.016),
+    metalness: 1,
+    roughness: 0.06,
+    transmission: 0,
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'Na',
+    phase: 'solid',
+    baseColorSrgb: [1, 0.945, 0.923],
+    metalness: 1,
+    roughness: 0.32,
+    transmission: 0,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'conductor-drude-free-electron'
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'Na', renderKey: 'Na', phase: 'solid' },
+    fallbackColorSrgb: [0.99, 0.94, 0.92]
+  });
+
+  assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, true);
+  assert.equal(material.userData.renderRowSphereOriginalMetalness, 1);
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'metallic-sphere-visibility-proxy');
+  assert.deepEqual(material.userData.renderRowSphereFallbackColor, [0.99, 0.94, 0.92]);
+  assert.ok(material.metalness <= 0.58);
+  assert.ok(material.roughness >= 0.34);
+  assert.ok(material.envMapIntensity >= 1.45);
+  assert.ok(material.color.r + material.color.g + material.color.b > 0.6);
+});
+
+test('SPH render-row sphere bridge leaves non-metal particle PBR out of metallic proxy', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.44, 0.76, 0.91),
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0,
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'h2o',
+    phase: 'liquid',
+    baseColorSrgb: [0.44, 0.76, 0.91],
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'molecular-transparent-beer-lambert-pbr'
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    fallbackColorSrgb: [0.44, 0.76, 0.91]
+  });
+
+  assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, undefined);
+  assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
+  assert.equal(material.metalness, 0);
+});
+
 test('SPH surface mesh material proxies transmissive PBR on mobile WebGL paths', () => {
   const policy = resolveSphSurfaceRendererMaterialPolicy({
     rendererBackend: 'three-webgl',

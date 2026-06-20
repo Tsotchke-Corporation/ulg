@@ -4281,6 +4281,10 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
 }
 
 const RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY = 0.66;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_MIN_METALNESS = 0.72;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_METALNESS = 0.58;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ROUGHNESS = 0.34;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ENV_INTENSITY = 1.45;
 const SURFACE_MESH_MOBILE_TRANSMISSIVE_OPACITY = 0.78;
 
 function srgbLuminance(color = []) {
@@ -4295,6 +4299,7 @@ function fallbackBridgeColorSrgbForDescriptor(descriptor = {}) {
   const material = String(descriptor.material || descriptor.renderKey || '').toLowerCase();
   if (material === 'h2o' || material === 'water' || descriptor.renderKey === 'ice') return [0.44, 0.76, 0.91];
   if (material === 'fe' || material === 'iron') return [0.66, 0.62, 0.56];
+  if (material === 'pd' || material === 'palladium') return [0.72, 0.7, 0.66];
   if (material === 'cs' || material === 'cesium') return [0.78, 0.68, 0.44];
   if (material === 'na' || material === 'sodium') return [0.72, 0.70, 0.62];
   if (material === 'csoh' || material === 'naoh') return [0.72, 0.82, 0.9];
@@ -4547,6 +4552,49 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       : needsTransmissiveProxyColor
       ? 'transmissive-proxy-low-luminance'
       : 'low-luminance-material';
+    changed = true;
+  }
+
+  const metalness = Number(material.metalness ?? optics.metalness ?? 0);
+  const fallbackLuminance = srgbLuminance(fallbackColor);
+  const metallicVisibilityCandidate = Number.isFinite(metalness)
+    && metalness >= RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_MIN_METALNESS
+    && fallbackLuminance > 0.04
+    && !blockedOptics;
+  if (metallicVisibilityCandidate) {
+    material.userData.renderRowSphereMetallicVisibilityProxy = true;
+    material.userData.renderRowSphereOriginalMetalness = metalness;
+    material.userData.renderRowSphereOriginalRoughness = Number(material.roughness ?? optics.roughness ?? 0);
+    material.userData.renderRowSphereOriginalEnvMapIntensity = Number(material.envMapIntensity ?? 0);
+    material.userData.renderRowSphereFallbackColor = [...fallbackColor];
+    material.userData.renderRowSphereFallbackReason = 'metallic-sphere-visibility-proxy';
+    if (materialColor && fallbackLuminance > currentLuminance) {
+      materialColor.setRGB(
+        clamp(fallbackColor[0], 0, 1),
+        clamp(fallbackColor[1], 0, 1),
+        clamp(fallbackColor[2], 0, 1),
+        (activeThreeNamespace || THREE).SRGBColorSpace
+      );
+    }
+    if ('metalness' in material) {
+      material.metalness = Math.min(
+        metalness,
+        RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_METALNESS
+      );
+    }
+    if ('roughness' in material) {
+      const roughness = Number(material.roughness ?? optics.roughness ?? 0);
+      material.roughness = Math.max(
+        Number.isFinite(roughness) ? roughness : 0,
+        RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ROUGHNESS
+      );
+    }
+    material.envMapIntensity = Math.max(
+      Number(material.envMapIntensity) || 0,
+      RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ENV_INTENSITY
+    );
+    material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.84);
+    material.transparent = material.opacity < 0.999;
     changed = true;
   }
 
@@ -9116,6 +9164,7 @@ export function createSphPhaseScene(container, {
     let maxParticleRadiusM = null;
     let sphereBridgeTransmissionProxyCount = 0;
     let sphereBridgeFallbackColorCount = 0;
+    let sphereBridgeMetallicVisibilityProxyCount = 0;
     let sphereBridgeMaterialRendererProxyCount = 0;
     let sphereBridgeGeometryProxyCount = 0;
     const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
@@ -9289,6 +9338,9 @@ export function createSphPhaseScene(container, {
         mesh.userData.renderDomainKey = descriptor.renderDomainKey;
         mesh.userData.renderRowSphereTransmissionProxy = Boolean(material.userData.renderRowSphereTransmissionProxy);
         mesh.userData.renderRowSphereFallbackColor = material.userData.renderRowSphereFallbackColor || null;
+        mesh.userData.renderRowSphereFallbackReason = material.userData.renderRowSphereFallbackReason || null;
+        mesh.userData.renderRowSphereMetallicVisibilityProxy =
+          Boolean(material.userData.renderRowSphereMetallicVisibilityProxy);
         mesh.userData.surfaceMaterialRendererProxy = Boolean(material.userData.surfaceMaterialRendererProxy);
         mesh.userData.surfaceMaterialRendererProxyReason = material.userData.surfaceMaterialRendererProxyReason || null;
         mesh.userData.renderRowSphereGeometryProxy = Boolean(mesh.geometry?.userData?.threeWebGpuMappedBufferSafeProxy);
@@ -9299,6 +9351,7 @@ export function createSphPhaseScene(container, {
           renderRowSphereBridgeContract.sphereBridgeClosurePbr;
         if (material.userData.renderRowSphereTransmissionProxy) sphereBridgeTransmissionProxyCount += 1;
         if (material.userData.renderRowSphereFallbackColor) sphereBridgeFallbackColorCount += 1;
+        if (material.userData.renderRowSphereMetallicVisibilityProxy) sphereBridgeMetallicVisibilityProxyCount += 1;
         let groupMinRadius = Number.POSITIVE_INFINITY;
         let groupMaxRadius = Number.NEGATIVE_INFINITY;
         for (let localIndex = 0; localIndex < indices.length; localIndex += 1) {
@@ -9344,6 +9397,7 @@ export function createSphPhaseScene(container, {
       drawOrderingPolicy = 'three-instanced-spheres-material-pbr-depth-policy';
       group.userData.sphereBridgeTransmissionProxyCount = sphereBridgeTransmissionProxyCount;
       group.userData.sphereBridgeFallbackColorCount = sphereBridgeFallbackColorCount;
+      group.userData.sphereBridgeMetallicVisibilityProxyCount = sphereBridgeMetallicVisibilityProxyCount;
       group.userData.sphereBridgeMaterialRendererProxyCount = sphereBridgeMaterialRendererProxyCount;
       group.userData.sphereBridgeGeometryProxyCount = sphereBridgeGeometryProxyCount;
       group.userData.sphereBridgeReusedMeshCount = reusedSphereMeshCount;
@@ -9498,6 +9552,7 @@ export function createSphPhaseScene(container, {
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
       sphereBridgeTransmissionProxyCount,
       sphereBridgeFallbackColorCount,
+      sphereBridgeMetallicVisibilityProxyCount,
       sphereBridgeMaterialRendererProxyCount,
       sphereBridgeGeometryProxyCount,
       sphereBridgeReusedMeshCount: useSphereBridge
@@ -15716,6 +15771,8 @@ export function createSphPhaseScene(container, {
         renderBridgeSphereClosurePbr: Boolean(renderBridge?.sphereBridgeClosurePbr),
         renderBridgeSphereTransmissionProxyCount: renderBridge?.sphereBridgeTransmissionProxyCount ?? 0,
         renderBridgeSphereFallbackColorCount: renderBridge?.sphereBridgeFallbackColorCount ?? 0,
+        renderBridgeSphereMetallicVisibilityProxyCount:
+          renderBridge?.sphereBridgeMetallicVisibilityProxyCount ?? 0,
         renderBridgeSphereMaterialRendererProxyCount: renderBridge?.sphereBridgeMaterialRendererProxyCount ?? 0,
         renderBridgeSphereGeometryProxyCount: renderBridge?.sphereBridgeGeometryProxyCount ?? 0,
         renderBridgeSphereReusedMeshCount: renderBridge?.sphereBridgeReusedMeshCount ?? 0,
@@ -17426,6 +17483,8 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeSphereClosurePbr = Boolean(renderBridge?.sphereBridgeClosurePbr);
           nextResidentSurfaceDraw.renderBridgeSphereTransmissionProxyCount = renderBridge?.sphereBridgeTransmissionProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereFallbackColorCount = renderBridge?.sphereBridgeFallbackColorCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereMetallicVisibilityProxyCount =
+            renderBridge?.sphereBridgeMetallicVisibilityProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereMaterialRendererProxyCount =
             renderBridge?.sphereBridgeMaterialRendererProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereGeometryProxyCount = renderBridge?.sphereBridgeGeometryProxyCount ?? 0;
@@ -18751,6 +18810,8 @@ export function createSphPhaseScene(container, {
           Boolean(sphResidentSurfaceDraw?.renderBridgeSphereClosurePbr),
         surfaceDrawRenderBridgeSphereTransmissionProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereTransmissionProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereFallbackColorCount: sphResidentSurfaceDraw?.renderBridgeSphereFallbackColorCount ?? 0,
+        surfaceDrawRenderBridgeSphereMetallicVisibilityProxyCount:
+          sphResidentSurfaceDraw?.renderBridgeSphereMetallicVisibilityProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
           sphResidentSurfaceDraw?.renderBridgeSphereMaterialRendererProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereGeometryProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereGeometryProxyCount ?? 0,

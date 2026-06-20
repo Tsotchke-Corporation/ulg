@@ -2284,6 +2284,8 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeSpherePbrMaterialSource ?? null,
             surfaceDrawRenderBridgeSphereClosurePbr:
               renderState.surfaceDrawRenderBridgeSphereClosurePbr ?? null,
+            surfaceDrawRenderBridgeSphereMetallicVisibilityProxyCount:
+              renderState.surfaceDrawRenderBridgeSphereMetallicVisibilityProxyCount ?? null,
             surfaceDrawRenderBridgeVisibleNoReadbackSupported: renderState.surfaceDrawRenderBridgeVisibleNoReadbackSupported ?? null,
             surfaceDrawRenderBridgeLastRenderStatus: renderState.surfaceDrawRenderBridgeLastRenderStatus ?? null,
             surfaceDrawRenderBridgeFrameCount: renderState.surfaceDrawRenderBridgeFrameCount ?? null,
@@ -2704,6 +2706,8 @@ async function runBrowserProbe({
             renderBridgeSphereClosurePbr: surfaceDraw.renderBridgeSphereClosurePbr ?? null,
             renderBridgeSphereTransmissionProxyCount: surfaceDraw.renderBridgeSphereTransmissionProxyCount ?? null,
             renderBridgeSphereFallbackColorCount: surfaceDraw.renderBridgeSphereFallbackColorCount ?? null,
+            renderBridgeSphereMetallicVisibilityProxyCount:
+              surfaceDraw.renderBridgeSphereMetallicVisibilityProxyCount ?? null,
             renderBridgeSphereMaterialRendererProxyCount:
               surfaceDraw.renderBridgeSphereMaterialRendererProxyCount ?? null,
             renderBridgeSphereGeometryProxyCount: surfaceDraw.renderBridgeSphereGeometryProxyCount ?? null,

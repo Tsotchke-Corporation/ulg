@@ -29250,3 +29250,36 @@ Remaining:
 - Add pre-render mechanics/active-grid invariants for the same runaway class.
 - Add a browser reaction repro that trips the cap count rather than only the
   synthetic `J=1e9` unit fixture.
+
+## 2026-06-19 17:46 AKDT - Particle Sphere PBR Metallic Visibility
+
+Status:
+
+- Fixed the black-sphere failure for sodium-style metallic particle rendering in
+  the render-row sphere bridge.
+- Added a bridge-local, closure-derived metallic visibility proxy that records
+  original conductor PBR values, keeps the derived visible color, and reduces
+  only the instanced particle-sphere material metalness/roughness enough to
+  remain visible when mobile/WebGL environment lighting is weak.
+- Exposed `renderBridgeSphereMetallicVisibilityProxyCount` through scene state
+  and the browser probe.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `npm run test:physics-atomics` with `11/11`; the three long-horizon
+  acceptance gates were skipped by opt-in policy.
+- PASS: `/tmp/ulg-particle-pbr-na-mobile-spheres-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`, two
+  nonblank mobile-shaped canvas captures, sphere bridge
+  `three-render-row-spheres`, material keys `h2o`, `naoh`, and `Na`,
+  closure-derived sphere PBR, and
+  `renderBridgeSphereMetallicVisibilityProxyCount=1`.
+
+Remaining:
+
+- Extend the material-resolution audit matrix to Pd, Fe, air, products, and the
+  Three WebGPU renderer material-proxy path.

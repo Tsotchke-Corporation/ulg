@@ -45,12 +45,17 @@ reaction case that actually trips the cap, split gas/foam expansion from
 individual particle radius, and fold reset/lockup regression coverage into the
 reset fix. Do not treat the render-row cap as the final physics model.
 
-Current routing note, 2026-06-19 AKDT: particle/sphere render modes can lose
-material PBR and show sodium or most substances as black spheres. Track this in
-`plan/todo/particle-pbr-material-closure-rendering-plan.md`. Treat it as an
-engine material-resolution bug: particle render modes must consume the same
-closure-derived optical/PBR rows as surfaces, with mobile/WebGL proxy material
-diagnostics when full PBR is unsupported.
+Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
+bridge-local metallic visibility proxy for closure-derived conductor PBR rows,
+so sodium-style fully metallic particles do not render black when the mobile or
+WebGL sphere bridge lacks reliable environment lighting. Evidence:
+`/tmp/ulg-particle-pbr-na-mobile-spheres-probe.json` completed `status=good`
+with zero console issues/warnings, two nonblank mobile-shaped canvas captures,
+sphere material keys `h2o`, `naoh`, and `Na`, closure-derived sphere PBR, and
+`renderBridgeSphereMetallicVisibilityProxyCount=1`. Track remaining broader
+coverage in `plan/todo/particle-pbr-material-closure-rendering-plan.md`: run the
+same material-resolution diagnostics across Pd/Fe/air/product materials and the
+WebGPU renderer proxy paths.
 
 Current routing note, 2026-06-19 AKDT: the drop edge setting's silent
 coarsening above `6` is fixed in the initializer and now reports

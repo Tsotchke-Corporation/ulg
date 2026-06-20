@@ -44,3 +44,27 @@ material, phase, temperature, and pressure are known.
 - Particle PBR and surface PBR share a single material-resolution contract.
 - Fallback or mobile proxy materials are closure-derived and diagnostic, not
   hard-coded cosmetic patches.
+
+## Progress - 2026-06-19 AKDT
+
+- Added a render-row sphere bridge metallic visibility proxy for conductor PBR
+  rows. The proxy is applied inside the engine material path, not as an overlay:
+  it keeps the closure-derived visible color, records original metalness,
+  roughness, and environment intensity, reduces only the particle-sphere bridge
+  metalness enough to survive weak mobile/WebGL environment lighting, and
+  reports `renderRowSphereMetallicVisibilityProxy`.
+- Surfaced `renderBridgeSphereMetallicVisibilityProxyCount` through scene state
+  and the long-horizon probe so browser evidence can distinguish true material
+  closure PBR from diagnostic visibility proxying.
+- Verified the sodium/water MLS-MPM mobile-shaped sphere path in
+  `/tmp/ulg-particle-pbr-na-mobile-spheres-probe.json`: `status=good`,
+  browser console issues/warnings `0/0`, two nonblank captured canvas frames,
+  sphere material keys `h2o`, `naoh`, and `Na`, closure-derived sphere PBR, and
+  metallic visibility proxy count `1`.
+
+## Remaining
+
+- Extend browser evidence to Pd, Fe, air, and representative product materials
+  once those scenarios are cheap enough to run in one matrix.
+- Audit the Three WebGPU material-proxy path separately; this slice covered the
+  mobile WebGL sphere bridge that was rendering sodium as black.

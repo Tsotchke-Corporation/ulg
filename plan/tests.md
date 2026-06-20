@@ -11108,3 +11108,33 @@ Render-row particle scale guardrail, 2026-06-19 17:01 AKDT:
   - Scale telemetry: `renderRowsParticleScaleStabilityStatus =
     gpu-row-cap-policy-applied-in-shader`, max radius growth allowed `4`, max
     volume ratio `J=64`.
+
+Particle sphere PBR metallic visibility, 2026-06-19 17:46 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Focused tests:
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+  - New coverage asserts a sodium-like fully metallic particle sphere is
+    stabilized with a closure-derived visible proxy, records original PBR
+    values and reason `metallic-sphere-visibility-proxy`, and leaves non-metal
+    particle PBR outside that proxy.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; the three long-horizon acceptance gates were skipped by
+    their opt-in environment guard.
+- Browser mobile-shaped sodium sphere probe:
+  `/tmp/ulg-particle-pbr-na-mobile-spheres-probe.json`
+  - Passed with `status=good`, analysis `good`, and browser console
+    issues/warnings `0/0`.
+  - Captured two nonblank canvas frames at mobile-shaped viewport
+    `390x844`, DPR `2`.
+  - Rendering telemetry: `three-render-row-spheres`, material keys `h2o`,
+    `naoh`, and `Na`, sphere PBR source `closure-derived-pbr`,
+    `renderBridgeSphereClosurePbr=true`,
+    `renderBridgeSphereMetallicVisibilityProxyCount=1`,
+    transmission proxy count `2`, fallback color count `1`, and min/max sphere
+    radius `0.045374006032943726` / `0.5262995958328247`.

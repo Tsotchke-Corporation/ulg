@@ -21,6 +21,7 @@ import {
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+  ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
   buildSphThermalPhaseResponseTable,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
@@ -194,6 +195,48 @@ test('SPH thermal material table packs closure-derived energy/phase segments', (
     equilibriumFromSpecificEnergy(materialProperties.fe, ironEnergy).temperatureK,
     1e-6
   );
+});
+
+test('SPH thermal material table carries non-authoritative material-bank warm inputs', () => {
+  const warmInputTable = {
+    schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+    status: 'material-bank-gpu-warm-input-table-ready',
+    rowCount: 1,
+    rows: new Float32Array(16),
+    metadata: [{
+      material: 'Fe',
+      requestedMaterial: 'Fe',
+      atomicNumber: 26,
+      temperatureK: 300,
+      pressurePa: 101325,
+      strictSourceOfTruth: false,
+      status: 'ready'
+    }]
+  };
+  const table = buildSphThermalMaterialTable(materialProperties, {
+    materialPropertyBankGpuWarmInputTable: warmInputTable
+  });
+  const iron = table.metadata.find((entry) => entry.material === 'fe');
+  const water = table.metadata.find((entry) => entry.material === 'h2o');
+
+  assert.equal(
+    table.materialPropertyBankWarmInputConsumer.schema,
+    ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    table.materialPropertyBankWarmInputConsumer.status,
+    'thermal-material-table-annotated-with-material-bank-warm-inputs'
+  );
+  assert.equal(table.materialPropertyBankWarmInputConsumer.sourceRowCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.matchedMaterialCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.strictSourceOfTruth, false);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.shaderBound, false);
+  assert.equal(table.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputMatchedMaterialCount, 1);
+  assert.equal(iron.materialPropertyBankWarmInput.material, 'Fe');
+  assert.equal(iron.materialPropertyBankWarmInputStatus, 'material-bank-warm-input-attached');
+  assert.equal(water.materialPropertyBankWarmInput, null);
+  assert.equal(water.materialPropertyBankWarmInputStatus, 'no-material-bank-warm-input');
 });
 
 test('SPH thermal graph buffer set exports flat energy-temperature segment closures', () => {
@@ -542,7 +585,23 @@ test('SPH thermal optional WebGPU accepts no-full retained output without CPU pa
 
 test('SPH thermal WebGPU defers retained output buffer destruction until submitted work completes', async () => {
   const packed = packedTwoWaterParticles();
-  const table = buildSphThermalMaterialTable(materialProperties);
+  const table = buildSphThermalMaterialTable(materialProperties, {
+    materialPropertyBankGpuWarmInputTable: {
+      schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+      status: 'material-bank-gpu-warm-input-table-ready',
+      rowCount: 1,
+      rows: new Float32Array(16),
+      metadata: [{
+        material: 'Fe',
+        requestedMaterial: 'Fe',
+        atomicNumber: 26,
+        temperatureK: 300,
+        pressurePa: 101325,
+        strictSourceOfTruth: false,
+        status: 'ready'
+      }]
+    }
+  });
   const graphSet = buildSphThermalClosureGraphBuffers(table);
   const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
   const device = fakeThermalDeviceWithFence();
@@ -577,6 +636,16 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
 
   assert.equal(result.retainedOutputParticleBuffers, true);
   assert.equal(result.outputBufferInitializationMode, 'shader-writes-all-particle-rows');
+  assert.equal(
+    result.materialPropertyBankWarmInputConsumer.schema,
+    ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    result.materialPropertyBankWarmInputConsumer.status,
+    'thermal-material-table-annotated-with-material-bank-warm-inputs'
+  );
+  assert.equal(result.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(result.materialPropertyBankWarmInputMatchedMaterialCount, 1);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-state'), false);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-thermo'), false);
   assert.equal(typeof result.destroyOutputParticleBuffers, 'function');

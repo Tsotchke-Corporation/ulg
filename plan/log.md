@@ -30368,3 +30368,29 @@ Remaining:
 - Run a non-headless browser or phone native WebGPU capture and use the
   browser-frame/readback-lifetime blocker split to decide whether the next fix
   is presentation/context/device-scale or local readback lifetime.
+
+## 2026-06-19 AKDT - Thermal Material Bank Warm-Input Annotation
+
+Status:
+
+- `buildSphThermalMaterialTable()` now accepts the packed material-property
+  bank warm-input table and attaches matching rows to material metadata without
+  treating them as authoritative physics.
+- SPH static-table inputs and scene table rebuilds pass the packed warm-input
+  table into the thermal table builder when particle state exposes it.
+- Static-table cache serialization and rehydration preserve the warm-input
+  consumer summary and row counts.
+- Thermal WebGPU result envelopes now report the material-bank warm-input
+  consumer status so probes can distinguish missing rows from annotated rows.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphThermalGpuKernel.js src/runtime/sph/sphStaticTableInputs.js src/visualization/sphPhaseScene.js src/runtime/sph/sphColdStartCache.js tests/sphThermalGpuKernel.test.mjs tests/sphColdStartCache.test.mjs`.
+- PASS:
+  `node --test tests/sphThermalGpuKernel.test.mjs --test-name-pattern "material-bank warm|retained output"` with `13/13`.
+- PASS: `node --test tests/sphColdStartCache.test.mjs` with `4/4`.
+
+Remaining:
+
+- Bind safe material-bank warm starts into actual thermal/EOS/mechanics shader
+  consumers. This slice only preserves and reports non-authoritative metadata.

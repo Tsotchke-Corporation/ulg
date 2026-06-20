@@ -2691,3 +2691,9 @@ Updated immediate priority after native canvas sizing:
    presentation next; if it presents, return to the resident continuation hang.
 3. Keep the no-overlay, no-full-readback route as the primary MLS-MPM renderer
    integration path.
+
+2026-06-19 material-bank routing note: thermal material tables now preserve
+accepted material-bank warm-input metadata through table construction,
+static-table cache rehydration, and thermal WebGPU result envelopes. Treat this
+as a non-authoritative annotation path for later thermal/EOS shader warm-start
+work; closure-derived thermal graphs still own the physics.

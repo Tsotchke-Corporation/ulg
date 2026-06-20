@@ -20,6 +20,7 @@ import {
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../material/materialPropertyBank.js';
 import {
   orderedSegments,
   segmentEnergyAbove,
@@ -58,6 +59,8 @@ export const SPH_THERMAL_DENSITY_POLICY_IDS = Object.freeze({
 export const SPH_THERMAL_STABLE_PHASE_POLICY_IDS = Object.freeze({
   dominantAtHalf: 1
 });
+export const ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA =
+  'peercompute.ulg.sph-thermal-material-bank-warm-input-consumer.v0';
 
 const THERMAL_SCOPE = 'sph-thermal-closure-table-conduction-walls';
 const THERMAL_SEGMENT_TYPES = Object.freeze({ phase: 1, plateau: 2 });
@@ -122,15 +125,59 @@ function sortedMaterialEntries(materialProperties) {
     .sort(([a], [b]) => String(a).localeCompare(String(b)));
 }
 
-export function buildSphThermalMaterialTable(materialProperties = {}) {
+function materialBankWarmInputsByMaterial(table = null) {
+  const rows = new Map();
+  if (table?.schema !== MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA) return rows;
+  for (const metadata of table.metadata || []) {
+    const material = String(metadata?.material || metadata?.requestedMaterial || '').toLowerCase();
+    if (!material) continue;
+    rows.set(material, { ...metadata });
+  }
+  return rows;
+}
+
+function materialBankWarmInputConsumerSummary({
+  table = null,
+  matchedMaterialCount = 0
+} = {}) {
+  const sourceRowCount = Math.max(0, Math.round(finiteNumber(table?.rowCount, 0)));
+  const matchedCount = Math.max(0, Math.round(finiteNumber(matchedMaterialCount, 0)));
+  return {
+    schema: ULG_SPH_THERMAL_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
+    status: sourceRowCount <= 0
+      ? 'no-material-bank-warm-input-table'
+      : (matchedCount > 0
+        ? 'thermal-material-table-annotated-with-material-bank-warm-inputs'
+        : 'material-bank-warm-inputs-not-matched-to-thermal-materials'),
+    sourceSchema: table?.schema ?? null,
+    sourceRowCount,
+    matchedMaterialCount: matchedCount,
+    consumer: 'sph-thermal-material-table',
+    consumedAs: 'non-authoritative-warm-input-metadata-before-closure-derived-thermal-graphs',
+    strictSourceOfTruth: false,
+    shaderBound: false,
+    scientificValidation: false,
+    materialValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function buildSphThermalMaterialTable(materialProperties = {}, {
+  materialPropertyBankGpuWarmInputTable = null
+} = {}) {
   const records = [];
   const segments = [];
   const metadata = [];
   const segmentMetadata = [];
+  const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
+  let materialBankWarmInputMatchedMaterialCount = 0;
   for (const [material, properties] of sortedMaterialEntries(materialProperties)) {
     const materialId = stableOpticalMaterialId(material);
     const materialSegments = orderedSegments(properties);
     const segmentOffset = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
+    const materialBankWarmInput = materialBankWarmInputs.get(String(material).toLowerCase()) || null;
+    if (materialBankWarmInput) materialBankWarmInputMatchedMaterialCount += 1;
     for (const segment of materialSegments) {
       const segmentIndex = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
       segmentMetadata[segmentIndex] = {
@@ -178,12 +225,24 @@ export function buildSphThermalMaterialTable(materialProperties = {}) {
       materialId,
       segmentOffset,
       segmentCount: materialSegments.length,
-      phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))]
+      phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))],
+      materialPropertyBankWarmInput: materialBankWarmInput,
+      materialPropertyBankWarmInputStatus: materialBankWarmInput
+        ? 'material-bank-warm-input-attached'
+        : 'no-material-bank-warm-input'
     });
   }
+  const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerSummary({
+    table: materialPropertyBankGpuWarmInputTable,
+    matchedMaterialCount: materialBankWarmInputMatchedMaterialCount
+  });
   return {
     schema: ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
     status: 'closure-derived-thermal-table-ready',
+    materialPropertyBankWarmInputConsumer,
+    materialPropertyBankWarmInputRowCount: materialPropertyBankWarmInputConsumer.sourceRowCount,
+    materialPropertyBankWarmInputMatchedMaterialCount:
+      materialPropertyBankWarmInputConsumer.matchedMaterialCount,
     materialCount: records.length / SPH_THERMAL_MATERIAL_RECORD_FLOATS,
     segmentCount: segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS,
     recordLayout: [...SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT],
@@ -940,6 +999,12 @@ function outputEnvelope({
     kernelScope: THERMAL_SCOPE,
     sourceSchema: sphParticleState.schema,
     materialTableSchema: thermalMaterialTable.schema,
+    materialPropertyBankWarmInputConsumer:
+      thermalMaterialTable.materialPropertyBankWarmInputConsumer ?? materialBankWarmInputConsumerSummary(),
+    materialPropertyBankWarmInputRowCount:
+      thermalMaterialTable.materialPropertyBankWarmInputRowCount ?? 0,
+    materialPropertyBankWarmInputMatchedMaterialCount:
+      thermalMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount ?? 0,
     thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
     thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
     thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,

@@ -182,6 +182,14 @@ particle state, and reports
 Remaining consumers are mechanics/EOS/thermal/optical kernels plus Phase 2
 reference-quality/crystalline rows.
 
+Status update, 2026-06-19 AKDT: thermal material tables now carry accepted
+material-bank warm-input metadata through live table construction,
+static-table cache serialization, and WebGPU thermal result envelopes. This is
+still a non-authoritative annotation path, not a shader-bound thermal closure
+override: closure-derived thermal graphs remain the source of physics truth
+and `shaderBound` remains `false` until a later thermal/EOS shader consumer
+can use rows safely as warm starts.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

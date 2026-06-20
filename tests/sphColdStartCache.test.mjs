@@ -23,7 +23,20 @@ function fakeTableInputs() {
       segmentStrideFloats: 4,
       recordLayout: { id: 0 },
       segmentLayout: { start: 0 },
-      metadata: [{ material: 'h2o', phaseCount: 3 }]
+      metadata: [{ material: 'h2o', phaseCount: 3 }],
+      materialPropertyBankWarmInputConsumer: {
+        schema: 'peercompute.ulg.sph-thermal-material-bank-warm-input-consumer.v0',
+        status: 'thermal-material-table-annotated-with-material-bank-warm-inputs',
+        sourceSchema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+        sourceRowCount: 1,
+        matchedMaterialCount: 1,
+        consumer: 'sph-thermal-material-table',
+        consumedAs: 'non-authoritative-warm-input-metadata-before-closure-derived-thermal-graphs',
+        strictSourceOfTruth: false,
+        shaderBound: false
+      },
+      materialPropertyBankWarmInputRowCount: 1,
+      materialPropertyBankWarmInputMatchedMaterialCount: 1
     },
     thermalClosureGraphSet: {
       schema: 'peercompute.ulg.sph-thermal-closure-graph-buffer-set.v0',
@@ -213,6 +226,12 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
   assert.equal(bundle.status, 'static-table-cache-bundle-hit');
   assert.equal(bundle.hitCount, 5);
   assert.equal(bundle.thermalMaterialTable.status, 'static-table-cache-hit');
+  assert.equal(
+    bundle.thermalMaterialTable.materialPropertyBankWarmInputConsumer.status,
+    'thermal-material-table-annotated-with-material-bank-warm-inputs'
+  );
+  assert.equal(bundle.thermalMaterialTable.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(bundle.thermalMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount, 1);
   assert.equal(bundle.thermalClosureGraphSet.status, 'static-table-cache-hit');
   assert.equal(bundle.thermalClosureGraphSet.graphs.length, 1);
   assert.equal(bundle.thermalClosureGraphSet.graphs[0].schema, 'peercompute.ulg.closure-law-graph.v0');

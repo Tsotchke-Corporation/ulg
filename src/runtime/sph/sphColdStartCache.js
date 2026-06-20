@@ -240,7 +240,13 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         segmentStrideFloats: thermalMaterialTable.segmentStrideFloats,
         recordLayout: thermalMaterialTable.recordLayout,
         segmentLayout: thermalMaterialTable.segmentLayout,
-        materials: thermalMaterialTable.metadata
+        materials: thermalMaterialTable.metadata,
+        materialPropertyBankWarmInputConsumer:
+          thermalMaterialTable.materialPropertyBankWarmInputConsumer ?? null,
+        materialPropertyBankWarmInputRowCount:
+          thermalMaterialTable.materialPropertyBankWarmInputRowCount ?? 0,
+        materialPropertyBankWarmInputMatchedMaterialCount:
+          thermalMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount ?? 0
       },
       generatorFingerprint,
       updatedAt
@@ -598,6 +604,12 @@ function restoreThermalMaterialTable(record) {
     records: record.arrays.records,
     segments: record.arrays.segments,
     metadata: metadata.materials || [],
+    materialPropertyBankWarmInputConsumer:
+      metadata.materialPropertyBankWarmInputConsumer ?? null,
+    materialPropertyBankWarmInputRowCount:
+      metadata.materialPropertyBankWarmInputRowCount ?? 0,
+    materialPropertyBankWarmInputMatchedMaterialCount:
+      metadata.materialPropertyBankWarmInputMatchedMaterialCount ?? 0,
     cache: cacheMetadata(record),
     scientificValidation: false,
     materialValidation: false,

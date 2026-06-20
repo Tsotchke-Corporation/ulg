@@ -14878,7 +14878,10 @@ export function createSphPhaseScene(container, {
       staticTableCache?.thermalMaterialTable?.schema
         ? staticTableCache.thermalMaterialTable
         : materialProperties
-        ? buildSphThermalMaterialTable(materialProperties)
+        ? buildSphThermalMaterialTable(materialProperties, {
+            materialPropertyBankGpuWarmInputTable:
+              nextSphGpuParticleState?.materialPropertyBankWarmInputTable ?? null
+          })
         : null
     ));
     sphThermalClosureGraphBuffers = measure('thermalClosureGraphs', () => (

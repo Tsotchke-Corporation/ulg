@@ -85,7 +85,10 @@ export function buildOpticalGpuTableForSurfaceDescriptors(descriptors = [], {
 
 export function sphStaticTableInputsFromViewState(viewState = {}) {
   const materialProperties = viewState.materialProperties || {};
-  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties, {
+    materialPropertyBankGpuWarmInputTable:
+      viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
+  });
   const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
   const opticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(

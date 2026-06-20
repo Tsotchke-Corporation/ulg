@@ -11815,6 +11815,22 @@ Default material bank loader, 2026-06-19 AKDT:
 - Whitespace:
   `git diff --check` passed.
 
+Thermal material-bank warm-input annotation, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphThermalGpuKernel.js src/runtime/sph/sphStaticTableInputs.js src/visualization/sphPhaseScene.js src/runtime/sph/sphColdStartCache.js tests/sphThermalGpuKernel.test.mjs tests/sphColdStartCache.test.mjs`
+  passed.
+- Thermal suite command:
+  `node --test tests/sphThermalGpuKernel.test.mjs --test-name-pattern "material-bank warm|retained output"`
+  - Passed: `13/13`.
+  - Covers non-authoritative material-bank warm-input attachment and WebGPU
+    result-envelope diagnostics.
+- Cold-start cache suite:
+  `node --test tests/sphColdStartCache.test.mjs`
+  - Passed: `4/4`.
+  - Covers preserving the warm-input consumer summary through static-table
+    cache rehydration.
+
 Native surface browser-frame validation classifier, 2026-06-19 AKDT:
 
 - Syntax:

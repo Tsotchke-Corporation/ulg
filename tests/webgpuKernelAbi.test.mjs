@@ -174,7 +174,7 @@ const CONTRACTS = [
     label: 'ulg-sph-render-rows-params',
     factory: 'createParamsArray',
     wgslStruct: 'RenderRowsParams',
-    bytes: 16
+    bytes: 48
   },
   {
     file: 'src/runtime/sph/sphRenderGpuKernel.js',

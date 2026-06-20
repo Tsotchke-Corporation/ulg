@@ -2703,3 +2703,10 @@ accepted material-bank PBR warm-input metadata through table construction and
 static-table cache rehydration. Treat this as diagnostics and future
 warm-start plumbing only; closure-derived optical rows still own packed PBR
 values.
+
+2026-06-19 render-row console routing note: the local browser console harness
+no longer reports the `ulg-sph-render-rows-params` validation cascade. The
+render-row params uniform allocation now matches the 48-byte JS/WGSL ABI, and a
+short H2O/H2O render-row probe classifies `good` with zero browser console
+issues or warnings. Continue native/mobile visible-output work separately; this
+does not prove the phone presentation path.

@@ -30420,3 +30420,35 @@ Remaining:
 
 - Use these annotations to drive renderer/diagnostic decisions only after
   proving they do not override closure-derived optical physics.
+
+## 2026-06-19 AKDT - Render-Row WebGPU Params ABI Cleanup
+
+Status:
+
+- The browser console harness exposed a render-row WebGPU validation cascade:
+  `ulg-sph-render-rows-params` was allocated as 32 bytes while the current
+  `RenderRowsParams` WGSL uniform layout and JS packer require 48 bytes.
+- `extractSphRenderRowsWebGpu()` now allocates the render-row params buffer from
+  the same byte-length constant used by `createParamsArray()`.
+- The WebGPU params ABI guard now expects the 48-byte render-row contract, so
+  future shader/JS/uniform-buffer drift fails in `tests/webgpuKernelAbi`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js tests/webgpuKernelAbi.test.mjs tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs` with `3/3`.
+- PASS:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "render row WebGPU extraction can retain resident rows|material bank|particle scale"` with `54/54`.
+- PASS:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-console-probe-after-renderrows.json ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_TIMEOUT_MS=90000 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0&surfaceDraw=three-render-row-points' node scripts/sph-long-horizon-probe.mjs`
+  - Status: `good`.
+  - Browser console issue count: `0`.
+  - Browser console warning count: `0`.
+  - Page error count: `0`.
+- PASS: `npm run build` with the existing large chunk warning only.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Continue real-device native WebGPU/mobile rendering acceptance; this fixes
+  the local render-row params validation fault, not the phone presentation path.

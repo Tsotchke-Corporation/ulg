@@ -107,6 +107,7 @@ export const SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO = 4;
 export const SPH_RENDER_ROW_MAX_VOLUME_RATIO_J = SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO ** 3;
 export const SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO = 2;
 export const SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO = 0.5;
+const SPH_RENDER_ROWS_PARAMS_BYTES = 48;
 export const ULG_SPH_RENDER_ROW_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.sph-render-row-particle-scale-stability.v0';
 export const ULG_SPH_RENDER_ROW_MATERIAL_BANK_PARTICLE_SIZE_CONSUMER_SCHEMA =
@@ -803,7 +804,7 @@ function createParamsArray({
   maxGasRadiusM = 0,
   materialBankParticleSizeRowCount = 0
 } = {}) {
-  const buffer = new ArrayBuffer(48);
+  const buffer = new ArrayBuffer(SPH_RENDER_ROWS_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0))), true);
@@ -5915,7 +5916,7 @@ export async function extractSphRenderRowsWebGpu({
     * SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-render-rows-params',
-    size: 32,
+    size: SPH_RENDER_ROWS_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({

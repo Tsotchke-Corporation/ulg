@@ -11929,3 +11929,30 @@ Material bank render-row shader consumer, 2026-06-19 AKDT:
   - Passed. Vite reported only the existing large chunk-size warning.
 - Whitespace:
   `git diff --check` passed.
+
+Render-row WebGPU params ABI cleanup, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphRenderGpuKernel.js tests/webgpuKernelAbi.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  passed.
+- WebGPU ABI guard:
+  `node --test tests/webgpuKernelAbi.test.mjs`
+  - Passed: `3/3`.
+  - Confirms `RenderRowsParams`, JS packing, and
+    `ulg-sph-render-rows-params` uniform allocation all agree on 48 bytes.
+- Focused render-kernel command:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "render row WebGPU extraction can retain resident rows|material bank|particle scale"`
+  - Passed: `54/54`.
+  - Re-covers retained render-row handoff, shader material-bank particle-size
+    consumption, and particle scale caps.
+- Browser console harness:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-console-probe-after-renderrows.json ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_TIMEOUT_MS=90000 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0&surfaceDraw=three-render-row-points' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: status `good`.
+  - Browser console issue count: `0`.
+  - Browser console warning count: `0`.
+  - Page error count: `0`.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.
+- Whitespace:
+  `git diff --check` passed.

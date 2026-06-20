@@ -2304,12 +2304,35 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
     pixelValidationStatus: 'not-run'
   });
-  assert.equal(nativePendingValidationWithFrame.ready, true);
-  assert.equal(nativePendingValidationWithFrame.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativePendingValidationWithFrame.ready, false);
+  assert.equal(
+    nativePendingValidationWithFrame.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
   assert.equal(nativePendingValidationWithFrame.nativeValidationPendingWithRenderedFrame, true);
-  assert.equal(nativePendingValidationWithFrame.consumerValidated, true);
+  assert.equal(nativePendingValidationWithFrame.consumerValidated, false);
 
-  const nativeFallbackValidated = resolveResidentSurfaceVisibleGpuConsumer({
+  const nativeReadbackPassedFallback = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerDeviceMapSmokeStatus: 'passed',
+      nativeSurfaceConsumerReadbackSmokeValidationStatus: 'passed'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativeReadbackPassedFallback.ready, true);
+  assert.equal(nativeReadbackPassedFallback.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativeReadbackPassedFallback.pixelValidationRequired, false);
+  assert.equal(nativeReadbackPassedFallback.nativeReadbackFallbackValidated, true);
+
+  const nativeReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {
       status: 'native-webgpu-surface-consumer-supported',
@@ -2326,13 +2349,16 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
     pixelValidationStatus: 'not-run'
   });
-  assert.equal(nativeFallbackValidated.ready, true);
-  assert.equal(nativeFallbackValidated.status, 'resident-surface-visible-gpu-consumer-ready');
-  assert.equal(nativeFallbackValidated.pixelValidationRequired, false);
-  assert.equal(nativeFallbackValidated.nativeReadbackFallbackValidated, true);
-  assert.equal(nativeFallbackValidated.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+  assert.equal(nativeReadbackUnavailableBlocked.ready, false);
+  assert.equal(
+    nativeReadbackUnavailableBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(nativeReadbackUnavailableBlocked.pixelValidationRequired, true);
+  assert.equal(nativeReadbackUnavailableBlocked.nativeReadbackFallbackValidated, false);
+  assert.equal(nativeReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
 
-  const nativePixelReadbackUnavailableValidated = resolveResidentSurfaceVisibleGpuConsumer({
+  const nativePixelReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {
       status: 'native-webgpu-surface-consumer-supported',
@@ -2348,11 +2374,14 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
     pixelValidationStatus: 'not-run'
   });
-  assert.equal(nativePixelReadbackUnavailableValidated.ready, true);
-  assert.equal(nativePixelReadbackUnavailableValidated.status, 'resident-surface-visible-gpu-consumer-ready');
-  assert.equal(nativePixelReadbackUnavailableValidated.pixelValidationRequired, false);
-  assert.equal(nativePixelReadbackUnavailableValidated.nativeReadbackFallbackValidated, true);
-  assert.equal(nativePixelReadbackUnavailableValidated.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+  assert.equal(nativePixelReadbackUnavailableBlocked.ready, false);
+  assert.equal(
+    nativePixelReadbackUnavailableBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(nativePixelReadbackUnavailableBlocked.pixelValidationRequired, true);
+  assert.equal(nativePixelReadbackUnavailableBlocked.nativeReadbackFallbackValidated, false);
+  assert.equal(nativePixelReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
 
   const validated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,

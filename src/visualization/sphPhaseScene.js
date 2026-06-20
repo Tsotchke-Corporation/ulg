@@ -1359,13 +1359,11 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     && (
       readbackSmokeValidationStatus === 'passed'
       || offscreenValidationStatus === 'passed'
-      || textureReadbackUnavailable
     )
   );
   const pixelValidated = normalizedPixelValidationStatus === 'passed';
   const consumerValidated = pixelValidated
-    || nativeReadbackFallbackValidated
-    || nativeValidationPendingWithRenderedFrame;
+    || nativeReadbackFallbackValidated;
   const runtimeConsumerReady = Boolean(
     inputReady
     && inputKind === 'surface-draw-buffers'

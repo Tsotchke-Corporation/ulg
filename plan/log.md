@@ -29474,3 +29474,39 @@ Remaining:
 
 - Add longer gas-ledger/gas-pressure visualization coverage so this visual proxy
   does not become the final gas-volume representation.
+
+## 2026-06-19 AKDT - Native Visible Consumer Fail-Closed Gate
+
+Status:
+
+- Tightened `resolveResidentSurfaceVisibleGpuConsumer()` so pending native
+  validation and texture-readback-unavailable errors do not count as visible
+  no-readback rendering.
+- Native surface consumers now promote only after browser pixel validation
+  passes or a same-device readback/offscreen validation actually passes.
+- Kept the diagnostic fields for pending validation and readback-unavailable
+  browsers, but they remain evidence of a blocked native path rather than a
+  fallback success.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PARTIAL/EXPECTED BAD:
+  `/tmp/ulg-native-visible-consumer-tightened-probe.json` reached retained
+  direct-consumer surface buffers and
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered` with
+  browser console issues/warnings `0/0`, but remained fail-closed:
+  `visibleGpuConsumerReady=false`,
+  `visibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-pixel-validation`,
+  `visibleGpuConsumerValidated=false`, and
+  `visibleGpuConsumerNativeReadbackFallbackValidated=false`.
+- The same probe reported direct canvas frames still blank:
+  `blankCanvasFrameCount=3`, `nonblankCanvasFrameCount=0`, with analysis issue
+  `visual-canvas-frames-all-blank`.
+
+Remaining:
+
+- Fix actual native main-canvas presentation or same-device validation so the
+  native path produces visible pixels; do not loosen the visibility gate.

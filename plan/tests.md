@@ -11278,3 +11278,29 @@ Gas product routing and gas-radius render proxy, 2026-06-19 AKDT:
   - The final retained sphere bridge still decoded `naoh|gas` rows, but max
     sphere radius was bounded to `0.15508762001991272 m`, matching the reported
     `renderRowsParticleScaleMaxGasParticleRadiusM=0.15508762272485`.
+
+Native visible-consumer fail-closed gate, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Focused tests:
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+  - New coverage proves pending native validation and texture-readback
+    unavailable errors do not mark the visible GPU consumer ready. A native
+    consumer can promote only after browser pixel validation passes or a
+    same-device readback/offscreen validation actually passes.
+- Browser no-full native smoke:
+  `/tmp/ulg-native-visible-consumer-tightened-probe.json`
+  - Expected partial/fail-closed result: probe `status=bad`, analysis `bad`,
+    browser console issues/warnings `0/0`.
+  - Retained direct-consumer surface buffers were ready and the native bridge
+    rendered (`renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`),
+    but `visibleGpuConsumerReady=false`,
+    `visibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-pixel-validation`,
+    `visibleGpuConsumerValidated=false`, and
+    `visibleGpuConsumerNativeReadbackFallbackValidated=false`.
+  - Direct canvas validation remains the blocker:
+    `blankCanvasFrameCount=3`, `nonblankCanvasFrameCount=0`,
+    and analysis includes `visual-canvas-frames-all-blank`.

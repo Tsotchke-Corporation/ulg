@@ -145,6 +145,19 @@ times out in second-batch `fusedMechanics`. The next renderer/runtime slice is
 resident continuation plus native pixel validation, not real-phone signoff,
 fallback geometry, or an overlay.
 
+Current routing note, 2026-06-19 AKDT: native visible-consumer readiness is now
+tightened against false positives. `resolveResidentSurfaceVisibleGpuConsumer()`
+no longer treats pending validation or texture-readback-unavailable errors as a
+ready visible consumer; only browser pixel validation or a same-device
+readback/offscreen pass can promote native no-readback rendering. Evidence:
+`/tmp/ulg-native-visible-consumer-tightened-probe.json` reaches retained
+surface draw buffers and
+`renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered` with
+console issues/warnings `0/0`, but remains `bad` with
+`resident-surface-visible-gpu-consumer-blocked-pixel-validation` and
+`visual-canvas-frames-all-blank`. Next work remains actual native canvas
+presentation/pixel validation, not loosening the gate.
+
 Superseded routing note, 2026-06-19 AKDT: the native
 `native-webgpu-surface-consumer` contract now exists as the next renderer
 handoff target. It is intentionally fail-closed unless the engine owns the main

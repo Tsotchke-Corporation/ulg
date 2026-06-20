@@ -8,7 +8,9 @@ strict truth, while generated `Be`, `B`, `C`, `N`, `F`, `Mg`, `Al`, `Si`, `P`,
 `S`, `Cl`, `Ca`, `Sc`, `Ti`, `V`, `Cr`, `Mn`, `Co`, `Ni`, `Cu`, `Zn`, `Ga`,
 `Ge`, `As`, `Se`, `Br`, `Sr`, `Y`, `Zr`, `Nb`, `Mo`, `Tc`, and `Ru` rows carry
 `reduced-estimate` provenance and explicit `gridPointsN=80` closure metadata.
-The unit guard now verifies the selectable prefix through `Ru` rather than a
+The same generated-prefix coverage now extends through `I`, including `Rh`,
+`Ag`, `Cd`, `In`, `Sn`, `Sb`, `Te`, and `I`. The unit guard verifies the
+selectable prefix through `I` rather than a
 hand-maintained first-tranche-only list.
 
 Focused checks:
@@ -18,7 +20,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=42`.
+  passed with `recordCount=50`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run.

@@ -74,6 +74,11 @@ const NO_FULL_READBACK_MODE = 'no-full-readback';
 const R_GAS = 8.314462618;
 const DEFAULT_SOUND_SPEED_SCALE = 1;
 const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
+const DEFAULT_REACTION_PARTICLE_BIN_CAPACITY = 64;
+const REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
+const REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
+const REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
+const REACTION_PARTICLE_BIN_GRID_MAX_CELL_COUNT = REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
   taitCondensed: 1,
@@ -95,6 +100,28 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function clampPositive(value, fallback = 0) {
+  return Math.max(0, finiteNumber(value, fallback));
+}
+
+function vector3From(value, fallback = [0, 0, 0]) {
+  if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+    return [
+      finiteNumber(value[0], fallback[0] ?? 0),
+      finiteNumber(value[1], fallback[1] ?? 0),
+      finiteNumber(value[2], fallback[2] ?? 0)
+    ];
+  }
+  if (value && typeof value === 'object') {
+    return [
+      finiteNumber(value.x ?? value.width, fallback[0] ?? 0),
+      finiteNumber(value.y ?? value.height, fallback[1] ?? 0),
+      finiteNumber(value.z ?? value.depth, fallback[2] ?? 0)
+    ];
+  }
+  return [...fallback];
 }
 
 function assertPackedSphParticleState(sphParticleState) {
@@ -786,6 +813,232 @@ function reactionHeaderRecord(table, index) {
   };
 }
 
+function maxReactionContactRadiusM(reactionTable) {
+  const count = Math.max(0, Math.round(finiteNumber(reactionTable?.reactionCount, 0)));
+  let maxRadiusM = 0;
+  for (let reactionIndex = 0; reactionIndex < count; reactionIndex += 1) {
+    const rx = reactionRecord(reactionTable, reactionIndex);
+    if (Math.round(finiteNumber(rx.status, 0)) !== REACTION_STATUS.ready) continue;
+    maxRadiusM = Math.max(maxRadiusM, clampPositive(rx.contactRadiusM, 0));
+  }
+  return maxRadiusM;
+}
+
+function particleStateBounds(sphParticleState, paddingM = 0) {
+  const state = sphParticleState?.state;
+  const count = Math.max(0, Math.round(finiteNumber(sphParticleState?.particleCount, 0)));
+  if (!(state instanceof Float32Array) || count <= 0) {
+    return null;
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  let liveCount = 0;
+  for (let particleIndex = 0; particleIndex < count; particleIndex += 1) {
+    const offset = particleIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
+    const massKg = finiteNumber(state[offset + 3], 0);
+    if (massKg <= 0) continue;
+    const x = finiteNumber(state[offset], Number.NaN);
+    const y = finiteNumber(state[offset + 1], Number.NaN);
+    const z = finiteNumber(state[offset + 2], Number.NaN);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    minZ = Math.min(minZ, z);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+    maxZ = Math.max(maxZ, z);
+    liveCount += 1;
+  }
+  if (liveCount <= 0) return null;
+  const padding = clampPositive(paddingM, 0);
+  const originM = [minX - padding, minY - padding, minZ - padding];
+  const boxDimsM = [
+    Math.max(maxX - minX + padding * 2, padding || 1e-6),
+    Math.max(maxY - minY + padding * 2, padding || 1e-6),
+    Math.max(maxZ - minZ + padding * 2, padding || 1e-6)
+  ];
+  return { originM, boxDimsM, source: 'cpu-state-bounds-fallback' };
+}
+
+function resolveReactionParticleBinBounds({ boxDimsM = null, sphParticleState = null, paddingM = 0 } = {}) {
+  const explicitDims = vector3From(
+    boxDimsM
+      ?? sphParticleState?.boxDimsM
+      ?? sphParticleState?.boxDims
+      ?? sphParticleState?.domainDimsM
+      ?? null,
+    [0, 0, 0]
+  ).map((value) => clampPositive(value, 0));
+  if (explicitDims.every((value) => value > 0)) {
+    return {
+      originM: [0, 0, 0],
+      boxDimsM: explicitDims,
+      source: boxDimsM ? 'explicit-box-dims' : 'particle-state-box-dims'
+    };
+  }
+  return particleStateBounds(sphParticleState, paddingM) || {
+    originM: [0, 0, 0],
+    boxDimsM: explicitDims,
+    source: 'unavailable'
+  };
+}
+
+function createReactionParticleBinParamsArray({ particleCount = 0, particleBinGrid = null } = {}) {
+  const gridEnabled = particleBinGrid?.enabled === true;
+  const gridDims = Array.isArray(particleBinGrid?.gridDims) ? particleBinGrid.gridDims : [0, 0, 0];
+  const origin = Array.isArray(particleBinGrid?.originM) ? particleBinGrid.originM : [0, 0, 0];
+  const boxDims = Array.isArray(particleBinGrid?.boxDimsM) ? particleBinGrid.boxDimsM : [0, 0, 0];
+  const cellSizeM = clampPositive(particleBinGrid?.cellSizeM, 0);
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(particleBinGrid?.cellCount, 0))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(particleBinGrid?.binCapacity, 0))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(gridDims[0], 0))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(gridDims[1], 0))), true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(gridDims[2], 0))), true);
+  view.setUint32(24, gridEnabled ? 1 : 0, true);
+  view.setUint32(28, 0, true);
+  view.setFloat32(32, finiteNumber(origin[0], 0), true);
+  view.setFloat32(36, finiteNumber(origin[1], 0), true);
+  view.setFloat32(40, finiteNumber(origin[2], 0), true);
+  view.setFloat32(44, cellSizeM, true);
+  view.setFloat32(48, cellSizeM > 0 ? 1 / cellSizeM : 0, true);
+  view.setFloat32(52, clampPositive(boxDims[0], 0), true);
+  view.setFloat32(56, clampPositive(boxDims[1], 0), true);
+  view.setFloat32(60, clampPositive(boxDims[2], 0), true);
+  return buffer;
+}
+
+export function resolveReactionParticleBinGrid({
+  boxDimsM = null,
+  sphParticleState = null,
+  reactionTable = null,
+  particleCount = sphParticleState?.particleCount ?? 0,
+  binCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY,
+  maxIndexBufferBytes = REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES
+} = {}) {
+  const maxContactRadiusM = maxReactionContactRadiusM(reactionTable);
+  if (!(maxContactRadiusM > 0)) {
+    return {
+      status: 'reaction-particle-bin-grid-disabled',
+      reason: 'no ready reactions with positive contact radius',
+      enabled: false,
+      neighborMode: 'all-particle-scan-fallback',
+      gridDims: [0, 0, 0],
+      boxDimsM: [0, 0, 0],
+      originM: [0, 0, 0],
+      boundsSource: 'unavailable',
+      cellSizeM: 0,
+      cellCount: 0,
+      binCapacity: 0,
+      averageOccupancy: 0,
+      estimatedOverflowRisk: false,
+      indexBufferByteLength: 0,
+      maxContactRadiusM: 0
+    };
+  }
+  const bounds = resolveReactionParticleBinBounds({
+    boxDimsM,
+    sphParticleState,
+    paddingM: maxContactRadiusM
+  });
+  const dims = bounds.boxDimsM.map((value) => clampPositive(value, 0));
+  if (dims.some((value) => value <= 0)) {
+    return {
+      status: 'reaction-particle-bin-grid-unavailable',
+      reason: 'box dimensions unavailable',
+      enabled: false,
+      neighborMode: 'all-particle-scan-fallback',
+      gridDims: [0, 0, 0],
+      boxDimsM: dims,
+      originM: bounds.originM,
+      boundsSource: bounds.source,
+      cellSizeM: 0,
+      cellCount: 0,
+      binCapacity: 0,
+      averageOccupancy: 0,
+      estimatedOverflowRisk: false,
+      indexBufferByteLength: 0,
+      maxContactRadiusM
+    };
+  }
+  const requestedCapacity = Math.max(1, Math.round(finiteNumber(binCapacity, DEFAULT_REACTION_PARTICLE_BIN_CAPACITY)));
+  const maxDimM = Math.max(...dims);
+  const cellSizeM = Math.max(
+    maxContactRadiusM,
+    maxDimM / REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS,
+    1e-6
+  );
+  const gridDims = dims.map((dim) => Math.max(
+    1,
+    Math.min(REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS, Math.ceil(dim / cellSizeM))
+  ));
+  const cellCount = gridDims[0] * gridDims[1] * gridDims[2];
+  const normalizedParticleCount = Math.max(0, Math.round(finiteNumber(particleCount, 0)));
+  const averageOccupancy = cellCount > 0 ? normalizedParticleCount / cellCount : 0;
+  const adaptiveCapacity = Math.max(
+    requestedCapacity,
+    Math.ceil(averageOccupancy * REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER)
+  );
+  const budgetBytes = Math.max(4, Math.round(finiteNumber(maxIndexBufferBytes, REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES)));
+  const maxCapacityByBudget = cellCount > 0
+    ? Math.max(1, Math.floor(budgetBytes / (cellCount * Uint32Array.BYTES_PER_ELEMENT)))
+    : 0;
+  const capacity = Math.max(1, Math.min(adaptiveCapacity, maxCapacityByBudget));
+  const estimatedOverflowRisk = normalizedParticleCount > 0
+    && averageOccupancy > capacity / REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER;
+  const indexBufferByteLength = cellCount * capacity * Uint32Array.BYTES_PER_ELEMENT;
+  if (cellCount <= 0 || cellCount > REACTION_PARTICLE_BIN_GRID_MAX_CELL_COUNT) {
+    return {
+      status: 'reaction-particle-bin-grid-unavailable',
+      reason: 'derived bin grid exceeds bounded cell budget',
+      enabled: false,
+      neighborMode: 'all-particle-scan-fallback',
+      gridDims,
+      boxDimsM: dims,
+      originM: bounds.originM,
+      boundsSource: bounds.source,
+      cellSizeM,
+      cellCount,
+      binCapacity: capacity,
+      requestedBinCapacity: requestedCapacity,
+      adaptiveBinCapacity: adaptiveCapacity,
+      maxBinCapacityByBudget: maxCapacityByBudget,
+      averageOccupancy,
+      estimatedOverflowRisk,
+      indexBufferByteLength,
+      maxContactRadiusM
+    };
+  }
+  return {
+    status: 'reaction-particle-bin-grid-ready',
+    reason: adaptiveCapacity > maxCapacityByBudget
+      ? 'adaptive bin capacity capped by index-buffer budget'
+      : null,
+    enabled: true,
+    neighborMode: 'fixed-capacity-particle-bin-grid',
+    gridDims,
+    boxDimsM: dims,
+    originM: bounds.originM,
+    boundsSource: bounds.source,
+    cellSizeM,
+    cellCount,
+    binCapacity: capacity,
+    requestedBinCapacity: requestedCapacity,
+    adaptiveBinCapacity: adaptiveCapacity,
+    maxBinCapacityByBudget: maxCapacityByBudget,
+    averageOccupancy,
+    estimatedOverflowRisk,
+    indexBufferByteLength,
+    maxContactRadiusM
+  };
+}
+
 function reactantTermRecord(table, termIndex) {
   if (!table.reactantTermRecords?.length) return null;
   const offset = termIndex * SPH_REACTION_REACTANT_TERM_FLOATS;
@@ -1265,6 +1518,9 @@ function outputEnvelope({
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
   sourceParticlePackMode = null,
+  reactionProposalNeighborMode = null,
+  reactionParticleBinGrid = null,
+  reactionParticleBins = null,
   queueCompletionStatus = null,
   queueCompletionMethod = null,
   scratchBufferCleanupStatus = null
@@ -1355,6 +1611,20 @@ function outputEnvelope({
     scratchBufferCleanupStatus,
     readbackMode,
     sourceParticlePackMode,
+    reactionProposalNeighborMode,
+    reactionParticleBinGridSchema: reactionParticleBins?.schema ?? null,
+    reactionParticleBinGridStatus: reactionParticleBins?.status ?? reactionParticleBinGrid?.status ?? null,
+    reactionParticleBinGridReason: reactionParticleBins?.reason ?? reactionParticleBinGrid?.reason ?? null,
+    reactionParticleBinGridEnabled: reactionParticleBinGrid?.enabled === true,
+    reactionParticleBinGridBoundsSource: reactionParticleBinGrid?.boundsSource ?? null,
+    reactionParticleBinGridDims: reactionParticleBinGrid?.gridDims ? [...reactionParticleBinGrid.gridDims] : null,
+    reactionParticleBinGridCellCount: reactionParticleBinGrid?.cellCount ?? 0,
+    reactionParticleBinGridCellSizeM: reactionParticleBinGrid?.cellSizeM ?? 0,
+    reactionParticleBinGridBinCapacity: reactionParticleBinGrid?.binCapacity ?? 0,
+    reactionParticleBinGridAverageOccupancy: reactionParticleBinGrid?.averageOccupancy ?? 0,
+    reactionParticleBinGridEstimatedOverflowRisk: reactionParticleBinGrid?.estimatedOverflowRisk === true,
+    reactionParticleBinGridIndexBufferByteLength: reactionParticleBins?.indexBufferByteLength ?? reactionParticleBinGrid?.indexBufferByteLength ?? 0,
+    reactionParticleBinGridMaxContactRadiusM: reactionParticleBinGrid?.maxContactRadiusM ?? 0,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     scientificValidation: false,
@@ -1518,6 +1788,69 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function createReactionParticleBinBuffers({
+  device,
+  sphParticleState,
+  reactionTable,
+  boxDimsM = null,
+  binCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY
+} = {}) {
+  const particleBinGrid = resolveReactionParticleBinGrid({
+    boxDimsM,
+    sphParticleState,
+    reactionTable,
+    particleCount: sphParticleState?.particleCount ?? 0,
+    binCapacity
+  });
+  const disabled = particleBinGrid.enabled !== true;
+  const cellCount = disabled ? 1 : Math.max(1, Math.round(finiteNumber(particleBinGrid.cellCount, 0)));
+  const capacity = disabled ? 1 : Math.max(1, Math.round(finiteNumber(particleBinGrid.binCapacity, DEFAULT_REACTION_PARTICLE_BIN_CAPACITY)));
+  const countsBuffer = writeStorageBuffer(
+    device,
+    disabled ? 'ulg-sph-reaction-particle-bin-counts-disabled' : 'ulg-sph-reaction-particle-bin-counts',
+    new Uint32Array(cellCount)
+  );
+  const indices = new Uint32Array(cellCount * capacity);
+  indices.fill(0xffffffff);
+  const indicesBuffer = writeStorageBuffer(
+    device,
+    disabled ? 'ulg-sph-reaction-particle-bin-indices-disabled' : 'ulg-sph-reaction-particle-bin-indices',
+    indices
+  );
+  const metadataBuffer = writeStorageBuffer(
+    device,
+    disabled ? 'ulg-sph-reaction-particle-bin-metadata-disabled' : 'ulg-sph-reaction-particle-bin-metadata',
+    new Uint32Array(4)
+  );
+  const paramsBuffer = device.createBuffer({
+    label: disabled ? 'ulg-sph-reaction-particle-bin-params-disabled' : 'ulg-sph-reaction-particle-bin-params',
+    size: 64,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createReactionParticleBinParamsArray({
+    particleCount: sphParticleState?.particleCount ?? 0,
+    particleBinGrid
+  }));
+  return {
+    schema: 'peercompute.ulg.sph-reaction-particle-bin-grid.v0',
+    status: disabled ? particleBinGrid.status : 'reaction-particle-bin-grid-prepared',
+    reason: particleBinGrid.reason ?? null,
+    enabled: !disabled,
+    neighborMode: particleBinGrid.neighborMode,
+    particleBinGrid,
+    countsBuffer,
+    indicesBuffer,
+    metadataBuffer,
+    paramsBuffer,
+    cellCount: disabled ? 0 : particleBinGrid.cellCount,
+    binCapacity: disabled ? 0 : particleBinGrid.binCapacity,
+    averageOccupancy: particleBinGrid.averageOccupancy || 0,
+    estimatedOverflowRisk: particleBinGrid.estimatedOverflowRisk === true,
+    indexBufferByteLength: disabled ? 0 : indices.byteLength,
+    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer]
+  };
+}
+
 function packReactionParticleRecords(sphParticleState, mlsMpmParticleState) {
   const packed = new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS);
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
@@ -1606,6 +1939,8 @@ export async function runSphReactionStepWebGpu({
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
   thermalResponseGraphUpload = null,
+  boxDimsM = null,
+  reactionParticleBinCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
   readbackMode = FULL_READBACK_MODE,
@@ -1665,6 +2000,13 @@ export async function runSphReactionStepWebGpu({
   const phaseResponseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
   const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
+  const reactionParticleBins = createReactionParticleBinBuffers({
+    device,
+    sphParticleState,
+    reactionTable,
+    boxDimsM,
+    binCapacity: reactionParticleBinCapacity
+  });
   const proposalBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-proposals',
@@ -1708,7 +2050,18 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(3, 'read-only-storage'),
     computeBufferBinding(7, 'storage'),
-    computeBufferBinding(11, 'uniform')
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(16, 'storage'),
+    computeBufferBinding(17, 'storage'),
+    computeBufferBinding(19, 'uniform')
+  ];
+  const reactionParticleBinBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(16, 'storage'),
+    computeBufferBinding(17, 'storage'),
+    computeBufferBinding(18, 'storage'),
+    computeBufferBinding(19, 'uniform')
   ];
   const reactionResolveBindings = [
     computeBufferBinding(0, 'read-only-storage'),
@@ -1735,6 +2088,15 @@ export async function runSphReactionStepWebGpu({
       code: sphReactionStepWgsl,
       entryPoint: 'pack_source',
       bindings: packBindings
+    })
+    : null;
+  const reactionParticleBinPipelineInfo = reactionParticleBins.enabled
+    ? createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-sph-reaction-step',
+      label: 'ulg-sph-reaction-particle-bins',
+      code: sphReactionStepWgsl,
+      entryPoint: 'bin_particles',
+      bindings: reactionParticleBinBindings
     })
     : null;
   const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
@@ -1764,7 +2126,10 @@ export async function runSphReactionStepWebGpu({
       { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
-      { binding: 11, resource: { buffer: paramsBuffer } }
+      { binding: 11, resource: { buffer: paramsBuffer } },
+      { binding: 16, resource: { buffer: reactionParticleBins.countsBuffer } },
+      { binding: 17, resource: { buffer: reactionParticleBins.indicesBuffer } },
+      { binding: 19, resource: { buffer: reactionParticleBins.paramsBuffer } }
     ]
   });
   const resolveBindEntries = (layout) => ({
@@ -1803,6 +2168,19 @@ export async function runSphReactionStepWebGpu({
       ]
     })
     : null;
+  const reactionParticleBinBindGroup = reactionParticleBinPipelineInfo
+    ? device.createBindGroup({
+      layout: reactionParticleBinPipelineInfo.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
+        { binding: 11, resource: { buffer: paramsBuffer } },
+        { binding: 16, resource: { buffer: reactionParticleBins.countsBuffer } },
+        { binding: 17, resource: { buffer: reactionParticleBins.indicesBuffer } },
+        { binding: 18, resource: { buffer: reactionParticleBins.metadataBuffer } },
+        { binding: 19, resource: { buffer: reactionParticleBins.paramsBuffer } }
+      ]
+    })
+    : null;
   const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
@@ -1812,6 +2190,11 @@ export async function runSphReactionStepWebGpu({
     pass.setPipeline(packPipelineInfo.pipeline);
     pass.setBindGroup(0, packBindGroup);
     pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  }
+  if (reactionParticleBinPipelineInfo && reactionParticleBinBindGroup) {
+    pass.setPipeline(reactionParticleBinPipelineInfo.pipeline);
+    pass.setBindGroup(0, reactionParticleBinBindGroup);
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
   }
   pass.setPipeline(proposePipeline);
   pass.setBindGroup(0, proposeBindGroup);
@@ -1902,6 +2285,7 @@ export async function runSphReactionStepWebGpu({
     reactionRecordBuffer,
     proposalBuffer,
     paramsBuffer,
+    ...reactionParticleBins.cleanupBuffers,
     localSourceStateBuffer,
     localSourceThermoBuffer,
     localSourceMechanicsBuffer,
@@ -1980,7 +2364,12 @@ export async function runSphReactionStepWebGpu({
     queueCompletionMethod,
     scratchBufferCleanupStatus,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
-    sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays'
+    sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
+    reactionProposalNeighborMode: reactionParticleBins.enabled
+      ? 'fixed-capacity-particle-bin-grid'
+      : 'all-particle-scan-fallback',
+    reactionParticleBinGrid: reactionParticleBins.particleBinGrid,
+    reactionParticleBins
   });
 }
 

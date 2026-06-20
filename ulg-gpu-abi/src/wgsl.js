@@ -919,6 +919,25 @@ struct ReactionParams {
   _pad2: u32,
 };
 
+struct ReactionParticleBinParams {
+  particle_count: u32,
+  cell_count: u32,
+  bin_capacity: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  bins_enabled: u32,
+  _pad0: u32,
+  origin_x_m: f32,
+  origin_y_m: f32,
+  origin_z_m: f32,
+  cell_size_m: f32,
+  inv_cell_size_m: f32,
+  box_x_m: f32,
+  box_y_m: f32,
+  box_z_m: f32,
+};
+
 struct ThermalRows {
   row0: vec4<f32>,
   row1: vec4<f32>,
@@ -967,6 +986,10 @@ struct ProductTerm {
 @group(0) @binding(13) var<storage, read> thermal_graph_samples: array<vec4<f32>>;
 @group(0) @binding(14) var<storage, read_write> pack_particle_records: array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(16) var<storage, read_write> reaction_particle_bin_counts: array<atomic<u32>>;
+@group(0) @binding(17) var<storage, read_write> reaction_particle_bin_indices: array<u32>;
+@group(0) @binding(18) var<storage, read_write> reaction_particle_bin_metadata: array<atomic<u32>>;
+@group(0) @binding(19) var<uniform> reaction_particle_bin_params: ReactionParticleBinParams;
 
 const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
 
@@ -1359,6 +1382,107 @@ fn pack_source(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 }
 
+fn reaction_particle_bin_ready() -> bool {
+  return reaction_particle_bin_params.bins_enabled != 0u
+    && reaction_particle_bin_params.cell_count > 0u
+    && reaction_particle_bin_params.bin_capacity > 0u
+    && reaction_particle_bin_params.grid_nx > 0u
+    && reaction_particle_bin_params.grid_ny > 0u
+    && reaction_particle_bin_params.grid_nz > 0u
+    && reaction_particle_bin_params.cell_size_m > 0.0;
+}
+
+fn reaction_particle_bin_coord(value: f32, axis_count: u32) -> u32 {
+  if (axis_count <= 1u) {
+    return 0u;
+  }
+  let raw = floor(value * reaction_particle_bin_params.inv_cell_size_m);
+  return u32(clamp(raw, 0.0, f32(axis_count - 1u)));
+}
+
+fn reaction_particle_bin_cell_index(coords: vec3<u32>) -> u32 {
+  return coords.x
+    + coords.y * reaction_particle_bin_params.grid_nx
+    + coords.z * reaction_particle_bin_params.grid_nx * reaction_particle_bin_params.grid_ny;
+}
+
+@compute @workgroup_size(64)
+fn bin_particles(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (
+    !reaction_particle_bin_ready()
+    || particle_index >= reaction_particle_bin_params.particle_count
+    || particle_index >= params.particle_count
+  ) {
+    return;
+  }
+  let state0 = state_pos_mass(particle_index);
+  if (state0.w <= 0.0) {
+    return;
+  }
+  let relative = state0.xyz - vec3<f32>(
+    reaction_particle_bin_params.origin_x_m,
+    reaction_particle_bin_params.origin_y_m,
+    reaction_particle_bin_params.origin_z_m
+  );
+  let coords = vec3<u32>(
+    reaction_particle_bin_coord(relative.x, reaction_particle_bin_params.grid_nx),
+    reaction_particle_bin_coord(relative.y, reaction_particle_bin_params.grid_ny),
+    reaction_particle_bin_coord(relative.z, reaction_particle_bin_params.grid_nz)
+  );
+  let cell_index = reaction_particle_bin_cell_index(coords);
+  if (cell_index >= reaction_particle_bin_params.cell_count) {
+    return;
+  }
+  let slot = atomicAdd(&reaction_particle_bin_counts[cell_index], 1u);
+  if (slot < reaction_particle_bin_params.bin_capacity) {
+    reaction_particle_bin_indices[cell_index * reaction_particle_bin_params.bin_capacity + slot] = particle_index;
+  } else {
+    atomicAdd(&reaction_particle_bin_metadata[0u], 1u);
+  }
+}
+
+fn reaction_partner_candidate(
+  particle_index: u32,
+  other: u32,
+  reaction_index: u32,
+  partner_material: f32,
+  partner_phase_mask: f32,
+  role: f32,
+  activation_k: f32,
+  contact_radius2: f32,
+  self_temperature: f32,
+  self_pos: vec3<f32>,
+  best: vec4<f32>
+) -> vec4<f32> {
+  if (other == particle_index || other >= params.particle_count) {
+    return best;
+  }
+  let other_thermo = thermo_row0(other);
+  if (other_thermo.x != partner_material || !phase_mask_satisfied(partner_phase_mask, other_thermo.y)) {
+    return best;
+  }
+  if (max(self_temperature, other_thermo.z) < activation_k) {
+    return best;
+  }
+  let other_pos_mass = state_pos_mass(other);
+  if (other_pos_mass.w <= 0.0) {
+    return best;
+  }
+  let delta = self_pos - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
+  let distance2 = dot(delta, delta);
+  if (distance2 > contact_radius2) {
+    return best;
+  }
+  if (
+    distance2 < best.w
+    || (distance2 == best.w && f32(other) < best.x)
+  ) {
+    return vec4<f32>(f32(other), f32(reaction_index), role, distance2);
+  }
+  return best;
+}
+
 @compute @workgroup_size(64)
 fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
@@ -1373,10 +1497,7 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let self_pos_mass = state_pos_mass(particle_index);
   let self_pos = vec3<f32>(self_pos_mass.x, self_pos_mass.y, self_pos_mass.z);
 
-  var best_partner = -1.0;
-  var best_reaction = -1.0;
-  var best_role = 0.0;
-  var best_distance2 = 3.402823e38;
+  var best = vec4<f32>(-1.0, -1.0, 0.0, 3.402823e38);
 
   for (var reaction_index = 0u; reaction_index < params.reaction_count; reaction_index = reaction_index + 1u) {
     let rx0 = reaction_row0(reaction_index);
@@ -1402,37 +1523,87 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let activation_k = rx0.w;
+    if (rx1.y <= 0.0) {
+      continue;
+    }
     let contact_radius2 = rx1.y * rx1.y;
-    for (var other = 0u; other < params.particle_count; other = other + 1u) {
-      if (other == particle_index) {
-        continue;
+    if (reaction_particle_bin_ready()) {
+      let relative_self = self_pos - vec3<f32>(
+        reaction_particle_bin_params.origin_x_m,
+        reaction_particle_bin_params.origin_y_m,
+        reaction_particle_bin_params.origin_z_m
+      );
+      let center_coords = vec3<i32>(
+        i32(reaction_particle_bin_coord(relative_self.x, reaction_particle_bin_params.grid_nx)),
+        i32(reaction_particle_bin_coord(relative_self.y, reaction_particle_bin_params.grid_ny)),
+        i32(reaction_particle_bin_coord(relative_self.z, reaction_particle_bin_params.grid_nz))
+      );
+      let radius_cells = min(
+        i32(8),
+        max(1, i32(ceil(rx1.y / reaction_particle_bin_params.cell_size_m)))
+      );
+      for (var dz = -radius_cells; dz <= radius_cells; dz = dz + 1) {
+        let cz = center_coords.z + dz;
+        if (cz < 0 || cz >= i32(reaction_particle_bin_params.grid_nz)) {
+          continue;
+        }
+        for (var dy = -radius_cells; dy <= radius_cells; dy = dy + 1) {
+          let cy = center_coords.y + dy;
+          if (cy < 0 || cy >= i32(reaction_particle_bin_params.grid_ny)) {
+            continue;
+          }
+          for (var dx = -radius_cells; dx <= radius_cells; dx = dx + 1) {
+            let cx = center_coords.x + dx;
+            if (cx < 0 || cx >= i32(reaction_particle_bin_params.grid_nx)) {
+              continue;
+            }
+            let cell_index = reaction_particle_bin_cell_index(vec3<u32>(u32(cx), u32(cy), u32(cz)));
+            if (cell_index >= reaction_particle_bin_params.cell_count) {
+              continue;
+            }
+            let count = min(
+              atomicLoad(&reaction_particle_bin_counts[cell_index]),
+              reaction_particle_bin_params.bin_capacity
+            );
+            for (var slot = 0u; slot < count; slot = slot + 1u) {
+              let other = reaction_particle_bin_indices[cell_index * reaction_particle_bin_params.bin_capacity + slot];
+              best = reaction_partner_candidate(
+                particle_index,
+                other,
+                reaction_index,
+                partner_material,
+                partner_phase_mask,
+                role,
+                activation_k,
+                contact_radius2,
+                self_temperature,
+                self_pos,
+                best
+              );
+            }
+          }
+        }
       }
-      let other_thermo = thermo_row0(other);
-      if (other_thermo.x != partner_material || !phase_mask_satisfied(partner_phase_mask, other_thermo.y)) {
-        continue;
-      }
-      if (max(self_temperature, other_thermo.z) < activation_k) {
-        continue;
-      }
-      let other_pos_mass = state_pos_mass(other);
-      let delta = self_pos - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
-      let distance2 = dot(delta, delta);
-      if (distance2 > contact_radius2) {
-        continue;
-      }
-      if (
-        distance2 < best_distance2
-        || (distance2 == best_distance2 && f32(other) < best_partner)
-      ) {
-        best_partner = f32(other);
-        best_reaction = f32(reaction_index);
-        best_role = role;
-        best_distance2 = distance2;
+    } else {
+      for (var other = 0u; other < params.particle_count; other = other + 1u) {
+        best = reaction_partner_candidate(
+          particle_index,
+          other,
+          reaction_index,
+          partner_material,
+          partner_phase_mask,
+          role,
+          activation_k,
+          contact_radius2,
+          self_temperature,
+          self_pos,
+          best
+        );
       }
     }
   }
 
-  proposals[particle_index] = vec4<f32>(best_partner, best_reaction, best_role, best_distance2);
+  proposals[particle_index] = best;
 }
 
 @compute @workgroup_size(64)

@@ -5942,3 +5942,26 @@ Still open:
   debug overflow readback. Promote to a prefix-scan compact bin list only if the
   overflow metadata shows dense contact/reaction scenarios outgrowing the
   current budget.
+
+## 2026-06-20 Status Update - Reaction Proposal Neighbor Bins
+
+Current state:
+
+- WebGPU reaction proposal now has a same-pass particle-bin grid. The reaction
+  step prepares bounded counts/indices/metadata buffers, runs `bin_particles`,
+  then runs `propose` against neighboring cells when the grid is ready.
+- The old all-particle proposal scan remains as the fallback path when no
+  positive reaction contact radius or legal box dimensions are available.
+- Resident summaries and browser stage-order diagnostics expose
+  `reactionProposalNeighborMode` plus reaction-bin grid status, cell count,
+  capacity, contact radius, and index-buffer bytes.
+- Browser evidence at `/tmp/ulg-reaction-bin-browser-probe-final.json` is
+  `status=good`, console-clean, and reports
+  `fixed-capacity-particle-bin-grid` with `343` reaction bin cells.
+
+Still open:
+
+- Add exact overflow diagnostics/prefix-scan compaction for reaction bins only
+  if dense chemistry scenarios exceed the current bounded adaptive capacity.
+  Next higher-leverage performance work remains resident sequence/cadence and
+  reducing render-row readback pressure.

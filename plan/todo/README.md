@@ -80,6 +80,19 @@ the contact-bin grid and overflow diagnostics through mounted
 mounted derived-material resident render-state Playwright test is green after
 separating material-surface readback readiness from pressure-solver readiness.
 
+Current routing note, 2026-06-20 AKDT: reaction proposal now has the same
+bounded-neighbor shape as contact kinematics. The WebGPU reaction step builds a
+same-pass fixed-capacity particle-bin grid from the authoritative simulation
+box, dispatches `bin_particles` before `propose`, and the proposal shader scans
+neighboring cells instead of every particle when the grid is ready. The
+all-particle scan remains a fail-closed fallback for unavailable/invalid bin
+policy. Resident and mounted diagnostics now report
+`reactionProposalNeighborMode`, bin-grid status, cell count, capacity, and
+index-buffer bytes; the Na/H2O resident browser probe is console-clean and
+shows `fixed-capacity-particle-bin-grid` with `343` cells. Remaining reaction
+hot-loop work is prefix-scan/compacted bins only if dense chemistry scenarios
+show fixed-bin overflow, plus broader multi-batch chemistry validation.
+
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by
 MLS-MPM packing. `createUlgRenderFieldBufferVolumeDescriptor()` selects the

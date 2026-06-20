@@ -21,6 +21,7 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   buildSphReactionTable,
   compareSphReactionStepParity,
+  resolveReactionParticleBinGrid,
   runSphReactionStepCpu,
   runSphReactionStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
@@ -326,6 +327,55 @@ test('SPH reaction WGSL routes gas products out of visible particle slots', () =
   assert.match(sphReactionStepWgsl, /fn\s+product_term_for_visible_slot/);
   assert.match(sphReactionStepWgsl, /let\s+condensed\s*=\s*term1\.y\s*<\s*0\.5/);
   assert.match(sphReactionStepWgsl, /product_term_for_visible_slot\(reaction_index,\s*local_product_slot\)/);
+});
+
+test('SPH reaction WGSL can propose reactions from a GPU particle-bin grid', () => {
+  assert.match(sphReactionStepWgsl, /struct\s+ReactionParticleBinParams/);
+  assert.match(sphReactionStepWgsl, /fn\s+bin_particles/);
+  assert.match(sphReactionStepWgsl, /fn\s+reaction_particle_bin_ready/);
+  assert.match(sphReactionStepWgsl, /fn\s+reaction_partner_candidate/);
+  assert.match(sphReactionStepWgsl, /if\s*\(\s*reaction_particle_bin_ready\(\)\s*\)/);
+  assert.match(sphReactionStepWgsl, /atomicLoad\(&reaction_particle_bin_counts\[cell_index\]\)/);
+});
+
+test('SPH reaction particle-bin grid uses bounded adaptive capacity', () => {
+  const packed = packedThreeParticles();
+  const grid = resolveReactionParticleBinGrid({
+    boxDimsM: [5, 5, 5],
+    sphParticleState: packed.sphParticleState,
+    reactionTable: reactionTable(),
+    particleCount: 10000
+  });
+
+  assert.equal(grid.status, 'reaction-particle-bin-grid-ready');
+  assert.equal(grid.enabled, true);
+  assert.equal(grid.neighborMode, 'fixed-capacity-particle-bin-grid');
+  assert.ok(grid.cellCount > 0);
+  assert.ok(grid.binCapacity >= 64);
+  assert.ok(grid.indexBufferByteLength <= 128 * 1024 * 1024);
+  assert.ok(Math.abs(grid.maxContactRadiusM - 0.1) < 1e-6);
+});
+
+test('SPH reaction particle-bin grid falls back without positive reaction radius', () => {
+  const packed = packedThreeParticles();
+  const table = buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    phaseRequirements: { b: ['liquid'] },
+    specificEnthalpyJPerKg: -1000,
+    contactRadiusM: 0
+  }], { materialProperties, contactRadiusM: 0 });
+  const grid = resolveReactionParticleBinGrid({
+    boxDimsM: [5, 5, 5],
+    sphParticleState: packed.sphParticleState,
+    reactionTable: table
+  });
+
+  assert.equal(grid.enabled, false);
+  assert.equal(grid.neighborMode, 'all-particle-scan-fallback');
+  assert.equal(grid.status, 'reaction-particle-bin-grid-disabled');
 });
 
 test('SPH reaction CPU reference preserves excess reactant and ledgers unplaced gas products', () => {

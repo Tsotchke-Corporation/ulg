@@ -30969,3 +30969,55 @@ Remaining:
 - Contact-bin indexing is still fixed-capacity plus adaptive headroom. If dense
   reaction/contact scenarios show overflow, replace it with a prefix-scan
   compact bin list rather than widening the default GPU buffer budget.
+
+## 2026-06-20 AKDT - Reaction Proposal Uses Same-Pass GPU Particle Bins
+
+Status:
+
+- The WebGPU reaction step now prepares a bounded fixed-capacity particle-bin
+  grid under a 128 MiB index-buffer budget and dispatches `bin_particles`
+  before `propose` in the same command encoder.
+- The reaction proposal shader scans neighboring bin cells when the grid is
+  ready and retains the all-particle scan as an explicit fallback.
+- Resident and mounted browser diagnostics now publish
+  `reactionProposalNeighborMode`, reaction-bin grid status, cell count,
+  capacity, max contact radius, and index-buffer bytes.
+- The resident MLS-MPM reaction call now passes the authoritative simulation
+  box dimensions into the reaction bin resolver instead of deriving live-loop
+  bounds from readback.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphReactionGpuKernel.js`
+- PASS:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS:
+  `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS:
+  `node --test tests/sphReactionGpuKernel.test.mjs`
+  with `14/14`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs`
+  with `79/79`.
+- PASS:
+  `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `72/72`.
+- PASS:
+  `/tmp/ulg-reaction-bin-browser-probe-final.json`
+  - `status=good`
+  - `analysis.issues=[]`
+  - `browserConsole.issueCount=0`
+  - final mounted diagnostics include
+    `reactionProposalNeighborMode=fixed-capacity-particle-bin-grid`,
+    `reactionParticleBinGridStatus=reaction-particle-bin-grid-prepared`, and
+    `reactionParticleBinGridCellCount=343`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Add exact overflow metadata/readback or prefix-scan compact reaction bins
+  only if dense chemistry scenarios outgrow the fixed/adaptive capacity.
+- Run broader multi-batch chemistry scenarios after the next resident cadence
+  slice so the performance signal is not dominated by startup and render-row
+  readback.

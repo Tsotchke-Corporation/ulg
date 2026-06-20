@@ -12207,3 +12207,37 @@ Contact-bin diagnostic flag lifetime fix, 2026-06-20 AKDT:
   `ULG_PROBE_OUTPUT=/tmp/ulg-contact-bin-browser-diagnostics-after-lifetime-fix.json ULG_PROBE_PORT=5672 ULG_PROBE_TIMEOUT_MS=90000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_CONTACT_BIN_METADATA_READBACK=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=Na&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&renderer=native-webgpu&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
   - Passed: `status=good`.
   - Browser console issue/warning counts: `0/0`.
+
+Reaction proposal particle-bin hot-loop slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphReactionGpuKernel.js`
+  passed.
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  passed.
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`
+  passed.
+- Whitespace:
+  `git diff --check`
+  passed.
+- Focused reaction tests:
+  `node --test tests/sphReactionGpuKernel.test.mjs`
+  - Passed: `14/14`.
+  - Covers WGSL bin/propose markers, bounded adaptive capacity, and fallback
+    behavior when no positive reaction contact radius exists.
+- Focused resident/reaction tests:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs`
+  - Passed: `79/79`.
+- Mounted resident summary tests:
+  `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `72/72`.
+- Browser reaction-bin probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-reaction-bin-browser-probe-final.json ULG_PROBE_PORT=5676 ULG_PROBE_TIMEOUT_MS=90000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=Na&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&renderer=native-webgpu&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: `status=good`.
+  - Browser console issue/warning counts: `0/0`.
+  - Final mounted diagnostics reported
+    `reactionProposalNeighborMode=fixed-capacity-particle-bin-grid`,
+    `reactionParticleBinGridStatus=reaction-particle-bin-grid-prepared`, and
+    `reactionParticleBinGridCellCount=343`.

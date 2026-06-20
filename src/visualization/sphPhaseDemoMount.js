@@ -466,6 +466,14 @@ export function summarizeResidentStageOrderExecution(execution = null) {
         diagnostics?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? null,
       reactionProductEventActiveEventCount: diagnostics?.reactionProductEventActiveEventCount ?? null,
       reactionResidentProductMassStatus: diagnostics?.reactionResidentProductMassStatus ?? null,
+      reactionProposalNeighborMode: diagnostics?.reactionProposalNeighborMode ?? null,
+      reactionParticleBinGridStatus: diagnostics?.reactionParticleBinGridStatus ?? null,
+      reactionParticleBinGridReason: diagnostics?.reactionParticleBinGridReason ?? null,
+      reactionParticleBinGridEnabled: diagnostics?.reactionParticleBinGridEnabled ?? null,
+      reactionParticleBinGridCellCount: diagnostics?.reactionParticleBinGridCellCount ?? null,
+      reactionParticleBinGridBinCapacity: diagnostics?.reactionParticleBinGridBinCapacity ?? null,
+      reactionParticleBinGridIndexBufferByteLength: diagnostics?.reactionParticleBinGridIndexBufferByteLength ?? null,
+      reactionParticleBinGridMaxContactRadiusM: diagnostics?.reactionParticleBinGridMaxContactRadiusM ?? null,
       thermalMechanicsRefreshStatus: diagnostics?.thermalMechanicsRefreshStatus ?? null
     },
     residentAuthorityLedgerStatus: execution?.residentAuthorityLedgerStatus

@@ -54,6 +54,16 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Reaction proposal now has a GPU-resident neighbor-bin producer. The WebGPU
+  reaction step builds bounded fixed-capacity particle bins in the same command
+  encoder as pack/propose/resolve/unpack, and the `propose` shader scans
+  neighboring cells when the grid is ready. The all-particle scan is now a
+  named fallback, not the normal ready-grid path. Mounted diagnostics expose
+  `reactionProposalNeighborMode`, bin status, cell count, capacity, and
+  index-buffer bytes. The current Na/H2O resident browser probe is
+  console-clean and reports `fixed-capacity-particle-bin-grid` with `343`
+  cells. This closes the first reaction-locality slice; prefix-scan compact
+  bins should wait for measured overflow/dense-chemistry evidence.
 - `peercompute.ulg.mls-mpm-p2g-backend-policy.v0` now makes the P2G backend
   explicit. The current WebGPU path reports `resident-scatter`, and requests
   for `ocean-tiled-experimental` fail closed to resident scatter with

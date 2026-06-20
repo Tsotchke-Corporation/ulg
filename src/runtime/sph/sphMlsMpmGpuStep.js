@@ -31,7 +31,9 @@ import {
 } from './sphGpuBuffers.js';
 import {
   createMlsMpmGridSpec,
+  MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   MLS_MPM_GPU_GRID_NODE_FLOATS,
+  resolveMlsMpmP2gBackendPolicy,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   runMlsMpmP2gGridProjectionWithOptionalWebGpu
 } from './sphGridGpuKernel.js';
@@ -607,7 +609,8 @@ function createResidentDispatchTopology({
   activeGridDispatch = null,
   substepCount = 1,
   fusedResidentMechanics = false,
-  fusedResidentSequence = false
+  fusedResidentSequence = false,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
   const boundedParticleCount = Math.max(0, Math.floor(finiteNumber(particleCount, 0)));
   const workgroupSize = 64;
@@ -620,9 +623,18 @@ function createResidentDispatchTopology({
   const particleWorkgroups = Math.max(1, Math.ceil(boundedParticleCount / workgroupSize));
   const gridWorkgroups = Math.max(1, Math.ceil(activeGridNodeCount / workgroupSize));
   const activeGridAxis = useActiveGrid ? 'active-grid-node' : 'grid-node';
+  const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: p2gBackend,
+    supportsOceanTiledKernel: false
+  });
   const p2g = {
     stageId: 'p2g',
     topology: 'particle-parallel-scatter',
+    backendPolicy: p2gBackendPolicy,
+    backendPolicyStatus: p2gBackendPolicy.status,
+    requestedBackend: p2gBackendPolicy.requestedBackend,
+    effectiveBackend: p2gBackendPolicy.effectiveBackend,
+    backendFallbackReason: p2gBackendPolicy.fallbackReason,
     entryPoint: 'main',
     dispatchAxis: 'particle',
     dispatchWorkgroupsPerSubstep: particleWorkgroups,
@@ -702,6 +714,11 @@ function createResidentDispatchTopology({
     activeGridNodeCount,
     activeGridEnabled: useActiveGrid,
     activeGridDispatchStatus: activeGridDispatch?.status || null,
+    p2gBackendPolicy,
+    p2gBackendPolicyStatus: p2gBackendPolicy.status,
+    p2gBackendRequested: p2gBackendPolicy.requestedBackend,
+    p2gBackendEffective: p2gBackendPolicy.effectiveBackend,
+    p2gBackendFallbackReason: p2gBackendPolicy.fallbackReason,
     particleParallelStages: ['p2g', 'g2p'],
     gridParallelStages: useActiveGrid
       ? ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']
@@ -1997,7 +2014,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   cflFactor = DEFAULT_CFL_FACTOR,
   internalPressureScale = 1,
   fuseActiveGrid = false,
-  activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
+  activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 }) {
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -2039,7 +2057,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     gridSpec,
     activeGridDispatch,
     substepCount: 1,
-    fusedResidentMechanics: true
+    fusedResidentMechanics: true,
+    p2gBackend
   });
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-out',
@@ -2475,6 +2494,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   preferWebGpu = true,
   fuseActiveGrid = false,
   activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   measureQueueFence = false
 }) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
@@ -2518,7 +2538,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     gridSpec,
     activeGridDispatch,
     substepCount: count,
-    fusedResidentSequence: true
+    fusedResidentSequence: true,
+    p2gBackend
   });
   const stageTimingStartMs = nowMs();
   const stageMs = {
@@ -3517,6 +3538,11 @@ function residentDispatchTopologyDiagnostics({
     dispatchTopology: resolved,
     dispatchTopologyStatus: resolved?.status || null,
     dispatchTopologySchema: resolved?.schema || null,
+    p2gBackendPolicy: resolved?.p2gBackendPolicy || null,
+    p2gBackendPolicyStatus: resolved?.p2gBackendPolicyStatus || null,
+    p2gBackendRequested: resolved?.p2gBackendRequested || null,
+    p2gBackendEffective: resolved?.p2gBackendEffective || null,
+    p2gBackendFallbackReason: resolved?.p2gBackendFallbackReason || null,
     cpuParticleLoopInHotPath: resolved?.cpuParticleLoopInHotPath ?? null,
     particleParallelStages: [...(resolved?.particleParallelStages || [])],
     gridParallelStages: [...(resolved?.gridParallelStages || [])],
@@ -11730,6 +11756,11 @@ async function residentStepEnvelope({
     internalPressureScale,
     dispatchTopology,
     dispatchTopologyStatus: dispatchTopology?.status || null,
+    p2gBackendPolicy: dispatchTopology?.p2gBackendPolicy || null,
+    p2gBackendPolicyStatus: dispatchTopology?.p2gBackendPolicyStatus || null,
+    p2gBackendRequested: dispatchTopology?.p2gBackendRequested || null,
+    p2gBackendEffective: dispatchTopology?.p2gBackendEffective || null,
+    p2gBackendFallbackReason: dispatchTopology?.p2gBackendFallbackReason || null,
     cpuParticleLoopInHotPath: dispatchTopology?.cpuParticleLoopInHotPath ?? null,
     stageStatus: stageStatusSummary,
     stageBackends: stageBackendSummary,
@@ -11862,6 +11893,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   reactionStepOptions = {},
   sourceSlot = sphParticleUpload?.slot ?? 0,
   readbackMode = FULL_READBACK_MODE,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   gpuResidentLaneManager = null,
   gpuResidentLaneId = 'ulg:sph-resident:active',
@@ -12009,7 +12041,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         cflFactor,
         internalPressureScale,
         fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
-        activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells
+        activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
+        p2gBackend
       }));
       stageMs.p2gGridProjection = 0;
       stageMs.gridUpdate = 0;
@@ -12033,6 +12066,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     parityTolerance: parityTolerances.p2g ?? 5e-2,
     retainGridBuffer: true,
     readbackMode: requestedReadbackMode,
+    p2gBackend,
     webGpuRunner: p2gRunner,
     onDeviceLost(info) {
       lostInfo = info;
@@ -12995,6 +13029,10 @@ function summarizeResidentStepForSequence(step, index) {
       particleCount: step.diagnostics?.particleCount ?? 0,
       gridNodeCount: step.diagnostics?.gridNodeCount ?? 0,
       dispatchTopologyStatus: step.diagnostics?.dispatchTopologyStatus ?? null,
+      p2gBackendPolicyStatus: step.diagnostics?.p2gBackendPolicyStatus ?? null,
+      p2gBackendRequested: step.diagnostics?.p2gBackendRequested ?? null,
+      p2gBackendEffective: step.diagnostics?.p2gBackendEffective ?? null,
+      p2gBackendFallbackReason: step.diagnostics?.p2gBackendFallbackReason ?? null,
       cpuParticleLoopInHotPath: step.diagnostics?.cpuParticleLoopInHotPath ?? null,
       particleParallelStages: [...(step.diagnostics?.particleParallelStages || [])],
       dispatchesPerSubstep: step.diagnostics?.dispatchesPerSubstep ?? null,
@@ -13199,6 +13237,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       preferWebGpu: args.preferWebGpu,
       fuseActiveGrid: Boolean(args.fuseNoFullResidentMechanicsActiveGrid || args.fuseNoFullResidentActiveGrid),
       activeGridSafetyCells: args.fusedActiveGridSafetyCells ?? args.activeGridSafetyCells,
+      p2gBackend: args.p2gBackend ?? MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
       measureQueueFence: Boolean(
         args.measureFusedSequenceQueueFence
         || args.measureGpuQueueFence

@@ -75,7 +75,12 @@ import {
   submitMlsMpmResidentStepsComputeTask,
   summarizeMlsMpmResidentHotLoopBudget
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
-import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
+import {
+  MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
+  MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
+  projectMlsMpmP2gGridCpu
+} from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
@@ -1851,6 +1856,7 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     fuseNoFullResidentMechanics: true,
+    p2gBackend: MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
     summaryRunner({ gridUpdate, g2pReconstruction, summaryScope }) {
       assert.equal(gridUpdate.fusedResidentMechanics, true);
       assert.equal(g2pReconstruction.fusedResidentMechanics, true);
@@ -1932,8 +1938,16 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.gridUpdate.fusedResidentMechanics, true);
   assert.equal(step.g2pReconstruction.fusedResidentMechanics, true);
   assert.equal(step.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
+  assert.equal(step.p2gBackendPolicy.schema, ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA);
+  assert.equal(step.p2gBackendPolicyStatus, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(step.p2gBackendRequested, MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL);
+  assert.equal(step.p2gBackendEffective, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
+  assert.equal(step.p2gBackendFallbackReason, 'ocean-tiled-p2g-kernel-not-available');
   assert.equal(step.cpuParticleLoopInHotPath, false);
   assert.equal(step.stageTiming.dispatchTopology.status, 'resident-dispatch-topology-ready');
+  assert.equal(step.stageTiming.dispatchTopology.p2gBackendPolicyStatus, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(step.stageTiming.dispatchTopology.p2g.backendPolicyStatus, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(step.stageTiming.dispatchTopology.p2g.effectiveBackend, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
   assert.equal(step.stageTiming.dispatchTopology.p2g.topology, 'particle-parallel-scatter');
   assert.equal(step.stageTiming.dispatchTopology.p2g.dispatchAxis, 'particle');
   assert.equal(step.stageTiming.dispatchTopology.p2g.particleLoopInShader, false);
@@ -1946,6 +1960,10 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.p2gGridProjection.dispatchTopology.topology, 'particle-parallel-scatter');
   assert.equal(step.p2gGridProjection.residentDispatchTopology, step.stageTiming.dispatchTopology);
   assert.equal(step.diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
+  assert.equal(step.diagnostics.p2gBackendPolicyStatus, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(step.diagnostics.p2gBackendRequested, MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL);
+  assert.equal(step.diagnostics.p2gBackendEffective, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
+  assert.equal(step.diagnostics.p2gBackendFallbackReason, 'ocean-tiled-p2g-kernel-not-available');
   assert.equal(step.diagnostics.cpuParticleLoopInHotPath, false);
   assert.deepEqual(step.diagnostics.particleParallelStages, ['p2g', 'g2p']);
   assert.equal(step.diagnostics.particleScaleStabilitySchema, 'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0');

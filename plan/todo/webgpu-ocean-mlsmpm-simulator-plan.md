@@ -59,7 +59,10 @@ Tactical status, 2026-06-19 AKDT:
   for `ocean-tiled-experimental` fail closed to resident scatter with
   `ocean-tiled-p2g-kernel-not-available` until the tiled kernel exists. Focused
   fake-device coverage proves the no-full WebGPU P2G path does not silently
-  claim the Ocean replacement is live.
+  claim the Ocean replacement is live. The same policy is threaded into
+  resident dispatch topology, fused no-full mechanics, fused sequence setup,
+  resident diagnostics, and condensed step summaries; focused resident tests
+  prove the actual hot loop reports the fallback policy too.
 - Resident MLS-MPM task envelopes now expose
   `peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0`. The helper
   normalizes no-full/no-summary readback budgets, compact-summary step counts,

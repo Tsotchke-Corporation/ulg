@@ -5,7 +5,8 @@
 The P2G projection contract now exposes an explicit backend policy for the
 Ocean-style migration. The current WebGPU runner reports `resident-scatter`,
 while `ocean-tiled-experimental` requests fail closed to resident scatter until
-the tiled/local-accumulator kernel exists.
+the tiled/local-accumulator kernel exists. The same policy is now threaded into
+resident MLS-MPM dispatch topology and fused no-full mechanics diagnostics.
 
 Focused checks:
 
@@ -16,6 +17,10 @@ Focused checks:
   `node --test tests/sphGridGpuKernel.test.mjs` passed `21/21`, including the
   policy normalization regression and the fake-device no-full WebGPU P2G
   fallback assertion for `ocean-tiled-experimental`.
+- Resident hot-loop coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `61/61`, including the
+  fused no-full resident mechanics assertion that an `ocean-tiled-experimental`
+  request reports `ocean-tiled-backend-fallback-resident-scatter`.
 
 ## Current Focused Result - 2026-06-19 Immediate Todo Guardrails And Hot-Loop Budget Telemetry
 

@@ -8,6 +8,10 @@ Status:
   contract. The direct CPU reference, direct WebGPU runner, and optional
   WebGPU runner now carry `p2gBackendPolicy`, requested/effective backend,
   policy status, and fallback reason.
+- Threaded the same policy into resident MLS-MPM dispatch topology, fused
+  no-full mechanics, fused sequence setup, resident diagnostics, and condensed
+  step summaries so the real hot loop reports the same requested/effective P2G
+  backend.
 - Kept the existing resident P2G path honest: it reports
   `resident-scatter`, `particleLoopInHotPath=false`, and
   `atomic-grid-accumulator-scatter`.
@@ -24,6 +28,9 @@ Validation:
 - PASS: `node --check src/runtime/sph/sphGridGpuKernel.js && node --check
   tests/sphGridGpuKernel.test.mjs`.
 - PASS: `node --test tests/sphGridGpuKernel.test.mjs` reported `21/21`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check
+  tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `61/61`.
 
 ## 2026-06-19 21:40 AKDT - Immediate Todo Guardrails And Hot-Loop Budget Telemetry
 

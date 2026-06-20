@@ -346,9 +346,14 @@ Extended mounted resident reaction browser coverage beyond Na/H2O:
   `gpu-resident-pressure-interface-spatial-gas-ledger` pressure, pressure above
   baseline, G2P particle-scale policy, render-row particle-scale caps, and
   support-radius bounds.
+- The harness now also opens Cs/H2O and runs two consecutive no-full resident
+  pressure/render passes. This covers the heavier alkali material/product path
+  (`Cs`, `csoh`, `h2`) that previously appeared in live WebGPU console-error
+  reports, while keeping the same retained product mass, promoted spatial gas
+  pressure, and scale-bound policy assertions.
 - Na/H2O still requires decoded gas render rows and max decoded radius under
-  the gas visual proxy cap. K/H2O keeps product/gas ledger pressure coverage
-  without assuming the global max rendered particle is a gas row.
+  the gas visual proxy cap. K/H2O and Cs/H2O keep product/gas ledger pressure
+  coverage without assuming the global max rendered particle is a gas row.
 
 Validation:
 
@@ -359,6 +364,6 @@ Validation:
 Remaining:
 
 - Add broader long-horizon resident batches beyond the current two-pass K/H2O
-  sequence.
+  and Cs/H2O sequences.
 - Add representative non-alkali or multivalent reaction pairs once their
   pressure/product routes have stable browser-ready expectations.

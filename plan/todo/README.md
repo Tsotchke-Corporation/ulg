@@ -63,8 +63,10 @@ active across multiple resident batches. Remaining gap: broaden long-horizon
 browser coverage beyond the focused resident sequences. K/H2O now has a
 console-guarded two-pass resident pressure/render regression with retained
 product mass, KOH/H2 material keys, promoted spatial gas pressure, scale
-policies, and support-radius bounds. Do not treat these caps as the final
-physics model.
+policies, and support-radius bounds. Cs/H2O now has the same two-pass resident
+browser coverage with retained CsOH/H2 product pressure, clean WebGPU console
+output, and the same scale/support bounds. Do not treat these caps as the
+final physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

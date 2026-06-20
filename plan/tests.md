@@ -11634,3 +11634,15 @@ Native surface validation scope guard, 2026-06-19 AKDT:
   - Debug clear-only keeps readback-smoke validation eligible while reporting
     offscreen surface geometry validation as skipped until real surface draws
     are submitted.
+
+Cesium resident reaction browser guard, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs` passed.
+- Mounted browser regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas pressure"`
+  - Passed: `1/1` in `3.2m`.
+  - The existing Na/H2O reset and K/H2O continuation assertions now also run a
+    Cs/H2O continuation sequence with retained CsOH/H2 product pressure,
+    promoted spatial gas pressure, scale-policy diagnostics, support-radius
+    bounds, and clean WebGPU console output.

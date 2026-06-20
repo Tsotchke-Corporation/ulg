@@ -29947,3 +29947,28 @@ Remaining:
 
 - Use the new scope diagnostics in the mounted native/mobile probes; do not
   promote the native visible consumer from debug clear-only evidence.
+
+## 2026-06-19 AKDT - Cesium Resident Reaction Browser Guard
+
+Status:
+
+- Broadened the mounted resident alkali/H2O browser regression from Na reset
+  plus K continuation to include Cs/H2O continuation.
+- The Cs path opens a fresh mounted scenario and runs two consecutive no-full
+  resident pressure/render passes, requiring retained CsOH/H2 material keys,
+  retained product mass, promoted spatial gas pressure, pressure above
+  baseline, G2P particle-scale policy, render-row scale caps, and support
+  radius bounds.
+- The same console harness stays active across Na, K, and Cs, so earlier
+  device/buffer validation failures for the Cs path are covered by the test.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas pressure"` with `1/1` in `3.2m`.
+
+Remaining:
+
+- Add non-alkali or multivalent reaction pairs once their retained pressure and
+  product expectations are stable enough for mounted browser assertions.

@@ -30932,3 +30932,40 @@ Remaining:
 - Continue the contact performance roadmap with a tiled/neighbor-list
   kinematics producer. The current browser console blocker is closed for this
   focused scenario.
+
+## 2026-06-20 AKDT - Contact-Bin Diagnostic Flag No Longer Tears Down Resident Buffers
+
+Status:
+
+- The contact-bin overflow metadata debug flag now round-trips through the
+  browser URL, resident execution policy, scene resident signatures, resident
+  step runner options, and the long-horizon probe.
+- Fixed the false-stale resident execution teardown caused by recomputing the
+  scene signature without `contactKinematicsParticleBinMetadataReadback`.
+- Resident product-mass cleanup now honors raw preserved GPU buffers as well as
+  preserved handle objects, so product-event buffer preservation survives handle
+  churn across merge/publication.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check scripts/sph-long-horizon-probe.mjs`
+- PASS:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `72/72`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  with `75/75`.
+- PASS:
+  `/tmp/ulg-contact-bin-browser-diagnostics-after-lifetime-fix.json`
+  - `status=good`
+  - `analysis.issues=[]`
+  - `browserConsole.issueCount=0`
+  - `browserConsole.warningCounts={}`
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Contact-bin indexing is still fixed-capacity plus adaptive headroom. If dense
+  reaction/contact scenarios show overflow, replace it with a prefix-scan
+  compact bin list rather than widening the default GPU buffer budget.

@@ -2970,6 +2970,9 @@ physics work:
 - [ ] Reduce or tile retained surface-vertex/draw metadata so no-full resident
   visual correctness can produce fresh surface evidence without routine CPU
   readback.
+- [x] Make contact-bin overflow diagnostics browser-safe: the debug flag now
+  reaches the resident pressure stage without false stale teardown, and the
+  focused Na/H2O browser probe is console-clean with exact metadata opt-in.
 - [x] Give the native marching-cubes extension path an in-engine WebGL/mobile
   fallback: blocked same-device GPUBuffer rendering now falls back to Three
   compact geometry with an explicit full-readback marker instead of stopping at

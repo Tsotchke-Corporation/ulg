@@ -1932,6 +1932,15 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentGpuQueueFence'),
     false
   );
+  const initialContactBinMetadataReadbackEnabled = booleanUrlParam(
+    initialHash.get('contactBinMetadataReadback')
+      ?? initialQuery.get('contactBinMetadataReadback')
+      ?? initialHash.get('pressureInterfaceContactBinMetadataReadback')
+      ?? initialQuery.get('pressureInterfaceContactBinMetadataReadback')
+      ?? initialHash.get('contactKinematicsParticleBinMetadataReadback')
+      ?? initialQuery.get('contactKinematicsParticleBinMetadataReadback'),
+    false
+  );
   function residentExecutionPolicyFromUrl() {
     return {
       schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
@@ -1940,7 +1949,9 @@ export async function mountSphPhaseDemoOverlay({
       fuseNoFullResidentMechanicsSequence: initialResidentFuseSequenceEnabled,
       fuseNoFullResidentMechanicsActiveGrid: initialResidentActiveGridEnabled,
       activeGridSafetyCells: initialResidentActiveGridSafetyCells,
-      measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled
+      measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled,
+      contactKinematicsParticleBinMetadataReadback:
+        initialContactBinMetadataReadbackEnabled
     };
   }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
@@ -2099,6 +2110,7 @@ export async function mountSphPhaseDemoOverlay({
     q.set('surfaceDraw', currentResidentSurfaceDrawDiagnosticMode());
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
+    if (initialContactBinMetadataReadbackEnabled) q.set('contactBinMetadataReadback', '1');
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
   applyUrlToControls(); // restore from the URL before the first build

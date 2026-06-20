@@ -12186,3 +12186,24 @@ Kinematics-gated material-interface contact response, 2026-06-20 AKDT:
 - ICC:
   `npm run icc:update`
   - Passed with `indexedFiles=354`, `memoryChunks=2072`.
+
+Contact-bin diagnostic flag lifetime fix, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Whitespace:
+  `git diff --check`
+  passed.
+- Focused pressure/interface and MLS-MPM runtime tests:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `72/72`.
+  - Adds preservation coverage for product-event buffers supplied through
+    `preserveBuffers`.
+- Focused renderer/demo tests:
+  `node --test tests/sphPhaseRenderer.test.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  - Passed: `75/75`.
+- Browser contact-bin diagnostic probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-contact-bin-browser-diagnostics-after-lifetime-fix.json ULG_PROBE_PORT=5672 ULG_PROBE_TIMEOUT_MS=90000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_CONTACT_BIN_METADATA_READBACK=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=Na&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&renderer=native-webgpu&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: `status=good`.
+  - Browser console issue/warning counts: `0/0`.

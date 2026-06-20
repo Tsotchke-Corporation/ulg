@@ -5922,3 +5922,23 @@ Still open:
 - Fix Three WebGPU error-scope/lifetime sequencing for the renderer-owned
   GPUDevice before promoting or pixel-validating the direct external-buffer
   surface consumer.
+
+## 2026-06-20 Status Update - Contact-Bin Debug Metadata Is Browser-Clean
+
+Current state:
+
+- The contact-bin overflow metadata opt-in now survives the browser URL,
+  resident execution policy, scene signature, long-horizon probe, and pressure
+  stage task path.
+- The prior destroyed-buffer console failures were caused by a false stale
+  teardown when the scene recomputed resident signatures without the contact-bin
+  flag. That signature mismatch is fixed.
+- Resident product-mass cleanup now treats raw preserved product-event buffers
+  as active leases, not only matching product-mass handle objects.
+
+Still open:
+
+- The contact bin remains a fixed-capacity grid with adaptive headroom and exact
+  debug overflow readback. Promote to a prefix-scan compact bin list only if the
+  overflow metadata shows dense contact/reaction scenarios outgrowing the
+  current budget.

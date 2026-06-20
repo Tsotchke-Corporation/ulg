@@ -3280,6 +3280,7 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
       thermoBuffer
     },
     boxDimsM: [4, 4, 4],
+    contactKinematicsParticleBinMetadataReadback: true,
     readbackMode: 'no-full-readback',
     expectedOutputFamilies: ['pressure-interface-force-rows'],
     pressureInterfaceStageTask: true
@@ -3291,6 +3292,7 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
   assert.equal(observedRunnerArgs.particleThermoBuffer, thermoBuffer);
   assert.equal(observedRunnerArgs.particleCount, 2);
   assert.deepEqual(observedRunnerArgs.boxDimsM, [4, 4, 4]);
+  assert.equal(observedRunnerArgs.contactKinematicsParticleBinMetadataReadback, true);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsGpuDerived, true);
   assert.equal(
@@ -5537,6 +5539,40 @@ test('MLS-MPM resident step cleanup preserves explicitly leased product-event bu
   assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-active');
   assert.equal(step.residentBufferLeaseCleanup.skippedDestroyCount, 1);
   assert.equal(step.residentBufferLeaseCleanup.events[0].status, 'destroy-skipped-active-lease');
+});
+
+test('MLS-MPM resident step cleanup preserves product-event buffers from preserveBuffers', () => {
+  const preservedResidentProductMass = residentProductMassHandle({
+    label: 'preserved-product-events-by-buffer',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const step = {
+    particlePingPong: { nextStep: 8, nextTime: 0.8 },
+    residentProductMass: preservedResidentProductMass,
+    nextParticleUploads: {
+      sphParticleUpload: {
+        ownsStateBuffer: false,
+        ownsThermoBuffer: false
+      },
+      mlsMpmParticleUpload: {
+        ownsMechanicsBuffer: false
+      }
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    preserveBuffers: [preservedResidentProductMass.productEventBuffer]
+  });
+
+  assert.equal(preservedResidentProductMass.destroyCalls, 0);
+  assert.equal(preservedResidentProductMass.productEventBuffer.destroyed, false);
+  assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(step.residentBufferLeaseCleanup.skippedDestroyCount, 1);
+  assert.equal(
+    step.residentBufferLeaseCleanup.leases[0].reason,
+    'preserve-resident-product-event-buffer'
+  );
 });
 
 test('MLS-MPM resident step rejects stale CPU mirrors without retained GPU uploads', async () => {

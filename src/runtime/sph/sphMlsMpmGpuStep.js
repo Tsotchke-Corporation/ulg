@@ -7221,6 +7221,8 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           particleCount: stageOptions.particleCount ?? stageOptions.sphParticleState?.particleCount ?? stageOptions.sphParticleUpload?.particleCount ?? null,
           boxDimsM: stageOptions.boxDimsM || null,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
+          contactKinematicsParticleBinMetadataReadback:
+            stageOptions.contactKinematicsParticleBinMetadataReadback === true,
           readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
         });
         webgpuStatus = {
@@ -10034,7 +10036,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 pressureInterfaceCoupling: stepOptions.pressureInterfaceCoupling || null,
                 pressureInterfaceForcePreview: stepOptions.pressureInterfaceForcePreview || null,
                 pressureInterfaceGasCellFieldImport: stepOptions.pressureInterfaceGasCellFieldImport || null,
-                pressureInterfaceGasCellFieldAdmission: stepOptions.pressureInterfaceGasCellFieldAdmission || null
+                pressureInterfaceGasCellFieldAdmission: stepOptions.pressureInterfaceGasCellFieldAdmission || null,
+                contactKinematicsParticleBinMetadataReadback:
+                  stepOptions.contactKinematicsParticleBinMetadataReadback === true
               } : {}),
               ...(includeThermalPhaseStage ? {
                 thermalMaterialTable: stepOptions.thermalMaterialTable || null,
@@ -11495,12 +11499,14 @@ function isPreservedResidentProductMass(candidate, preservedHandles) {
 function destroyResidentProductMassFromStep(step, {
   preserveResidentProductMass = null,
   preserveResidentProductMassHandles = [],
-  destroyInputResidentProductMass = false
+  destroyInputResidentProductMass = false,
+  preserveBuffers = []
 } = {}) {
   const preservedHandles = preservedResidentProductMassList({
     preserveResidentProductMass,
     preserveResidentProductMassHandles
   });
+  const preservedBuffers = new Set((preserveBuffers || []).filter(Boolean));
   const cleanupLedger = createResidentBufferLeaseLedger({
     ledgerId: `mls-mpm-resident-step:${step?.particlePingPong?.nextStep ?? 'unknown'}:buffer-cleanup`,
     stateKey: 'mls-mpm-resident-step',
@@ -11532,12 +11538,19 @@ function destroyResidentProductMassFromStep(step, {
       bufferLabel: residentProductMass.productEventBuffer?.label,
       expectedConsumers: ['cleanup']
     });
-    const preserved = isPreservedResidentProductMass(residentProductMass, preservedHandles);
+    const preservedByHandle = isPreservedResidentProductMass(residentProductMass, preservedHandles);
+    const preservedByBuffer = Boolean(
+      residentProductMass.productEventBuffer
+      && preservedBuffers.has(residentProductMass.productEventBuffer)
+    );
+    const preserved = preservedByHandle || preservedByBuffer;
     if (preserved) {
       addResidentBufferLease(cleanupLedger, {
         resourceKey,
         consumerStage: 'preserved-resident-product-mass',
-        reason: 'preserve-resident-product-mass-handle'
+        reason: preservedByHandle
+          ? 'preserve-resident-product-mass-handle'
+          : 'preserve-resident-product-event-buffer'
       });
     }
     if (destroyed.some((item) => isSameResidentProductMass(item, residentProductMass))) continue;
@@ -13031,7 +13044,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     destroyResidentProductMassFromStep(step, {
       preserveResidentProductMass,
       preserveResidentProductMassHandles,
-      destroyInputResidentProductMass
+      destroyInputResidentProductMass,
+      preserveBuffers
     });
   } else if (step?.g2pReconstruction?.destroyOutputParticleBuffers) {
     step.g2pReconstruction.destroyOutputParticleBuffers();

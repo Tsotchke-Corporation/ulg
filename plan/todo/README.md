@@ -70,6 +70,9 @@ particle occupancy under a 128 MiB index-buffer budget and report average
 occupancy, estimated overflow risk, and index-buffer bytes. Follow-up: exact
 GPU overflow metadata readback is now available as an explicit debug opt-in,
 reporting overflow status/count without changing the default no-full hot path.
+The browser/probe flag now round-trips through URL policy, scene signatures,
+and pressure-stage task options; the contact-bin browser probe is console-clean
+after fixing stale signature teardown and product-event buffer preservation.
 Remaining contact-performance work is, if fixed capacity still proves too
 lossy, a prefix-scan compact bin list. Browser summary acceptance now exposes
 the contact-bin grid and overflow diagnostics through mounted

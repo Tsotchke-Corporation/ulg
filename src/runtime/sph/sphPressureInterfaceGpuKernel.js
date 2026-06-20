@@ -35,6 +35,8 @@ const DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA = 5e5;
 const DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M = 0;
 const DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M = 0;
 const DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY = 64;
+const CONTACT_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
+const CONTACT_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
 const CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
 const CONTACT_PARTICLE_BIN_GRID_MAX_CELL_COUNT = CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
@@ -795,7 +797,9 @@ export function resolvePressureInterfaceParticleBinGrid({
   boxDimsM = null,
   packedContactPolicy = null,
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
-  binCapacity = DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY
+  binCapacity = DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY,
+  particleCount = 0,
+  maxIndexBufferBytes = CONTACT_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES
 } = {}) {
   const dims = vector3From(boxDimsM, [0, 0, 0]).map((value) => clampPositive(value, 0));
   if (dims.some((value) => value <= 0)) {
@@ -808,10 +812,13 @@ export function resolvePressureInterfaceParticleBinGrid({
       originM: [0, 0, 0],
       cellSizeM: 0,
       cellCount: 0,
-      binCapacity: 0
+      binCapacity: 0,
+      averageOccupancy: 0,
+      estimatedOverflowRisk: false,
+      indexBufferByteLength: 0
     };
   }
-  const capacity = Math.max(1, Math.round(finiteNumber(binCapacity, DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY)));
+  const requestedCapacity = Math.max(1, Math.round(finiteNumber(binCapacity, DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY)));
   const maxDimM = Math.max(...dims);
   const supportRadiusM = maxContactPolicySupportRadiusM(packedContactPolicy);
   const requestedSearchRadiusM = Math.max(
@@ -825,6 +832,19 @@ export function resolvePressureInterfaceParticleBinGrid({
     Math.min(CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS, Math.ceil(dim / requestedSearchRadiusM))
   ));
   const cellCount = gridDims[0] * gridDims[1] * gridDims[2];
+  const normalizedParticleCount = Math.max(0, Math.round(finiteNumber(particleCount, 0)));
+  const averageOccupancy = cellCount > 0 ? normalizedParticleCount / cellCount : 0;
+  const adaptiveCapacity = Math.max(
+    requestedCapacity,
+    Math.ceil(averageOccupancy * CONTACT_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER)
+  );
+  const budgetBytes = Math.max(4, Math.round(finiteNumber(maxIndexBufferBytes, CONTACT_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES)));
+  const maxCapacityByBudget = cellCount > 0
+    ? Math.max(1, Math.floor(budgetBytes / (cellCount * Uint32Array.BYTES_PER_ELEMENT)))
+    : 0;
+  const capacity = Math.max(1, Math.min(adaptiveCapacity, maxCapacityByBudget));
+  const estimatedOverflowRisk = normalizedParticleCount > 0 && averageOccupancy > capacity / CONTACT_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER;
+  const indexBufferByteLength = cellCount * capacity * Uint32Array.BYTES_PER_ELEMENT;
   if (cellCount <= 0 || cellCount > CONTACT_PARTICLE_BIN_GRID_MAX_CELL_COUNT) {
     return {
       status: 'interface-contact-particle-bin-grid-unavailable',
@@ -835,12 +855,20 @@ export function resolvePressureInterfaceParticleBinGrid({
       originM: [0, 0, 0],
       cellSizeM: requestedSearchRadiusM,
       cellCount,
-      binCapacity: capacity
+      binCapacity: capacity,
+      requestedBinCapacity: requestedCapacity,
+      adaptiveBinCapacity: adaptiveCapacity,
+      maxBinCapacityByBudget: maxCapacityByBudget,
+      averageOccupancy,
+      estimatedOverflowRisk,
+      indexBufferByteLength
     };
   }
   return {
     status: 'interface-contact-particle-bin-grid-ready',
-    reason: null,
+    reason: adaptiveCapacity > maxCapacityByBudget
+      ? 'adaptive bin capacity capped by index-buffer budget'
+      : null,
     enabled: true,
     gridDims,
     boxDimsM: dims,
@@ -848,6 +876,12 @@ export function resolvePressureInterfaceParticleBinGrid({
     cellSizeM: requestedSearchRadiusM,
     cellCount,
     binCapacity: capacity,
+    requestedBinCapacity: requestedCapacity,
+    adaptiveBinCapacity: adaptiveCapacity,
+    maxBinCapacityByBudget: maxCapacityByBudget,
+    averageOccupancy,
+    estimatedOverflowRisk,
+    indexBufferByteLength,
     maxSupportRadiusM: supportRadiusM,
     maxSearchRadiusM: Math.max(clampPositive(maxSearchRadiusM, 0), supportRadiusM * 2)
   };
@@ -981,6 +1015,9 @@ export function runSphPressureInterfaceParticleBinsWebGpu({
     paramsBuffer,
     cellCount,
     binCapacity,
+    averageOccupancy: particleBinGrid.averageOccupancy || 0,
+    estimatedOverflowRisk: particleBinGrid.estimatedOverflowRisk === true,
+    indexBufferByteLength: indices.byteLength,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
     cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer]
@@ -1079,6 +1116,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     particleBinGrid: resolvedParticleBins.particleBinGrid || null,
     particleBinGridCellCount: resolvedParticleBins.cellCount || resolvedParticleBins.particleBinGrid?.cellCount || 0,
     particleBinGridBinCapacity: resolvedParticleBins.binCapacity || resolvedParticleBins.particleBinGrid?.binCapacity || 0,
+    particleBinGridAverageOccupancy: resolvedParticleBins.averageOccupancy || resolvedParticleBins.particleBinGrid?.averageOccupancy || 0,
+    particleBinGridEstimatedOverflowRisk: resolvedParticleBins.estimatedOverflowRisk === true || resolvedParticleBins.particleBinGrid?.estimatedOverflowRisk === true,
+    particleBinGridIndexBufferByteLength: resolvedParticleBins.indexBufferByteLength || resolvedParticleBins.particleBinGrid?.indexBufferByteLength || 0,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
     derivation: resolvedParticleBins.enabled
@@ -1272,7 +1312,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         boxDimsM,
         packedContactPolicy,
         maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
-        binCapacity: contactKinematicsParticleBinCapacity
+        binCapacity: contactKinematicsParticleBinCapacity,
+        particleCount: particleSource.particleCount
       })
     : null;
   const pressureModelId = packedGasPressureCells.rowCount > 0 && pressureFieldResolution.localPressureGradientReady
@@ -1339,6 +1380,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsParticleBinGrid?.enabled === true,
         interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsParticleBinGrid?.cellCount || 0,
         interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsParticleBinGrid?.binCapacity || 0,
+        interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsParticleBinGrid?.averageOccupancy || 0,
+        interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
+        interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1533,6 +1577,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
       interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
       interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
+      interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
+      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
+      interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1601,6 +1648,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
       interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
       interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
+      interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
+      interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
+      interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

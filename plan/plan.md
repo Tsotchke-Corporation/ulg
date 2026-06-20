@@ -22,10 +22,14 @@ console-clean. The next physics target is replacing the per-interface GPU
 particle scan with a tiled/neighbor-list contact producer plus broader browser
 visual acceptance. Follow-up: the first same-device particle-bin producer now
 runs before GPU contact-kinematics derivation, and the kinematics shader scans
-neighboring bin cells when grid bounds are available. The remaining contact
-physics target is adaptive overflow/prefix-scan bin compaction plus broader
-browser visual acceptance. The next rendering target remains native WebGPU
-validation/presentation evidence, not an overlay or CPU mesh fallback.
+neighboring bin cells when grid bounds are available. Follow-up adaptive
+capacity/headroom diagnostics now scale fixed-cap bins from average occupancy
+under a 128 MiB index-buffer budget and expose estimated overflow risk through
+pressure-stage evidence. The remaining contact physics target is exact GPU
+overflow metadata readback/debugging, prefix-scan bin compaction if fixed-cap
+bins prove lossy, and broader browser visual acceptance. The next rendering
+target remains native WebGPU validation/presentation evidence, not an overlay
+or CPU mesh fallback.
 
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
 now cached as a resident WebGPU upload instead of being rebuilt inside every

@@ -3246,7 +3246,10 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
           interfaceContactKinematicsParticleBinGridStatus: 'interface-contact-particle-bin-grid-submitted',
           interfaceContactKinematicsParticleBinGridEnabled: true,
           interfaceContactKinematicsParticleBinGridCellCount: 8,
-          interfaceContactKinematicsParticleBinGridBinCapacity: 64
+          interfaceContactKinematicsParticleBinGridBinCapacity: 64,
+          interfaceContactKinematicsParticleBinGridAverageOccupancy: 0.25,
+          interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: false,
+          interfaceContactKinematicsParticleBinGridIndexBufferByteLength: 2048
         }
       };
     },
@@ -3299,6 +3302,9 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEnabled, true);
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridCellCount, 8);
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridBinCapacity, 64);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridAverageOccupancy, 0.25);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk, false);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 2048);
 });
 
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {

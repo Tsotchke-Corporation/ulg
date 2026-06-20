@@ -20,7 +20,7 @@ Focused checks:
 - Contact/pressure/stage coverage:
   `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
   tests/sphMlsMpmGpuStep.test.mjs` passed `71/71`, including the 16-byte empty
-  gas-cell sentinel guard.
+  gas-cell sentinel guard plus adaptive bin-capacity/headroom diagnostics.
 - ABI/grid/buffer coverage:
   `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
   tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs` passed
@@ -40,6 +40,20 @@ Focused checks:
 - ICC:
   `npm run icc:update` passed with `indexedFiles=354` and
   `memoryChunks=2085`.
+
+Follow-up focused check:
+
+- Adaptive bin diagnostics:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`, and
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` passed `71/71`.
+- Follow-up hygiene:
+  `git diff --check` passed; `npm run build` passed with only the existing Vite
+  large-chunk warning; `npm run icc:update` passed with `indexedFiles=354` and
+  `memoryChunks=2086`.
 
 ## Previous Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
 

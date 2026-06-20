@@ -6941,6 +6941,9 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     interfaceContactKinematicsParticleBinGridEnabled: solver?.interfaceContactKinematicsParticleBinGridEnabled === true,
     interfaceContactKinematicsParticleBinGridCellCount: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridCellCount, 0),
     interfaceContactKinematicsParticleBinGridBinCapacity: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridBinCapacity, 0),
+    interfaceContactKinematicsParticleBinGridAverageOccupancy: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridAverageOccupancy, 0),
+    interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: solver?.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk === true,
+    interfaceContactKinematicsParticleBinGridIndexBufferByteLength: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 0),
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -7305,7 +7308,10 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     interfaceContactKinematicsParticleBinGridStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridStatus || null,
     interfaceContactKinematicsParticleBinGridEnabled: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridEnabled === true,
     interfaceContactKinematicsParticleBinGridCellCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridCellCount, 0),
-    interfaceContactKinematicsParticleBinGridBinCapacity: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridBinCapacity, 0)
+    interfaceContactKinematicsParticleBinGridBinCapacity: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridBinCapacity, 0),
+    interfaceContactKinematicsParticleBinGridAverageOccupancy: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridAverageOccupancy, 0),
+    interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk === true,
+    interfaceContactKinematicsParticleBinGridIndexBufferByteLength: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 0)
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);

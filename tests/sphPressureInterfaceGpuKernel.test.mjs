@@ -266,6 +266,7 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   assert.equal(particleBinGrid.status, 'interface-contact-particle-bin-grid-ready');
   assert.equal(particleBinGrid.enabled, true);
   assert.equal(particleBinGrid.binCapacity, 64);
+  assert.equal(particleBinGrid.estimatedOverflowRisk, false);
   assert.ok(particleBinGrid.cellCount > 0);
   const binParams = createPressureInterfaceParticleBinParamsArray({
     particleCount: 8,
@@ -277,6 +278,22 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   assert.equal(binView.getUint32(24, true), 1);
   assert.ok(binView.getFloat32(44, true) > 0);
   assert.ok(binView.getFloat32(48, true) > 0);
+  const denseParticleBinGrid = resolvePressureInterfaceParticleBinGrid({
+    boxDimsM: [4, 4, 4],
+    packedContactPolicy: packAlgorithmContactPolicyRows(normalizeAlgorithmContactPairResponsePolicy({
+      algorithmMaterialContactRows: algorithmContactRowsFixture()
+    })),
+    maxSearchRadiusM: 0.5,
+    particleCount: 10000
+  });
+  assert.equal(denseParticleBinGrid.status, 'interface-contact-particle-bin-grid-ready');
+  assert.ok(denseParticleBinGrid.averageOccupancy > 19);
+  assert.ok(denseParticleBinGrid.binCapacity > 64);
+  assert.equal(denseParticleBinGrid.estimatedOverflowRisk, false);
+  assert.equal(
+    denseParticleBinGrid.indexBufferByteLength,
+    denseParticleBinGrid.cellCount * denseParticleBinGrid.binCapacity * Uint32Array.BYTES_PER_ELEMENT
+  );
 
   const params = createPressureInterfaceParamsArray({
     elementCount: 2,
@@ -488,6 +505,9 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridEnabled, true);
   assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridCellCount > 0);
   assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridBinCapacity, 64);
+  assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridAverageOccupancy > 0);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk, false);
+  assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridIndexBufferByteLength > 0);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(device.bindGroups.length, 3);
   assert.equal(device.bindGroups[0].entries.length, 5);

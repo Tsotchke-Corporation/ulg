@@ -63,10 +63,14 @@ instead of every particle when the bin grid is ready, and diagnostics report
 bin-grid status/enabled/cell-count/capacity through the solver and
 ComputeManager stage evidence. Empty pressure-interface gas-cell storage
 sentinels now bind a 16-byte zero row instead of a 4-byte buffer, closing the
-browser validation warning found during the direct WebGPU smoke. Remaining
-contact-performance work is adaptive overflow handling/readback and, if fixed
-capacity proves too lossy, a prefix-scan compact bin list; then broader visual
-acceptance.
+browser validation warning found during the direct WebGPU smoke. Follow-up:
+adaptive capacity/headroom diagnostics are now wired into the bin-grid
+resolver and pressure-stage evidence. Dense bins scale capacity from average
+particle occupancy under a 128 MiB index-buffer budget and report average
+occupancy, estimated overflow risk, and index-buffer bytes. Remaining
+contact-performance work is exact GPU overflow metadata readback/debugging and,
+if fixed capacity still proves too lossy, a prefix-scan compact bin list; then
+broader visual acceptance.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

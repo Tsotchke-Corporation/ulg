@@ -26,6 +26,11 @@ Validation:
 - PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
 - PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
   tests/sphMlsMpmGpuStep.test.mjs` reported `71/71`.
+- PASS: `git diff --check`.
+- PASS: `npm run build`.
+  - Vite reported only the existing large chunk-size warning.
+- PASS: `npm run icc:update`.
+  - Indexed `354` files and `2086` memory chunks.
 - PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
   tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
   reported `47/47`.
@@ -42,9 +47,41 @@ Validation:
 
 Remaining:
 
-- Add overflow/adaptive-capacity diagnostics and browser visual acceptance.
+- Add exact overflow metadata readback/debug diagnostics and browser visual
+  acceptance.
 - Replace the fixed-capacity bin rows with a prefix-scan compact bin list if
   overflow starts dropping meaningful contact particles in dense reactions.
+
+## 2026-06-20 AKDT - Adaptive Contact-Bin Capacity Diagnostics
+
+Status:
+
+- The pressure-interface bin-grid resolver now receives particle count and
+  derives bin capacity from average particle occupancy instead of always using
+  the default fixed `64` slots per cell.
+- Capacity is capped by a 128 MiB particle-index buffer budget, and the grid
+  reports requested capacity, adaptive capacity, budget cap, average occupancy,
+  estimated overflow risk, and index-buffer byte length.
+- Pressure-interface solver diagnostics and MLS-MPM pressure-stage evidence now
+  expose average occupancy, estimated overflow risk, and index-buffer bytes so
+  browser probes can identify dense-contact risk without adding a hot-loop
+  readback.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` reported `71/71`.
+
+Remaining:
+
+- Exact GPU overflow metadata readback remains a debug-path follow-up, not a
+  no-full hot-loop requirement.
+- Prefix-scan compact bin lists remain the next escalation if fixed-capacity
+  bins are still too lossy in dense reactions.
 
 ## 2026-06-20 06:11 AKDT - Algorithm Contact Pair Force Rows
 

@@ -23,8 +23,18 @@ validation passed syntax checks, `71/71` pressure/MLS-MPM stage tests, and
 `git diff --check`, `npm run build`, `npm run test:physics-atomics` (`11/14`
 with three expected opt-in skips), and `npm run icc:update`
 (`indexedFiles=354`, `memoryChunks=2085`) also passed. Remaining contact work
-is overflow/adaptive-capacity diagnostics, a prefix-scan compact bin list if
-fixed-cap cells prove lossy, and broader browser visual acceptance.
+is exact overflow metadata readback/debugging, a prefix-scan compact bin list
+if fixed-cap cells prove lossy, and broader browser visual acceptance.
+
+Follow-up, 2026-06-20 AKDT: adaptive bin capacity/headroom diagnostics are now
+part of that same pressure-interface bin path. Bin capacity scales from
+particle-count-per-cell average occupancy under a 128 MiB index-buffer budget,
+and pressure solver/stage evidence exposes average occupancy, estimated
+overflow risk, and index-buffer byte length. Focused syntax and
+pressure/MLS-MPM stage tests still pass `71/71`. Exact GPU overflow metadata
+readback remains queued as debug-only work so the no-full contact path stays
+readback-free. `git diff --check`, `npm run build`, and `npm run icc:update`
+(`indexedFiles=354`, `memoryChunks=2086`) passed after this follow-up.
 
 Previous checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path can now
 derive per-interface contact kinematics from resident SPH particle state and

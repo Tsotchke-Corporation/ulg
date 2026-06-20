@@ -18,6 +18,14 @@ storage row. Remaining work is overflow/adaptive-capacity diagnostics,
 longer-horizon browser visual acceptance, and a prefix-scan compact bin list
 if fixed capacity starts dropping meaningful contact particles.
 
+Status update, 2026-06-20 AKDT: adaptive bin capacity/headroom diagnostics are
+implemented for the fixed-capacity producer. The bin-grid resolver now receives
+particle count, scales bin capacity from average occupancy, caps the index
+buffer at 128 MiB, and reports average occupancy, estimated overflow risk, and
+index-buffer byte length through the pressure solver and ComputeManager stage
+evidence. Exact GPU overflow metadata readback remains optional debug work
+because adding it to the no-full hot path would reintroduce queue stalls.
+
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` can now use GPU-derived interface kinematics in
 the no-full pressure path. When interface elements lack explicit `gapM` /

@@ -29326,3 +29326,42 @@ Remaining:
   gas-particle path.
 - Audit the Three WebGPU renderer material-proxy path for the same particle PBR
   diagnostics.
+
+## 2026-06-19 18:44 AKDT - Resident G2P Particle-Scale Guard
+
+Status:
+
+- Added a resident mechanics-side `J` guard in MLS-MPM G2P so runaway variable
+  particle scale is bounded before render-row extraction.
+- Applied the same `max radius growth = 4` / `max J = 64` policy to CPU G2P,
+  standalone WebGPU G2P, and the fused no-full resident mechanics G2P path.
+- Added
+  `peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0` diagnostics.
+  CPU/reference runs report cap counts and sample rows; no-full/fused WebGPU
+  runs expose `gpu-g2p-cap-policy-applied-in-shader` without a hot-loop CPU
+  particle scan.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphG2pGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphG2pGpuKernel.test.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphG2pGpuKernel.test.mjs` with `17/17`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `60/60`.
+- PASS: `npm run test:physics-atomics` with `11/11`; the three long-horizon
+  acceptance gates were skipped by opt-in policy.
+- PASS: browser probe `/tmp/ulg-resident-g2p-scale-guard-probe.json`
+  completed `status=good`, analysis `good`, browser console
+  issues/warnings `0/0`, four captured visual frames with three nonblank
+  canvas frames, and resident diagnostics
+  `particleScaleStabilityStatus=gpu-g2p-cap-policy-applied-in-shader`,
+  `particleScalePolicySource=webgpu-fused-g2p-shader`, max `J=64`, and max
+  radius growth `4`.
+
+Remaining:
+
+- Add a browser reaction repro that actually trips the G2P/render cap telemetry.
+- Split gas/foam expansion from individual particle radius.

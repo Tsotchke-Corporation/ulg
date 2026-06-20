@@ -11179,3 +11179,37 @@ Air/Pd/Fe particle PBR audit, 2026-06-19 18:18 AKDT:
     `closure-derived-pbr`, `renderBridgeSphereMetallicVisibilityProxyCount=1`,
     and min/max sphere radius `0.07754381000995636` /
     `0.15509283542633057`.
+
+Resident G2P particle-scale guard, 2026-06-19 18:44 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphG2pGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check ulg-gpu-abi/src/wgsl.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check tests/sphG2pGpuKernel.test.mjs`, and
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
+- Focused tests:
+  `node --test tests/sphG2pGpuKernel.test.mjs`
+  - Passed: `17/17`.
+  - New coverage proves a non-condensed CPU G2P particle with synthetic runaway
+    affine strain is capped to `J=64` / radius growth `4` before render
+    extraction, with cap-count diagnostics.
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `60/60`.
+  - New coverage proves fused no-full resident mechanics diagnostics expose
+    `peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0`,
+    `gpu-g2p-cap-policy-applied-in-shader`, and the max `J=64` / radius growth
+    `4` shader policy without a full particle readback.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; the three long-horizon acceptance gates were skipped by
+    their opt-in environment guard.
+- Browser probe:
+  `/tmp/ulg-resident-g2p-scale-guard-probe.json`
+  - Passed with `status=good`, analysis `good`, browser console
+    issues/warnings `0/0`, four captured visual frames, three nonblank canvas
+    frames, and resident diagnostics
+    `particleScaleStabilityStatus=gpu-g2p-cap-policy-applied-in-shader`,
+    `particleScalePolicySource=webgpu-fused-g2p-shader`, max `J=64`, and max
+    radius growth `4`.

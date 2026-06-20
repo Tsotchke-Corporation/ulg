@@ -4228,6 +4228,10 @@ fn cubic_root_positive(value: f32) -> f32 {
   return exp(log(max(value, 1.0e-12)) / 3.0);
 }
 
+const MECHANICS_MIN_VOLUME_RATIO_J: f32 = 0.1;
+const MECHANICS_MAX_RADIUS_GROWTH_RATIO: f32 = 4.0;
+const MECHANICS_MAX_VOLUME_RATIO_J: f32 = 64.0;
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
@@ -4311,12 +4315,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   next_j = det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
-  if (next_j < 0.1) {
-    let s = cubic_root_positive(0.1);
+  if (next_j < MECHANICS_MIN_VOLUME_RATIO_J) {
+    let s = cubic_root_positive(MECHANICS_MIN_VOLUME_RATIO_J);
     nf00 = s; nf01 = 0.0; nf02 = 0.0;
     nf10 = 0.0; nf11 = s; nf12 = 0.0;
     nf20 = 0.0; nf21 = 0.0; nf22 = s;
-    next_j = 0.1;
+    next_j = MECHANICS_MIN_VOLUME_RATIO_J;
+  } else if (next_j > MECHANICS_MAX_VOLUME_RATIO_J) {
+    let scale = cubic_root_positive(MECHANICS_MAX_VOLUME_RATIO_J / max(next_j, 1.0e-12));
+    nf00 = nf00 * scale; nf01 = nf01 * scale; nf02 = nf02 * scale;
+    nf10 = nf10 * scale; nf11 = nf11 * scale; nf12 = nf12 * scale;
+    nf20 = nf20 * scale; nf21 = nf21 * scale; nf22 = nf22 * scale;
+    next_j = MECHANICS_MAX_VOLUME_RATIO_J;
   }
 
   out_sph_state[state_base] = vec4<f32>(position.x, position.y, position.z, pos_mass.w);
@@ -5075,6 +5085,10 @@ fn g2p_cubic_root_positive(value: f32) -> f32 {
   return exp(log(max(value, 1.0e-12)) / 3.0);
 }
 
+const G2P_MIN_VOLUME_RATIO_J: f32 = 0.1;
+const G2P_MAX_RADIUS_GROWTH_RATIO: f32 = 4.0;
+const G2P_MAX_VOLUME_RATIO_J: f32 = 64.0;
+
 fn g2p_particle_wall_clearance(rest_volume_m3: f32) -> f32 {
   if (rest_volume_m3 <= 0.0) {
     return 0.0;
@@ -5268,12 +5282,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     nf20 = 0.0; nf21 = 0.0; nf22 = s;
   }
   next_j = g2p_det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
-  if (next_j < 0.1) {
-    let s = g2p_cubic_root_positive(0.1);
+  if (next_j < G2P_MIN_VOLUME_RATIO_J) {
+    let s = g2p_cubic_root_positive(G2P_MIN_VOLUME_RATIO_J);
     nf00 = s; nf01 = 0.0; nf02 = 0.0;
     nf10 = 0.0; nf11 = s; nf12 = 0.0;
     nf20 = 0.0; nf21 = 0.0; nf22 = s;
-    next_j = 0.1;
+    next_j = G2P_MIN_VOLUME_RATIO_J;
+  } else if (next_j > G2P_MAX_VOLUME_RATIO_J) {
+    let scale = g2p_cubic_root_positive(G2P_MAX_VOLUME_RATIO_J / max(next_j, 1.0e-12));
+    nf00 = nf00 * scale; nf01 = nf01 * scale; nf02 = nf02 * scale;
+    nf10 = nf10 * scale; nf11 = nf11 * scale; nf12 = nf12 * scale;
+    nf20 = nf20 * scale; nf21 = nf21 * scale; nf22 = nf22 * scale;
+    next_j = G2P_MAX_VOLUME_RATIO_J;
   }
 
   out_sph_state[state_base] = vec4<f32>(position.x, position.y, position.z, pos_mass.w);

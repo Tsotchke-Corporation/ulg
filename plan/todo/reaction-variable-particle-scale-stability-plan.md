@@ -105,11 +105,46 @@ Validation:
 
 Remaining:
 
-- Add a resident mechanics/active-grid invariant that catches the same runaway
-  before render extraction, especially for no-readback batches where only the
-  shader policy is visible.
 - Add a targeted reaction reproduction that actually trips the cap in browser
   telemetry, not only the unit-level synthetic `J=1e9` fixture.
 - Split gas/foam product expansion from individual particle visual radius so
   gas volume can be represented without huge per-particle spheres.
+- Add reset/lockup regression coverage after the reset functionality fix lands.
+
+## Implementation Status - 2026-06-19 18:44 AKDT
+
+Implemented a resident mechanics-side particle-scale guard for the same runaway
+class:
+
+- MLS-MPM G2P now applies a general volume-ratio guard after material-specific
+  condensed stabilization and before writing `out_mls_mechanics`: min `J=0.1`,
+  max radius growth ratio `4`, and max effective `J=64`.
+- The standalone G2P WGSL and fused no-full resident mechanics G2P path now use
+  the same cap constants and bumped pipeline cache keys.
+- CPU G2P reports
+  `peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0` diagnostics with
+  cap counts, invalid counts, raw/effective `J`, radius growth ratios, and
+  sample capped particle rows.
+- WebGPU no-full and fused no-full runs report
+  `gpu-g2p-cap-policy-applied-in-shader` in resident-step diagnostics without
+  adding a CPU particle scan to the hot loop.
+
+Validation:
+
+- `node --check src/runtime/sph/sphG2pGpuKernel.js`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/sphG2pGpuKernel.test.mjs`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/sphG2pGpuKernel.test.mjs` passed `17/17`.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `60/60`.
+
+Remaining:
+
+- Add a targeted reaction reproduction that actually trips the G2P/render cap
+  in browser telemetry, not only synthetic G2P/render-row fixtures.
+- Split gas/foam product expansion from individual particle visual radius so
+  gas volume can be represented without huge per-particle spheres.
+- Add active-grid/support-radius admission checks if a future product-expansion
+  path can grow per-particle support before G2P sees `J`.
 - Add reset/lockup regression coverage after the reset functionality fix lands.

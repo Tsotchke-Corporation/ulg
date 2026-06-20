@@ -1946,6 +1946,12 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
   assert.equal(step.diagnostics.cpuParticleLoopInHotPath, false);
   assert.deepEqual(step.diagnostics.particleParallelStages, ['p2g', 'g2p']);
+  assert.equal(step.diagnostics.particleScaleStabilitySchema, 'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0');
+  assert.equal(step.diagnostics.particleScaleStabilityStatus, 'gpu-g2p-cap-policy-applied-in-shader');
+  assert.equal(step.diagnostics.particleScalePolicyAppliedInG2p, true);
+  assert.equal(step.diagnostics.particleScalePolicyAppliedInShader, true);
+  assert.equal(step.diagnostics.particleScaleMaxRadiusGrowthRatioAllowed, 4);
+  assert.equal(step.diagnostics.particleScaleMaxVolumeRatioJAllowed, 64);
   assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
   assert.equal(step.nextParticleStateBufferByteLength, buffers.sphParticleState.state.byteLength);
   assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);

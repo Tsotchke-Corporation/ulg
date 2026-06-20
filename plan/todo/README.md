@@ -36,14 +36,18 @@ physics loop is incoherent.
 ## Active Priority Order
 
 Current routing note, 2026-06-19 AKDT: variable scaled particle rendering now
-has a first fail-closed render-row bound in CPU and WGSL (`max radius growth =
-4`, `max J = 64`) plus `peercompute.ulg.sph-render-row-particle-scale-stability.v0`
-diagnostics. Track remaining work in
-`plan/todo/reaction-variable-particle-scale-stability-plan.md`: add the same
-runaway invariant before active-grid/mechanics planning, create a browser
-reaction case that actually trips the cap, split gas/foam expansion from
-individual particle radius, and fold reset/lockup regression coverage into the
-reset fix. Do not treat the render-row cap as the final physics model.
+has fail-closed render-row and resident G2P mechanics bounds in CPU and WGSL
+(`max radius growth = 4`, `max J = 64`). Render extraction reports
+`peercompute.ulg.sph-render-row-particle-scale-stability.v0`; G2P/resident
+mechanics reports
+`peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0`, including
+`gpu-g2p-cap-policy-applied-in-shader` for no-full/fused batches. Track
+remaining work in `plan/todo/reaction-variable-particle-scale-stability-plan.md`:
+create a browser reaction case that actually trips the cap, split gas/foam
+expansion from individual particle radius, add any active-grid/support-radius
+admission checks needed by product expansion, and fold reset/lockup regression
+coverage into the reset fix. Do not treat these caps as the final physics
+model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

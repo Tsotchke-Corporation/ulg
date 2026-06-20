@@ -45,7 +45,12 @@ import {
   packGasPressureCellRows,
   runSphPressureInterfaceForceRowsWebGpu
 } from './sphPressureInterfaceGpuKernel.js';
-import { runMlsMpmG2pWithOptionalWebGpu } from './sphG2pGpuKernel.js';
+import {
+  MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
+  MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+  ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+  runMlsMpmG2pWithOptionalWebGpu
+} from './sphG2pGpuKernel.js';
 import {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
@@ -565,6 +570,34 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function noFullReadbackG2pParticleScaleStability({
+  particleCount = 0,
+  source = 'webgpu-g2p-shader'
+} = {}) {
+  return {
+    schema: ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+    status: 'gpu-g2p-cap-policy-applied-in-shader',
+    source,
+    particleCount: Math.max(0, Math.round(finiteNumber(particleCount, 0))),
+    mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+    mechanicsVolumeRatioJOffset: 18,
+    minVolumeRatioJAllowed: 0.1,
+    maxRadiusGrowthRatioAllowed: MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
+    maxVolumeRatioJAllowed: MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+    policyAppliedInG2p: true,
+    policyAppliedInShader: true,
+    capCountKnown: false,
+    capCount: null,
+    invalidCountKnown: false,
+    invalidCount: null,
+    effectiveFiniteCount: 0,
+    minEffectiveVolumeRatioJ: null,
+    maxEffectiveVolumeRatioJ: null,
+    maxRawVolumeRatioJ: null,
+    cappedSamples: []
+  };
 }
 
 function createResidentDispatchTopology({
@@ -2189,7 +2222,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       ]
     });
     const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v1',
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v2',
       label: 'ulg-mls-mpm-g2p-reconstruct',
       code: mlsMpmG2pReconstructWgsl,
       entryPoint: 'main',
@@ -2334,6 +2367,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       activeGridDispatch,
       activeGridIndirectDispatch
     };
+    const g2pParticleScaleStability = noFullReadbackG2pParticleScaleStability({
+      particleCount,
+      source: 'webgpu-fused-g2p-shader'
+    });
     const g2pReconstruction = {
       schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
       reconstructionSchema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -2358,6 +2395,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       retainedOutputParticleBuffers: true,
       readbackMode: NO_FULL_READBACK_MODE,
       fullReadbackPerformed: false,
+      particleScaleStability: g2pParticleScaleStability,
+      particleScaleStabilitySchema: g2pParticleScaleStability.schema,
+      particleScaleStabilityStatus: g2pParticleScaleStability.status,
+      particleScalePolicyAppliedInG2p: true,
+      particleScaleMaxVolumeRatioJAllowed: g2pParticleScaleStability.maxVolumeRatioJAllowed,
+      particleScaleMaxRadiusGrowthRatioAllowed: g2pParticleScaleStability.maxRadiusGrowthRatioAllowed,
       webgpuStatus,
       webgpuParity: {
         status: 'not-run-no-full-readback',
@@ -2667,7 +2710,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       ]
     });
     const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v1',
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v2',
       label: 'ulg-mls-mpm-g2p-reconstruct',
       code: mlsMpmG2pReconstructWgsl,
       entryPoint: 'main',
@@ -2894,6 +2937,10 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       activeGridDispatch,
       activeGridIndirectDispatch
     };
+    const g2pParticleScaleStability = noFullReadbackG2pParticleScaleStability({
+      particleCount,
+      source: 'webgpu-fused-sequence-g2p-shader'
+    });
     const g2pReconstruction = {
       schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
       reconstructionSchema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -2918,6 +2965,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       retainedOutputParticleBuffers: true,
       readbackMode: NO_FULL_READBACK_MODE,
       fullReadbackPerformed: false,
+      particleScaleStability: g2pParticleScaleStability,
+      particleScaleStabilitySchema: g2pParticleScaleStability.schema,
+      particleScaleStabilityStatus: g2pParticleScaleStability.status,
+      particleScalePolicyAppliedInG2p: true,
+      particleScaleMaxVolumeRatioJAllowed: g2pParticleScaleStability.maxVolumeRatioJAllowed,
+      particleScaleMaxRadiusGrowthRatioAllowed: g2pParticleScaleStability.maxRadiusGrowthRatioAllowed,
       webgpuStatus,
       webgpuParity: {
         status: 'not-run-no-full-readback',
@@ -3477,6 +3530,41 @@ function residentDispatchTopologyDiagnostics({
   };
 }
 
+function residentParticleScaleStabilityDiagnostics({
+  g2pReconstruction,
+  compactGpuSummary = null,
+  readbackMode = FULL_READBACK_MODE
+} = {}) {
+  const g2pStability = g2pReconstruction?.particleScaleStability || null;
+  const status = g2pStability?.status || (readbackMode === NO_FULL_READBACK_MODE
+    ? 'gpu-g2p-cap-policy-applied-in-shader'
+    : 'particle-scale-bounded');
+  return {
+    particleScaleStability: g2pStability,
+    particleScaleStabilitySchema: g2pStability?.schema || ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+    particleScaleStabilityStatus: status,
+    particleScalePolicySource: g2pStability?.source || null,
+    particleScalePolicyAppliedInG2p: g2pStability?.policyAppliedInG2p === true,
+    particleScalePolicyAppliedInShader: g2pStability?.policyAppliedInShader === true,
+    particleScaleMaxRadiusGrowthRatioAllowed: g2pStability?.maxRadiusGrowthRatioAllowed
+      ?? MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
+    particleScaleMaxVolumeRatioJAllowed: g2pStability?.maxVolumeRatioJAllowed
+      ?? MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+    particleScaleCapCountKnown: g2pStability?.capCountKnown === true,
+    particleScaleCapCount: g2pStability?.capCount ?? null,
+    particleScaleInvalidCountKnown: g2pStability?.invalidCountKnown === true,
+    particleScaleInvalidCount: g2pStability?.invalidCount ?? null,
+    particleScaleMaxRawVolumeRatioJ: g2pStability?.maxRawVolumeRatioJ ?? null,
+    particleScaleMaxEffectiveVolumeRatioJ: g2pStability?.maxEffectiveVolumeRatioJ
+      ?? compactGpuSummary?.maxVolumeRatioJ
+      ?? null,
+    particleScaleMinEffectiveVolumeRatioJ: g2pStability?.minEffectiveVolumeRatioJ
+      ?? compactGpuSummary?.minVolumeRatioJ
+      ?? null,
+    particleScaleCappedSamples: [...(g2pStability?.cappedSamples || [])]
+  };
+}
+
 export function compactMlsMpmResidentStepDiagnostics({
   sphParticleState,
   mlsMpmParticleState,
@@ -3497,6 +3585,11 @@ export function compactMlsMpmResidentStepDiagnostics({
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction
+  });
+  const particleScaleStability = residentParticleScaleStabilityDiagnostics({
+    g2pReconstruction,
+    compactGpuSummary,
+    readbackMode
   });
   if (compactGpuSummary?.compactGpuSummaryAvailable) {
     return {
@@ -3551,6 +3644,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary.activeGridDispatchPlan?.metadataBufferRetained ?? false,
       activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
       ...topologyDiagnostics,
+      ...particleScaleStability,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
       ...reactionSummary,
@@ -3612,6 +3706,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
       activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
       ...topologyDiagnostics,
+      ...particleScaleStability,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
       ...reactionSummary,
@@ -3665,6 +3760,7 @@ export function compactMlsMpmResidentStepDiagnostics({
     activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
     activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
     ...topologyDiagnostics,
+    ...particleScaleStability,
     ...pressureInterfaceGridForce,
     ...wallBarrierContact,
     ...reactionSummary,
@@ -12850,6 +12946,17 @@ function summarizeResidentStepForSequence(step, index) {
       nextPositionBoundsM: step.diagnostics?.nextPositionBoundsM ?? null,
       maxSpeedMPerS: step.diagnostics?.maxSpeedMPerS ?? null,
       maxDisplacementM: step.diagnostics?.maxDisplacementM ?? null,
+      particleScaleStability: step.diagnostics?.particleScaleStability ?? null,
+      particleScaleStabilitySchema: step.diagnostics?.particleScaleStabilitySchema ?? null,
+      particleScaleStabilityStatus: step.diagnostics?.particleScaleStabilityStatus ?? null,
+      particleScalePolicyAppliedInG2p: step.diagnostics?.particleScalePolicyAppliedInG2p === true,
+      particleScalePolicyAppliedInShader: step.diagnostics?.particleScalePolicyAppliedInShader === true,
+      particleScaleMaxRadiusGrowthRatioAllowed: step.diagnostics?.particleScaleMaxRadiusGrowthRatioAllowed ?? null,
+      particleScaleMaxVolumeRatioJAllowed: step.diagnostics?.particleScaleMaxVolumeRatioJAllowed ?? null,
+      particleScaleCapCountKnown: step.diagnostics?.particleScaleCapCountKnown === true,
+      particleScaleCapCount: step.diagnostics?.particleScaleCapCount ?? null,
+      particleScaleMaxRawVolumeRatioJ: step.diagnostics?.particleScaleMaxRawVolumeRatioJ ?? null,
+      particleScaleMaxEffectiveVolumeRatioJ: step.diagnostics?.particleScaleMaxEffectiveVolumeRatioJ ?? null,
       compactGpuSummaryAvailable: step.diagnostics?.compactGpuSummaryAvailable ?? false,
       compactGpuSummaryStatus: step.diagnostics?.compactGpuSummaryStatus ?? null,
       compactSummaryScope: step.diagnostics?.compactSummaryScope ?? null,

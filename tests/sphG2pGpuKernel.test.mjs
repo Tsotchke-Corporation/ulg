@@ -9,6 +9,9 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
+  MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+  ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -204,6 +207,10 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /liquid_wall_damping_alpha: f32/);
   assert.match(mlsMpmG2pReconstructWgsl, /velocity = velocity \* keep/);
   assert.match(mlsMpmG2pReconstructWgsl, /if \(!solid\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /G2P_MAX_RADIUS_GROWTH_RATIO:\s*f32\s*=\s*4\.0/);
+  assert.match(mlsMpmG2pReconstructWgsl, /G2P_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
+  assert.match(mlsMpmG2pReconstructWgsl, /next_j > G2P_MAX_VOLUME_RATIO_J/);
+  assert.match(mlsMpmG2pReconstructWgsl, /next_j = G2P_MAX_VOLUME_RATIO_J/);
   assert.doesNotMatch(mlsMpmG2pReconstructWgsl, /c00 = c00 \* 0\.25/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });
@@ -418,6 +425,34 @@ test('CPU MLS-MPM G2P bounds solid volume jumps without accepting blink-scale de
 
   nearlyEqual(result.mechanics[18], 1.049, 1e-5);
   assert.ok(result.mechanics[18] <= 1.05, `solid volume ratio should remain bounded, got ${result.mechanics[18]}`);
+});
+
+test('CPU MLS-MPM G2P caps non-condensed particle scale before render extraction', () => {
+  const args = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  args.mlsMpmParticleState.mechanics[20] = 0;
+  args.mlsMpmParticleState.mechanics[26] = 2;
+  for (let i = 0; i <= 2; i += 1) for (let j = 0; j <= 2; j += 1) for (let k = 0; k <= 2; k += 1) {
+    const offset = nodeIndex(args.gridUpdate, i, j, k) * MLS_MPM_GPU_GRID_VELOCITY_FLOATS;
+    args.gridUpdate.updatedGridNodes[offset + 1] = 1000 * i;
+    args.gridUpdate.updatedGridNodes[offset + 2] = 1000 * j;
+    args.gridUpdate.updatedGridNodes[offset + 3] = 1000 * k;
+  }
+
+  const result = reconstructMlsMpmG2pCpu({
+    ...args,
+    boxDimsM: [3, 3, 3]
+  });
+
+  assert.equal(result.particleScaleStability.schema, ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA);
+  assert.equal(result.particleScaleStability.status, 'particle-scale-cap-applied');
+  assert.equal(result.particleScaleStability.capCount, 1);
+  assert.equal(result.particleScaleStability.maxRadiusGrowthRatioAllowed, MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO);
+  assert.equal(result.particleScaleStability.maxVolumeRatioJAllowed, MLS_MPM_G2P_MAX_VOLUME_RATIO_J);
+  assert.ok(result.particleScaleStability.maxRawVolumeRatioJ > MLS_MPM_G2P_MAX_VOLUME_RATIO_J);
+  assert.equal(result.mechanics[18], MLS_MPM_G2P_MAX_VOLUME_RATIO_J);
+  nearlyEqual(result.mechanics[0], MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO, 1e-5);
+  nearlyEqual(result.mechanics[4], MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO, 1e-5);
+  nearlyEqual(result.mechanics[8], MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO, 1e-5);
 });
 
 test('optional MLS-MPM G2P returns CPU reference when WebGPU is not requested', async () => {

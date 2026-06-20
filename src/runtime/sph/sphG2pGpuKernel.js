@@ -47,6 +47,11 @@ const EOS_MODEL_IDS = Object.freeze({
 const CONDENSED_MIN_VOLUME_RATIO_J = 0.95;
 const CONDENSED_MAX_VOLUME_RATIO_J = 1.049;
 const CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP = 1.5;
+export const MLS_MPM_G2P_MIN_VOLUME_RATIO_J = 0.1;
+export const MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO = 4;
+export const MLS_MPM_G2P_MAX_VOLUME_RATIO_J = MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO ** 3;
+export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
+  'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
 
 function finiteNumber(value, fallback = 0) {
@@ -180,6 +185,126 @@ function stabilizeCondensedF(nextF, rawNextJ, previousJ, solid) {
   };
 }
 
+function stabilizeGeneralParticleScaleF(nextF, rawNextJ) {
+  const numericJ = Number(rawNextJ);
+  const finiteRawJ = Number.isFinite(numericJ);
+  const finiteF = Array.isArray(nextF)
+    && nextF.length === 9
+    && nextF.every((value) => Number.isFinite(Number(value)));
+  if (!finiteF || !finiteRawJ) {
+    const targetJ = clamp(finiteNumber(rawNextJ, 1), MLS_MPM_G2P_MIN_VOLUME_RATIO_J, MLS_MPM_G2P_MAX_VOLUME_RATIO_J);
+    return {
+      nextF: isotropicF(targetJ),
+      nextJ: targetJ,
+      capped: true,
+      invalid: true,
+      rawVolumeRatioJ: finiteRawJ ? numericJ : null,
+      reason: 'non-finite-deformation'
+    };
+  }
+  if (numericJ < MLS_MPM_G2P_MIN_VOLUME_RATIO_J) {
+    return {
+      nextF: isotropicF(MLS_MPM_G2P_MIN_VOLUME_RATIO_J),
+      nextJ: MLS_MPM_G2P_MIN_VOLUME_RATIO_J,
+      capped: true,
+      invalid: false,
+      rawVolumeRatioJ: numericJ,
+      reason: 'below-min-volume-ratio'
+    };
+  }
+  if (numericJ > MLS_MPM_G2P_MAX_VOLUME_RATIO_J) {
+    const scale = Math.cbrt(MLS_MPM_G2P_MAX_VOLUME_RATIO_J / Math.max(numericJ, 1e-12));
+    const scaledF = nextF.map((value) => value * scale);
+    if (scaledF.every((value) => Number.isFinite(value))) {
+      return {
+        nextF: scaledF,
+        nextJ: MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+        capped: true,
+        invalid: false,
+        rawVolumeRatioJ: numericJ,
+        reason: 'above-max-volume-ratio'
+      };
+    }
+    return {
+      nextF: isotropicF(MLS_MPM_G2P_MAX_VOLUME_RATIO_J),
+      nextJ: MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+      capped: true,
+      invalid: true,
+      rawVolumeRatioJ: numericJ,
+      reason: 'above-max-volume-ratio-non-finite-scale'
+    };
+  }
+  return {
+    nextF,
+    nextJ: numericJ,
+    capped: false,
+    invalid: false,
+    rawVolumeRatioJ: numericJ,
+    reason: null
+  };
+}
+
+function summarizeG2pParticleScaleStability({
+  backend,
+  particleCount,
+  mechanics,
+  capCount = null,
+  invalidCount = null,
+  maxRawVolumeRatioJ = null,
+  cappedSamples = [],
+  source = null
+} = {}) {
+  const count = Math.max(0, Math.round(finiteNumber(particleCount, 0)));
+  const stride = MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  const hasMechanics = mechanics instanceof Float32Array && mechanics.length >= count * stride;
+  let minEffectiveVolumeRatioJ = Number.POSITIVE_INFINITY;
+  let maxEffectiveVolumeRatioJ = 0;
+  let effectiveFiniteCount = 0;
+  if (hasMechanics) {
+    for (let index = 0; index < count; index += 1) {
+      const j = Number(mechanics[index * stride + 18]);
+      if (!Number.isFinite(j)) continue;
+      effectiveFiniteCount += 1;
+      minEffectiveVolumeRatioJ = Math.min(minEffectiveVolumeRatioJ, j);
+      maxEffectiveVolumeRatioJ = Math.max(maxEffectiveVolumeRatioJ, j);
+    }
+  }
+  const knownCapCount = Number.isFinite(Number(capCount)) ? Math.max(0, Math.round(Number(capCount))) : null;
+  const knownInvalidCount = Number.isFinite(Number(invalidCount)) ? Math.max(0, Math.round(Number(invalidCount))) : null;
+  const policySource = source || (backend === 'webgpu'
+    ? 'webgpu-g2p-shader'
+    : 'cpu-reference-g2p-deformation-update');
+  const status = knownCapCount > 0
+    ? 'particle-scale-cap-applied'
+    : (hasMechanics
+        ? 'particle-scale-bounded'
+        : 'gpu-g2p-cap-policy-applied-in-shader');
+  return {
+    schema: ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+    status,
+    source: policySource,
+    particleCount: count,
+    mechanicsStrideFloats: stride,
+    mechanicsVolumeRatioJOffset: 18,
+    minVolumeRatioJAllowed: MLS_MPM_G2P_MIN_VOLUME_RATIO_J,
+    maxRadiusGrowthRatioAllowed: MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
+    maxVolumeRatioJAllowed: MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+    policyAppliedInG2p: true,
+    policyAppliedInShader: backend === 'webgpu',
+    capCountKnown: knownCapCount != null,
+    capCount: knownCapCount,
+    invalidCountKnown: knownInvalidCount != null,
+    invalidCount: knownInvalidCount,
+    effectiveFiniteCount,
+    minEffectiveVolumeRatioJ: effectiveFiniteCount > 0 ? minEffectiveVolumeRatioJ : null,
+    maxEffectiveVolumeRatioJ: effectiveFiniteCount > 0 ? maxEffectiveVolumeRatioJ : null,
+    maxRawVolumeRatioJ: Number.isFinite(Number(maxRawVolumeRatioJ))
+      ? Number(maxRawVolumeRatioJ)
+      : (effectiveFiniteCount > 0 ? maxEffectiveVolumeRatioJ : null),
+    cappedSamples: cappedSamples.slice(0, 8)
+  };
+}
+
 function gridIndex(gridUpdate, i, j, k) {
   const [, gny, gnz] = gridUpdate.gridDims;
   return ((i + gridUpdate.gridShift) * gny + (j + gridUpdate.gridShift)) * gnz + (k + gridUpdate.gridShift);
@@ -202,9 +327,16 @@ function outputEnvelope({
   dt,
   boxDimsM,
   internalPressureScale = 1,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  particleScaleStability = null
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const particleScaleStabilitySummary = particleScaleStability || summarizeG2pParticleScaleStability({
+    backend,
+    particleCount: sphParticleState?.particleCount ?? 0,
+    mechanics,
+    source: backend === 'webgpu' ? 'webgpu-g2p-shader' : 'cpu-reference-g2p-deformation-update'
+  });
   return {
     schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
     backend,
@@ -231,6 +363,12 @@ function outputEnvelope({
     readbackMode,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
+    particleScaleStability: particleScaleStabilitySummary,
+    particleScaleStabilitySchema: particleScaleStabilitySummary.schema,
+    particleScaleStabilityStatus: particleScaleStabilitySummary.status,
+    particleScalePolicyAppliedInG2p: particleScaleStabilitySummary.policyAppliedInG2p === true,
+    particleScaleMaxVolumeRatioJAllowed: particleScaleStabilitySummary.maxVolumeRatioJAllowed,
+    particleScaleMaxRadiusGrowthRatioAllowed: particleScaleStabilitySummary.maxRadiusGrowthRatioAllowed,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -259,6 +397,10 @@ export function reconstructMlsMpmG2pCpu({
   const invDx = 1 / gridUpdate.gridSpacingM;
   const state = new Float32Array(sphParticleState.state);
   const mechanics = new Float32Array(mlsMpmParticleState.mechanics);
+  let particleScaleCapCount = 0;
+  let particleScaleInvalidCount = 0;
+  let maxRawVolumeRatioJ = 0;
+  const cappedSamples = [];
 
   for (let particleIndex = 0; particleIndex < sphParticleState.particleCount; particleIndex += 1) {
     const stateOffset = particleIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -373,10 +515,26 @@ export function reconstructMlsMpmG2pCpu({
         nextJ = det3(nextF);
       }
     }
-    if (nextJ < 0.1) {
-      nextF = isotropicF(0.1);
-      nextJ = det3(nextF);
+    const scaleStability = stabilizeGeneralParticleScaleF(nextF, nextJ);
+    maxRawVolumeRatioJ = Math.max(maxRawVolumeRatioJ, finiteNumber(scaleStability.rawVolumeRatioJ, 0));
+    if (scaleStability.capped) {
+      particleScaleCapCount += 1;
+      if (scaleStability.invalid) particleScaleInvalidCount += 1;
+      if (cappedSamples.length < 8) {
+        cappedSamples.push({
+          particleIndex,
+          rawVolumeRatioJ: scaleStability.rawVolumeRatioJ,
+          volumeRatioJ: scaleStability.nextJ,
+          rawRadiusGrowthRatio: scaleStability.rawVolumeRatioJ != null
+            ? Math.cbrt(Math.max(scaleStability.rawVolumeRatioJ, 1e-12))
+            : null,
+          radiusGrowthRatio: Math.cbrt(Math.max(scaleStability.nextJ, 1e-12)),
+          reason: scaleStability.reason
+        });
+      }
     }
+    nextF = scaleStability.nextF;
+    nextJ = scaleStability.nextJ;
     mechanics.set(nextF, mechanicsOffset);
     mechanics.set(effectiveC, mechanicsOffset + 9);
     mechanics[mechanicsOffset + 18] = nextJ;
@@ -391,7 +549,17 @@ export function reconstructMlsMpmG2pCpu({
     mechanics,
     dt: dtSeconds,
     boxDimsM: dims,
-    internalPressureScale
+    internalPressureScale,
+    particleScaleStability: summarizeG2pParticleScaleStability({
+      backend: 'cpu-reference',
+      particleCount: sphParticleState.particleCount,
+      mechanics,
+      capCount: particleScaleCapCount,
+      invalidCount: particleScaleInvalidCount,
+      maxRawVolumeRatioJ,
+      cappedSamples,
+      source: 'cpu-reference-g2p-deformation-update'
+    })
   });
 }
 
@@ -496,7 +664,7 @@ export async function runMlsMpmG2pWebGpu({
       liquidWallDampingDistanceM
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v1',
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v2',
       label: 'ulg-mls-mpm-g2p-reconstruct',
       code: mlsMpmG2pReconstructWgsl,
       entryPoint: 'main',
@@ -661,6 +829,12 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,
+    particleScaleStability: reconstruction?.particleScaleStability ?? null,
+    particleScaleStabilitySchema: reconstruction?.particleScaleStabilitySchema ?? null,
+    particleScaleStabilityStatus: reconstruction?.particleScaleStabilityStatus ?? null,
+    particleScalePolicyAppliedInG2p: reconstruction?.particleScalePolicyAppliedInG2p === true,
+    particleScaleMaxVolumeRatioJAllowed: reconstruction?.particleScaleMaxVolumeRatioJAllowed ?? null,
+    particleScaleMaxRadiusGrowthRatioAllowed: reconstruction?.particleScaleMaxRadiusGrowthRatioAllowed ?? null,
     cpuReference,
     gpuResult,
     webgpuStatus,

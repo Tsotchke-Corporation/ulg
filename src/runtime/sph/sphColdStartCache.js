@@ -310,7 +310,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       table: opticalGpuTable,
       arrays: {
         records: opticalGpuTable.records,
-        spectralSamples: opticalGpuTable.spectralSamples
+        spectralSamples: opticalGpuTable.spectralSamples,
+        materialPropertyBankPbrWarmInputRows:
+          opticalGpuTable.materialPropertyBankPbrWarmInputRows ?? new Float32Array()
       },
       metadata: {
         recordCount: opticalGpuTable.recordCount,
@@ -325,6 +327,8 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
           opticalGpuTable.materialPropertyBankPbrWarmInputConsumer ?? null,
         materialPropertyBankPbrWarmInputRowCount:
           opticalGpuTable.materialPropertyBankPbrWarmInputRowCount ?? 0,
+        materialPropertyBankPbrWarmInputRowStrideFloats:
+          opticalGpuTable.materialPropertyBankPbrWarmInputRowStrideFloats ?? 0,
         materialPropertyBankPbrWarmInputMatchedRecordCount:
           opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
         colorSpace: opticalGpuTable.colorSpace
@@ -785,6 +789,10 @@ function restoreOpticalGpuTable(record) {
       metadata.materialPropertyBankPbrWarmInputConsumer ?? null,
     materialPropertyBankPbrWarmInputRowCount:
       metadata.materialPropertyBankPbrWarmInputRowCount ?? 0,
+    materialPropertyBankPbrWarmInputRows:
+      record.arrays.materialPropertyBankPbrWarmInputRows ?? new Float32Array(),
+    materialPropertyBankPbrWarmInputRowStrideFloats:
+      metadata.materialPropertyBankPbrWarmInputRowStrideFloats ?? 0,
     materialPropertyBankPbrWarmInputMatchedRecordCount:
       metadata.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
     colorSpace: metadata.colorSpace || 'linear-rgb-from-srgb-closure-output',

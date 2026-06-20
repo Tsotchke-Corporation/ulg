@@ -19,6 +19,7 @@ import {
   decodeOpticalGpuLookupOutputRows,
   opticalLookupWgsl,
   requestOpticalGpuDevice,
+  runOpticalGpuLookup,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
   stableOpticalMaterialId,
@@ -39,42 +40,8 @@ function createLookupFixture() {
   return { table, lookup, cpuReference };
 }
 
-test('optical GPU table packs derived PBR records and spectral samples', () => {
-  const table = buildOpticalGpuTable([
-    { material: 'h2o', phase: 'liquid' },
-    {
-      material: 'Au',
-      phase: 'solid',
-      properties: {
-        conductionElectronDensityPerM3: 5.9e28,
-        opticalInterbandOscillators: []
-      }
-    }
-  ]);
-
-  assert.equal(table.schema, ULG_OPTICAL_GPU_TABLE_SCHEMA);
-  assert.equal(table.status, 'cpu-derived-gpu-buffer-ready');
-  assert.equal(table.recordCount, 2);
-  assert.equal(table.records.length, table.recordCount * OPTICAL_GPU_RECORD_FLOATS);
-  assert.equal(table.spectralSamples.length, table.spectralSampleCount * OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS);
-  assert.deepEqual(table.recordLayout, OPTICAL_GPU_RECORD_LAYOUT);
-  assert.deepEqual(table.spectralSampleLayout, OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT);
-  assert.match(table.wgslStructs, /struct OpticalMaterialRecord/);
-  assert.match(table.wgslStructs, /struct OpticalSpectralSample/);
-
-  const water = table.recordMetadata.find((record) => record.material === 'h2o');
-  const gold = table.recordMetadata.find((record) => record.material === 'Au');
-  assert.equal(water.phase, 'liquid');
-  assert.equal(water.renderModel, 'molecular-transparent-beer-lambert-pbr');
-  assert.ok(water.spectralCount > 0);
-  assert.equal(gold.renderModel, 'conductor-drude-free-electron');
-  assert.ok(gold.renderModelId > 0);
-  assert.equal(table.scientificValidation, false);
-  assert.equal(table.fullPhysicsValidation, false);
-});
-
-test('optical GPU table carries non-authoritative material-bank PBR warm inputs', () => {
-  const warmInputTable = {
+function sodiumWarmInputTable() {
+  return {
     schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
     status: 'material-bank-gpu-warm-input-table-ready',
     rowLayout: [
@@ -128,6 +95,133 @@ test('optical GPU table carries non-authoritative material-bank PBR warm inputs'
       generatorFingerprint: 'test-bank'
     }]
   };
+}
+
+function fakeOpticalLookupDevice() {
+  const queueWrites = [];
+  const bindGroupLayouts = [];
+  const bindGroups = [];
+  const destroyed = [];
+  const makeBuffer = ({ label, size, usage }) => ({
+    label,
+    size,
+    usage,
+    data: new ArrayBuffer(Math.max(16, size)),
+    destroyed: false,
+    destroy() {
+      this.destroyed = true;
+      destroyed.push(label);
+    },
+    async mapAsync() {},
+    getMappedRange() {
+      return this.data;
+    },
+    unmap() {}
+  });
+  return {
+    queueWrites,
+    bindGroupLayouts,
+    bindGroups,
+    destroyed,
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        queueWrites.push({ label: buffer?.label ?? null, offset, byteLength: data?.byteLength ?? 0 });
+        if (buffer?.data && data?.buffer) {
+          new Uint8Array(buffer.data).set(
+            new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+            offset
+          );
+        }
+      },
+      submit() {}
+    },
+    createBuffer(descriptor) {
+      return makeBuffer(descriptor);
+    },
+    createShaderModule({ code }) {
+      return { code };
+    },
+    createBindGroupLayout(descriptor) {
+      bindGroupLayouts.push(descriptor);
+      return descriptor;
+    },
+    createPipelineLayout(descriptor) {
+      return descriptor;
+    },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout(index) {
+          return { index };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            dispatchWorkgroups() {},
+            end() {}
+          };
+        },
+        copyBufferToBuffer(source, sourceOffset, target, targetOffset, size) {
+          if (!source?.data || !target?.data) return;
+          new Uint8Array(target.data).set(
+            new Uint8Array(source.data, sourceOffset, size),
+            targetOffset
+          );
+        },
+        finish() {
+          return {};
+        }
+      };
+    }
+  };
+}
+
+test('optical GPU table packs derived PBR records and spectral samples', () => {
+  const table = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'liquid' },
+    {
+      material: 'Au',
+      phase: 'solid',
+      properties: {
+        conductionElectronDensityPerM3: 5.9e28,
+        opticalInterbandOscillators: []
+      }
+    }
+  ]);
+
+  assert.equal(table.schema, ULG_OPTICAL_GPU_TABLE_SCHEMA);
+  assert.equal(table.status, 'cpu-derived-gpu-buffer-ready');
+  assert.equal(table.recordCount, 2);
+  assert.equal(table.records.length, table.recordCount * OPTICAL_GPU_RECORD_FLOATS);
+  assert.equal(table.spectralSamples.length, table.spectralSampleCount * OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS);
+  assert.deepEqual(table.recordLayout, OPTICAL_GPU_RECORD_LAYOUT);
+  assert.deepEqual(table.spectralSampleLayout, OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT);
+  assert.match(table.wgslStructs, /struct OpticalMaterialRecord/);
+  assert.match(table.wgslStructs, /struct OpticalSpectralSample/);
+
+  const water = table.recordMetadata.find((record) => record.material === 'h2o');
+  const gold = table.recordMetadata.find((record) => record.material === 'Au');
+  assert.equal(water.phase, 'liquid');
+  assert.equal(water.renderModel, 'molecular-transparent-beer-lambert-pbr');
+  assert.ok(water.spectralCount > 0);
+  assert.equal(gold.renderModel, 'conductor-drude-free-electron');
+  assert.ok(gold.renderModelId > 0);
+  assert.equal(table.scientificValidation, false);
+  assert.equal(table.fullPhysicsValidation, false);
+});
+
+test('optical GPU table carries non-authoritative material-bank PBR warm inputs', () => {
+  const warmInputTable = sodiumWarmInputTable();
   const table = buildOpticalGpuTable([
     { material: 'Na', phase: 'solid' },
     { material: 'h2o', phase: 'liquid' }
@@ -150,6 +244,8 @@ test('optical GPU table carries non-authoritative material-bank PBR warm inputs'
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.strictSourceOfTruth, false);
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.shaderBound, false);
   assert.equal(table.materialPropertyBankPbrWarmInputRowCount, 1);
+  assert.equal(table.materialPropertyBankPbrWarmInputRows.length, warmInputTable.rows.length);
+  assert.equal(table.materialPropertyBankPbrWarmInputRowStrideFloats, 16);
   assert.equal(table.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
   assert.equal(sodium.materialPropertyBankPbrWarmInput.material, 'Na');
   assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[0] - 0.86) < 1e-6);
@@ -431,10 +527,56 @@ test('optical GPU lookup output decoder rejects missing output buffers', () => {
 
 test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment drift', () => {
   assert.match(opticalLookupWgsl, /record_index \* 6u/);
+  assert.match(opticalLookupWgsl, /@binding\(4\) var<storage, read> material_bank_pbr_warm_input_rows/);
+  assert.match(opticalLookupWgsl, /fn material_bank_pbr_warm_input_anchor/);
   assert.match(opticalLookupWgsl, /optical_outputs\[query_index \* 4u\]/);
-  assert.match(opticalLookupWgsl, /row1\.x, row1\.y, row1\.z, row2\.z/);
+  assert.match(opticalLookupWgsl, /row1\.x \+ warm_input_anchor, row1\.y, row1\.z, row2\.z/);
   assert.match(opticalLookupWgsl, /row5\.w == query\.z/);
   assert.match(opticalLookupWgsl, /row5\.x, row4\.y, row4\.x, row5\.w/);
+});
+
+test('optical GPU lookup binds material-bank PBR warm inputs without overriding closure records', async () => {
+  const table = buildOpticalGpuTable([
+    { material: 'Na', phase: 'solid' }
+  ], {
+    materialPropertyBankGpuWarmInputTable: sodiumWarmInputTable()
+  });
+  const lookup = buildOpticalGpuLookupQueries(table, [{ material: 'Na', phase: 'solid' }]);
+  const device = fakeOpticalLookupDevice();
+
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    preferWebGpu: true,
+    device,
+    webGpuRunner: runOpticalGpuLookup,
+    parityTolerance: Number.POSITIVE_INFINITY
+  });
+
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(
+    result.materialPropertyBankPbrWarmInputConsumer.schema,
+    ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    result.materialPropertyBankPbrWarmInputConsumer.status,
+    'optical-material-bank-pbr-warm-inputs-bound-in-shader'
+  );
+  assert.equal(result.materialPropertyBankPbrWarmInputConsumer.shaderBound, true);
+  assert.equal(result.materialPropertyBankPbrWarmInputConsumer.shaderBinding, 4);
+  assert.equal(result.materialPropertyBankPbrWarmInputConsumer.shaderRowCount, 1);
+  assert.equal(result.materialPropertyBankPbrWarmInputConsumer.bufferSource, 'optical-gpu-table');
+  assert.equal(result.materialPropertyBankPbrWarmInputRowCount, 1);
+  assert.equal(result.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
+  assert.ok(device.bindGroupLayouts.at(-1).entries.some((entry) => entry.binding === 4));
+  assert.ok(device.bindGroups.at(-1).entries.some((entry) => (
+    entry.binding === 4
+      && entry.resource.buffer.label === 'ulg-optical-material-bank-pbr-warm-input-rows'
+  )));
+  assert.equal(
+    device.queueWrites.some((write) => write.label === 'ulg-optical-material-bank-pbr-warm-input-rows'),
+    true
+  );
 });
 
 test('optional optical GPU lookup returns CPU reference when WebGPU is not requested', async () => {

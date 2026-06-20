@@ -14024,7 +14024,9 @@ export function createSphPhaseScene(container, {
     const tableSourceRowCount = Math.max(0, Math.round(Number(
       table?.materialPropertyBankPbrWarmInputRowCount ?? 0
     ) || 0));
-    return tableSourceRowCount === sourceRowCount;
+    const tableWarmRowsAvailable = sourceRowCount <= 0
+      || ((table?.materialPropertyBankPbrWarmInputRows?.byteLength ?? 0) > 0);
+    return tableSourceRowCount === sourceRowCount && tableWarmRowsAvailable;
   }
 
   function rebuildOpticalStateForSurfaceBatchesWithCache(batches, {

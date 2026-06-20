@@ -222,6 +222,22 @@ the existing large bundle warning. Remaining material-bank consumers: optical
 shader-side binding beyond PBR metadata, reference-quality replacement rows,
 and Phase 2 crystalline structure data.
 
+Current routing note, 2026-06-20 AKDT: optical/PBR material-bank warm inputs
+now have a shader-side consumer as well. `buildOpticalGpuTable()` preserves the
+accepted warm-input rows alongside closure-derived optical records, static
+table cache records serialize/rehydrate those rows, old optical cache entries
+without row arrays are rejected for warm-input reuse, and `opticalLookupWgsl`
+binds the row table at binding `4` with a zeroed presence anchor. Closure
+optical records still own base color, metalness, roughness, opacity,
+transmission, IOR, render model, and spectral/scattering values. Evidence:
+`node --test tests/opticalGpuBuffers.test.mjs tests/sphColdStartCache.test.mjs tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs`
+passed `45/45`; `/tmp/ulg-optical-bank-shader-binding-probe.json` completed
+`status=good` with browser console issue/warning counts `0/0`; `npm run build`
+passed with the existing large bundle warning. Remaining material-bank work is
+reference-quality replacement rows, Phase 2 crystalline structure data, and
+turning these shader-bound warm inputs into validated algorithm-shaped row
+schemas where the closures can safely consume them.
+
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
 retained GPU vertex counter into the surface-row translation pass. This

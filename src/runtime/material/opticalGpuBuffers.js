@@ -341,6 +341,31 @@ function materialBankPbrWarmInputConsumerSummary({
   };
 }
 
+function materialBankPbrWarmInputConsumerForOutput(table, {
+  shaderBound = false,
+  shaderBinding = null,
+  shaderRowCount = 0,
+  bufferSource = null
+} = {}) {
+  const consumer = table?.materialPropertyBankPbrWarmInputConsumer
+    ?? materialBankPbrWarmInputConsumerSummary();
+  const boundRowCount = Math.max(0, Math.round(finiteNumber(shaderRowCount, 0)));
+  const bound = shaderBound === true && boundRowCount > 0;
+  return {
+    ...consumer,
+    status: bound
+      ? 'optical-material-bank-pbr-warm-inputs-bound-in-shader'
+      : consumer.status,
+    consumedAs: bound
+      ? 'non-authoritative-shader-bound-pbr-warm-input-metadata-before-closure-derived-optical-rows'
+      : consumer.consumedAs,
+    shaderBound: bound,
+    shaderBinding: bound ? shaderBinding : null,
+    shaderRowCount: bound ? boundRowCount : 0,
+    bufferSource: bound ? bufferSource : null
+  };
+}
+
 export function buildOpticalGpuTable(descriptors, {
   materialProperties = {},
   pathLengthM = 0.25,
@@ -450,6 +475,15 @@ export function buildOpticalGpuTable(descriptors, {
     table: materialPropertyBankGpuWarmInputTable,
     matchedRecordCount: materialBankPbrWarmInputMatchedRecordCount
   });
+  const materialPropertyBankPbrWarmInputRows =
+    materialPropertyBankGpuWarmInputTable?.schema === MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
+      && materialPropertyBankGpuWarmInputTable.rows instanceof Float32Array
+      ? new Float32Array(materialPropertyBankGpuWarmInputTable.rows)
+      : new Float32Array();
+  const materialPropertyBankPbrWarmInputRowStrideFloats = Math.max(0, Math.round(finiteNumber(
+    materialPropertyBankGpuWarmInputTable?.rowStrideFloats,
+    MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length
+  )));
 
   return {
     schema: ULG_OPTICAL_GPU_TABLE_SCHEMA,
@@ -468,6 +502,8 @@ export function buildOpticalGpuTable(descriptors, {
     materialPropertyBankPbrWarmInputConsumer,
     materialPropertyBankPbrWarmInputRowCount:
       materialPropertyBankPbrWarmInputConsumer.sourceRowCount,
+    materialPropertyBankPbrWarmInputRows,
+    materialPropertyBankPbrWarmInputRowStrideFloats,
     materialPropertyBankPbrWarmInputMatchedRecordCount:
       materialPropertyBankPbrWarmInputConsumer.matchedRecordCount,
     materialMap: [...materialIds.entries()].map(([material, materialId]) => ({ material, materialId })),
@@ -670,6 +706,12 @@ function lookupExecutionFromResult(result, {
     outputStrideFloats: OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS,
     queryCount: result?.queryCount ?? 0,
     outputs: result?.outputs ?? new Float32Array(),
+    materialPropertyBankPbrWarmInputConsumer:
+      result?.materialPropertyBankPbrWarmInputConsumer ?? null,
+    materialPropertyBankPbrWarmInputRowCount:
+      result?.materialPropertyBankPbrWarmInputRowCount ?? 0,
+    materialPropertyBankPbrWarmInputMatchedRecordCount:
+      result?.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -755,14 +797,47 @@ export function uploadOpticalGpuTable(device, table) {
   };
 }
 
-function createLookupParamsArray({ recordCount, queryCount }) {
+function createLookupParamsArray({ recordCount, queryCount, materialBankPbrWarmInputRowCount = 0 }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, recordCount, true);
   view.setUint32(4, queryCount, true);
-  view.setUint32(8, 0, true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(materialBankPbrWarmInputRowCount, 0))), true);
   view.setUint32(12, 0, true);
   return buffer;
+}
+
+function resolveOpticalMaterialBankPbrWarmInputShaderBinding(device, table) {
+  const rows = table?.materialPropertyBankPbrWarmInputRows;
+  const rowCount = Math.max(0, Math.round(finiteNumber(table?.materialPropertyBankPbrWarmInputRowCount, 0)));
+  if (rows?.byteLength > 0 && rowCount > 0) {
+    const buffer = writeStorageBuffer(
+      device,
+      'ulg-optical-material-bank-pbr-warm-input-rows',
+      rows
+    );
+    return {
+      buffer,
+      rowCount,
+      bufferSource: 'optical-gpu-table',
+      destroy() {
+        buffer.destroy?.();
+      }
+    };
+  }
+  const emptyBuffer = writeStorageBuffer(
+    device,
+    'ulg-optical-material-bank-pbr-warm-input-rows-empty',
+    new Float32Array(0)
+  );
+  return {
+    buffer: emptyBuffer,
+    rowCount: 0,
+    bufferSource: 'empty',
+    destroy() {
+      emptyBuffer.destroy?.();
+    }
+  };
 }
 
 export async function runOpticalGpuLookup({ device, table, lookup }) {
@@ -779,6 +854,7 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
   const paddedOutputByteLength = Math.max(16, outputByteLength);
   const recordBuffer = writeStorageBuffer(device, 'ulg-optical-lookup-records', table.records);
   const queryBuffer = writeStorageBuffer(device, 'ulg-optical-lookup-queries', lookup.queries);
+  const materialBankPbrWarmInputBinding = resolveOpticalMaterialBankPbrWarmInputShaderBinding(device, table);
   const outputBuffer = device.createBuffer({
     label: 'ulg-optical-lookup-outputs',
     size: paddedOutputByteLength,
@@ -797,7 +873,8 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createLookupParamsArray({
       recordCount: table.recordCount,
-      queryCount: lookup.queryCount
+      queryCount: lookup.queryCount,
+      materialBankPbrWarmInputRowCount: materialBankPbrWarmInputBinding.rowCount
     }));
     const module = device.createShaderModule({ code: opticalLookupWgsl });
     const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
@@ -808,7 +885,8 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'read-only-storage'),
         computeBufferBinding(2, 'storage'),
-        computeBufferBinding(3, 'uniform')
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(4, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -817,7 +895,8 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
         { binding: 0, resource: { buffer: recordBuffer } },
         { binding: 1, resource: { buffer: queryBuffer } },
         { binding: 2, resource: { buffer: outputBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 3, resource: { buffer: paramsBuffer } },
+        { binding: 4, resource: { buffer: materialBankPbrWarmInputBinding.buffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -838,12 +917,23 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
       outputStrideFloats: OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS,
       queryCount: lookup.queryCount,
       outputs,
+      materialPropertyBankPbrWarmInputConsumer: materialBankPbrWarmInputConsumerForOutput(table, {
+        shaderBound: materialBankPbrWarmInputBinding.rowCount > 0,
+        shaderBinding: 4,
+        shaderRowCount: materialBankPbrWarmInputBinding.rowCount,
+        bufferSource: materialBankPbrWarmInputBinding.bufferSource
+      }),
+      materialPropertyBankPbrWarmInputRowCount:
+        table.materialPropertyBankPbrWarmInputRowCount ?? 0,
+      materialPropertyBankPbrWarmInputMatchedRecordCount:
+        table.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
       scientificValidation: false,
       fullPhysicsValidation: false
     };
   } finally {
     recordBuffer.destroy?.();
     queryBuffer.destroy?.();
+    materialBankPbrWarmInputBinding.destroy?.();
     outputBuffer.destroy?.();
     paramsBuffer.destroy?.();
     readBuffer.destroy?.();

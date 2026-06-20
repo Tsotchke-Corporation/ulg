@@ -233,6 +233,22 @@ had a matching bank seed. This remains metadata only: closure-derived optical
 rows still provide the packed GPU values, and the bank is not used as
 authoritative color truth.
 
+Status update, 2026-06-20 AKDT: optical/PBR warm-input rows are now
+shader-bound in the optical lookup path without becoming color truth.
+`buildOpticalGpuTable()` stores accepted bank PBR warm rows beside the
+closure-derived optical records, `sphColdStartCache` persists those rows, the
+scene rejects older optical cache entries that only have a matching row count,
+and `opticalLookupWgsl` binds the rows at binding `4` with a zeroed presence
+anchor. Closure-derived optical records still own visible PBR/spectral output.
+Evidence:
+`node --test tests/opticalGpuBuffers.test.mjs tests/sphColdStartCache.test.mjs tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs`
+passed `45/45`; `/tmp/ulg-optical-bank-shader-binding-probe.json` completed
+`status=good` with browser console issue/warning counts `0/0`; `npm run build`
+passed with the existing large bundle warning. Remaining Phase 1/2 work is
+reference-quality replacement rows, crystalline structure records, and
+validated algorithm-shaped consumers that can use these rows as more than
+non-authoritative warm-start metadata.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

@@ -435,7 +435,7 @@ export const opticalLookupWgsl = `
 struct OpticalLookupParams {
   record_count: u32,
   query_count: u32,
-  _pad0: u32,
+  material_bank_pbr_warm_input_row_count: u32,
   _pad1: u32,
 };
 
@@ -443,9 +443,17 @@ struct OpticalLookupParams {
 @group(0) @binding(1) var<storage, read> optical_queries: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> optical_outputs: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> optical_params: OpticalLookupParams;
+@group(0) @binding(4) var<storage, read> material_bank_pbr_warm_input_rows: array<vec4<f32>>;
 
 fn record_row(record_index: u32, row: u32) -> vec4<f32> {
   return optical_records[record_index * 6u + row];
+}
+
+fn material_bank_pbr_warm_input_anchor() -> f32 {
+  if (optical_params.material_bank_pbr_warm_input_row_count == 0u) {
+    return 0.0;
+  }
+  return material_bank_pbr_warm_input_rows[0u].x * 0.0;
 }
 
 @compute @workgroup_size(64)
@@ -470,7 +478,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let row2 = record_row(record_index, 2u);
       let row4 = record_row(record_index, 4u);
       matched_index = f32(record_index);
-      out0 = vec4<f32>(row1.x, row1.y, row1.z, row2.z);
+      let warm_input_anchor = material_bank_pbr_warm_input_anchor();
+      out0 = vec4<f32>(row1.x + warm_input_anchor, row1.y, row1.z, row2.z);
       out1 = vec4<f32>(row1.w, row2.x, row2.y, row2.w);
       out2 = vec4<f32>(row4.z, row4.w, row5.z, matched_index);
       out3 = vec4<f32>(row5.x, row4.y, row4.x, row5.w);

@@ -103,6 +103,10 @@ function fakeTableInputs() {
       schema: 'peercompute.ulg.optical-gpu-table.v0',
       records: new Float32Array([0.1, 0.2, 0.3, 0.4]),
       spectralSamples: new Float32Array([450, 0.8, 550, 0.9]),
+      materialPropertyBankPbrWarmInputRows: new Float32Array([
+        120001, 8, 293.15, 101325, 64, 1, 0.1, 0.2,
+        0.3, 0, 0.5, 1.33, 0, 1, 0, 0
+      ]),
       recordCount: 1,
       spectralSampleCount: 2,
       recordStrideFloats: 4,
@@ -127,6 +131,7 @@ function fakeTableInputs() {
         shaderBound: false
       },
       materialPropertyBankPbrWarmInputRowCount: 1,
+      materialPropertyBankPbrWarmInputRowStrideFloats: 16,
       materialPropertyBankPbrWarmInputMatchedRecordCount: 1,
       colorSpace: 'srgb'
     },
@@ -260,6 +265,8 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
     'optical-gpu-table-annotated-with-material-bank-pbr-warm-inputs'
   );
   assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRowCount, 1);
+  assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRows.length, 16);
+  assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRowStrideFloats, 16);
   assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
   assert.equal(bundle.reactionTable.reactionClosureSchema, null);
   assert.equal(bundle.reactionTable.reactionHeaderCount, 1);

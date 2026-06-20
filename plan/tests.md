@@ -21,6 +21,9 @@ It now extends through `Cm`, including `Ac`, `Th`, `Pa`, `U`, `Np`, `Pu`,
 `Am`, and `Cm`.
 It now extends through `Rf`, including `Bk`, `Cf`, `Es`, `Fm`, `Md`, `No`,
 `Lr`, and `Rf`.
+It now extends through `Ts`, including final superheavy rows `Db`, `Sg`, `Bh`,
+`Hs`, `Mt`, `Ds`, `Rg`, `Cn`, `Nh`, `Fl`, `Mc`, `Lv`, and `Ts`; the current
+selectable non-noble bank has no missing `condensedElementSymbols()` targets.
 
 Focused checks:
 
@@ -29,7 +32,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=98`.
+  passed with `recordCount=111`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run with cache write/hit
@@ -45,6 +48,8 @@ Focused checks:
   The `Hg/Tl/Pb/Bi/Po/At/Fr/Ra` write pass also reported `cache.hitCount=8`.
   The `Ac/Th/Pa/U/Np/Pu/Am/Cm` write pass reported `cache.hitCount=8`.
   The `Bk/Cf/Es/Fm/Md/No/Lr/Rf` write pass reported `cache.hitCount=8`.
+  The `Db/Sg/Bh/Hs/Mt/Ds/Rg/Cn/Nh/Fl/Mc/Lv/Ts` write pass reported
+  `cache.hitCount=13`.
 - Build hygiene:
   `npm run build`, `git diff --check`, and `npm run icc:update` passed; the
   Vite build retained the existing large-chunk warning.

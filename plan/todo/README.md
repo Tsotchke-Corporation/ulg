@@ -151,6 +151,12 @@ remaining.
 The actinide tail now reaches `Rf`; `Bk`, `Cf`, `Es`, `Fm`, `Md`, `No`, `Lr`,
 and `Rf` bring the bank to 98 rows with 13 selectable non-noble targets
 remaining.
+The final superheavy tranche added `Db`, `Sg`, `Bh`, `Hs`, `Mt`, `Ds`, `Rg`,
+`Cn`, `Nh`, `Fl`, `Mc`, `Lv`, and `Ts`; the element bank now has 111 rows and
+`remainingMissingCount=0` for the current selectable non-noble closure gate.
+The material-bank todo should now move from row coverage to shader-side
+consumers, reference-quality replacement rows, and Phase 2 crystalline
+structure data.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

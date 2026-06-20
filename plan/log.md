@@ -53,6 +53,9 @@ Status:
 - Added actinide tail plus first transactinide row `Bk`, `Cf`, `Es`, `Fm`,
   `Md`, `No`, `Lr`, and `Rf`. The bank now contains 98 rows, leaves 13
   selectable non-noble targets, and the write pass reported `cache.hitCount=8`.
+- Added final superheavy tranche `Db`, `Sg`, `Bh`, `Hs`, `Mt`, `Ds`, `Rg`,
+  `Cn`, `Nh`, `Fl`, `Mc`, `Lv`, and `Ts`. The bank now contains 111 rows and
+  leaves zero missing current selectable non-noble targets.
 
 Validation:
 
@@ -78,6 +81,8 @@ Validation:
   `Ac/Th/Pa/U/Np/Pu/Am/Cm` with `hitCount=8`.
 - PASS: the same cache-backed generator path reused dry-run cache for
   `Bk/Cf/Es/Fm/Md/No/Lr/Rf` with `hitCount=8`.
+- PASS: the same cache-backed generator path reused dry-run cache for
+  `Db/Sg/Bh/Hs/Mt/Ds/Rg/Cn/Nh/Fl/Mc/Lv/Ts` with `hitCount=13`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

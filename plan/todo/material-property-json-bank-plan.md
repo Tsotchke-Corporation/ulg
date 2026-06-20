@@ -162,6 +162,16 @@ bank now covers the selectable prefix through `Rf`, contains 98 element rows,
 and leaves 13 selectable non-noble superheavy target rows. The cache-backed
 write reused all eight records with `cache.hitCount=8`.
 
+Status update, 2026-06-19 AKDT: selectable non-noble element coverage is now
+complete for the current demo closure availability gate. The final superheavy
+tranche adds `Db`, `Sg`, `Bh`, `Hs`, `Mt`, `Ds`, `Rg`, `Cn`, `Nh`, `Fl`, `Mc`,
+`Lv`, and `Ts`; the checked-in bank now has 111 element rows and
+`remainingMissingCount=0` for `condensedElementSymbols()`. This closes the
+Phase 1 selectable-coverage gap, but the rows remain `reduced-estimate` warm
+starts. Still open: shader-side consumers for the packed rows, noble-gas or
+full-periodic-table policy if the UI exposes those elements later, and Phase 2
+reference/crystalline structures.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius
@@ -282,6 +292,9 @@ model, and element records have passed acceptance gates.
 - JSON schemas exist and validate all checked-in records.
 - Element bank covers all currently selectable elements in the SPH phase demo,
   then all periodic-table elements.
+  - Current selectable non-noble coverage is complete at 111 rows through `Ts`;
+    noble-gas/full-periodic-table coverage remains a future policy decision
+    because the current closure availability gate excludes noble gases.
 - Loader integrates through `MaterialRegistry` or the material resolver
   manifest path with provenance preserved.
 - Tests prove unit consistency, stale-schema rejection, fallback to derived

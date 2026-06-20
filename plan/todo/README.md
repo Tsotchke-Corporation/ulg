@@ -76,11 +76,15 @@ narrowed. The scene exposes
 mobile-shaped H2O/H2O MLS-MPM reset regression for `dropn=7, basen=5` passes:
 the drop domain is `7^3`, the same-material base expands to `14^3` for equal
 physical particle radius, render-domain counts match generated particles, and
-base/drop position bounds are available after reset. Keep
-`plan/todo/drop-edge-large-size-respect-plan.md` active only for the remaining
-visual presentation question: same-material surface/render-field modes may make
-the preserved drop domain look merged or ignored. Do not hide this behind a
-visual scale or loosen the initialized edge contract.
+base/drop position bounds are available after reset. CPU continuous surface
+batching now derives role domains from `renderDomainCounts`, count-only
+resident seed batches can merge by domain, and
+`peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0` explicitly
+reports when same-material same-phase role domains are intentionally merged for
+a continuous visible surface. Keep
+`plan/todo/drop-edge-large-size-respect-plan.md` active only for broader visual
+mode coverage above `dropn=7`; do not hide this behind a visual scale or loosen
+the initialized edge contract.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

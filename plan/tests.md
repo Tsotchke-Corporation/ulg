@@ -11398,10 +11398,14 @@ Drop edge >6 domain bounds guardrail, 2026-06-19 AKDT:
 
 - Syntax:
   `node --check src/visualization/sphPhaseScene.js` and
+  `node --check src/visualization/sphPhaseDemoMount.js` and
   `node --check tests/demo.e2e.mjs` passed.
 - Focused tests:
   `node --test tests/sphPhaseRenderer.test.mjs`
-  - Passed: `63/63`.
+  - Passed: `64/64`.
+  - Added coverage that CPU continuous surface batching derives same-material
+    base/drop render domains from `renderDomainCounts` even when material rows
+    omit explicit domain ids.
   `node --test tests/sphPhaseDemo.test.mjs`
   - Passed: `37/37`.
 - Mounted browser regression:
@@ -11413,3 +11417,7 @@ Drop edge >6 domain bounds guardrail, 2026-06-19 AKDT:
   - `peercompute.ulg.sph-scene-set-particles-timing.v0` now carries
     `peercompute.ulg.sph-render-domain-position-bounds.v0`, proving base/drop
     center and bounds from the render-facing particle arrays after reset.
+  - The same payload now carries
+    `peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0`, proving
+    that the H2O/H2O liquid role domains are intentionally merged for the
+    continuous visible material surface rather than lost at initialization.

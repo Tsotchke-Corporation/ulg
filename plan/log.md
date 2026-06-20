@@ -29640,21 +29640,27 @@ Status:
   where only the drop edge is raised above `6`; initialization preserves the
   requested `7^3` drop and intentionally expands the same-material base to
   `14^3` so both domains share physical particle radius.
-- Kept this as engine diagnostics and regression coverage, not a visual scale
-  workaround. If the demo still looks like the drop edge is ignored, the
-  remaining suspect is same-material surface/render-field presentation hiding
-  a correct domain partition.
+- CPU continuous surface batching now applies the same fallback domain counts
+  as resident seed batching when material rows do not already carry explicit
+  role-domain ids. Count-only resident seed batches can also merge by domain,
+  so the selected render mode can report an intentional same-material visible
+  merge without rebuilding CPU geometry.
+- The scene and mounted overlay now expose
+  `peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0`, making it
+  explicit when H2O/H2O base/drop role domains are merged into one continuous
+  visible material surface.
 
 Validation:
 
 - PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
 - PASS: `node --check tests/demo.e2e.mjs`.
-- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `64/64`.
 - PASS: `node --test tests/sphPhaseDemo.test.mjs` with `37/37`.
 - PASS: `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5635' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "same-material base spacing expands"` with `1/1`.
 
 Remaining:
 
-- Keep `plan/todo/drop-edge-large-size-respect-plan.md` active until visual
-  surface modes either make the preserved drop domain obvious or report that a
-  same-material merged surface is intentionally hiding separate role geometry.
+- Keep `plan/todo/drop-edge-large-size-respect-plan.md` active only for broader
+  visual mode coverage above `dropn=7`; the primary same-material H2O/H2O
+  `dropn=7, basen=5` path now has engine bounds and visible-merge diagnostics.

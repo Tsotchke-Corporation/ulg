@@ -3531,11 +3531,14 @@ test('SPH phase reset preserves large drop edge when same-material base spacing 
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
       || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
     const bounds = overlay?.__sphSetParticlesTiming?.renderDomainPositionBounds;
+    const merge = overlay?.__sphSetParticlesTiming?.sameMaterialDomainMergeDiagnostics
+      || overlay?.__sphSameMaterialDomainMergeDiagnostics;
     return diagnostics?.effectiveDropParticlesPerEdge === 7
       && diagnostics?.effectiveBaseParticlesPerEdge === 14
       && diagnostics?.requestedEdgePreservationStatus === 'preserved'
       && bounds?.drop?.count === 7 ** 3
-      && bounds?.base?.count === 14 ** 3;
+      && bounds?.base?.count === 14 ** 3
+      && merge?.status === 'same-material-domain-surfaces-merged';
   }, null, { timeout: 60_000 });
 
   await page.evaluate(() => document.querySelector('#sph-reset')?.click());
@@ -3544,12 +3547,15 @@ test('SPH phase reset preserves large drop edge when same-material base spacing 
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
       || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
     const bounds = overlay?.__sphSetParticlesTiming?.renderDomainPositionBounds;
+    const merge = overlay?.__sphSetParticlesTiming?.sameMaterialDomainMergeDiagnostics
+      || overlay?.__sphSameMaterialDomainMergeDiagnostics;
     return overlay?.__sphResetStatus?.status === 'particle-state-resynced-after-reset'
       && diagnostics?.effectiveDropParticlesPerEdge === 7
       && diagnostics?.effectiveBaseParticlesPerEdge === 14
       && bounds?.status === 'render-domain-position-bounds-ready'
       && bounds?.drop?.count === 7 ** 3
-      && bounds?.base?.count === 14 ** 3;
+      && bounds?.base?.count === 14 ** 3
+      && merge?.status === 'same-material-domain-surfaces-merged';
   }, null, { timeout: 60_000 });
 
   const summary = await page.evaluate(() => {
@@ -3567,7 +3573,11 @@ test('SPH phase reset preserves large drop edge when same-material base spacing 
         schema: setParticlesTiming?.schema,
         particleCount: setParticlesTiming?.particleCount ?? null,
         renderDomainCounts: setParticlesTiming?.renderDomainCounts ?? null,
-        renderDomainPositionBounds: setParticlesTiming?.renderDomainPositionBounds ?? null
+        renderDomainPositionBounds: setParticlesTiming?.renderDomainPositionBounds ?? null,
+        sameMaterialDomainMergeDiagnostics:
+          setParticlesTiming?.sameMaterialDomainMergeDiagnostics
+          || overlay?.__sphSameMaterialDomainMergeDiagnostics
+          || null
       }
     };
   });
@@ -3608,6 +3618,18 @@ test('SPH phase reset preserves large drop edge when same-material base spacing 
   expect(bounds?.base?.size?.[0]).toBeCloseTo(13 / 14, 6);
   expect(bounds?.base?.size?.[1]).toBeCloseTo(13 / 14, 6);
   expect(bounds?.base?.size?.[2]).toBeCloseTo(13 / 14, 6);
+  const merge = summary.setParticlesTiming.sameMaterialDomainMergeDiagnostics;
+  expect(merge?.schema).toBe('peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0');
+  expect(merge?.status).toBe('same-material-domain-surfaces-merged');
+  expect(merge?.mergedSurfaceCount).toBeGreaterThanOrEqual(1);
+  const waterSurface = merge.surfaces.find((surface) => (
+    surface.material === 'h2o'
+    && surface.phase === 'liquid'
+    && surface.mergedRenderDomains?.some((domain) => domain.renderDomainKey === 'base')
+    && surface.mergedRenderDomains?.some((domain) => domain.renderDomainKey === 'drop')
+  ));
+  expect(waterSurface?.reason).toBe('same material and phase role domains merged for a continuous visible surface');
+  expect(waterSurface?.count).toBe(expectedTotalCount);
   expect(consoleIssues).toEqual([]);
 });
 

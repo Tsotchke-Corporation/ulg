@@ -900,6 +900,40 @@ test('SPH phase renderer preserves same-material render domains as separate surf
   );
 });
 
+test('SPH phase renderer derives same-material render domains from domain counts', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 0.4, 2.6,
+      2.4, 2.8, 2.4,
+      2.6, 2.8, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' }
+    ],
+    renderDomainCounts: { base: 2, drop: 2, total: 4 }
+  });
+
+  assert.equal(batches.length, 2);
+  assert.deepEqual(
+    batches.map((batch) => [batch.surfaceKey, batch.renderDomainId, batch.renderDomainKey, batch.count]).sort(),
+    [
+      ['h2o|h2o|liquid|domain:base', 1, 'base', 2],
+      ['h2o|h2o|liquid|domain:drop', 2, 'drop', 2]
+    ]
+  );
+});
+
 test('SPH resident material seed surfaces preserve domains without CPU geometry', () => {
   const batches = createResidentMaterialSeedSurfaceBatches({
     materials: [

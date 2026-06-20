@@ -52,11 +52,17 @@ resident GPU uploads, and reset/rebuild flows.
   MLS-MPM, reset, and render-row spheres. It proves the common "only raise the
   drop edge" path preserves `7^3` drop particles after reset and expands the
   same-material base to `14^3` particles for equal particle radius.
+- CPU continuous surface batching now applies fallback role-domain assignment
+  from `renderDomainCounts`, matching the resident seed path. Count-only
+  resident seed batches can merge by domain, so render-row sphere mode reports
+  an intentional same-material visible merge without forcing CPU geometry.
+- The scene now exposes
+  `peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0`, proving
+  when same-material same-phase base/drop domains are intentionally merged for
+  one continuous visible material surface.
 - This narrows the live report away from URL parsing, UI input clamping,
-  initialization, render-domain counting, and reset state for `dropn=7`. If
-  the drop still looks ignored in the demo, the remaining suspect is visual
-  presentation: same-material surface/render-field merging can obscure a
-  correct role/domain partition.
+  initialization, render-domain counting, reset state, and the common H2O/H2O
+  visible-merge confusion for `dropn=7`.
 
 2026-06-19 AKDT update:
 
@@ -105,10 +111,9 @@ resident GPU uploads, and reset/rebuild flows.
 
 Remaining:
 
-- Keep this active until the visible surface modes make role/domain partition
-  explicit enough that a preserved drop domain cannot be mistaken for an
-  ignored edge, or until those modes report a clear same-material merged-surface
-  reason in diagnostics.
+- Keep this active only for broader visual-mode coverage above `dropn=7` and
+  for non-H2O material pairs where domain visibility still has not been
+  sampled.
 - Full resident stepping at the expanded `dropn=7, basen=5` total remains
   performance-roadmap work rather than an initialization/drop-edge contract
   blocker.

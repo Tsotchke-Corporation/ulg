@@ -4757,6 +4757,7 @@ export function createContinuousSurfaceBatches({
   colorsRgb,
   materials = null,
   particleRadiiM = null,
+  renderDomainCounts = null,
   boxEdgeM = 10,
   boxDimsM = null,
   smoothingLengthM = null,
@@ -4778,7 +4779,23 @@ export function createContinuousSurfaceBatches({
       ? smoothingLengthM
       : (estimateGlobalParticleSpacingM(positionsM, particleCount) ?? 0.25));
   for (let i = 0; i < particleCount; i += 1) {
-    const descriptor = renderDescriptorOf(materials?.[i]);
+    const source = materials?.[i];
+    const descriptorBase = renderDescriptorOf(source);
+    const sourceObject = source && typeof source === 'object' ? source : {};
+    const explicitDomainId = normalizeRenderDomainId(
+      sourceObject.renderDomainId ?? descriptorBase.renderDomainId
+    );
+    const fallbackDomainId = renderDomainIdForParticleIndexFromCounts(i, renderDomainCounts);
+    const renderDomainId = explicitDomainId > 0 ? explicitDomainId : fallbackDomainId;
+    const descriptor = renderDomainId > 0
+      ? renderDescriptorOf({
+        ...descriptorBase,
+        renderDomainId,
+        renderDomainKey: sourceObject.renderDomainKey
+          || descriptorBase.renderDomainKey
+          || renderDomainKeyForId(renderDomainId)
+      })
+      : descriptorBase;
     let batch = batches.get(descriptor.surfaceKey);
     if (!batch) {
       batch = {
@@ -4933,7 +4950,8 @@ export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [],
       Number(batch.positionsM?.length) || 0,
       Number(batch.normalizedPositions?.length) || 0
     ) / 3);
-    if (positionCount <= 0) return null;
+    const batchCount = Math.max(0, Math.round(Number(batch.count) || 0));
+    if (positionCount <= 0 && batchCount <= 0) return null;
     return [
       batch.renderKey,
       batch.material,
@@ -5018,6 +5036,40 @@ export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [],
     output.push(batch);
   }
   return output;
+}
+
+function sameMaterialDomainMergeDiagnosticsFromBatches(batches = []) {
+  const surfaces = (Array.isArray(batches) ? batches : [])
+    .filter((batch) => (
+      batch?.source === 'merged-same-material-phase-render-surface'
+      && Array.isArray(batch.mergedRenderDomains)
+      && batch.mergedRenderDomains.length > 1
+    ))
+    .map((batch) => ({
+      surfaceKey: batch.surfaceKey ?? null,
+      renderKey: batch.renderKey ?? null,
+      material: batch.material ?? null,
+      phase: batch.phase ?? null,
+      count: Math.max(0, Math.round(Number(batch.count) || 0)),
+      reason: 'same material and phase role domains merged for a continuous visible surface',
+      mergedRenderDomains: batch.mergedRenderDomains.map((domain) => ({
+        renderDomainId: normalizeRenderDomainId(domain.renderDomainId),
+        renderDomainKey: domain.renderDomainKey ?? null,
+        count: Math.max(0, Math.round(Number(domain.count) || 0)),
+        surfaceKey: domain.surfaceKey ?? null
+      }))
+    }));
+  return {
+    schema: 'peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0',
+    status: surfaces.length > 0
+      ? 'same-material-domain-surfaces-merged'
+      : 'no-same-material-domain-surface-merge',
+    reason: surfaces.length > 0
+      ? 'visible surface extraction merges same-material same-phase role domains'
+      : null,
+    mergedSurfaceCount: surfaces.length,
+    surfaces
+  };
 }
 
 function materialPropertiesLookup(material, materialProperties) {
@@ -14610,6 +14662,7 @@ export function createSphPhaseScene(container, {
           colorsRgb,
           particleRadiiM,
           materials,
+          renderDomainCounts,
           boxEdgeM,
           boxDimsM: dims,
           smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
@@ -14725,6 +14778,8 @@ export function createSphPhaseScene(container, {
           smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
         })
     ));
+    const sameMaterialDomainMergeDiagnostics =
+      sameMaterialDomainMergeDiagnosticsFromBatches(residentFieldBatches);
     const nextSurfaceBatchIdentitySignature = residentSurfaceBatchIdentitySignature(residentFieldBatches);
     measure('opticalState', () => rebuildOpticalStateForSurfaceBatchesWithCache(residentFieldBatches, {
       materialProperties,
@@ -14748,6 +14803,7 @@ export function createSphPhaseScene(container, {
     scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
     scene.userData.sphThermalClosureGraphBuffers = sphThermalClosureGraphBuffers;
     scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
+    scene.userData.sphSameMaterialDomainMergeDiagnostics = sameMaterialDomainMergeDiagnostics;
     scene.userData.sphThermalResponseGraphUpload = sphThermalResponseGraphUpload;
     scene.userData.mlsMpmMechanicsMaterialTable = mlsMpmMechanicsMaterialTable;
     scene.userData.mlsMpmMechanicsMaterialPhaseUpload = mlsMpmMechanicsMaterialPhaseUpload;
@@ -14840,6 +14896,7 @@ export function createSphPhaseScene(container, {
       particleCount: positionsM?.length ? positionsM.length / 3 : 0,
       renderDomainCounts: currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null,
       renderDomainPositionBounds,
+      sameMaterialDomainMergeDiagnostics,
       surfaceBatchCount: batches.length,
       cpuSurfaceBatchCount: cpuSurfaceBatches.length,
       residentSurfaceBatchCount: residentFieldBatches.length,

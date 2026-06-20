@@ -4997,6 +4997,8 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
     overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
     overlay.__sphSetParticlesTiming = scene.scene?.userData?.sphSetParticlesTiming || null;
+    overlay.__sphSameMaterialDomainMergeDiagnostics =
+      scene.scene?.userData?.sphSameMaterialDomainMergeDiagnostics || null;
     overlay.__sphSurfaceApplyTiming = scene.scene?.userData?.sphSurfaceApplyTiming || null;
     overlay.__mlsMpmResidentSourceMode = sourceMode;
     overlay.__mlsMpmResidentContinuedFromResidentState = false;

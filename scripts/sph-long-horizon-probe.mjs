@@ -1804,6 +1804,11 @@ async function runBrowserProbe({
           ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
           ?? bridge?.pixelValidationStatus
           ?? null;
+        const pixelValidationReason =
+          renderState?.surfaceDrawRenderBridgePixelValidationReason
+          ?? surfaceDraw?.renderBridgePixelValidationReason
+          ?? bridge?.pixelValidationReason
+          ?? null;
         const readbackSmokeValidationStatus =
           renderState?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
           ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
@@ -1811,12 +1816,42 @@ async function runBrowserProbe({
           ?? surfaceDraw?.renderBridgeReadbackSmokeValidationStatus
           ?? bridge?.readbackSmokeValidationStatus
           ?? null;
+        const readbackSmokeValidationReason =
+          renderState?.surfaceDrawRenderBridgeReadbackSmokeValidationReason
+          ?? surfaceDraw?.renderBridgeReadbackSmokeValidationReason
+          ?? bridge?.readbackSmokeValidationReason
+          ?? null;
         const offscreenValidationStatus =
           renderState?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
           ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
           ?? renderState?.surfaceDrawRenderBridgeOffscreenValidationStatus
           ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
           ?? bridge?.offscreenValidationStatus
+          ?? null;
+        const offscreenValidationReason =
+          renderState?.surfaceDrawRenderBridgeOffscreenValidationReason
+          ?? surfaceDraw?.renderBridgeOffscreenValidationReason
+          ?? bridge?.offscreenValidationReason
+          ?? null;
+        const validationBlockerFamily =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+          ?? surfaceDraw?.visibleGpuConsumerNativeValidationBlockerFamily
+          ?? null;
+        const textureReadbackUnavailable =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable
+          ?? surfaceDraw?.visibleGpuConsumerNativeTextureReadbackUnavailable
+          ?? null;
+        const deviceMapSmokeStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus
+          ?? surfaceDraw?.visibleGpuConsumerNativeDeviceMapSmokeStatus
+          ?? null;
+        const deviceTextureReadbackSmokeStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus
+          ?? surfaceDraw?.visibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus
+          ?? null;
+        const deviceTextureReadbackSmokeReason =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
+          ?? surfaceDraw?.visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
           ?? null;
         const validationScope =
           renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
@@ -1842,6 +1877,28 @@ async function runBrowserProbe({
           ?? bridge?.frameCount
           ?? 0
         ) || 0;
+        const gpuBufferHandoffReady = Boolean(
+          renderState?.surfaceDrawGpuBufferHandoffReady
+          ?? surfaceDraw?.gpuBufferHandoffReady
+        );
+        const gpuBufferHandoffStatus =
+          renderState?.surfaceDrawGpuBufferHandoffStatus
+          ?? surfaceDraw?.gpuBufferHandoffStatus
+          ?? null;
+        const gpuBufferHandoffReason =
+          renderState?.surfaceDrawGpuBufferHandoffReason
+          ?? surfaceDraw?.gpuBufferHandoffReason
+          ?? null;
+        const renderBridgeStatus =
+          renderState?.surfaceDrawRenderBridgeStatus
+          ?? surfaceDraw?.renderBridgeStatus
+          ?? bridge?.status
+          ?? null;
+        const renderBridgeLastRenderStatus =
+          renderState?.surfaceDrawRenderBridgeLastRenderStatus
+          ?? surfaceDraw?.renderBridgeLastRenderStatus
+          ?? bridge?.lastRenderStatus
+          ?? null;
         const pending = [pixelValidationStatus, readbackSmokeValidationStatus, offscreenValidationStatus]
           .some((status) => status === 'pending');
         return {
@@ -1852,9 +1909,22 @@ async function runBrowserProbe({
             ? 'native-surface-visible-consumer-ready'
             : (pending ? 'native-surface-validation-pending' : 'native-surface-validation-settled-not-ready'),
           bridgeMode,
+          renderBridgeStatus,
+          renderBridgeLastRenderStatus,
+          gpuBufferHandoffReady,
+          gpuBufferHandoffStatus,
+          gpuBufferHandoffReason,
           pixelValidationStatus,
+          pixelValidationReason,
           readbackSmokeValidationStatus,
+          readbackSmokeValidationReason,
           offscreenValidationStatus,
+          offscreenValidationReason,
+          validationBlockerFamily,
+          textureReadbackUnavailable,
+          deviceMapSmokeStatus,
+          deviceTextureReadbackSmokeStatus,
+          deviceTextureReadbackSmokeReason,
           validationScope,
           offscreenValidationEligible,
           offscreenValidationSkippedReason,
@@ -1978,6 +2048,7 @@ async function runBrowserProbe({
         residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
+        nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
         renderModeSelection: overlay.__sphRenderModeSelection || null,

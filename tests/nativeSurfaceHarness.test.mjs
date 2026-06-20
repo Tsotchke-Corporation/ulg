@@ -23,4 +23,23 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /validationScope,/);
   assert.match(probeSource, /offscreenValidationEligible,/);
   assert.match(probeSource, /offscreenValidationSkippedReason,/);
+  assert.match(probeSource, /nativeSurfaceValidation: nativeSurfaceValidationSnapshot\(\)/);
+  assert.match(probeSource, /validationBlockerFamily,/);
+  assert.match(probeSource, /textureReadbackUnavailable,/);
+  assert.match(probeSource, /gpuBufferHandoffReady,/);
+});
+
+test('native WebGPU surface requests retain render-field buffers by default', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /\(threeWebGpuSurfaceBufferRetainResidentHandoff \|\| requestedNativeWebGpuSurfaceConsumerBridge\)[\s\S]*?requestedRenderFieldSurfaceSummaryMode === 'auto'/,
+    'native WebGPU surface requests must coerce auto summary mode into retained render-field buffers'
+  );
+  assert.match(
+    sceneSource,
+    /native-webgpu-surface-consumer request retains render-field buffers without compact summary readback/,
+    'native WebGPU surface coercion should remain explicit in diagnostics'
+  );
 });

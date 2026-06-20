@@ -11956,3 +11956,25 @@ Render-row WebGPU params ABI cleanup, 2026-06-19 AKDT:
   - Passed. Vite reported only the existing large chunk-size warning.
 - Whitespace:
   `git diff --check` passed.
+
+Native surface request retention and probe snapshot, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/nativeSurfaceHarness.test.mjs`
+  passed.
+- Native harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `2/2`.
+  - Confirms native probes retain render-field buffers by default and metrics
+    carry native validation snapshot fields.
+- Focused renderer command:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU surface validation cadence|visible GPU surface consumer|renderer backend|surface draw"`
+  - Passed: `68/68`.
+- Mobile-shaped native probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-native-mobile-after-snapshot.json ULG_PROBE_FRAME_DIR=/tmp/ulg-native-mobile-after-snapshot-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS=1500 ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=native-webgpu-surface-consumer&blob=1' node scripts/sph-long-horizon-probe.mjs`
+  - Partial by design: status `bad` because native visible consumer remains
+    blocked on validation.
+  - Browser console issue/warning counts: `0/0`.
+  - Native GPU buffer handoff accepted: `true`.
+  - Last `nativeSurfaceValidation.validationBlockerFamily`:
+    `native-surface-validation-readback-lifetime`.

@@ -2710,3 +2710,10 @@ render-row params uniform allocation now matches the 48-byte JS/WGSL ABI, and a
 short H2O/H2O render-row probe classifies `good` with zero browser console
 issues or warnings. Continue native/mobile visible-output work separately; this
 does not prove the phone presentation path.
+
+2026-06-19 native surface routing note: explicit
+`native-webgpu-surface-consumer` requests now retain render-field buffers by
+coercing auto surface-summary mode to `skip`. Mobile-shaped native probes now
+reach the native direct-consumer handoff and bridge render path with console
+clean output; the remaining fail-closed blocker is
+`native-surface-validation-readback-lifetime`, not summary-only fallback.

@@ -17204,12 +17204,13 @@ export function createSphPhaseScene(container, {
           : null);
       let renderFieldSurfaceSummaryModeCoercionReason = null;
       if (
-        threeWebGpuSurfaceBufferRetainResidentHandoff
+        (threeWebGpuSurfaceBufferRetainResidentHandoff || requestedNativeWebGpuSurfaceConsumerBridge)
         && requestedRenderFieldSurfaceSummaryMode === 'auto'
       ) {
         requestedRenderFieldSurfaceSummaryMode = 'skip';
-        renderFieldSurfaceSummaryModeCoercionReason =
-          'three-webgpu-surface-buffers request is blocked from visible presentation; retaining render-field buffers without compact summary readback';
+        renderFieldSurfaceSummaryModeCoercionReason = requestedNativeWebGpuSurfaceConsumerBridge
+          ? 'native-webgpu-surface-consumer request retains render-field buffers without compact summary readback'
+          : 'three-webgpu-surface-buffers request is blocked from visible presentation; retaining render-field buffers without compact summary readback';
       }
       const shouldUseWebGpuRenderRowOverlayBridge = isWebGpuResidentRenderRowBridgeMode(
         requestedSurfaceDrawDiagnosticMode

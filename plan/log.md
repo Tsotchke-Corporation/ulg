@@ -30452,3 +30452,41 @@ Remaining:
 
 - Continue real-device native WebGPU/mobile rendering acceptance; this fixes
   the local render-row params validation fault, not the phone presentation path.
+
+## 2026-06-19 AKDT - Native Surface Requests Retain Render-Field Buffers
+
+Status:
+
+- Explicit `native-webgpu-surface-consumer` render requests now coerce
+  `renderFieldSurfaceSummaryMode=auto` to `skip` so the engine direct-consumer
+  path retains render-field buffers instead of silently downgrading to
+  `summary-only-no-overlay`.
+- The long-horizon probe now embeds a `nativeSurfaceValidation` snapshot in
+  each metric with bridge status, last render status, GPU handoff status,
+  blocker family, readback/offscreen reasons, and device map/texture smoke
+  results.
+- A mobile-shaped native probe now reaches the real native path:
+  `native-webgpu-surface-consumer`, `resident-surface-buffer-direct-consumer-ready`,
+  `native-webgpu-surface-consumer-rendered`, and zero browser console issues.
+  It remains fail-closed because same-device native surface readback is still
+  unavailable in this headless browser with `A valid external Instance reference
+  no longer exists`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/nativeSurfaceHarness.test.mjs`.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `2/2`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU surface validation cadence|visible GPU surface consumer|renderer backend|surface draw"` with `68/68`.
+- PARTIAL:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-native-mobile-after-snapshot.json ULG_PROBE_FRAME_DIR=/tmp/ulg-native-mobile-after-snapshot-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS=1500 ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=native-webgpu-surface-consumer&blob=1' node scripts/sph-long-horizon-probe.mjs`
+  - Browser console issue count: `0`.
+  - Browser console warning count: `0`.
+  - Native handoff accepted: `true`.
+  - Native validation blocker family:
+    `native-surface-validation-readback-lifetime`.
+
+Remaining:
+
+- Fix or bypass the same-device native surface readback lifetime issue without
+  accepting blank mobile/native output as valid.

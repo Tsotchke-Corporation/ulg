@@ -12300,3 +12300,41 @@ Three render-row no-full retention slice, 2026-06-20 AKDT:
   - Overall probe status remains `bad` because this interim retained-Three path
     intentionally lacks fresh CPU motion evidence (`resident-render-source-stale`,
     `missing-max-speed`, `no-positive-displacement`).
+
+Native consumer device reuse and no-full evidence slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Native harness tests:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `5/5`.
+  - Covers automatic browser-frame capture for native validation, in-memory PNG
+    analysis, submit-fence pacing guards, native consumer device reuse, and
+    no-full render-source evidence over advancing metric time.
+- Focused renderer tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU|renderer-owned|render-row|resident render source"`
+  - Passed: `69/69`.
+- Browser native no-full probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-native-device-reuse-probe-2.json ULG_PROBE_PORT=5683 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS=2500 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=native-webgpu-surface-consumer&renderer=native-webgpu&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: `status=good`.
+  - Browser console issue count: `0`.
+  - `analysis.issues=[]`.
+  - `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+  - `residentRenderSourceCurrentSampleCount=2`.
+  - `residentRenderSourceStaleSampleCount=0`.
+  - `residentRenderSourceMetricTimeDeltaS=0.0005`.
+  - The final native surface draw reports
+    `sourceResidentRenderSourceStatus=resident-render-source-current`,
+    `sourceResidentExecutionGenerationMatchesCurrent=true`,
+    `renderBridgeStatus=native-webgpu-surface-consumer-ready`, and
+    `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`.
+- Build:
+  `npm run build`
+  - Passed with the existing large chunk warning only.
+- ICC:
+  `npm run icc:update`
+  - Passed with `indexedFiles=354` and `memoryChunks=2102`.

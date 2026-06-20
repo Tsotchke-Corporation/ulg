@@ -67,10 +67,30 @@ test('native WebGPU browser probe analyzes captured frames without artifact outp
     /nativeWebGpuSurfaceConsumerTextureReadbackUnavailable\s*\|\|\s*nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired/,
     'native WebGPU canvas-capture classification should recognize browser-frame validation requirements'
   );
+  assert.match(
+    probeSource,
+    /nativeSurfaceFrameValidationRequired\s*=\s*[\s\S]*?surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'/,
+    'native WebGPU probes should force browser-frame capture when frame validation owns readiness'
+  );
+  assert.match(
+    probeSource,
+    /captureFrames = probeMode !== 'direct-resident'[\s\S]*?\|\| nativeSurfaceFrameValidationRequired/,
+    'native frame validation should not require ULG_PROBE_CAPTURE_FRAMES or ULG_PROBE_FRAME_DIR'
+  );
   assert.doesNotMatch(
     probeSource,
     /if \(!frameDir\) \{\s*return \{[\s\S]*?frames: \[\]/,
     'captured frames must not be discarded just because artifact output is disabled'
+  );
+  assert.match(
+    probeSource,
+    /residentRenderSourceMetricTimeDeltaS/,
+    'native no-full surface probes should accept current render-source samples across advancing metric time'
+  );
+  assert.match(
+    probeSource,
+    /residentNoReadbackRenderSourceEvidenceAvailable[\s\S]*?residentRenderSourceTimeAdvanced/,
+    'native no-full surface probes should not require CPU motion diagnostics when render-source evidence is current'
   );
 });
 
@@ -131,5 +151,30 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
     sceneSource,
     /skipped-native-webgpu-surface-consumer/,
     'native surface draws should no longer bypass submit fencing'
+  );
+});
+
+test('native WebGPU resident refresh reuses the engine-owned consumer device', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /function nativeWebGpuSurfaceConsumerDeviceResult\(\)/,
+    'native WebGPU renderer should expose its resident canvas consumer device to refresh callers'
+  );
+  assert.match(
+    sceneSource,
+    /status: 'webgpu-native-surface-consumer-device-ready'/,
+    'native consumer device reuse should be visible in diagnostics'
+  );
+  assert.match(
+    sceneSource,
+    /rendererOwnedWebGpuDeviceResult\(\)\s*\|\|\s*nativeWebGpuSurfaceConsumerDeviceResult\(\)/,
+    'cached resident device resolution should prefer an existing native canvas consumer before requesting another adapter'
+  );
+  assert.match(
+    sceneSource,
+    /if \(!result\.device\) \{\s*opticalGpuDeviceResultPromise = null;[\s\S]*?transientDeviceUnavailable/,
+    'transient requestAdapter null results should not poison the cached resident WebGPU device'
   );
 });

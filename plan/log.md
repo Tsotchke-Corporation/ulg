@@ -31106,3 +31106,54 @@ Remaining:
 - Finish the native/engine-owned GPU render consumer so visible particle/surface
   motion can update from retained GPU buffers without CPU render-row readback
   or stale retained Three geometry.
+
+## 2026-06-20 AKDT - Native Consumer Device Reuse and No-Full Probe Evidence
+
+Status:
+
+- The native/engine-owned surface consumer no longer regresses to stale retained
+  buffers on the second resident render refresh when Chromium returns a
+  transient `requestAdapter returned null`.
+- `requestCachedOpticalGpuDevice()` now reuses an existing native main-canvas
+  consumer GPUDevice before requesting another adapter, and it clears transient
+  no-device results instead of caching them as the resident device result.
+- The long-horizon probe now treats current resident render-source samples over
+  advancing metric time as valid no-full evidence, so native no-full validation
+  does not have to reintroduce CPU motion readback.
+
+Validation:
+
+- PASS:
+  `node --check src/visualization/sphPhaseScene.js`
+- PASS:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  with `5/5`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU|renderer-owned|render-row|resident render source"`
+  with `69/69`.
+- PASS:
+  `/tmp/ulg-native-device-reuse-probe-2.json`
+  - `status=good`
+  - `analysis.issues=[]`
+  - `browserConsole.issueCount=0`
+  - `visualFrameCapture.analyzedFrameCount=4`
+  - `residentNoReadbackRenderSourceEvidenceAvailable=true`
+  - `residentRenderSourceCurrentSampleCount=2`
+  - `residentRenderSourceStaleSampleCount=0`
+  - final native bridge reports `native-webgpu-surface-consumer-ready` and
+    `native-webgpu-surface-consumer-rendered`.
+- PASS:
+  `npm run build`
+  with the existing large chunk warning only.
+- PASS:
+  `npm run icc:update`
+  with `indexedFiles=354` and `memoryChunks=2102`.
+
+Remaining:
+
+- Broaden native no-full surface validation beyond the one-batch water/water
+  smoke and move renderer/physics synchronization toward the planned
+  worker/engine ownership split. Keep this engine-integrated; do not add an
+  overlay.

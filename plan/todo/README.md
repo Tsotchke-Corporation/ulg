@@ -159,6 +159,20 @@ lane by moving native presentation/physics synchronization into the planned
 engine/worker ownership split, keeping the consumer engine-integrated and
 fail-closed rather than adding an overlay.
 
+Current routing note, 2026-06-20 AKDT: the native/engine-owned surface consumer
+now keeps resident no-full refreshes current across the second render pass. The
+scene reuses an existing native main-canvas consumer GPUDevice before asking
+Chromium for another adapter, and transient `requestAdapter returned null`
+results no longer poison the cached resident device. The long-horizon native
+probe also treats current resident render-source samples over advancing metric
+time as valid no-full evidence instead of requiring CPU motion readback.
+Browser evidence at `/tmp/ulg-native-device-reuse-probe-2.json` is
+`status=good`, console-clean, reports two current resident render-source
+samples with zero stale samples, and has nonblank Playwright canvas/page frame
+captures. Continue this lane by broadening native-surface scenarios and then
+moving ownership toward the worker/engine split; do not replace it with an
+overlay.
+
 Current routing note, 2026-06-20 AKDT: the material JSON bank now has the first
 Phase 2 element crystalline-structure seed checked in and validated. The
 `element-crystal-structures` bank covers active solid Li, Na, K, Rb, Cs, Fe,

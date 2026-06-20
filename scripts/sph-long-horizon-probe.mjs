@@ -4983,6 +4983,17 @@ function analyzeTimeline(timeline, {
     (Number.isFinite(residentRenderSourceStepDelta) && residentRenderSourceStepDelta > 0)
     || (Number.isFinite(residentRenderSourceTimeDeltaS) && residentRenderSourceTimeDeltaS > 0)
   );
+  const residentRenderSourceMetricTimeSeries = residentRenderSourceSamples
+    .map((sample) => metricTimeS(metrics[sample.index]))
+    .filter(Number.isFinite);
+  const residentRenderSourceMetricTimeDeltaS = residentRenderSourceMetricTimeSeries.length >= 2
+    ? Math.max(...residentRenderSourceMetricTimeSeries) - Math.min(...residentRenderSourceMetricTimeSeries)
+    : null;
+  const residentRenderSourceTimeAdvanced = Boolean(
+    residentRenderSourceAdvanced
+    || (Number.isFinite(residentRenderSourceMetricTimeDeltaS) && residentRenderSourceMetricTimeDeltaS > 0)
+    || (Number.isFinite(visualFrameTimeSpanS) && visualFrameTimeSpanS > 0)
+  );
   const minVolumeObservedJ = minVolumeSeries.length ? Math.min(...minVolumeSeries) : null;
   const maxVolumeObservedJ = maxVolumeSeries.length ? Math.max(...maxVolumeSeries) : null;
   const maxPressureImpulseNSeconds = pressureImpulseSeries.length ? Math.max(...pressureImpulseSeries) : null;
@@ -5261,7 +5272,7 @@ function analyzeTimeline(timeline, {
     && compactSummaryDisabled
     && residentRenderSourceCurrentSampleCount > 0
     && residentRenderSourceStaleSampleCount === 0
-    && residentRenderSourceAdvanced
+    && residentRenderSourceTimeAdvanced
     && (
       residentSurfaceVisibleGpuConsumerInputReadySampleCount > 0
       || residentSurfaceBufferHandoffSampleCount > 0
@@ -6001,6 +6012,8 @@ function analyzeTimeline(timeline, {
     residentRenderSourceStepDelta,
     residentRenderSourceTimeDeltaS,
     residentRenderSourceAdvanced,
+    residentRenderSourceMetricTimeDeltaS,
+    residentRenderSourceTimeAdvanced,
     residentNoReadbackRenderSourceEvidenceAvailable,
     minActiveGridNodeCount,
     minVolumeObservedJ,
@@ -6183,8 +6196,14 @@ async function main() {
   const frameDir = process.env.ULG_PROBE_FRAME_DIR
     ? path.resolve(process.env.ULG_PROBE_FRAME_DIR)
     : null;
+  const nativeSurfaceFrameValidationRequired =
+    surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer';
   const captureFrames = probeMode !== 'direct-resident'
-    && (process.env.ULG_PROBE_CAPTURE_FRAMES === '1' || Boolean(frameDir));
+    && (
+      process.env.ULG_PROBE_CAPTURE_FRAMES === '1'
+      || Boolean(frameDir)
+      || nativeSurfaceFrameValidationRequired
+    );
   const captureFrameEvery = positiveInteger(process.env.ULG_PROBE_FRAME_EVERY, 1);
   const captureFrameMax = positiveInteger(process.env.ULG_PROBE_FRAME_MAX, 64);
   const initialResidentWaitMs = positiveInteger(

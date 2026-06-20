@@ -6160,6 +6160,37 @@ export function createSphPhaseScene(container, {
     };
   }
 
+  function nativeWebGpuSurfaceConsumerDeviceResult() {
+    if (!renderer?.isNativeWebGPURenderer) return null;
+    const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer
+      || scene.userData?.sphNativeWebGpuSurfaceConsumer
+      || null;
+    const nativeDevice = nativeConsumer?.device || nativeConsumer?.gpuDevice || null;
+    if (!nativeDevice || nativeConsumer?.deviceLost) return null;
+    if (
+      !nativeDevice.queue?.submit
+      || !nativeDevice.createBuffer
+      || !nativeDevice.createCommandEncoder
+      || !nativeDevice.createRenderPipeline
+    ) {
+      return null;
+    }
+    return {
+      status: 'webgpu-native-surface-consumer-device-ready',
+      reason: 'reusing native WebGPU surface consumer resident device',
+      device: nativeDevice,
+      rendererBackend: rendererBackendName(),
+      rendererOwnedDevice: false,
+      nativeWebGpuSurfaceConsumerDevice: true,
+      nativeWebGpuSurfaceConsumerStatus: nativeConsumer?.status ?? null,
+      rendererOwnedResidentDevicePolicy: scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy
+        || null,
+      rendererPresentationEnabled: true,
+      requiredLimits: null,
+      deviceLimits: summarizeThreeWebGpuDeviceLimits(nativeDevice)
+    };
+  }
+
   async function runResidentWebGpuDeviceMapSmoke(device, {
     source = 'cached-resident-webgpu-device'
   } = {}) {
@@ -6345,7 +6376,8 @@ export function createSphPhaseScene(container, {
   }
 
   function requestCachedOpticalGpuDevice(ref = navigatorRef) {
-    const rendererDeviceResult = rendererOwnedWebGpuDeviceResult();
+    const rendererDeviceResult = rendererOwnedWebGpuDeviceResult()
+      || nativeWebGpuSurfaceConsumerDeviceResult();
     if (rendererDeviceResult) return Promise.resolve(rendererDeviceResult);
     if (
       renderer?.isWebGPURenderer
@@ -6369,6 +6401,11 @@ export function createSphPhaseScene(container, {
             requested: enableThreeWebGpuResidentDevice,
             unsafeDiagnosticOverride: renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
           });
+        if (!result.device) {
+          opticalGpuDeviceResultPromise = null;
+          result.transientDeviceUnavailable = result.reason === 'requestAdapter returned null';
+          return result;
+        }
         if (result.device?.lost?.then) {
           result.device.lost.finally(() => {
             if (opticalGpuDeviceResultPromise) opticalGpuDeviceResultPromise = null;

@@ -163,6 +163,31 @@ function materialBankWarmInputConsumerSummary({
   };
 }
 
+function materialBankWarmInputConsumerForOutput(thermalMaterialTable, {
+  shaderBound = false,
+  shaderBinding = null,
+  shaderRowCount = 0,
+  bufferSource = null
+} = {}) {
+  const consumer = thermalMaterialTable?.materialPropertyBankWarmInputConsumer
+    ?? materialBankWarmInputConsumerSummary();
+  const boundRowCount = Math.max(0, Math.round(finiteNumber(shaderRowCount, 0)));
+  const bound = shaderBound === true && boundRowCount > 0;
+  return {
+    ...consumer,
+    status: bound
+      ? 'thermal-material-bank-warm-inputs-bound-in-shader'
+      : consumer.status,
+    consumedAs: bound
+      ? 'non-authoritative-shader-bound-warm-input-metadata-before-closure-derived-thermal-graphs'
+      : consumer.consumedAs,
+    shaderBound: bound,
+    shaderBinding: bound ? shaderBinding : null,
+    shaderRowCount: bound ? boundRowCount : 0,
+    bufferSource: bound ? bufferSource : null
+  };
+}
+
 export function buildSphThermalMaterialTable(materialProperties = {}, {
   materialPropertyBankGpuWarmInputTable = null
 } = {}) {
@@ -990,8 +1015,13 @@ function outputEnvelope({
   retainedOutputParticleBuffers = false,
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
-  outputBufferInitializationMode = null
+  outputBufferInitializationMode = null,
+  materialPropertyBankWarmInputShaderBinding = null
 }) {
+  const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
+    thermalMaterialTable,
+    materialPropertyBankWarmInputShaderBinding || {}
+  );
   return {
     schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
     backend,
@@ -999,12 +1029,13 @@ function outputEnvelope({
     kernelScope: THERMAL_SCOPE,
     sourceSchema: sphParticleState.schema,
     materialTableSchema: thermalMaterialTable.schema,
-    materialPropertyBankWarmInputConsumer:
-      thermalMaterialTable.materialPropertyBankWarmInputConsumer ?? materialBankWarmInputConsumerSummary(),
+    materialPropertyBankWarmInputConsumer,
     materialPropertyBankWarmInputRowCount:
-      thermalMaterialTable.materialPropertyBankWarmInputRowCount ?? 0,
+      materialPropertyBankWarmInputConsumer.sourceRowCount ?? thermalMaterialTable.materialPropertyBankWarmInputRowCount ?? 0,
     materialPropertyBankWarmInputMatchedMaterialCount:
-      thermalMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount ?? 0,
+      materialPropertyBankWarmInputConsumer.matchedMaterialCount
+        ?? thermalMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount
+        ?? 0,
     thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
     thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
     thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,
@@ -1191,6 +1222,61 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function resolveMaterialBankWarmInputShaderBinding(device, {
+  sphParticleState = null,
+  sphParticleUpload = null
+} = {}) {
+  const borrowedBuffer = sphParticleUpload?.materialPropertyBankWarmInputBuffer || null;
+  const borrowedRowCount = Math.max(0, Math.round(finiteNumber(
+    sphParticleUpload?.materialPropertyBankWarmInputRowCount,
+    0
+  )));
+  if (borrowedBuffer && borrowedRowCount > 0) {
+    return {
+      buffer: borrowedBuffer,
+      rowCount: borrowedRowCount,
+      bufferSource: 'sph-particle-upload',
+      borrowed: true,
+      destroy() {}
+    };
+  }
+  const packedRows = sphParticleState?.materialPropertyBankWarmInputTable?.rows;
+  const packedRowCount = Math.max(0, Math.round(finiteNumber(
+    sphParticleState?.materialPropertyBankWarmInputTable?.rowCount,
+    0
+  )));
+  if (packedRows?.byteLength > 0 && packedRowCount > 0) {
+    const buffer = writeStorageBuffer(
+      device,
+      'ulg-sph-thermal-material-bank-warm-input-rows',
+      packedRows
+    );
+    return {
+      buffer,
+      rowCount: packedRowCount,
+      bufferSource: 'sph-particle-state',
+      borrowed: false,
+      destroy() {
+        buffer.destroy?.();
+      }
+    };
+  }
+  const emptyBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-material-bank-warm-input-rows-empty',
+    new Float32Array(0)
+  );
+  return {
+    buffer: emptyBuffer,
+    rowCount: 0,
+    bufferSource: 'empty',
+    borrowed: false,
+    destroy() {
+      emptyBuffer.destroy?.();
+    }
+  };
+}
+
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
   return device.createBuffer({
     label,
@@ -1319,14 +1405,15 @@ function createParamsArray({
   wallRate,
   wallLayerM,
   boxDimsM,
-  wallTemperaturesK
+  wallTemperaturesK,
+  materialBankWarmInputRowCount = 0
 }) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, materialCount, true);
   view.setUint32(8, segmentCount, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(materialBankWarmInputRowCount, 0))), true);
   view.setFloat32(16, dtS, true);
   view.setFloat32(20, smoothingLengthM, true);
   view.setFloat32(24, conductionRate, true);
@@ -1413,6 +1500,10 @@ export async function runSphThermalStepWebGpu({
   const responseBuffer = responseGraphUpload.responseBuffer;
   const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
   const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
+  const materialBankWarmInputBinding = resolveMaterialBankWarmInputShaderBinding(device, {
+    sphParticleState,
+    sphParticleUpload
+  });
   const outputBufferInitializationMode = 'shader-writes-all-particle-rows';
   const outStateBuffer = createOutputStorageBuffer(
     device,
@@ -1441,11 +1532,12 @@ export async function runSphThermalStepWebGpu({
     wallRate,
     wallLayerM: layer,
     boxDimsM: dims,
-    wallTemperaturesK
+    wallTemperaturesK,
+    materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
   }));
 
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v1',
+    cacheKey: 'ulg-sph-thermal-step.v2',
     label: 'ulg-sph-thermal-step',
     code: sphThermalStepWgsl,
     entryPoint: 'main',
@@ -1458,7 +1550,8 @@ export async function runSphThermalStepWebGpu({
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'storage'),
-      computeBufferBinding(8, 'uniform')
+      computeBufferBinding(8, 'uniform'),
+      computeBufferBinding(9, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1472,7 +1565,8 @@ export async function runSphThermalStepWebGpu({
       { binding: 5, resource: { buffer: graphSampleBuffer } },
       { binding: 6, resource: { buffer: outStateBuffer } },
       { binding: 7, resource: { buffer: outThermoBuffer } },
-      { binding: 8, resource: { buffer: paramsBuffer } }
+      { binding: 8, resource: { buffer: paramsBuffer } },
+      { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1497,6 +1591,7 @@ export async function runSphThermalStepWebGpu({
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+    if (!materialBankWarmInputBinding.borrowed) materialBankWarmInputBinding.destroy();
     paramsBuffer.destroy?.();
     if (!retainOutputParticleBuffers) {
       outStateBuffer.destroy?.();
@@ -1542,6 +1637,12 @@ export async function runSphThermalStepWebGpu({
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     outputBufferInitializationMode,
+    materialPropertyBankWarmInputShaderBinding: {
+      shaderBound: materialBankWarmInputBinding.rowCount > 0,
+      shaderBinding: 9,
+      shaderRowCount: materialBankWarmInputBinding.rowCount,
+      bufferSource: materialBankWarmInputBinding.bufferSource
+    },
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
   });
 }

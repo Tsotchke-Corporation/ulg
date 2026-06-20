@@ -189,6 +189,22 @@ The material-bank todo should now move from render-row-only consumption to
 mechanics/EOS/thermal/optical shader consumers, reference-quality replacement
 rows, and Phase 2 crystalline structure data.
 
+Current routing note, 2026-06-20 AKDT: the thermal WebGPU step now has a
+second shader-side material-bank consumer. In addition to the render-row
+particle-size binding at `5`, `sphThermalStepWgsl` binds accepted
+material-bank warm-input rows at binding `9` and reports
+`thermal-material-bank-warm-inputs-bound-in-shader` when an uploaded row buffer
+is actually used. The shader reads the row table only as a zeroed
+non-authoritative presence probe; phase, temperature, rest density, and
+response slopes still come from closure-derived thermal graph buffers. Evidence:
+`node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs`
+passed `33/33`; the mounted derived-material Playwright test passed `1/1`;
+`/tmp/ulg-thermal-bank-shader-binding-probe.json` completed `status=good` with
+browser console issue/warning counts `0/0`. Remaining material-bank consumers:
+mechanics/EOS shader warm-start availability, optical shader-side binding
+beyond metadata annotations, reference-quality replacement rows, and Phase 2
+crystalline structure data.
+
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
 retained GPU vertex counter into the surface-row translation pass. This

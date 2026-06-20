@@ -190,6 +190,23 @@ override: closure-derived thermal graphs remain the source of physics truth
 and `shaderBound` remains `false` until a later thermal/EOS shader consumer
 can use rows safely as warm starts.
 
+Status update, 2026-06-20 AKDT: thermal WebGPU warm-input rows are now
+shader-bound without becoming authoritative physics. `sphThermalStepWgsl`
+binds the packed material-bank warm-input table at binding `9`, carries the
+row count in the fourth `ThermalParams` u32, and reads a zeroed presence anchor
+so closure-derived thermal graph buffers still exclusively determine phase,
+temperature, rest density, and response slopes. WebGPU thermal results report
+`thermal-material-bank-warm-inputs-bound-in-shader` only when an uploaded
+material-bank row buffer is actually present; table construction and static
+cache records remain metadata-only. Evidence:
+`node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs`
+passed `33/33`, the mounted derived-material Playwright test passed `1/1`,
+and `/tmp/ulg-thermal-bank-shader-binding-probe.json` completed `status=good`
+with browser console issue/warning counts `0/0`. Remaining consumers are
+mechanics/EOS shader warm-start availability, optical shader-side binding
+beyond PBR metadata, reference-quality replacement rows, and Phase 2
+crystalline structures.
+
 Status update, 2026-06-19 AKDT: optical GPU/PBR tables now carry accepted
 material-bank PBR warm-input metadata through live table construction and
 static-table cache rehydration. The cached optical-table reuse path rejects old

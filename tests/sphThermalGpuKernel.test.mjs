@@ -92,10 +92,12 @@ function fakeThermalDeviceWithFence() {
   });
   const destroyed = [];
   const buffers = [];
+  const bindGroups = [];
   const queueWrites = [];
   const device = {
     destroyed,
     buffers,
+    bindGroups,
     queueWrites,
     fenceRequestedCount: 0,
     resolveFence,
@@ -141,7 +143,9 @@ function fakeThermalDeviceWithFence() {
       return { label, bindGroupLayouts };
     },
     createBindGroup({ layout, entries }) {
-      return { layout, entries };
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
     },
     createCommandEncoder() {
       return {
@@ -628,7 +632,9 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
     thermalResponseGraphUpload,
     sphParticleUpload: {
       stateBuffer: sourceStateBuffer,
-      thermoBuffer: sourceThermoBuffer
+      thermoBuffer: sourceThermoBuffer,
+      materialPropertyBankWarmInputBuffer: { label: 'material-bank-warm-inputs' },
+      materialPropertyBankWarmInputRowCount: 1
     },
     retainOutputParticleBuffers: true,
     readbackMode: 'no-full-readback'
@@ -642,10 +648,17 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   );
   assert.equal(
     result.materialPropertyBankWarmInputConsumer.status,
-    'thermal-material-table-annotated-with-material-bank-warm-inputs'
+    'thermal-material-bank-warm-inputs-bound-in-shader'
   );
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBound, true);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderBinding, 9);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 1);
+  assert.equal(result.materialPropertyBankWarmInputConsumer.bufferSource, 'sph-particle-upload');
   assert.equal(result.materialPropertyBankWarmInputRowCount, 1);
   assert.equal(result.materialPropertyBankWarmInputMatchedMaterialCount, 1);
+  assert.ok(device.bindGroups.at(-1).entries.some((entry) => (
+    entry.binding === 9 && entry.resource.buffer.label === 'material-bank-warm-inputs'
+  )));
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-state'), false);
   assert.equal(device.queueWrites.some((write) => write.label === 'ulg-sph-thermal-output-thermo'), false);
   assert.equal(typeof result.destroyOutputParticleBuffers, 'function');

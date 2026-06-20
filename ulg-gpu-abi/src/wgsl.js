@@ -490,7 +490,7 @@ struct ThermalParams {
   particle_count: u32,
   material_count: u32,
   response_count: u32,
-  _pad0: u32,
+  material_bank_warm_input_row_count: u32,
   dt: f32,
   smoothing_length_m: f32,
   conduction_rate: f32,
@@ -518,6 +518,7 @@ struct ThermalParams {
 @group(0) @binding(6) var<storage, read_write> out_sph_state: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> params: ThermalParams;
+@group(0) @binding(9) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
 
 const PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;
 
@@ -653,6 +654,15 @@ fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) ->
     return 0.0;
   }
   return temperature_slope_from_graph(u32(response0.z), specific_internal_energy);
+}
+
+fn material_bank_warm_input_anchor() -> f32 {
+  if (params.material_bank_warm_input_row_count == 0u) {
+    return 0.0;
+  }
+  // Non-authoritative warm-input presence probe. The value is intentionally
+  // zeroed so closure-derived thermal graphs remain the only thermal source.
+  return material_bank_warm_input_rows[0u].x * 0.0;
 }
 
 fn clamp_wall_du_specific(d_u_specific: f32, temperature_k: f32, wall_temperature_k: f32, temperature_slope: f32) -> f32 {
@@ -825,7 +835,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let temperature = row0.z;
 	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
 	  let support = 2.0 * params.smoothing_length_m;
-	  var du = 0.0;
+	  var du = material_bank_warm_input_anchor();
 	  var conduction_du = 0.0;
 	  var neighbor_min_temperature = temperature;
 	  var neighbor_max_temperature = temperature;

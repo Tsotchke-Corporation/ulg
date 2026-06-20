@@ -1818,6 +1818,24 @@ async function runBrowserProbe({
           ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
           ?? bridge?.offscreenValidationStatus
           ?? null;
+        const validationScope =
+          renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
+          ?? surfaceDraw?.renderBridgeNativeSurfaceValidationScope
+          ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
+          ?? bridge?.nativeSurfaceValidationScope
+          ?? null;
+        const offscreenValidationEligible =
+          renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible
+          ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationEligible
+          ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible
+          ?? bridge?.nativeSurfaceOffscreenValidationEligible
+          ?? null;
+        const offscreenValidationSkippedReason =
+          renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason
+          ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationSkippedReason
+          ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason
+          ?? bridge?.nativeSurfaceOffscreenValidationSkippedReason
+          ?? null;
         const frameCount = Number(
           renderState?.surfaceDrawRenderBridgeFrameCount
           ?? surfaceDraw?.renderBridgeFrameCount
@@ -1837,6 +1855,9 @@ async function runBrowserProbe({
           pixelValidationStatus,
           readbackSmokeValidationStatus,
           offscreenValidationStatus,
+          validationScope,
+          offscreenValidationEligible,
+          offscreenValidationSkippedReason,
           frameCount
         };
       };
@@ -2388,10 +2409,16 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceReason ?? null,
             surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired:
               renderState.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceValidationScope:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceValidationScope ?? null,
             surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded:
               renderState.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible ?? null,
             surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded:
               renderState.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason ?? null,
             surfaceDrawRenderBridgeRenderAttemptCount:
               renderState.surfaceDrawRenderBridgeRenderAttemptCount ?? null,
             surfaceDrawRenderBridgeRenderSkipCount:

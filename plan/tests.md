@@ -11657,3 +11657,16 @@ High drop-edge points render coverage, 2026-06-19 AKDT:
   - Fe/H2O `dropn=8, basen=5` now validates reset, render-domain counts and
     bounds, SPH/MLS-MPM uploads, selected `three-render-row-points` mode, and
     clean WebGPU console output.
+
+Native validation scope harness telemetry, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check scripts/sph-performance-benchmark.mjs`, and
+  `node --check tests/nativeSurfaceHarness.test.mjs` passed.
+- Focused Node suite:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `1/1`.
+  - Guards that long-horizon probe and performance benchmark artifacts expose
+    native validation scope, offscreen eligibility, and offscreen skipped
+    reason.

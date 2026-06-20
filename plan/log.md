@@ -29997,3 +29997,28 @@ Remaining:
 - Keep drop-edge open only for a new live repro outside the covered H2O/H2O
   and Fe/H2O URL paths, or for resident render-state batches that publish
   additional bridge diagnostics.
+
+## 2026-06-19 AKDT - Native Validation Scope Harness Telemetry
+
+Status:
+
+- Long-horizon native probe wait snapshots now include validation scope,
+  offscreen validation eligibility, and offscreen skip reason.
+- Probe render-state metrics and performance benchmark scenario summaries now
+  flatten `surfaceDrawRenderBridgeNativeSurfaceValidationScope`,
+  `surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible`, and
+  `surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason`.
+- Added a source-level harness guard so these native validation scope fields do
+  not silently disappear from probe or benchmark artifacts.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check tests/nativeSurfaceHarness.test.mjs`.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `1/1`.
+
+Remaining:
+
+- Use these flattened fields in the next native/mobile probe run to separate
+  debug current-texture smoke from real `native-surface-draw` evidence.

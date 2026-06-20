@@ -429,15 +429,30 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.renderBridgeNativeSurfaceValidationEncoderRequired
     ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired
     ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceValidationScope =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
+    ?? surfaceDraw?.renderBridgeNativeSurfaceValidationScope
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
+    ?? null;
   const surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
     renderState?.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded
     ?? surfaceDraw?.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded
     ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded
     ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible
+    ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationEligible
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible
+    ?? null;
   const surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded =
     renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded
     ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationNeeded
     ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded
+    ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason
+    ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationSkippedReason
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason
     ?? null;
   const surfaceDrawRenderBridgeLastRenderSkipReason =
     renderState?.surfaceDrawRenderBridgeLastRenderSkipReason
@@ -800,8 +815,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawRenderBridgeOffscreenValidationStatus,
     surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus,
     surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired,
+    surfaceDrawRenderBridgeNativeSurfaceValidationScope,
     surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded,
+    surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationEligible,
     surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded,
+    surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationSkippedReason,
     surfaceDrawRenderBridgeLastRenderSkipReason,
     surfaceDrawRenderBridgeReused,
     surfaceDrawRenderBridgeUpdateCount,

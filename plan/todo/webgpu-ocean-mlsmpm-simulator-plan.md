@@ -137,8 +137,10 @@ Tactical status, 2026-06-19 AKDT:
   standalone same-device readback smoke path, but it reports offscreen surface
   geometry validation as ineligible until real retained surface draws are
   submitted. Surface-draw/render-state diagnostics now expose validation scope,
-  offscreen eligibility, and offscreen skip reason, preventing current-texture
-  smoke evidence from being mistaken for a promoted visible surface consumer.
+  offscreen eligibility, and offscreen skip reason, and the long-horizon probe
+  plus performance benchmark now flatten those fields into native artifacts.
+  This prevents current-texture smoke evidence from being mistaken for a
+  promoted visible surface consumer.
 - Native WebGPU surface presentation now reuses compatible main-canvas render
   bridges instead of rebuilding static shader modules, layouts, render
   pipelines, sampler, camera buffer, and optical lookup buffers on every

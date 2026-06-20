@@ -160,10 +160,12 @@ scope instead of letting debug clear-only look like surface geometry evidence.
 readback smoke validation, but offscreen surface validation is ineligible until
 actual retained surface draws are submitted. The render bridge publishes
 validation scope, offscreen eligibility, and offscreen skip reason into
-surface-draw/render-state diagnostics. Use this to debug native current-texture
-presentation, but do not promote the visible consumer from clear-only evidence;
-real acceptance still needs `native-surface-draw` validation or browser pixel
-evidence on the engine-owned surface.
+surface-draw/render-state diagnostics, and both the long-horizon probe and
+performance benchmark now flatten those fields into artifacts. Use this to
+debug native current-texture presentation, but do not promote the visible
+consumer from clear-only evidence; real acceptance still needs
+`native-surface-draw` validation or browser pixel evidence on the engine-owned
+surface.
 
 Current routing note, 2026-06-19 AKDT: resident MLS-MPM render-every
 continuation is now console-clean on the native WebGPU surface-consumer route

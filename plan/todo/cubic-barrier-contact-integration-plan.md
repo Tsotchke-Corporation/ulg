@@ -2,6 +2,17 @@
 
 Date: 2026-06-18 AKDT
 
+Status update, 2026-06-20 AKDT: compact
+`algorithmMaterialContactRows` now feed the MLS-MPM wall-barrier grid-update
+path. When an explicit wall stiffness or bulk/shear override is absent,
+`resolveWallBarrierContactMaterialPolicy()` selects a representative contact
+row, multiplies row `normalStiffnessPa` by grid support length, and passes the
+derived stiffness into CPU/WebGPU grid update params. Grid-update and resident
+step diagnostics report the contact-row schema, pair key, materials, phases,
+normal stiffness, and policy source. This is still a non-authoritative
+wall-contact consumer; the next contact slice is material-interface/contact
+pair response inside the mechanics update path.
+
 Status update, 2026-06-18 AKDT: the first wall-contact slice is implemented in
 the MLS-MPM grid update path. `mlsMpmWallBarrierContactResponse()` remains the
 small cubic-barrier dynamic response helper, and

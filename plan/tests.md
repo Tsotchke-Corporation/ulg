@@ -1,5 +1,30 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-20 Algorithm Row Runtime Consumers
+
+Algorithm-derived rows now feed active runtime consumers. Surface extraction
+rows select native marching-cubes isovalue/policy metadata, and contact rows
+derive MLS-MPM wall-barrier elastic stiffness when no explicit wall stiffness
+or modulus override is supplied.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`, and
+  `node --check src/visualization/sphPhaseScene.js` passed.
+- Focused runtime coverage:
+  `node --test tests/sphGridUpdateGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` passed `79/79`.
+- Renderer/native adjacent coverage:
+  `node --test tests/sphGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+  passed `78/78`; `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs
+  tests/nativeSurfaceHarness.test.mjs` passed `22/22`.
+- Physics invariants:
+  `npm run test:physics-atomics` passed `11/14` with the three expected
+  opt-in long-horizon skips.
+
 ## Current Focused Result - 2026-06-19 Material Bank Generator First Tranche
 
 The element JSON bank now has a bounded generator path and first generated

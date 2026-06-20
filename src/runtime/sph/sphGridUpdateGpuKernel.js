@@ -47,6 +47,7 @@ const EMPTY_PRESSURE_INTERFACE_FORCE_ROWS = new Float32Array(SPH_PRESSURE_INTERF
 const DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M = 0;
 const DEFAULT_WALL_BARRIER_CONTACT_SCALE = 1;
 const DEFAULT_WALL_BARRIER_MIN_GAP_M = 1e-6;
+const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA = 'peercompute.ulg.algorithm-material-contact-rows.v0';
 const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
   'apply-to-mls-mpm-grid',
   'pressure-interface-grid-force-consumer-approved'
@@ -152,12 +153,89 @@ export function estimateMlsMpmWallBarrierElasticStiffness({
   };
 }
 
+function representativeAlgorithmContactRow(algorithmMaterialContactRows = null) {
+  if (algorithmMaterialContactRows?.schema !== ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA) return null;
+  const rows = Array.isArray(algorithmMaterialContactRows.rows) ? algorithmMaterialContactRows.rows : [];
+  return rows.find((row) => finiteNumber(row?.normalStiffnessPa, 0) > 0) || null;
+}
+
+export function resolveWallBarrierContactMaterialPolicy({
+  algorithmMaterialContactRows = null,
+  supportLengthM = 0,
+  wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  wallBarrierMaterialBulkModulusPa = 0,
+  wallBarrierMaterialShearModulusPa = 0
+} = {}) {
+  const explicit = Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0));
+  const bulk = Math.max(0, finiteNumber(wallBarrierMaterialBulkModulusPa, 0));
+  const shear = Math.max(0, finiteNumber(wallBarrierMaterialShearModulusPa, 0));
+  const supportLength = Math.max(0, finiteNumber(supportLengthM, 0));
+  if (explicit > 0 || bulk > 0 || shear > 0) {
+    return {
+      schema: 'peercompute.ulg.mls-mpm-wall-barrier-contact-material-policy.v0',
+      status: explicit > 0
+        ? 'wall-barrier-contact-material-policy-explicit-stiffness'
+        : 'wall-barrier-contact-material-policy-explicit-modulus',
+      source: explicit > 0 ? 'explicit-normal-stiffness' : 'explicit-bulk-shear-modulus',
+      algorithmContactRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+      algorithmContactRowStatus: null,
+      algorithmContactPairKey: null,
+      algorithmContactMaterials: [],
+      algorithmContactPhases: [],
+      algorithmContactNormalStiffnessPa: 0,
+      wallBarrierElasticStiffnessNPerM: explicit,
+      wallBarrierMaterialBulkModulusPa: bulk,
+      wallBarrierMaterialShearModulusPa: shear,
+      supportLengthM: supportLength
+    };
+  }
+  const contactRow = representativeAlgorithmContactRow(algorithmMaterialContactRows);
+  const normalStiffnessPa = Math.max(0, finiteNumber(contactRow?.normalStiffnessPa, 0));
+  return {
+    schema: 'peercompute.ulg.mls-mpm-wall-barrier-contact-material-policy.v0',
+    status: contactRow
+      ? 'wall-barrier-contact-material-policy-algorithm-contact-row'
+      : 'wall-barrier-contact-material-policy-unavailable',
+    source: contactRow ? 'algorithm-contact-row-normal-stiffness-support' : 'unavailable-zero',
+    algorithmContactRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+    algorithmContactRowStatus: contactRow?.status ?? null,
+    algorithmContactPairKey: contactRow?.pairKey ?? null,
+    algorithmContactMaterials: Array.isArray(contactRow?.materials) ? [...contactRow.materials] : [],
+    algorithmContactPhases: Array.isArray(contactRow?.phases) ? [...contactRow.phases] : [],
+    algorithmContactNormalStiffnessPa: normalStiffnessPa,
+    wallBarrierElasticStiffnessNPerM: normalStiffnessPa * supportLength,
+    wallBarrierMaterialBulkModulusPa: normalStiffnessPa,
+    wallBarrierMaterialShearModulusPa: 0,
+    supportLengthM: supportLength
+  };
+}
+
 function resolveWallBarrierElasticStiffness({
   wallBarrierElasticStiffnessNPerM,
   wallBarrierMaterialBulkModulusPa,
   wallBarrierMaterialShearModulusPa,
-  supportLengthM
+  supportLengthM,
+  algorithmMaterialContactRows
 }) {
+  const materialPolicy = resolveWallBarrierContactMaterialPolicy({
+    algorithmMaterialContactRows,
+    supportLengthM,
+    wallBarrierElasticStiffnessNPerM,
+    wallBarrierMaterialBulkModulusPa,
+    wallBarrierMaterialShearModulusPa
+  });
+  if (materialPolicy.source === 'algorithm-contact-row-normal-stiffness-support') {
+    return {
+      schema: ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA,
+      status: 'wall-barrier-elastic-stiffness-from-algorithm-contact-row',
+      source: materialPolicy.source,
+      bulkModulusPa: materialPolicy.wallBarrierMaterialBulkModulusPa,
+      shearModulusPa: materialPolicy.wallBarrierMaterialShearModulusPa,
+      supportLengthM: materialPolicy.supportLengthM,
+      elasticNormalStiffnessNPerM: materialPolicy.wallBarrierElasticStiffnessNPerM,
+      materialPolicy
+    };
+  }
   const explicit = Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0));
   if (explicit > 0) {
     return {
@@ -167,7 +245,8 @@ function resolveWallBarrierElasticStiffness({
       bulkModulusPa: Math.max(0, finiteNumber(wallBarrierMaterialBulkModulusPa, 0)),
       shearModulusPa: Math.max(0, finiteNumber(wallBarrierMaterialShearModulusPa, 0)),
       supportLengthM: Math.max(0, finiteNumber(supportLengthM, 0)),
-      elasticNormalStiffnessNPerM: explicit
+      elasticNormalStiffnessNPerM: explicit,
+      materialPolicy
     };
   }
   const estimated = estimateMlsMpmWallBarrierElasticStiffness({
@@ -179,7 +258,8 @@ function resolveWallBarrierElasticStiffness({
     ...estimated,
     source: estimated.elasticNormalStiffnessNPerM > 0
       ? 'bulk-shear-modulus-grid-support'
-      : 'unavailable-zero'
+      : 'unavailable-zero',
+    materialPolicy
   };
 }
 
@@ -189,6 +269,7 @@ function createWallBarrierContactSummary({
   wallBarrierContactScale,
   wallBarrierMinGapM,
   elasticStiffnessSource = null,
+  materialPolicy = null,
   bulkModulusPa = 0,
   shearModulusPa = 0,
   supportLengthM = 0
@@ -199,6 +280,15 @@ function createWallBarrierContactSummary({
     mode: 'cubic-barrier-dynamic-grid-wall-response',
     wallBarrierElasticStiffnessNPerM,
     wallBarrierElasticStiffnessSource: elasticStiffnessSource,
+    wallBarrierContactMaterialPolicySchema: materialPolicy?.schema ?? null,
+    wallBarrierContactMaterialPolicyStatus: materialPolicy?.status ?? null,
+    wallBarrierContactMaterialPolicySource: materialPolicy?.source ?? null,
+    wallBarrierContactAlgorithmRowsSchema: materialPolicy?.algorithmContactRowsSchema ?? null,
+    wallBarrierContactAlgorithmRowStatus: materialPolicy?.algorithmContactRowStatus ?? null,
+    wallBarrierContactAlgorithmPairKey: materialPolicy?.algorithmContactPairKey ?? null,
+    wallBarrierContactAlgorithmMaterials: materialPolicy?.algorithmContactMaterials ?? [],
+    wallBarrierContactAlgorithmPhases: materialPolicy?.algorithmContactPhases ?? [],
+    wallBarrierContactAlgorithmNormalStiffnessPa: materialPolicy?.algorithmContactNormalStiffnessPa ?? 0,
     wallBarrierBulkModulusPa: bulkModulusPa,
     wallBarrierShearModulusPa: shearModulusPa,
     wallBarrierSupportLengthM: supportLengthM,
@@ -305,6 +395,16 @@ function outputEnvelope({
     wallBarrierElasticStiffnessNPerM: wallBarrierContact?.wallBarrierElasticStiffnessNPerM
       ?? DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
     wallBarrierElasticStiffnessSource: wallBarrierContact?.wallBarrierElasticStiffnessSource ?? null,
+    wallBarrierContactMaterialPolicySchema: wallBarrierContact?.wallBarrierContactMaterialPolicySchema ?? null,
+    wallBarrierContactMaterialPolicyStatus: wallBarrierContact?.wallBarrierContactMaterialPolicyStatus ?? null,
+    wallBarrierContactMaterialPolicySource: wallBarrierContact?.wallBarrierContactMaterialPolicySource ?? null,
+    wallBarrierContactAlgorithmRowsSchema: wallBarrierContact?.wallBarrierContactAlgorithmRowsSchema ?? null,
+    wallBarrierContactAlgorithmRowStatus: wallBarrierContact?.wallBarrierContactAlgorithmRowStatus ?? null,
+    wallBarrierContactAlgorithmPairKey: wallBarrierContact?.wallBarrierContactAlgorithmPairKey ?? null,
+    wallBarrierContactAlgorithmMaterials: wallBarrierContact?.wallBarrierContactAlgorithmMaterials ?? [],
+    wallBarrierContactAlgorithmPhases: wallBarrierContact?.wallBarrierContactAlgorithmPhases ?? [],
+    wallBarrierContactAlgorithmNormalStiffnessPa:
+      wallBarrierContact?.wallBarrierContactAlgorithmNormalStiffnessPa ?? 0,
     wallBarrierBulkModulusPa: wallBarrierContact?.wallBarrierBulkModulusPa ?? 0,
     wallBarrierShearModulusPa: wallBarrierContact?.wallBarrierShearModulusPa ?? 0,
     wallBarrierSupportLengthM: wallBarrierContact?.wallBarrierSupportLengthM ?? 0,
@@ -542,6 +642,7 @@ export function updateMlsMpmGridCpu({
   wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
   wallBarrierMaterialBulkModulusPa = 0,
   wallBarrierMaterialShearModulusPa = 0,
+  algorithmMaterialContactRows = null,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M
 } = {}) {
@@ -573,12 +674,14 @@ export function updateMlsMpmGridCpu({
     wallBarrierElasticStiffnessNPerM,
     wallBarrierMaterialBulkModulusPa,
     wallBarrierMaterialShearModulusPa,
-    supportLengthM: gridSpacingM
+    supportLengthM: gridSpacingM,
+    algorithmMaterialContactRows
   });
   const wallBarrierContact = createWallBarrierContactSummary({
     status: 'wall-barrier-contact-applied-cpu-reference',
     wallBarrierElasticStiffnessNPerM: elasticStiffness.elasticNormalStiffnessNPerM,
     elasticStiffnessSource: elasticStiffness.source,
+    materialPolicy: elasticStiffness.materialPolicy,
     bulkModulusPa: elasticStiffness.bulkModulusPa,
     shearModulusPa: elasticStiffness.shearModulusPa,
     supportLengthM: elasticStiffness.supportLengthM,
@@ -797,6 +900,7 @@ export async function runMlsMpmGridUpdateWebGpu({
   wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
   wallBarrierMaterialBulkModulusPa = 0,
   wallBarrierMaterialShearModulusPa = 0,
+  algorithmMaterialContactRows = null,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   retainUpdatedGridBuffer = false,
@@ -814,7 +918,8 @@ export async function runMlsMpmGridUpdateWebGpu({
     wallBarrierElasticStiffnessNPerM,
     wallBarrierMaterialBulkModulusPa,
     wallBarrierMaterialShearModulusPa,
-    supportLengthM: finiteNumber(p2gGridProjection.gridSpacingM, 0)
+    supportLengthM: finiteNumber(p2gGridProjection.gridSpacingM, 0),
+    algorithmMaterialContactRows
   });
   const wallBarrierContact = createWallBarrierContactSummary({
     status: readbackMode === NO_FULL_READBACK_MODE
@@ -822,6 +927,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       : 'wall-barrier-contact-submitted-webgpu-readback',
     wallBarrierElasticStiffnessNPerM: elasticStiffness.elasticNormalStiffnessNPerM,
     elasticStiffnessSource: elasticStiffness.source,
+    materialPolicy: elasticStiffness.materialPolicy,
     bulkModulusPa: elasticStiffness.bulkModulusPa,
     shearModulusPa: elasticStiffness.shearModulusPa,
     supportLengthM: elasticStiffness.supportLengthM,
@@ -1103,6 +1209,15 @@ function executionFromUpdate(update, {
     wallBarrierContactMode: update?.wallBarrierContactMode ?? null,
     wallBarrierElasticStiffnessNPerM: update?.wallBarrierElasticStiffnessNPerM ?? DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
     wallBarrierElasticStiffnessSource: update?.wallBarrierElasticStiffnessSource ?? null,
+    wallBarrierContactMaterialPolicySchema: update?.wallBarrierContactMaterialPolicySchema ?? null,
+    wallBarrierContactMaterialPolicyStatus: update?.wallBarrierContactMaterialPolicyStatus ?? null,
+    wallBarrierContactMaterialPolicySource: update?.wallBarrierContactMaterialPolicySource ?? null,
+    wallBarrierContactAlgorithmRowsSchema: update?.wallBarrierContactAlgorithmRowsSchema ?? null,
+    wallBarrierContactAlgorithmRowStatus: update?.wallBarrierContactAlgorithmRowStatus ?? null,
+    wallBarrierContactAlgorithmPairKey: update?.wallBarrierContactAlgorithmPairKey ?? null,
+    wallBarrierContactAlgorithmMaterials: update?.wallBarrierContactAlgorithmMaterials ?? [],
+    wallBarrierContactAlgorithmPhases: update?.wallBarrierContactAlgorithmPhases ?? [],
+    wallBarrierContactAlgorithmNormalStiffnessPa: update?.wallBarrierContactAlgorithmNormalStiffnessPa ?? 0,
     wallBarrierBulkModulusPa: update?.wallBarrierBulkModulusPa ?? 0,
     wallBarrierShearModulusPa: update?.wallBarrierShearModulusPa ?? 0,
     wallBarrierSupportLengthM: update?.wallBarrierSupportLengthM ?? 0,
@@ -1157,6 +1272,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
   wallBarrierMaterialBulkModulusPa = 0,
   wallBarrierMaterialShearModulusPa = 0,
+  algorithmMaterialContactRows = null,
   wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
   wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   preferWebGpu = false,
@@ -1182,6 +1298,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         wallBarrierElasticStiffnessNPerM,
         wallBarrierMaterialBulkModulusPa,
         wallBarrierMaterialShearModulusPa,
+        algorithmMaterialContactRows,
         wallBarrierContactScale,
         wallBarrierMinGapM,
         pressureInterfaceForceSolver,
@@ -1253,6 +1370,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       wallBarrierElasticStiffnessNPerM,
       wallBarrierMaterialBulkModulusPa,
       wallBarrierMaterialShearModulusPa,
+      algorithmMaterialContactRows,
       wallBarrierContactScale,
       wallBarrierMinGapM,
       retainUpdatedGridBuffer,

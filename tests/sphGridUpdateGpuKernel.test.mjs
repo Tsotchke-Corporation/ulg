@@ -16,6 +16,7 @@ import {
   createMlsMpmGridUpdateParityReport,
   estimateMlsMpmWallBarrierElasticStiffness,
   mlsMpmWallBarrierContactResponse,
+  resolveWallBarrierContactMaterialPolicy,
   runMlsMpmGridUpdateWebGpu,
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
@@ -74,6 +75,30 @@ function pressureInterfaceForceSolverFixture({
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
     forceRowCount: 1,
     forceRowValues: forceRowValuesOverride || forceRowValues
+  };
+}
+
+function algorithmContactRowsFixture({
+  normalStiffnessPa = 3.5e6,
+  pairKey = 'drop:Na|base:h2o'
+} = {}) {
+  return {
+    schema: 'peercompute.ulg.algorithm-material-contact-rows.v0',
+    status: 'algorithm-derived-contact-rows-ready',
+    rowCount: 1,
+    rows: [
+      {
+        schema: 'peercompute.ulg.algorithm-material-contact-row.v0',
+        status: 'algorithm-derived-contact-row-ready',
+        pairKey,
+        roles: ['drop', 'base'],
+        materials: ['Na', 'h2o'],
+        phases: ['solid', 'liquid'],
+        normalStiffnessPa,
+        supportRadiusM: 0.25,
+        forceMutationAuthority: 'not-authoritative-contact-policy-row'
+      }
+    ]
   };
 }
 
@@ -222,6 +247,31 @@ test('MLS-MPM wall barrier response applies cubic-barrier dynamic stiffness', ()
   assert.ok(estimatedElasticity.elasticNormalStiffnessNPerM > 0);
 });
 
+test('MLS-MPM wall barrier policy derives stiffness from algorithm contact rows', () => {
+  const rows = algorithmContactRowsFixture({ normalStiffnessPa: 7e6 });
+  const policy = resolveWallBarrierContactMaterialPolicy({
+    algorithmMaterialContactRows: rows,
+    supportLengthM: 0.25
+  });
+  assert.equal(policy.status, 'wall-barrier-contact-material-policy-algorithm-contact-row');
+  assert.equal(policy.source, 'algorithm-contact-row-normal-stiffness-support');
+  assert.equal(policy.algorithmContactRowsSchema, rows.schema);
+  assert.equal(policy.algorithmContactRowStatus, 'algorithm-derived-contact-row-ready');
+  assert.equal(policy.algorithmContactPairKey, 'drop:Na|base:h2o');
+  assert.deepEqual(policy.algorithmContactMaterials, ['Na', 'h2o']);
+  assert.equal(policy.algorithmContactNormalStiffnessPa, 7e6);
+  assert.equal(policy.wallBarrierElasticStiffnessNPerM, 7e6 * 0.25);
+
+  const explicit = resolveWallBarrierContactMaterialPolicy({
+    algorithmMaterialContactRows: rows,
+    supportLengthM: 0.25,
+    wallBarrierElasticStiffnessNPerM: 123
+  });
+  assert.equal(explicit.status, 'wall-barrier-contact-material-policy-explicit-stiffness');
+  assert.equal(explicit.source, 'explicit-normal-stiffness');
+  assert.equal(explicit.wallBarrierElasticStiffnessNPerM, 123);
+});
+
 test('CPU MLS-MPM grid update converts momentum to velocity and applies gravity', () => {
   const p2gGridProjection = manualP2gProjection({ nodePosition: [2, 2, 2] });
   const update = updateMlsMpmGridCpu({
@@ -277,6 +327,24 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
   assert.equal(wall.wallBarrierContactNodeCount, 1);
   assert.ok(wall.wallBarrierContactMaxResponseAlpha > 0.999);
   assert.ok(wall.wallBarrierContactMaxNormalStiffness > 0);
+
+  const rowDrivenWall = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [3, -4, 5], nodePosition: [2, 0, 2] }),
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 10,
+    algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 4.4e6 })
+  });
+  assert.equal(rowDrivenWall.wallBarrierElasticStiffnessSource, 'algorithm-contact-row-normal-stiffness-support');
+  assert.equal(rowDrivenWall.wallBarrierContactMaterialPolicyStatus, 'wall-barrier-contact-material-policy-algorithm-contact-row');
+  assert.equal(rowDrivenWall.wallBarrierContactAlgorithmPairKey, 'drop:Na|base:h2o');
+  assert.deepEqual(rowDrivenWall.wallBarrierContactAlgorithmMaterials, ['Na', 'h2o']);
+  assert.equal(rowDrivenWall.wallBarrierContactAlgorithmNormalStiffnessPa, 4.4e6);
+  assert.equal(rowDrivenWall.wallBarrierBulkModulusPa, 4.4e6);
+  assert.equal(rowDrivenWall.wallBarrierShearModulusPa, 0);
+  assert.equal(rowDrivenWall.wallBarrierSupportLengthM, 1);
+  assert.ok(rowDrivenWall.wallBarrierElasticStiffnessNPerM > 0);
 });
 
 test('CPU MLS-MPM grid update leaves the first interior floor row free for liquid spreading', () => {
@@ -328,6 +396,34 @@ test('optional MLS-MPM grid update returns CPU reference when WebGPU is not requ
   assert.equal(execution.gridShift, 1);
   assert.equal(execution.webgpuStatus.status, 'not-requested');
   assert.equal(execution.fullPhysicsValidation, false);
+});
+
+test('optional MLS-MPM grid update carries algorithm contact row wall policy', async () => {
+  const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [0, -8, 0], nodePosition: [1, 0, 1] }),
+    preferWebGpu: false,
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    cflFactor: 10,
+    algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 2.25e6 }),
+    navigatorRef: {
+      gpu: {
+        async requestAdapter() {
+          throw new Error('should not request WebGPU');
+        }
+      }
+    }
+  });
+
+  assert.equal(execution.backend, 'cpu-reference');
+  assert.equal(execution.wallBarrierElasticStiffnessSource, 'algorithm-contact-row-normal-stiffness-support');
+  assert.equal(
+    execution.wallBarrierContactMaterialPolicyStatus,
+    'wall-barrier-contact-material-policy-algorithm-contact-row'
+  );
+  assert.equal(execution.wallBarrierContactAlgorithmRowsSchema, 'peercompute.ulg.algorithm-material-contact-rows.v0');
+  assert.equal(execution.wallBarrierContactAlgorithmPairKey, 'drop:Na|base:h2o');
+  assert.equal(execution.wallBarrierContactAlgorithmNormalStiffnessPa, 2.25e6);
 });
 
 test('optional MLS-MPM grid update falls back when WebGPU is unavailable', async () => {

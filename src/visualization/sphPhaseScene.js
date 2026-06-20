@@ -12786,6 +12786,7 @@ export function createSphPhaseScene(container, {
           gravityMPerS2,
           boxDimsM: dims,
           cflFactor,
+          algorithmMaterialContactRows: mlsMpmGpuParticleState?.algorithmMaterialContactRows ?? null,
           preferWebGpu,
           navigatorRef: overrideNavigatorRef,
           device,

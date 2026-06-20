@@ -36,6 +36,19 @@ physics loop is incoherent.
 ## Active Priority Order
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
+draw now consumes the compact algorithm surface-extraction rows emitted by
+MLS-MPM packing. `createUlgRenderFieldBufferVolumeDescriptor()` selects the
+drop/base row by render-domain role, falls back by material/phase, and uses the
+row `isovalue` for native buffer-volume extraction while publishing
+surface-policy diagnostics into scene and native extraction summaries. The
+follow-on contact slice now feeds `algorithmMaterialContactRows` into the
+MLS-MPM wall-barrier grid update as a non-authoritative
+elasticity-inclusive stiffness source when no explicit wall stiffness/modulus
+override is supplied. Continue contact work by extending material-interface
+pair response inside the mechanics update path, not by adding renderer
+overlays or post-hoc position fixes.
+
+Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw metadata now distinguishes material `surfaceIndex` from the compact
 extension's single retained indirect draw row. Extension surfaces publish
 `indirectRowIndex=0` / `indirectOffsetBytes=0`, and the native draw order uses

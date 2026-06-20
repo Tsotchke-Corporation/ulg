@@ -2,6 +2,15 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-20 AKDT: compact algorithm-derived rows are now
+crossing into active runtime consumers. Surface extraction rows feed native
+marching-cubes buffer-volume descriptors and isovalue selection; contact rows
+feed MLS-MPM wall-barrier stiffness derivation when explicit wall material
+overrides are absent. The next physics target is material-interface/contact
+pair response in the mechanics update path. The next rendering target remains
+native WebGPU validation/presentation evidence, not an overlay or CPU mesh
+fallback.
+
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
 now cached as a resident WebGPU upload instead of being rebuilt inside every
 thermal mechanics-refresh substep. `runMlsMpmMechanicsRefreshWebGpu()` accepts

@@ -1,5 +1,45 @@
 # ULG Implementation Log
 
+## 2026-06-20 05:55 AKDT - Algorithm Row Runtime Consumers
+
+Status:
+
+- Wired `algorithmMaterialSurfaceExtractionRows` into native render-field
+  buffer-volume descriptor creation. The descriptor now selects a policy row
+  by drop/base render-domain role or material/phase, uses the row isovalue for
+  native marching-cubes extraction, and publishes row policy diagnostics in
+  scene/native extraction summaries.
+- Added `resolveWallBarrierContactMaterialPolicy()` so MLS-MPM grid update can
+  consume compact `algorithmMaterialContactRows` as a non-authoritative
+  wall-barrier stiffness source when explicit wall stiffness/modulus overrides
+  are absent.
+- Threaded contact rows from `mlsMpmParticleState` through resident step,
+  mechanics-only resident step, and scene direct grid-update calls.
+- Resident grid-update diagnostics now report contact-row schema, row status,
+  pair key, materials, phases, normal stiffness, and policy source.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --test tests/sphGridUpdateGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` reported `79/79`.
+- PASS: `node --test tests/sphGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+  reported `78/78`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs
+  tests/nativeSurfaceHarness.test.mjs` reported `22/22`.
+- PASS: `npm run test:physics-atomics` reported `11/14` with three expected
+  opt-in long-horizon skips.
+
+Next:
+
+- Extend contact-row consumption from wall-barrier stiffness into
+  material-interface/contact pair response inside the mechanics update path.
+- Keep native surface work focused on validation/presentation evidence and
+  avoid renderer overlays or CPU mesh revival.
+
 ## 2026-06-19 23:32 AKDT - Material Bank Generator First Tranche
 
 Status:

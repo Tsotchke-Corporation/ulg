@@ -104,7 +104,8 @@ function manualBuffers({
   massKg = 8,
   smoothingLengthM = 1,
   restDensityKgPerM3 = 8,
-  mechanicsDtS = 0.1
+  mechanicsDtS = 0.1,
+  algorithmMaterialContactRows = null
 } = {}) {
   const state = new Float32Array([
     position[0], position[1], position[2], massKg,
@@ -136,7 +137,8 @@ function manualBuffers({
       mechanicsDtS,
       gridCflFactor: 10,
       gravityMPerS2: [0, 0, 0],
-      mechanics
+      mechanics,
+      algorithmMaterialContactRows
     }
   };
 }
@@ -197,6 +199,30 @@ function pressureInterfaceGridForceAdmissionFixture({
     hotBufferKey: sourceHotBufferKey,
     pressureInterfaceForceRowCount: forceRowCount,
     outputFamilies: ['pressure-interface-force-rows']
+  };
+}
+
+function algorithmContactRowsFixture({
+  normalStiffnessPa = 3.5e6,
+  pairKey = 'drop:Na|base:h2o'
+} = {}) {
+  return {
+    schema: 'peercompute.ulg.algorithm-material-contact-rows.v0',
+    status: 'algorithm-derived-contact-rows-ready',
+    rowCount: 1,
+    rows: [
+      {
+        schema: 'peercompute.ulg.algorithm-material-contact-row.v0',
+        status: 'algorithm-derived-contact-row-ready',
+        pairKey,
+        roles: ['drop', 'base'],
+        materials: ['Na', 'h2o'],
+        phases: ['solid', 'liquid'],
+        normalStiffnessPa,
+        supportRadiusM: 0.25,
+        forceMutationAuthority: 'not-authoritative-contact-policy-row'
+      }
+    ]
   };
 }
 
@@ -769,6 +795,36 @@ test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not
   assert.ok(step.state instanceof Float32Array);
   assert.ok(step.mechanics instanceof Float32Array);
   assert.equal(step.fullPhysicsValidation, false);
+});
+
+test('MLS-MPM resident step derives wall barrier policy from algorithm contact rows', async () => {
+  const buffers = manualBuffers({
+    position: [1.25, 0.25, 1.25],
+    velocity: [0, -3, 0],
+    smoothingLengthM: 0.5,
+    mechanicsDtS: 0.1,
+    algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 6.5e6 })
+  });
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    preferWebGpu: false,
+    gridSpacingM: 0.5,
+    boxDimsM: [3, 3, 3],
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    cflFactor: 10
+  });
+
+  assert.equal(step.gridUpdate.wallBarrierElasticStiffnessSource, 'algorithm-contact-row-normal-stiffness-support');
+  assert.equal(
+    step.gridUpdate.wallBarrierContactMaterialPolicyStatus,
+    'wall-barrier-contact-material-policy-algorithm-contact-row'
+  );
+  assert.equal(step.gridUpdate.wallBarrierContactAlgorithmPairKey, 'drop:Na|base:h2o');
+  assert.equal(step.gridUpdate.wallBarrierContactAlgorithmNormalStiffnessPa, 6.5e6);
+  assert.equal(step.wallBarrierContactMaterialPolicyStatus, 'wall-barrier-contact-material-policy-algorithm-contact-row');
+  assert.equal(step.wallBarrierContactAlgorithmPairKey, 'drop:Na|base:h2o');
+  assert.equal(step.diagnostics.wallBarrierContactMaterialPolicyStatus, 'wall-barrier-contact-material-policy-algorithm-contact-row');
 });
 
 test('MLS-MPM resident step preserves shifted grid origin into G2P', async () => {

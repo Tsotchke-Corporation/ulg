@@ -3513,6 +3513,16 @@ function wallBarrierContactDiagnostics(gridUpdate) {
     wallBarrierContactStatus: gridUpdate?.wallBarrierContactStatus ?? null,
     wallBarrierContactMode: gridUpdate?.wallBarrierContactMode ?? null,
     wallBarrierElasticStiffnessNPerM: gridUpdate?.wallBarrierElasticStiffnessNPerM ?? 0,
+    wallBarrierElasticStiffnessSource: gridUpdate?.wallBarrierElasticStiffnessSource ?? null,
+    wallBarrierContactMaterialPolicySchema: gridUpdate?.wallBarrierContactMaterialPolicySchema ?? null,
+    wallBarrierContactMaterialPolicyStatus: gridUpdate?.wallBarrierContactMaterialPolicyStatus ?? null,
+    wallBarrierContactMaterialPolicySource: gridUpdate?.wallBarrierContactMaterialPolicySource ?? null,
+    wallBarrierContactAlgorithmRowsSchema: gridUpdate?.wallBarrierContactAlgorithmRowsSchema ?? null,
+    wallBarrierContactAlgorithmRowStatus: gridUpdate?.wallBarrierContactAlgorithmRowStatus ?? null,
+    wallBarrierContactAlgorithmPairKey: gridUpdate?.wallBarrierContactAlgorithmPairKey ?? null,
+    wallBarrierContactAlgorithmMaterials: gridUpdate?.wallBarrierContactAlgorithmMaterials ?? [],
+    wallBarrierContactAlgorithmPhases: gridUpdate?.wallBarrierContactAlgorithmPhases ?? [],
+    wallBarrierContactAlgorithmNormalStiffnessPa: gridUpdate?.wallBarrierContactAlgorithmNormalStiffnessPa ?? 0,
     wallBarrierContactScale: gridUpdate?.wallBarrierContactScale ?? 0,
     wallBarrierMinGapM: gridUpdate?.wallBarrierMinGapM ?? 0,
     wallBarrierContactNodeCount: gridUpdate?.wallBarrierContactNodeCount ?? 0,
@@ -11786,6 +11796,16 @@ async function residentStepEnvelope({
     wallBarrierContactStatus: gridUpdate?.wallBarrierContactStatus ?? null,
     wallBarrierContactMode: gridUpdate?.wallBarrierContactMode ?? null,
     wallBarrierElasticStiffnessNPerM: gridUpdate?.wallBarrierElasticStiffnessNPerM ?? 0,
+    wallBarrierElasticStiffnessSource: gridUpdate?.wallBarrierElasticStiffnessSource ?? null,
+    wallBarrierContactMaterialPolicySchema: gridUpdate?.wallBarrierContactMaterialPolicySchema ?? null,
+    wallBarrierContactMaterialPolicyStatus: gridUpdate?.wallBarrierContactMaterialPolicyStatus ?? null,
+    wallBarrierContactMaterialPolicySource: gridUpdate?.wallBarrierContactMaterialPolicySource ?? null,
+    wallBarrierContactAlgorithmRowsSchema: gridUpdate?.wallBarrierContactAlgorithmRowsSchema ?? null,
+    wallBarrierContactAlgorithmRowStatus: gridUpdate?.wallBarrierContactAlgorithmRowStatus ?? null,
+    wallBarrierContactAlgorithmPairKey: gridUpdate?.wallBarrierContactAlgorithmPairKey ?? null,
+    wallBarrierContactAlgorithmMaterials: gridUpdate?.wallBarrierContactAlgorithmMaterials ?? [],
+    wallBarrierContactAlgorithmPhases: gridUpdate?.wallBarrierContactAlgorithmPhases ?? [],
+    wallBarrierContactAlgorithmNormalStiffnessPa: gridUpdate?.wallBarrierContactAlgorithmNormalStiffnessPa ?? 0,
     wallBarrierContactScale: gridUpdate?.wallBarrierContactScale ?? 0,
     wallBarrierMinGapM: gridUpdate?.wallBarrierMinGapM ?? 0,
     wallBarrierContactNodeCount: gridUpdate?.wallBarrierContactNodeCount ?? 0,
@@ -11964,6 +11984,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
+  const algorithmMaterialContactRows = mlsMpmParticleState?.algorithmMaterialContactRows ?? null;
   const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
   const resolvedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
@@ -12126,6 +12147,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     gravityMPerS2: gravity,
     boxDimsM: dims,
     cflFactor,
+    algorithmMaterialContactRows,
     preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !lostInfo,
     navigatorRef,
     device: resolvedDevice,
@@ -12514,6 +12536,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
+  const algorithmMaterialContactRows = mlsMpmParticleState?.algorithmMaterialContactRows ?? null;
   const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
   const residentLaneCopyBudget = gpuResidentLaneCopyBudgetOverride || estimateResidentGpuLaneCopyBudget({
@@ -12639,6 +12662,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       gravityMPerS2: gravity,
       boxDimsM: dims,
       cflFactor,
+      algorithmMaterialContactRows,
       preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !lostInfo,
       navigatorRef,
       device: resolvedDevice,

@@ -29920,3 +29920,30 @@ Remaining:
 
 - Broaden long-horizon browser coverage beyond Na/H2O and beyond this focused
   three-pass sequence.
+
+## 2026-06-19 AKDT - Native Surface Validation Scope Guard
+
+Status:
+
+- Split native WebGPU surface validation cadence into explicit scopes:
+  `native-surface-draw`, `native-current-texture-debug-clear`, and
+  `native-no-submitted-draws`.
+- Debug clear-only now reports that it can exercise current-texture/readback
+  smoke validation but skips offscreen surface-draw geometry validation unless
+  real surface draws were submitted.
+- The native render bridge now publishes validation scope, offscreen
+  eligibility, and offscreen skip reason into surface-draw and render-state
+  diagnostics, so browser probes can distinguish canvas/texture smoke from a
+  real visible native surface pass.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU surface validation cadence|visible GPU surface consumer"` with `68/68`.
+
+Remaining:
+
+- Use the new scope diagnostics in the mounted native/mobile probes; do not
+  promote the native visible consumer from debug clear-only evidence.

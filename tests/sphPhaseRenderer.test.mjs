@@ -2694,7 +2694,66 @@ test('SPH native WebGPU surface validation cadence stops after pass or retry exh
   assert.equal(initial.validationEncoderRequired, true);
   assert.equal(initial.readbackSmokeValidationNeeded, true);
   assert.equal(initial.offscreenValidationNeeded, true);
+  assert.equal(initial.offscreenValidationEligible, true);
+  assert.equal(initial.validationScope, 'native-surface-draw');
   assert.equal(initial.status, 'native-webgpu-surface-validation-needed');
+
+  const debugClearOnly = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 0,
+    debugClearOnly: true,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'not-run',
+    readbackSmokeValidationAttemptCount: 0,
+    offscreenValidationStatus: 'not-run',
+    offscreenValidationAttemptCount: 0
+  });
+  assert.equal(debugClearOnly.validationEncoderRequired, true);
+  assert.equal(debugClearOnly.readbackSmokeValidationNeeded, true);
+  assert.equal(debugClearOnly.offscreenValidationNeeded, false);
+  assert.equal(debugClearOnly.offscreenValidationEligible, false);
+  assert.equal(debugClearOnly.debugClearOnly, true);
+  assert.equal(debugClearOnly.validationScope, 'native-current-texture-debug-clear');
+  assert.match(
+    debugClearOnly.offscreenValidationSkippedReason,
+    /debug clear-only validates the current texture/
+  );
+  assert.equal(debugClearOnly.status, 'native-webgpu-surface-validation-needed');
+
+  const debugClearOnlyReadbackPassed = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 0,
+    debugClearOnly: true,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'passed',
+    readbackSmokeValidationFormat: 'rgba8unorm',
+    offscreenValidationStatus: 'not-run',
+    offscreenValidationAttemptCount: 0
+  });
+  assert.equal(debugClearOnlyReadbackPassed.validationEncoderRequired, false);
+  assert.equal(debugClearOnlyReadbackPassed.readbackSmokeValidationNeeded, false);
+  assert.equal(debugClearOnlyReadbackPassed.offscreenValidationNeeded, false);
+  assert.equal(debugClearOnlyReadbackPassed.offscreenValidationEligible, false);
+  assert.equal(debugClearOnlyReadbackPassed.validationScope, 'native-current-texture-debug-clear');
+  assert.equal(
+    debugClearOnlyReadbackPassed.status,
+    'native-webgpu-surface-validation-debug-clear-only'
+  );
+
+  const noSurfaceDraws = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 0,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'passed',
+    readbackSmokeValidationFormat: 'rgba8unorm',
+    offscreenValidationStatus: 'not-run',
+    offscreenValidationAttemptCount: 0
+  });
+  assert.equal(noSurfaceDraws.validationEncoderRequired, false);
+  assert.equal(noSurfaceDraws.offscreenValidationNeeded, false);
+  assert.equal(noSurfaceDraws.offscreenValidationEligible, false);
+  assert.equal(noSurfaceDraws.validationScope, 'native-no-submitted-draws');
+  assert.equal(noSurfaceDraws.status, 'native-webgpu-surface-validation-no-surface-draws');
 
   const passed = resolveSphNativeWebGpuSurfaceValidationCadence({
     rendererBridge: 'native-webgpu-surface-consumer',

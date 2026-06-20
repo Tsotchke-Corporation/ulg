@@ -132,6 +132,13 @@ Tactical status, 2026-06-19 AKDT:
   This removes another repeated validation-work loop while preserving the
   same-device visible-consumer validation gate; remaining throughput work is
   still resident sequencing/cadence and native extraction variability.
+- Native WebGPU validation cadence now carries explicit validation scope.
+  Debug clear-only is `native-current-texture-debug-clear`: it can run the
+  standalone same-device readback smoke path, but it reports offscreen surface
+  geometry validation as ineligible until real retained surface draws are
+  submitted. Surface-draw/render-state diagnostics now expose validation scope,
+  offscreen eligibility, and offscreen skip reason, preventing current-texture
+  smoke evidence from being mistaken for a promoted visible surface consumer.
 - Native WebGPU surface presentation now reuses compatible main-canvas render
   bridges instead of rebuilding static shader modules, layouts, render
   pipelines, sampler, camera buffer, and optical lookup buffers on every

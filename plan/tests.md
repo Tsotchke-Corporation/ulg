@@ -11620,3 +11620,17 @@ Consecutive resident reaction pressure sequence, 2026-06-19 AKDT:
   - The consecutive pass keeps promoted pressure source
     `gpu-resident-pressure-interface-spatial-gas-ledger`, pressure above
     baseline, and render-state pressure input from the promoted summary.
+
+Native surface validation scope guard, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Focused renderer suite:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native WebGPU surface validation cadence|visible GPU surface consumer"`
+  - Passed: `68/68`.
+  - Added native cadence assertions for `native-surface-draw`,
+    `native-current-texture-debug-clear`, and `native-no-submitted-draws`.
+  - Debug clear-only keeps readback-smoke validation eligible while reporting
+    offscreen surface geometry validation as skipped until real surface draws
+    are submitted.

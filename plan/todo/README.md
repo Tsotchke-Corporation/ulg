@@ -145,6 +145,9 @@ non-noble targets remaining.
 Heavy post-transition coverage now reaches `Ra`; `Hg`, `Tl`, `Pb`, `Bi`,
 `Po`, `At`, `Fr`, and `Ra` bring the bank to 82 rows with 29 selectable
 non-noble targets remaining.
+The first actinide tranche reaches `Cm`; `Ac`, `Th`, `Pa`, `U`, `Np`, `Pu`,
+`Am`, and `Cm` bring the bank to 90 rows with 21 selectable non-noble targets
+remaining.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

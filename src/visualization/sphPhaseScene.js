@@ -67,6 +67,11 @@ import {
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
+  destroyMlsMpmMechanicsMaterialPhaseUpload,
+  uploadMlsMpmMechanicsMaterialPhaseRecords
+} from '../runtime/sph/sphMechanicsRefreshGpuKernel.js';
+import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
@@ -5474,6 +5479,9 @@ export function createSphPhaseScene(container, {
   let sphThermalResponseGraphUploadSignature = null;
   let pendingSphThermalResponseGraphUpload = null;
   let mlsMpmMechanicsMaterialTable = null;
+  let mlsMpmMechanicsMaterialPhaseUpload = null;
+  let mlsMpmMechanicsMaterialPhaseUploadSignature = null;
+  let pendingMlsMpmMechanicsMaterialPhaseUpload = null;
   let sphReactionTable = null;
   let currentMaterialProperties = null;
   let currentRenderDomainCounts = null;
@@ -5510,6 +5518,7 @@ export function createSphPhaseScene(container, {
   scene.userData.sphThermalPhaseResponseTable = null;
   scene.userData.sphThermalResponseGraphUpload = null;
   scene.userData.mlsMpmMechanicsMaterialTable = null;
+  scene.userData.mlsMpmMechanicsMaterialPhaseUpload = null;
   scene.userData.sphReactionTable = null;
   scene.userData.sphRenderDomainCounts = null;
   scene.userData.sphPhysicalLawGroups = null;
@@ -6929,6 +6938,18 @@ export function createSphPhaseScene(container, {
       Array.from(thermalPhaseResponseTable.responses || []).join(','),
       Array.from(graphBank.nodeRows || []).join(','),
       Array.from(graphBank.sampleRows || []).join(',')
+    ].join('|');
+  }
+
+  function mlsMpmMechanicsMaterialPhaseSignature({
+    mechanicsMaterialTable = mlsMpmMechanicsMaterialTable
+  } = {}) {
+    if (!mechanicsMaterialTable?.schema || !mechanicsMaterialTable.records) return null;
+    return [
+      mechanicsMaterialTable.schema,
+      mechanicsMaterialTable.phaseRecordCount ?? 0,
+      mechanicsMaterialTable.records.byteLength ?? 0,
+      Array.from(mechanicsMaterialTable.records || []).join(',')
     ].join('|');
   }
 
@@ -11669,6 +11690,101 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshMlsMpmMechanicsMaterialPhaseUpload({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null
+  } = {}) {
+    const signature = mlsMpmMechanicsMaterialPhaseSignature();
+    if (!signature) {
+      if (mlsMpmMechanicsMaterialPhaseUpload?.status === 'webgpu-uploaded') {
+        destroyMlsMpmMechanicsMaterialPhaseUpload(mlsMpmMechanicsMaterialPhaseUpload);
+      }
+      mlsMpmMechanicsMaterialPhaseUpload = null;
+      mlsMpmMechanicsMaterialPhaseUploadSignature = null;
+      scene.userData.mlsMpmMechanicsMaterialPhaseUpload = null;
+      return null;
+    }
+    if (
+      !force
+      && mlsMpmMechanicsMaterialPhaseUploadSignature === signature
+      && mlsMpmMechanicsMaterialPhaseUpload
+    ) {
+      return mlsMpmMechanicsMaterialPhaseUpload;
+    }
+    if (!force && pendingMlsMpmMechanicsMaterialPhaseUpload?.signature === signature) {
+      return pendingMlsMpmMechanicsMaterialPhaseUpload.promise;
+    }
+    const promise = (async () => {
+      if (!preferWebGpu) {
+        const upload = {
+          schema: ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
+          status: 'not-requested',
+          sourceMaterialTableSchema: mlsMpmMechanicsMaterialTable?.schema ?? null,
+          phaseRecordCount: mlsMpmMechanicsMaterialTable?.phaseRecordCount ?? 0,
+          recordsByteLength: mlsMpmMechanicsMaterialTable?.records?.byteLength ?? 0,
+          reason: 'WebGPU MLS-MPM mechanics material phase upload not requested',
+          scientificValidation: false,
+          materialValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        };
+        mlsMpmMechanicsMaterialPhaseUpload = upload;
+        mlsMpmMechanicsMaterialPhaseUploadSignature = signature;
+        scene.userData.mlsMpmMechanicsMaterialPhaseUpload = upload;
+        return upload;
+      }
+      const resolvedDeviceResult = device
+        ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+        : (deviceResult || await requestCachedOpticalGpuDevice(overrideNavigatorRef));
+      if (!resolvedDeviceResult.device) {
+        const upload = {
+          schema: ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
+          status: resolvedDeviceResult.status,
+          sourceMaterialTableSchema: mlsMpmMechanicsMaterialTable?.schema ?? null,
+          phaseRecordCount: mlsMpmMechanicsMaterialTable?.phaseRecordCount ?? 0,
+          recordsByteLength: mlsMpmMechanicsMaterialTable?.records?.byteLength ?? 0,
+          reason: resolvedDeviceResult.reason,
+          fallback: 'cpu-packed-mechanics-material-phase-records',
+          scientificValidation: false,
+          materialValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        };
+        mlsMpmMechanicsMaterialPhaseUpload = upload;
+        mlsMpmMechanicsMaterialPhaseUploadSignature = signature;
+        scene.userData.mlsMpmMechanicsMaterialPhaseUpload = upload;
+        return upload;
+      }
+      const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(
+        resolvedDeviceResult.device,
+        mlsMpmMechanicsMaterialTable
+      );
+      upload.signature = signature;
+      if (!running || mlsMpmMechanicsMaterialPhaseSignature() !== signature) {
+        destroyMlsMpmMechanicsMaterialPhaseUpload(upload);
+        return { ...upload, status: 'stale-upload-discarded' };
+      }
+      if (mlsMpmMechanicsMaterialPhaseUpload?.status === 'webgpu-uploaded') {
+        destroyMlsMpmMechanicsMaterialPhaseUpload(mlsMpmMechanicsMaterialPhaseUpload);
+      }
+      mlsMpmMechanicsMaterialPhaseUpload = upload;
+      mlsMpmMechanicsMaterialPhaseUploadSignature = signature;
+      scene.userData.mlsMpmMechanicsMaterialPhaseUpload = upload;
+      return upload;
+    })();
+    pendingMlsMpmMechanicsMaterialPhaseUpload = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmMechanicsMaterialPhaseUpload?.promise === promise) {
+        pendingMlsMpmMechanicsMaterialPhaseUpload = null;
+      }
+    }
+  }
+
   async function refreshMlsMpmMechanicsPrediction({
     preferWebGpu = true,
     force = false,
@@ -12168,6 +12284,14 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphThermalResponseGraphUpload;
+      const resolvedMechanicsMaterialPhaseUpload = preferWebGpu
+        ? await refreshMlsMpmMechanicsMaterialPhaseUpload({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmMechanicsMaterialPhaseUpload;
       let resolvedPressureForceRowsUpload = null;
       let pressureForceRowsBorrow = null;
       try {
@@ -12217,6 +12341,9 @@ export function createSphPhaseScene(container, {
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+          },
+          mechanicsRefreshOptions: {
+            mechanicsMaterialPhaseUpload: resolvedMechanicsMaterialPhaseUpload
           },
           reactionTable: effectiveReactionTable,
           reactionStepOptions: {
@@ -12529,6 +12656,18 @@ export function createSphPhaseScene(container, {
         uploadStatus: resolvedThermalResponseGraphUpload?.status ?? null,
         graphCount: resolvedThermalResponseGraphUpload?.graphCount ?? null
       });
+      const resolvedMechanicsMaterialPhaseUpload = preferWebGpu
+        ? await refreshMlsMpmMechanicsMaterialPhaseUpload({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmMechanicsMaterialPhaseUpload;
+      markResidentStepsProgress('resident-steps-mechanics-material-upload-ready', {
+        uploadStatus: resolvedMechanicsMaterialPhaseUpload?.status ?? null,
+        phaseRecordCount: resolvedMechanicsMaterialPhaseUpload?.phaseRecordCount ?? null
+      });
       let resolvedPressureForceRowsUpload = null;
       let pressureForceRowsBorrow = null;
       try {
@@ -12588,6 +12727,9 @@ export function createSphPhaseScene(container, {
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload,
             wallTemperaturesK: currentWallTemperaturesK || {},
             ...(thermalStepOptionOverrides || {})
+          },
+          mechanicsRefreshOptions: {
+            mechanicsMaterialPhaseUpload: resolvedMechanicsMaterialPhaseUpload
           },
           reactionTable: effectiveReactionTable,
           reactionStepOptions: {
@@ -14188,6 +14330,18 @@ export function createSphPhaseScene(container, {
         })
         : null
     ));
+    const nextMechanicsMaterialPhaseSignature = mlsMpmMechanicsMaterialPhaseSignature();
+    if (
+      mlsMpmMechanicsMaterialPhaseUpload
+      && mlsMpmMechanicsMaterialPhaseUploadSignature !== nextMechanicsMaterialPhaseSignature
+    ) {
+      if (mlsMpmMechanicsMaterialPhaseUpload.status === 'webgpu-uploaded') {
+        destroyMlsMpmMechanicsMaterialPhaseUpload(mlsMpmMechanicsMaterialPhaseUpload);
+      }
+      mlsMpmMechanicsMaterialPhaseUpload = null;
+      mlsMpmMechanicsMaterialPhaseUploadSignature = null;
+      scene.userData.mlsMpmMechanicsMaterialPhaseUpload = null;
+    }
     const nextThermalResponseGraphSignature = sphThermalResponseGraphSignature();
     if (
       sphThermalResponseGraphUpload
@@ -14250,6 +14404,7 @@ export function createSphPhaseScene(container, {
     scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
     scene.userData.sphThermalResponseGraphUpload = sphThermalResponseGraphUpload;
     scene.userData.mlsMpmMechanicsMaterialTable = mlsMpmMechanicsMaterialTable;
+    scene.userData.mlsMpmMechanicsMaterialPhaseUpload = mlsMpmMechanicsMaterialPhaseUpload;
     scene.userData.sphReactionTable = sphReactionTable;
     if (shouldRetainResidentSurfaceDrawOverlay({
       previousSurfaceBatchSignature: currentSurfaceBatchIdentitySignature,
@@ -19185,6 +19340,9 @@ export function createSphPhaseScene(container, {
     if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
       destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
     }
+    if (mlsMpmMechanicsMaterialPhaseUpload?.status === 'webgpu-uploaded') {
+      destroyMlsMpmMechanicsMaterialPhaseUpload(mlsMpmMechanicsMaterialPhaseUpload);
+    }
     clearMlsMpmResidentExecutionArtifacts();
     clearSphResidentSurfaceDrawArtifacts();
     flushNativeMarchingCubesAdapterCaches('sph-phase-scene-dispose');
@@ -19234,6 +19392,9 @@ export function createSphPhaseScene(container, {
     },
     getMlsMpmMechanicsMaterialTable() {
       return mlsMpmMechanicsMaterialTable;
+    },
+    getMlsMpmMechanicsMaterialPhaseUpload() {
+      return mlsMpmMechanicsMaterialPhaseUpload;
     },
     getSphReactionTable() {
       return sphReactionTable;

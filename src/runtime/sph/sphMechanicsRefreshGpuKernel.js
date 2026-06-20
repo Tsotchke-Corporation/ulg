@@ -17,6 +17,7 @@ import {
 } from './sphMechanicsMaterialTable.js';
 
 export const ULG_MLS_MPM_MECHANICS_REFRESH_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-refresh.v0';
+export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-phase-upload.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -102,6 +103,63 @@ function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
   });
 }
 
+export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('uploadMlsMpmMechanicsMaterialPhaseRecords requires a WebGPU-like device');
+  }
+  if (mechanicsMaterialTable?.schema !== ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA) {
+    throw new TypeError('MLS-MPM mechanics material phase upload requires a mechanics material table');
+  }
+  const recordsBuffer = writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-mechanics-material-phase-records',
+    mechanicsMaterialTable.records
+  );
+  let destroyed = false;
+  return {
+    schema: ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
+    status: 'webgpu-uploaded',
+    sourceMaterialTableSchema: mechanicsMaterialTable.schema,
+    phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
+    recordsByteLength: mechanicsMaterialTable.records.byteLength,
+    recordsBuffer,
+    materialPhaseBuffer: recordsBuffer,
+    destroyMechanicsMaterialPhaseUpload() {
+      if (destroyed) return;
+      destroyed = true;
+      recordsBuffer.destroy?.();
+      this.destroyed = true;
+    },
+    destroyed: false,
+    scientificValidation: false,
+    materialValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function destroyMlsMpmMechanicsMaterialPhaseUpload(upload) {
+  if (!upload) return;
+  if (typeof upload.destroyMechanicsMaterialPhaseUpload === 'function') {
+    upload.destroyMechanicsMaterialPhaseUpload();
+    return;
+  }
+  upload.recordsBuffer?.destroy?.();
+  upload.materialPhaseBuffer?.destroy?.();
+  upload.destroyed = true;
+}
+
+function uploadedMechanicsMaterialPhaseRecordsMatch(upload, mechanicsMaterialTable) {
+  return Boolean(
+    upload?.status === 'webgpu-uploaded'
+    && upload.destroyed !== true
+    && (upload.recordsBuffer || upload.materialPhaseBuffer)
+    && upload.sourceMaterialTableSchema === mechanicsMaterialTable?.schema
+    && upload.phaseRecordCount === mechanicsMaterialTable?.phaseRecordCount
+    && upload.recordsByteLength === mechanicsMaterialTable?.records?.byteLength
+  );
+}
+
 function createParamsArray({ particleCount, phaseRecordCount }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
@@ -136,6 +194,8 @@ function outputEnvelope({
   mechanics,
   mechanicsBuffer = null,
   mechanicsBufferByteLength = 0,
+  mechanicsMaterialPhaseUpload = null,
+  mechanicsMaterialPhaseUploadReused = false,
   retainedOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
@@ -154,6 +214,10 @@ function outputEnvelope({
     mechanics,
     mechanicsBuffer,
     mechanicsBufferByteLength,
+    mechanicsMaterialPhaseUploadStatus: mechanicsMaterialPhaseUpload?.status ?? null,
+    mechanicsMaterialPhaseUploadReused: Boolean(mechanicsMaterialPhaseUploadReused),
+    mechanicsMaterialPhaseRecordsByteLength: mechanicsMaterialPhaseUpload?.recordsByteLength
+      ?? mechanicsMaterialTable.records.byteLength,
     retainedOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
@@ -227,6 +291,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
   sphParticleState,
   mlsMpmParticleState,
   mechanicsMaterialTable,
+  mechanicsMaterialPhaseUpload = null,
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
   sourceStateBuffer = null,
@@ -246,11 +311,17 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-thermo', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-mechanics-refresh-source-mechanics', mlsMpmParticleState.mechanics);
-  const materialPhaseBuffer = writeStorageBuffer(
-    device,
-    'ulg-mls-mpm-mechanics-material-phase-records',
-    mechanicsMaterialTable.records
-  );
+  const borrowedMaterialPhaseUpload = uploadedMechanicsMaterialPhaseRecordsMatch(
+    mechanicsMaterialPhaseUpload,
+    mechanicsMaterialTable
+  )
+    ? mechanicsMaterialPhaseUpload
+    : null;
+  const localMaterialPhaseUpload = borrowedMaterialPhaseUpload
+    ? null
+    : uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable);
+  const materialPhaseUpload = borrowedMaterialPhaseUpload || localMaterialPhaseUpload;
+  const materialPhaseBuffer = materialPhaseUpload.recordsBuffer || materialPhaseUpload.materialPhaseBuffer;
   const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
   const outMechanicsBuffer = createOutputStorageBuffer(
     device,
@@ -307,7 +378,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-    materialPhaseBuffer.destroy?.();
+    if (localMaterialPhaseUpload) destroyMlsMpmMechanicsMaterialPhaseUpload(localMaterialPhaseUpload);
     paramsBuffer.destroy?.();
     if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
   };
@@ -324,6 +395,8 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     mechanics,
     mechanicsBuffer: outMechanicsBuffer,
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    mechanicsMaterialPhaseUpload: materialPhaseUpload,
+    mechanicsMaterialPhaseUploadReused: Boolean(borrowedMaterialPhaseUpload),
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,

@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
+now cached as a resident WebGPU upload instead of being rebuilt inside every
+thermal mechanics-refresh substep. `runMlsMpmMechanicsRefreshWebGpu()` accepts
+a borrowed `mechanicsMaterialPhaseUpload`, the SPH scene owns a signature-keyed
+`mlsMpmMechanicsMaterialPhaseUpload` cache next to the existing thermal graph
+upload, and the probe/benchmark flatten
+`mechanicsMaterialPhaseUploadStatus`, record count, and byte length. Focused
+coverage proves the refresh kernel reuses the uploaded rows without issuing
+another `queue.writeBuffer()` for
+`ulg-mls-mpm-mechanics-material-phase-records`. Fresh 10k-ish three-batch
+native evidence is `status=good`, `probeStatus=good`, zero browser console
+issues, zero readback bytes, `mechanicsMaterialPhaseUploadStatus=webgpu-uploaded`,
+`phaseRecordCount=8`, `recordsByteLength=384`, actual particles `9826`, mean
+batch `103.13 ms`, resident completed stage `2.8 ms`, thermal `0.2 ms`,
+mechanics refresh `0.3 ms`, visible native GPU consumer ready, active grid
+used, and bridge `reused=true`. This removes a repeated upload from the
+current thermal resident path while leaving the larger thermal-aware fused
+sequence/cadence migration as the next architectural target.
+
 Current checkpoint, 2026-06-19 AKDT: native WebGPU surface validation now has
 an explicit cadence gate instead of blindly creating a validation command
 encoder every render frame. The gate tracks readback-smoke and offscreen

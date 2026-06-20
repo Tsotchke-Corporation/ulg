@@ -52,6 +52,23 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Mechanics-refresh material phase rows now have a resident WebGPU upload
+  cache. `runMlsMpmMechanicsRefreshWebGpu()` can borrow
+  `mechanicsMaterialPhaseUpload`, the scene maintains a signature-keyed
+  `mlsMpmMechanicsMaterialPhaseUpload` beside the thermal response graph
+  upload, and the probe/benchmark harness reports upload status, phase record
+  count, and byte length. Focused coverage proves the kernel does not issue a
+  per-step `queue.writeBuffer()` for
+  `ulg-mls-mpm-mechanics-material-phase-records` when the upload is borrowed.
+  Fresh 10k-ish three-batch native evidence is `status=good`,
+  `probeStatus=good`, zero browser console issues, zero readback bytes,
+  `mechanicsMaterialPhaseUploadStatus=webgpu-uploaded`,
+  `phaseRecordCount=8`, `recordsByteLength=384`, actual particles `9826`,
+  mean batch `103.13 ms`, resident completed stage `2.8 ms`, thermal
+  `0.2 ms`, mechanics refresh `0.3 ms`, active grid used, visible native GPU
+  consumer ready, and render bridge reused. This is a safe current-architecture
+  cleanup; the larger remaining target is still thermal-aware fused
+  sequencing/cadence.
 - Native WebGPU surface validation now has a cadence gate before validation
   command-encoder creation. The render loop inspects readback-smoke and
   offscreen validation pending/pass/retry-exhausted state and only starts GPU

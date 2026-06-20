@@ -253,6 +253,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const surfaceDraw = metric?.surfaceDraw || null;
   const residentStep = metric?.residentStep || null;
   const residentSteps = metric?.residentSteps || null;
+  const mechanicsMaterialPhaseUpload = metric?.mlsMpmMechanicsMaterialPhaseUpload || null;
   const effectiveProbeMode = result?.timeline?.probeMode || probeMode;
   const residentStageTiming = residentStep?.stageTiming ?? residentSteps?.finalStepStageTiming ?? null;
   const dispatchTopology = residentStageTiming?.dispatchTopology
@@ -720,6 +721,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     } : null,
     residentStepsStatus: residentSteps?.status ?? null,
     residentStepStatus: residentStep?.status ?? null,
+    mechanicsMaterialPhaseUploadStatus: mechanicsMaterialPhaseUpload?.status ?? null,
+    mechanicsMaterialPhaseUploadPhaseRecordCount: mechanicsMaterialPhaseUpload?.phaseRecordCount ?? null,
+    mechanicsMaterialPhaseUploadRecordsByteLength: mechanicsMaterialPhaseUpload?.recordsByteLength ?? null,
     fusedResidentMechanics: residentStageTiming?.fusedResidentMechanics ?? null,
     fusedResidentSequence: residentStageTiming?.fusedResidentSequence ?? null,
     fusedResidentSequenceStepCount: residentStageTiming?.fusedResidentSequenceStepCount ?? null,

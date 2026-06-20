@@ -1,5 +1,47 @@
 # ULG Implementation Log
 
+## 2026-06-19 16:09 AKDT - Mechanics Material Phase Upload Cache
+
+Status:
+
+- Added `uploadMlsMpmMechanicsMaterialPhaseRecords()` and
+  `destroyMlsMpmMechanicsMaterialPhaseUpload()` for the MLS-MPM mechanics
+  refresh material table.
+- `runMlsMpmMechanicsRefreshWebGpu()` now accepts a borrowed
+  `mechanicsMaterialPhaseUpload` and skips rebuilding
+  `ulg-mls-mpm-mechanics-material-phase-records` inside the hot substep when
+  the upload matches the active mechanics material table.
+- The SPH scene now maintains a signature-keyed
+  `mlsMpmMechanicsMaterialPhaseUpload` cache, invalidates it when packed
+  mechanics material records change, disposes it with the scene, and passes it
+  through `mechanicsRefreshOptions` for both single resident steps and
+  multi-step resident execution.
+- The long-horizon probe and performance benchmark now expose
+  `mechanicsMaterialPhaseUploadStatus`, phase record count, and byte length.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphMechanicsRefreshGpuKernel.test.mjs` reported
+  `6/6`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `59/59`.
+- PASS: `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_BENCH_PROFILE=smoke
+  ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=3
+  ULG_BENCH_BATCH_STEPS=4
+  ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer
+  ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1
+  ULG_BENCH_OUTPUT=/tmp/ulg-bench-native-10k-mechanics-material-upload-cache-2.json
+  ULG_BENCH_PORT=5245 ULG_BENCH_TIMEOUT_MS=240000
+  npm run bench:sph-performance` completed with `status=good`,
+  `probeStatus=good`, browser console issues `0`, zero readback bytes,
+  `mechanicsMaterialPhaseUploadStatus=webgpu-uploaded`,
+  `phaseRecordCount=8`, `recordsByteLength=384`, resident completed stage
+  `2.8 ms`, and visible native GPU consumer ready.
+
 ## 2026-06-19 13:12 AKDT - Native WebGPU Surface Validation And Pd Picker
 
 Status:

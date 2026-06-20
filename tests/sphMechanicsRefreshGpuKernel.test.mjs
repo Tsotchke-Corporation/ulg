@@ -7,8 +7,10 @@ import {
   MLS_MPM_EOS_MODEL_IDS
 } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  destroyMlsMpmMechanicsMaterialPhaseUpload,
   refreshMlsMpmMechanicsCpu,
-  runMlsMpmMechanicsRefreshWebGpu
+  runMlsMpmMechanicsRefreshWebGpu,
+  uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
@@ -257,4 +259,115 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
   assert.equal(result.status, 'mechanics-constitutive-refresh-executed');
   assert.equal(result.outputBufferInitializationMode, 'shader-copies-source-mechanics-rows');
   assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-refresh-output-mechanics'), false);
+});
+
+test('WebGPU mechanics refresh reuses uploaded material phase records', async () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    }
+  });
+  const state = new Float32Array([0, 0, 0, 9.97, 0, 0, 0, 300]);
+  const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  thermo[0] = stableOpticalMaterialId('h2o');
+  thermo[1] = GPU_PHASE_IDS.liquid;
+  thermo[3] = 997;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  mechanics[18] = 1;
+  mechanics[19] = 1;
+
+  const queueWrites = [];
+  const device = {
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        queueWrites.push({ label: buffer?.label ?? null, offset, byteLength: data?.byteLength ?? 0 });
+      },
+      submit() {},
+      onSubmittedWorkDone() {
+        return Promise.resolve();
+      }
+    },
+    createBuffer({ label, size, usage }) {
+      return {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+    },
+    createShaderModule({ label, code }) {
+      return { label, code };
+    },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout(index) {
+          return { index };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      return { layout, entries };
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            dispatchWorkgroups() {},
+            end() {}
+          };
+        },
+        finish() {
+          return {};
+        }
+      };
+    }
+  };
+
+  const materialPhaseUpload = uploadMlsMpmMechanicsMaterialPhaseRecords(device, table);
+  assert.equal(materialPhaseUpload.status, 'webgpu-uploaded');
+  assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-material-phase-records'), true);
+  queueWrites.length = 0;
+
+  const result = await runMlsMpmMechanicsRefreshWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      mechanics
+    },
+    mechanicsMaterialTable: table,
+    mechanicsMaterialPhaseUpload: materialPhaseUpload,
+    sphParticleUpload: {
+      stateBuffer: { label: 'borrowed-state' },
+      thermoBuffer: { label: 'borrowed-thermo' }
+    },
+    mlsMpmParticleUpload: {
+      mechanicsBuffer: { label: 'borrowed-mechanics' }
+    },
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(result.status, 'mechanics-constitutive-refresh-executed');
+  assert.equal(result.mechanicsMaterialPhaseUploadStatus, 'webgpu-uploaded');
+  assert.equal(result.mechanicsMaterialPhaseUploadReused, true);
+  assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-material-phase-records'), false);
+  assert.equal(materialPhaseUpload.destroyed, false);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(materialPhaseUpload);
+  assert.equal(materialPhaseUpload.destroyed, true);
 });

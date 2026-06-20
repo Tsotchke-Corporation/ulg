@@ -1,5 +1,34 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Mechanics Material Phase Upload Cache
+
+The thermal resident path now reuses a WebGPU upload for mechanics-refresh
+material phase records. The refresh kernel can borrow
+`mechanicsMaterialPhaseUpload`, the scene owns the cached upload, and the
+browser benchmark reports the cache status directly.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check scripts/sph-performance-benchmark.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphMechanicsRefreshGpuKernel.test.mjs` passed `6/6`,
+  including the borrowed material phase upload regression.
+- Resident step coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `59/59`.
+- Browser benchmark:
+  `/tmp/ulg-bench-native-10k-mechanics-material-upload-cache-2.json` completed
+  with `status=good`, `probeStatus=good`, browser console issues `0`,
+  `mechanicsMaterialPhaseUploadStatus=webgpu-uploaded`,
+  `phaseRecordCount=8`, `recordsByteLength=384`, actual particles `9826`,
+  mean batch `103.13 ms`, resident completed stage `2.8 ms`, zero readback
+  bytes, active grid used, visible native GPU consumer ready, and bridge
+  `reused=true`.
+
 ## Current Focused Result - 2026-06-19 Native WebGPU Surface Validation And Pd Picker
 
 The native WebGPU surface consumer now validates as an engine-owned

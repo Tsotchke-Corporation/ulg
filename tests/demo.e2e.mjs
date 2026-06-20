@@ -3552,6 +3552,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const sphThermalClosureGraphBuffers = scene?.getSphThermalClosureGraphBuffers?.();
     const sphThermalPhaseResponseTable = scene?.getSphThermalPhaseResponseTable?.();
     const sphThermalResponseGraphUpload = scene?.getSphThermalResponseGraphUpload?.();
+    const mlsMpmMechanicsMaterialPhaseUpload = scene?.getMlsMpmMechanicsMaterialPhaseUpload?.();
     const sphGpuParticleState = scene?.getSphGpuParticleState?.();
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
@@ -3669,6 +3670,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         graphCount: sphThermalResponseGraphUpload?.graphCount,
         responseBufferByteLength: sphThermalResponseGraphUpload?.responseBufferByteLength,
         graphSampleBufferByteLength: sphThermalResponseGraphUpload?.graphSampleBufferByteLength
+      },
+      mlsMpmMechanicsMaterialPhaseUpload: {
+        schema: mlsMpmMechanicsMaterialPhaseUpload?.schema,
+        status: mlsMpmMechanicsMaterialPhaseUpload?.status,
+        phaseRecordCount: mlsMpmMechanicsMaterialPhaseUpload?.phaseRecordCount,
+        recordsByteLength: mlsMpmMechanicsMaterialPhaseUpload?.recordsByteLength
       },
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
@@ -4293,6 +4300,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   ]).toContain(derivedSummary.sphThermalResponseGraphUpload.status);
   expect(derivedSummary.sphThermalResponseGraphUpload.responseCount).toBe(derivedSummary.sphThermalPhaseResponseTable.responseCount);
   expect(derivedSummary.sphThermalResponseGraphUpload.graphCount).toBe(derivedSummary.sphThermalClosureGraphBuffers.graphCount);
+  expect(derivedSummary.mlsMpmMechanicsMaterialPhaseUpload.schema).toBe('peercompute.ulg.mls-mpm-mechanics-material-phase-upload.v0');
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-uploaded'
+  ]).toContain(derivedSummary.mlsMpmMechanicsMaterialPhaseUpload.status);
+  expect(derivedSummary.mlsMpmMechanicsMaterialPhaseUpload.phaseRecordCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   if (usesThreeRenderRowBridge) {
     expect(derivedSummary.opticalGpuLookup.queryCount).toBeGreaterThanOrEqual(0);
@@ -4673,6 +4689,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphThermalResponseGraphUpload.status).toBe('webgpu-uploaded');
     expect(derivedSummary.sphThermalResponseGraphUpload.responseBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.sphThermalResponseGraphUpload.graphSampleBufferByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.mlsMpmMechanicsMaterialPhaseUpload.status).toBe('webgpu-uploaded');
+    expect(derivedSummary.mlsMpmMechanicsMaterialPhaseUpload.recordsByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);

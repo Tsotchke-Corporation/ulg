@@ -1861,6 +1861,9 @@ async function runBrowserProbe({
         const sceneUserData = sceneApi?.scene?.userData || {};
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+        const mechanicsMaterialPhaseUpload = sceneApi.getMlsMpmMechanicsMaterialPhaseUpload?.()
+          || sceneUserData.mlsMpmMechanicsMaterialPhaseUpload
+          || null;
         const plainSphStepResult = overlay.__sphLastStepResult || null;
         const residentAuthorityHost = overlay.__sphPeerComputeResidentAuthorityHost || null;
         const residentComputeManager = overlay.__sphResidentComputeManager || null;
@@ -1888,6 +1891,12 @@ async function runBrowserProbe({
             source: residentComputeManager.source ?? null,
             submitTask: residentComputeManager.submitTask ?? null
           } : null,
+        mlsMpmMechanicsMaterialPhaseUpload: mechanicsMaterialPhaseUpload ? {
+          schema: mechanicsMaterialPhaseUpload.schema ?? null,
+          status: mechanicsMaterialPhaseUpload.status ?? null,
+          phaseRecordCount: mechanicsMaterialPhaseUpload.phaseRecordCount ?? null,
+          recordsByteLength: mechanicsMaterialPhaseUpload.recordsByteLength ?? null
+        } : null,
         rendererInit: sceneUserData.sphRendererInit || null,
         residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,

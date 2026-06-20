@@ -2091,6 +2091,129 @@ test('SPH Three WebGPU resident bridge material proxy uses a basic pipeline mate
   assert.equal(proxy.userData.optical, material.userData.optical);
 });
 
+test('SPH Three WebGPU render-row sphere proxy keeps sodium closure PBR visible', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.02, 0.018, 0.016),
+    metalness: 1,
+    roughness: 0.06,
+    transmission: 0,
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'Na',
+    phase: 'solid',
+    baseColorSrgb: [1, 0.945, 0.923],
+    metalness: 1,
+    roughness: 0.32,
+    transmission: 0,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'conductor-drude-free-electron'
+  };
+  material.userData.renderDescriptor = { material: 'Na', renderKey: 'Na', phase: 'solid' };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'Na', renderKey: 'Na', phase: 'solid' },
+    fallbackColorSrgb: [0.99, 0.94, 0.92]
+  });
+  const proxy = createThreeWebGpuResidentBridgeMaterialProxy(material, {
+    descriptor: { material: 'Na', renderKey: 'Na', phase: 'solid' },
+    fallbackColorSrgb: [0.99, 0.94, 0.92],
+    bridgeMode: 'three-render-row-spheres',
+    proxyReason: 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  });
+
+  assert.equal(proxy.type, 'MeshBasicMaterial');
+  assert.equal(proxy.userData.renderRowSphereMaterialRendererProxy, true);
+  assert.equal(
+    proxy.userData.renderRowSphereMaterialRendererProxyReason,
+    'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  );
+  assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
+  assert.equal(proxy.userData.renderRowSphereClosurePbr, true);
+  assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, true);
+  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'metallic-sphere-visibility-proxy');
+  assert.deepEqual(proxy.userData.surfaceMaterialFallbackColor, [0.99, 0.94, 0.92]);
+  assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 0.6);
+});
+
+test('SPH Three WebGPU render-row sphere proxy keeps air closure PBR visible', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.94, 0.97, 1),
+    metalness: 0,
+    roughness: 0.92,
+    transmission: 0.9995,
+    thickness: 0.05,
+    transparent: true,
+    opacity: 0.0006
+  });
+  material.userData.optical = {
+    material: 'air',
+    phase: 'gas',
+    baseColorSrgb: [0.94, 0.97, 1],
+    metalness: 0,
+    roughness: 0.92,
+    transmission: 0.9995,
+    opacity: 0.0006,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'gas-rayleigh-transparent-pbr'
+  };
+  material.userData.renderDescriptor = { material: 'air', renderKey: 'air', phase: 'gas' };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'air', renderKey: 'air', phase: 'gas' },
+    fallbackColorSrgb: [0.72, 0.86, 1]
+  });
+  const proxy = createThreeWebGpuResidentBridgeMaterialProxy(material, {
+    descriptor: { material: 'air', renderKey: 'air', phase: 'gas' },
+    fallbackColorSrgb: [0.72, 0.86, 1],
+    bridgeMode: 'three-render-row-spheres',
+    proxyReason: 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  });
+
+  assert.equal(proxy.type, 'MeshBasicMaterial');
+  assert.equal(proxy.transparent, true);
+  assert.ok(proxy.opacity >= 0.66);
+  assert.equal(proxy.userData.renderRowSphereMaterialRendererProxy, true);
+  assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
+  assert.equal(proxy.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
+  assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, undefined);
+  assert.equal(proxy.userData.renderRowSphereFallbackReason, undefined);
+  assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 2.4);
+});
+
+test('SPH Three WebGPU render-row sphere proxy uses visible fallback for black source materials', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0, 0, 0),
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'Na',
+    phase: 'solid',
+    baseColorSrgb: [1, 0.945, 0.923],
+    metalness: 1,
+    roughness: 0.32,
+    transmission: 0,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'conductor-drude-free-electron'
+  };
+
+  const proxy = createThreeWebGpuResidentBridgeMaterialProxy(material, {
+    descriptor: { material: 'Na', renderKey: 'Na', phase: 'solid' },
+    fallbackColorSrgb: [0.99, 0.94, 0.92],
+    bridgeMode: 'three-render-row-spheres',
+    proxyReason: 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  });
+
+  assert.equal(proxy.userData.surfaceMaterialProxyColorSource, 'closure-derived-fallback-color');
+  assert.equal(proxy.userData.renderRowSphereMaterialRendererProxyColorSource, 'closure-derived-fallback-color');
+  assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 0.6);
+});
+
 test('SPH Three WebGPU surface buffers can use conservative aggregate draw records without summary readback', () => {
   const records = resolveThreeWebGpuSurfaceBufferDrawRecords({
     surfaceDrawExecution: {

@@ -4444,6 +4444,14 @@ function srgbLuminance(color = []) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+function threeColorLuminance(color = null) {
+  const r = Number(color?.r);
+  const g = Number(color?.g);
+  const b = Number(color?.b);
+  if (![r, g, b].every(Number.isFinite)) return 0;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 function fallbackBridgeColorSrgbForDescriptor(descriptor = {}) {
   const material = String(descriptor.material || descriptor.renderKey || '').toLowerCase();
   if (material === 'h2o' || material === 'water' || descriptor.renderKey === 'ice') return [0.44, 0.76, 0.91];
@@ -4494,13 +4502,23 @@ export function createThreeWebGpuResidentBridgeMaterialProxy(material, {
   const fallbackColor = Array.isArray(fallbackColorSrgb)
     ? fallbackColorSrgb
     : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
-  const color = material.color?.clone?.() || new Three.Color().setRGB(
+  const fallbackColorObject = new Three.Color().setRGB(
     clamp(fallbackColor[0], 0, 1),
     clamp(fallbackColor[1], 0, 1),
     clamp(fallbackColor[2], 0, 1),
     Three.SRGBColorSpace
   );
+  const sourceColor = material.color?.clone?.() || null;
+  const sourceLuminance = threeColorLuminance(sourceColor);
+  const fallbackLuminance = srgbLuminance(fallbackColor);
+  const useFallbackColor = !sourceColor || (
+    sourceLuminance <= 0.025
+    && fallbackLuminance > sourceLuminance + 0.025
+  );
+  const color = useFallbackColor ? fallbackColorObject : sourceColor;
   const opacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
+  const renderRowSphereProxy = bridgeMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+    || String(proxyReason || '').includes('render-row-spheres');
   const proxy = new MaterialCtor({
     color,
     side: Three.DoubleSide,
@@ -4516,7 +4534,21 @@ export function createThreeWebGpuResidentBridgeMaterialProxy(material, {
     surfaceMaterialRendererProxyReason: proxyReason,
     surfaceMaterialRendererBridgeMode: bridgeMode || material.userData?.surfaceMaterialRendererBridgeMode || null,
     surfaceMaterialOriginalType: material.type || null,
-    surfaceMaterialFallbackColor: [...fallbackColor]
+    surfaceMaterialFallbackColor: [...fallbackColor],
+    surfaceMaterialProxyColorSource: useFallbackColor
+      ? 'closure-derived-fallback-color'
+      : 'source-material-color',
+    ...(renderRowSphereProxy
+      ? {
+          renderRowSphereMaterialRendererProxy: true,
+          renderRowSphereMaterialRendererProxyReason: proxyReason,
+          renderRowSphereMaterialRendererProxyColorSource: useFallbackColor
+            ? 'closure-derived-fallback-color'
+            : 'source-material-color',
+          renderRowSpherePbrMaterialSource: 'closure-derived-pbr-proxied-for-renderer',
+          renderRowSphereClosurePbr: true
+        }
+      : {})
   };
   return proxy;
 }

@@ -70,8 +70,9 @@ material, phase, temperature, and pressure are known.
   proving it stays visible without a metallic fallback; an ad hoc
   `drop=air&base=air` mounted probe did not reach ready state inside 90s, so
   do not add that as a flaky e2e gate yet.
-- Audit the Three WebGPU material-proxy path separately; this slice covered the
-  mobile WebGL sphere bridge that was rendering sodium as black.
+- Three WebGPU material-proxy audit is now covered by focused renderer tests for
+  sodium, air, and direct black-source fallback. Keep broader visual coverage
+  focused on the mounted air-particle scenario above.
 
 ## Progress - 2026-06-19 AKDT, Air Sphere Bridge Guard
 
@@ -99,3 +100,17 @@ material, phase, temperature, and pressure are known.
   `/tmp/ulg-particle-pbr-fe-mobile-spheres-probe.json` completed `status=good`
   with browser console issues/warnings `0/0`, closure-derived sphere PBR, and
   metallic visibility proxy count `1`.
+
+## Progress - 2026-06-19 AKDT, Three WebGPU Proxy Audit
+
+- Extended `createThreeWebGpuResidentBridgeMaterialProxy()` so render-row
+  sphere proxies report particle-specific material renderer proxy diagnostics:
+  bridge mode, proxy reason, proxied closure-PBR source, closure-PBR flag, and
+  visible color source.
+- Hardened the Three WebGPU proxy path against black particle materials by
+  using the closure-derived fallback color when the source material reaches the
+  proxy with near-zero luminance.
+- Added renderer guards for sodium conductor PBR, transparent air
+  `gas-rayleigh-transparent-pbr`, and direct black-source fallback on the Three
+  WebGPU render-row sphere proxy path. Focused renderer coverage reports
+  `68/68`.

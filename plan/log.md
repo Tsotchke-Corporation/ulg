@@ -27,6 +27,33 @@ Validation:
   tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas
   pressure"` passed `1/1` with the WebGPU console issue guard active.
 
+## 2026-06-19 22:29 AKDT - Three WebGPU Particle PBR Proxy Audit
+
+Status:
+
+- Extended the Three WebGPU resident bridge material proxy so render-row sphere
+  materials carry particle-specific diagnostics when the renderer needs a
+  `MeshBasicMaterial` pipeline proxy. The proxy now records the bridge mode,
+  proxy reason, PBR material source, closure-PBR flag, and whether its visible
+  color came from the source material or the closure-derived fallback color.
+- Hardened the proxy against black source materials: if a physical material
+  reaches the Three WebGPU proxy with near-zero luminance but a visible
+  closure-derived fallback color is available, the proxy uses the fallback and
+  records `closure-derived-fallback-color`.
+- Added focused renderer coverage for sodium conductor particles, transparent
+  dry-air gas particles, and the direct black-source fallback case on the
+  Three WebGPU render-row sphere proxy path.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js
+  tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern
+  "Three WebGPU render-row sphere proxy|render-row sphere bridge keeps air|render-row
+  sphere bridge uses closure-derived visible proxy"` reported `68/68`.
+
 ## 2026-06-19 22:10 AKDT - WebGPU-Ocean P2G Backend Policy Switch
 
 Status:

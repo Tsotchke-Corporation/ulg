@@ -77,9 +77,10 @@ sphere material keys `h2o`, `naoh`, and `Na`, closure-derived sphere PBR, and
 coverage in `plan/todo/particle-pbr-material-closure-rendering-plan.md`: air now
 packs as `gas-rayleigh-transparent-pbr` instead of blocked black, Pd and Fe
 mobile-shaped sphere probes are console-clean with metallic proxy count `1`, and
-products resolve to nonblocked PBR rows. The remaining renderer-specific audit
-is the Three WebGPU material-proxy path plus an explicit air-particle visual
-scenario.
+products resolve to nonblocked PBR rows. The Three WebGPU render-row sphere
+material-proxy path now carries particle-specific diagnostics and has sodium,
+air, and black-source fallback guards. The remaining gap is an explicit
+air-particle mounted visual scenario once one is cheap and non-flaky.
 
 Current routing note, 2026-06-19 AKDT: drop-edge >6 remains active but is now
 narrowed. The scene exposes

@@ -1,5 +1,26 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Three WebGPU Particle PBR Proxy Audit
+
+The Three WebGPU render-row sphere bridge now has focused particle-PBR proxy
+coverage. Sodium conductor particles and transparent dry-air gas particles keep
+closure-derived visible colors and metadata after the `MeshBasicMaterial`
+renderer proxy, and the proxy falls back to the closure-derived visible color
+when a source material reaches it as black.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Diff hygiene:
+  `git diff --check -- src/visualization/sphPhaseScene.js
+  tests/sphPhaseRenderer.test.mjs` passed.
+- Renderer regression:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern
+  "Three WebGPU render-row sphere proxy|render-row sphere bridge keeps air|render-row
+  sphere bridge uses closure-derived visible proxy"` reported `68/68`.
+
 ## Current Focused Result - 2026-06-19 Alkali Resident Reaction Scale Browser Coverage
 
 Mounted resident reaction coverage now extends beyond Na/H2O. The Playwright

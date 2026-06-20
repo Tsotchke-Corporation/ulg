@@ -3383,6 +3383,65 @@ function cohortRangesFromRenderDomainCounts(counts = null) {
   };
 }
 
+function renderDomainPositionBoundsFromPositions(positionsM, counts = null) {
+  const normalized = normalizeRenderDomainCounts(counts);
+  const particleCount = Math.floor((positionsM?.length || 0) / 3);
+  if (!normalized || particleCount <= 0) return null;
+  const rangeBounds = (role, startIndex, endIndex) => {
+    const start = Math.max(0, Math.min(particleCount, Math.round(startIndex)));
+    const end = Math.max(start, Math.min(particleCount, Math.round(endIndex)));
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    let finitePositionCount = 0;
+    for (let index = start; index < end; index += 1) {
+      const x = Number(positionsM[index * 3]);
+      const y = Number(positionsM[index * 3 + 1]);
+      const z = Number(positionsM[index * 3 + 2]);
+      if (![x, y, z].every(Number.isFinite)) continue;
+      finitePositionCount += 1;
+      min[0] = Math.min(min[0], x);
+      min[1] = Math.min(min[1], y);
+      min[2] = Math.min(min[2], z);
+      max[0] = Math.max(max[0], x);
+      max[1] = Math.max(max[1], y);
+      max[2] = Math.max(max[2], z);
+    }
+    const boundsReady = finitePositionCount > 0;
+    const size = boundsReady
+      ? max.map((value, axis) => value - min[axis])
+      : null;
+    return {
+      role,
+      startIndex: start,
+      endIndex: end,
+      count: end - start,
+      finitePositionCount,
+      min: boundsReady ? min : null,
+      max: boundsReady ? max : null,
+      size,
+      center: boundsReady
+        ? min.map((value, axis) => value + size[axis] * 0.5)
+        : null,
+      status: boundsReady ? 'position-bounds-ready' : 'position-bounds-empty'
+    };
+  };
+  const base = rangeBounds('base', 0, normalized.base);
+  const drop = rangeBounds('drop', normalized.base, normalized.base + normalized.drop);
+  const expectedTotal = normalized.base + normalized.drop;
+  return {
+    schema: 'peercompute.ulg.sph-render-domain-position-bounds.v0',
+    status: expectedTotal === particleCount && normalized.total === particleCount
+      ? 'render-domain-position-bounds-ready'
+      : 'render-domain-position-count-mismatch',
+    source: 'set-particles-positions-render-domain-counts',
+    particleCount,
+    expectedTotal,
+    renderDomainCounts: { ...normalized },
+    base,
+    drop
+  };
+}
+
 function renderDomainExtractionOptions(counts = null) {
   const normalized = normalizeRenderDomainCounts(counts);
   return {
@@ -14578,7 +14637,9 @@ export function createSphPhaseScene(container, {
     currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
     currentPhysicalLawGroups = normalizePhysicalLawGroups(physicalLawGroups);
     currentWallTemperaturesK = wallTemperaturesK ? { ...wallTemperaturesK } : null;
+    const renderDomainPositionBounds = renderDomainPositionBoundsFromPositions(positionsM, currentRenderDomainCounts);
     scene.userData.sphRenderDomainCounts = currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null;
+    scene.userData.sphRenderDomainPositionBounds = renderDomainPositionBounds;
     scene.userData.sphPhysicalLawGroups = { ...currentPhysicalLawGroups };
     sphThermalMaterialTable = measure('thermalMaterialTable', () => (
       staticTableCache?.thermalMaterialTable?.schema
@@ -14778,6 +14839,7 @@ export function createSphPhaseScene(container, {
       stageMs,
       particleCount: positionsM?.length ? positionsM.length / 3 : 0,
       renderDomainCounts: currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null,
+      renderDomainPositionBounds,
       surfaceBatchCount: batches.length,
       cpuSurfaceBatchCount: cpuSurfaceBatches.length,
       residentSurfaceBatchCount: residentFieldBatches.length,

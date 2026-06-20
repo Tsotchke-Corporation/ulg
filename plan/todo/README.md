@@ -69,16 +69,18 @@ products resolve to nonblocked PBR rows. The remaining renderer-specific audit
 is the Three WebGPU material-proxy path plus an explicit air-particle visual
 scenario.
 
-Current routing note, 2026-06-19 AKDT: reopened by live report. The prior
-initializer/reset coverage showed `dropn=7, basen=7` preserving requested and
-effective high edges, but the current demo still appears not to respect drop
-edge for anything larger than `6`. Treat
-`plan/todo/drop-edge-large-size-respect-plan.md` as active again until a fresh
-browser/mobile-shaped repro proves the URL/UI value, initialized drop domain,
-render-domain counts, resident uploads, reset flow, and visible bounds all
-agree for values above `6`. Do not hide this behind a visual scale or the
-previous performance-roadmap note for the `dropn=7, basen=5` expanded base
-case.
+Current routing note, 2026-06-19 AKDT: drop-edge >6 remains active but is now
+narrowed. The scene exposes
+`peercompute.ulg.sph-render-domain-position-bounds.v0` inside
+`peercompute.ulg.sph-scene-set-particles-timing.v0`, and the mounted
+mobile-shaped H2O/H2O MLS-MPM reset regression for `dropn=7, basen=5` passes:
+the drop domain is `7^3`, the same-material base expands to `14^3` for equal
+physical particle radius, render-domain counts match generated particles, and
+base/drop position bounds are available after reset. Keep
+`plan/todo/drop-edge-large-size-respect-plan.md` active only for the remaining
+visual presentation question: same-material surface/render-field modes may make
+the preserved drop domain look merged or ignored. Do not hide this behind a
+visual scale or loosen the initialized edge contract.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

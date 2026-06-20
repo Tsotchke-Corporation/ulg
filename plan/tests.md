@@ -11393,3 +11393,23 @@ Native surface readback classification, 2026-06-19 AKDT:
   - Native bridge readback smoke is now classified as `not-run` with
     texture-readback-unavailable reason instead of generic `error`; offscreen
     validation remains `not-run` for the same external-instance class.
+
+Drop edge >6 domain bounds guardrail, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check tests/demo.e2e.mjs` passed.
+- Focused tests:
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+  `node --test tests/sphPhaseDemo.test.mjs`
+  - Passed: `37/37`.
+- Mounted browser regression:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5635' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "same-material base spacing expands"`
+  - Passed: `1/1`.
+  - The mobile-shaped H2O/H2O MLS-MPM reset path preserves
+    `dropn=7` as `7^3` drop particles and expands the same-material base to
+    `14^3` particles for equal physical particle radius.
+  - `peercompute.ulg.sph-scene-set-particles-timing.v0` now carries
+    `peercompute.ulg.sph-render-domain-position-bounds.v0`, proving base/drop
+    center and bounds from the render-facing particle arrays after reset.

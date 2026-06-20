@@ -43,6 +43,23 @@ resident GPU uploads, and reset/rebuild flows.
 
 2026-06-19 AKDT update:
 
+- Added render-domain position bounds to
+  `peercompute.ulg.sph-scene-set-particles-timing.v0`. These diagnostics are
+  derived from the render-facing `positionsM` array plus normalized
+  `renderDomainCounts`, and report base/drop count, finite position count,
+  center, and center-to-center bounds.
+- Added a mounted mobile-shaped regression for `dropn=7, basen=5`, H2O/H2O,
+  MLS-MPM, reset, and render-row spheres. It proves the common "only raise the
+  drop edge" path preserves `7^3` drop particles after reset and expands the
+  same-material base to `14^3` particles for equal particle radius.
+- This narrows the live report away from URL parsing, UI input clamping,
+  initialization, render-domain counting, and reset state for `dropn=7`. If
+  the drop still looks ignored in the demo, the remaining suspect is visual
+  presentation: same-material surface/render-field merging can obscure a
+  correct role/domain partition.
+
+2026-06-19 AKDT update:
+
 - Reopened by live demo report: drop edge still does not appear to be
   respected for anything larger than `6`.
 - The prior `dropn=7, basen=7` mounted reset/rebuild evidence is now treated as
@@ -88,7 +105,10 @@ resident GPU uploads, and reset/rebuild flows.
 
 Remaining:
 
-- `dropn=7, basen=5` still expands same-material base spacing to `14^3`
-  particles by design. That higher-count case is covered by initializer/probe
-  diagnostics, but full resident stepping at that count remains performance
-  roadmap work rather than a drop-edge contract blocker.
+- Keep this active until the visible surface modes make role/domain partition
+  explicit enough that a preserved drop domain cannot be mistaken for an
+  ignored edge, or until those modes report a clear same-material merged-surface
+  reason in diagnostics.
+- Full resident stepping at the expanded `dropn=7, basen=5` total remains
+  performance-roadmap work rather than an initialization/drop-edge contract
+  blocker.

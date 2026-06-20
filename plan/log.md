@@ -29625,3 +29625,36 @@ Remaining:
 - Actual native surface/offscreen readback still needs a deeper device/context
   lifetime fix. The current result is correct fail-closed classification, not a
   rendering signoff.
+
+## 2026-06-19 AKDT - Drop Edge >6 Domain Bounds Guardrail
+
+Status:
+
+- Added render-domain position bounds to
+  `peercompute.ulg.sph-scene-set-particles-timing.v0`. The scene now reports
+  base/drop cohort counts, finite position counts, center, and center-to-center
+  bounds from the same `positionsM` and `renderDomainCounts` passed into
+  rendering and GPU upload.
+- Added mounted mobile-shaped regression coverage for `dropn=7, basen=5`,
+  H2O/H2O, MLS-MPM, and render-row spheres. This covers the user-reported path
+  where only the drop edge is raised above `6`; initialization preserves the
+  requested `7^3` drop and intentionally expands the same-material base to
+  `14^3` so both domains share physical particle radius.
+- Kept this as engine diagnostics and regression coverage, not a visual scale
+  workaround. If the demo still looks like the drop edge is ignored, the
+  remaining suspect is same-material surface/render-field presentation hiding
+  a correct domain partition.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` with `37/37`.
+- PASS: `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5635 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5635' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "same-material base spacing expands"` with `1/1`.
+
+Remaining:
+
+- Keep `plan/todo/drop-edge-large-size-respect-plan.md` active until visual
+  surface modes either make the preserved drop domain obvious or report that a
+  same-material merged surface is intentionally hiding separate role geometry.

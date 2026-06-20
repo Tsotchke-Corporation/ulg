@@ -256,6 +256,9 @@ function scenarioPerformanceGate({
 
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
+  const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
+  const initialMetric = metrics.find((entry) => entry?.initial) || null;
+  const initialParticleEdgeDiagnostics = initialMetric?.initial?.initialParticleEdgeDiagnostics || null;
   const metric = lastMetricWithRenderState(result);
   const renderState = metric?.renderState || null;
   const surfaceDraw = metric?.surfaceDraw || null;
@@ -692,6 +695,15 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     targetParticleCount,
     actualParticleCount: scenario.actualParticleCount,
     latticeEdgePerCohort: scenario.edge,
+    effectiveParticleCount: initialParticleEdgeDiagnostics?.totalGeneratedParticleCount ?? null,
+    requestedDropParticlesPerEdge: initialParticleEdgeDiagnostics?.requestedDropParticlesPerEdge ?? scenario.edge,
+    requestedBaseParticlesPerEdge: initialParticleEdgeDiagnostics?.requestedBaseParticlesPerEdge ?? scenario.edge,
+    effectiveDropParticlesPerEdge: initialParticleEdgeDiagnostics?.effectiveDropParticlesPerEdge ?? null,
+    effectiveBaseParticlesPerEdge: initialParticleEdgeDiagnostics?.effectiveBaseParticlesPerEdge ?? null,
+    initialParticleEdgeStatus: initialParticleEdgeDiagnostics?.status ?? null,
+    initialParticleEdgePreservationStatus: initialParticleEdgeDiagnostics?.requestedEdgePreservationStatus ?? null,
+    initialParticleEdgePreservedRequestedRole: initialParticleEdgeDiagnostics?.preservedRequestedRole ?? null,
+    initialParticleEdgeDiagnostics,
     status: benchmarkStatus,
     probeStatus: result?.status ?? (exit.code === 0 ? 'unknown' : 'probe-error'),
     probeMode: effectiveProbeMode,

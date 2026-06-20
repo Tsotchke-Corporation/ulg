@@ -1,5 +1,36 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Drop Edge Large Request Respect
+
+Initial particle edge requests above `6` now stay visible in the actual
+particle placement contract instead of being silently coarsened by adaptive
+spacing. The demo/view state publishes
+`peercompute.ulg.sph-initial-particle-edge-diagnostics.v0`, and the probe plus
+benchmark harnesses carry those diagnostics.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/runtime/sphPhaseViewState.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseDemo.test.mjs` passed `37/37`, including
+  `dropn=7, basen=5` same-material matching, non-matching adaptive spacing,
+  and `dropn=basen=7` benchmark-count preservation.
+- Direct initializer smoke:
+  H2O/H2O at `dropn=7, basen=5` now reports effective drop edge `7`, effective
+  base edge `14`, total particles `3087`, and matching radius. H2O/H2O at
+  `dropn=7, basen=7` preserves both explicit edges and reports total particles
+  `686`. Na/H2O at `dropn=7, basen=5` preserves effective drop edge `7` and
+  keeps an adaptive base edge `8`.
+- Mounted browser probe:
+  `/tmp/ulg-drop-edge-7-mounted-probe.json` completed with `status=good`,
+  browser console issues `0`, initial edge diagnostics reporting effective
+  drop edge `7`, effective base edge `14`, total generated particles `3087`,
+  and final render-row vertex count `3087`.
+
 ## Current Focused Result - 2026-06-19 Mechanics Material Phase Upload Cache
 
 The thermal resident path now reuses a WebGPU upload for mechanics-refresh

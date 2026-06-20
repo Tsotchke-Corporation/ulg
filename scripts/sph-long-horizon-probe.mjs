@@ -1914,7 +1914,14 @@ async function runBrowserProbe({
           batchMs,
           sceneTimeS,
           initial: batchIndex === 0 ? {
-            preflight: overlay.__sphPhasePreflight || null
+            preflight: overlay.__sphPhasePreflight || null,
+            dropMaterial: overlay.__sphPhaseViewState?.dropMaterial ?? overlay.__sphDriver?.demo?.dropMaterial ?? null,
+            baseMaterial: overlay.__sphPhaseViewState?.baseMaterial ?? overlay.__sphDriver?.demo?.baseMaterial ?? null,
+            counts: overlay.__sphPhaseViewState?.counts || overlay.__sphDriver?.demo?.counts || null,
+            initialParticleEdgeDiagnostics:
+              overlay.__sphPhaseViewState?.initialParticleEdgeDiagnostics
+              || overlay.__sphDriver?.demo?.initialParticleEdgeDiagnostics
+              || null
           } : null,
           residentAuthorityHost: compactResidentAuthorityHost(residentAuthorityHost),
           residentWorkerCapability: compactWorkerCapability(residentAuthorityHost),
@@ -3972,6 +3979,7 @@ async function runDirectResidentProbe({
             dropMaterial: viewState.dropMaterial,
             baseMaterial: viewState.baseMaterial,
             counts: viewState.counts,
+            initialParticleEdgeDiagnostics: viewState.initialParticleEdgeDiagnostics || null,
             cohortRanges: activeCohortRanges,
             cohortDiagnostics: cohortDiagnosticsForState(sphParticleState.state, activeCohortRanges),
             boxDimsM: viewState.box?.dimensionsM || null,

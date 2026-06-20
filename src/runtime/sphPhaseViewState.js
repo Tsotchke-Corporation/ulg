@@ -98,6 +98,15 @@ export function createSphPhaseViewState(driver) {
           base: { ...demo.initialParticleSpacing.base }
         }
       : null,
+    initialParticleEdgeDiagnostics: demo.initialParticleEdgeDiagnostics
+      ? {
+          ...demo.initialParticleEdgeDiagnostics,
+          drop: { ...demo.initialParticleEdgeDiagnostics.drop },
+          base: { ...demo.initialParticleEdgeDiagnostics.base },
+          rejectedPreservedCandidates: (demo.initialParticleEdgeDiagnostics.rejectedPreservedCandidates || [])
+            .map((candidate) => ({ ...candidate }))
+        }
+      : null,
     scenario: {
       walls: {
         model: demo.scenario?.walls?.model ?? null,

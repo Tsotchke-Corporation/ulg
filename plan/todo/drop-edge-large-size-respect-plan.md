@@ -38,3 +38,30 @@ resident GPU uploads, and reset/rebuild flows.
 - Generated particles, render bounds, resident upload metadata, and reset state
   agree on the effective drop dimensions.
 - The fix is material-agnostic and works with variable particle spacing/radius.
+
+## Implementation Status
+
+2026-06-19 AKDT:
+
+- The initializer now treats explicit role edge requests above `6` as a lower
+  bound for adaptive spacing. The density/temperature resolver can still refine
+  particle size and paired-role spacing, but it no longer silently lowers a
+  high requested drop edge.
+- Same-material/same-temperature matching preserves high requested drop edges
+  and scales the paired base edge when needed to keep equal physical particle
+  radius. Equal high drop/base requests preserve both explicit role edges and
+  report that same-material spacing was not unified.
+- Demo and view state now expose
+  `peercompute.ulg.sph-initial-particle-edge-diagnostics.v0` with requested and
+  effective edge, generated count, block edge, spacing, radius, and preservation
+  status. Long-horizon probes and performance benchmarks carry the same
+  diagnostics.
+- Focused coverage is in `tests/sphPhaseDemo.test.mjs` for `dropn=7, basen=5`,
+  non-matching adaptive spacing, and `dropn=basen=7` benchmark-count
+  preservation.
+
+Remaining:
+
+- Add a mounted browser visual-sequence check that exercises reset/rebuild with
+  `dropn>6` and confirms resident upload/render-domain counts match the new
+  diagnostics after scene reset.

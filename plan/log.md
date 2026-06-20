@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-06-19 16:54 AKDT - Drop Edge Large Request Respect
+
+Status:
+
+- Fixed the initial particle edge resolver so explicit role edge requests
+  larger than `6` are no longer silently coarsened below the requested drop or
+  base edge by density-adaptive spacing.
+- Same-material/same-temperature matching now preserves a high requested drop
+  edge first and scales the paired base edge when that is required to keep the
+  physical particle radius matched. Equal high explicit drop/base edge requests
+  preserve both role edges and report that matching-material spacing was not
+  unified.
+- Added `peercompute.ulg.sph-initial-particle-edge-diagnostics.v0` to the demo
+  and view state, including requested/effective edge, generated count, spacing,
+  particle radius, preservation status, and rejected preservation candidates.
+- The long-horizon probe and performance benchmark now surface the initial
+  particle edge diagnostics so the console harness can explain particle-count
+  differences directly.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check src/runtime/sphPhaseViewState.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` reported `37/37`.
+- PASS: direct initializer smoke showed `dropn=7, basen=5` for room
+  temperature H2O/H2O creates an effective drop edge `7`, effective base edge
+  `14`, and matching particle radius; `dropn=7, basen=7` preserves both
+  explicit edges with total particles `686`; Na/H2O preserves effective drop
+  edge `7` with material-adaptive base edge `8`.
+- PASS: `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=7&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=0&lawt=0&lawr=0&lawv=1&lawst=0&residentAuto=0&visualCapture=1&surfaceDraw=three-render-row-points&blob=1' ULG_PROBE_OUTPUT=/tmp/ulg-drop-edge-7-mounted-probe.json ULG_PROBE_PORT=5247 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-points ULG_PROBE_FAIL_ON_BAD=0 npm run probe:sph-long-horizon`
+  completed with `status=good`, browser console issues `0`, effective drop
+  edge `7`, effective base edge `14`, total generated particles `3087`, and
+  render-row vertex count `3087`.
+
 ## 2026-06-19 16:09 AKDT - Mechanics Material Phase Upload Cache
 
 Status:

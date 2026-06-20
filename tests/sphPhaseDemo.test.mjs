@@ -209,6 +209,95 @@ test('same material and temperature initialize with matching physical particle r
   near(viewState.materials[dropIndex].initialParticleSpacingM, viewState.materials[baseIndex].initialParticleSpacingM);
 });
 
+test('same material high drop edge preserves requested drop edge and matches particle radius', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 7,
+    baseParticleEdge: 5
+  });
+  const spacing = demo.initialParticleSpacing;
+  const diagnostics = demo.initialParticleEdgeDiagnostics;
+  const viewState = createSphPhaseViewState({ demo });
+
+  assert.equal(spacing.matchingMaterialState, true);
+  assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
+  assert.equal(spacing.matchingMaterialStateSpacingPlan.strategy, 'preserve-drop-requested-edge');
+  assert.equal(spacing.matchingMaterialStateSpacingPlan.preservedRequestedRole, 'drop');
+  assert.equal(spacing.drop.particlesPerEdge, 7);
+  assert.equal(spacing.base.particlesPerEdge, 14);
+  assert.equal(demo.counts.drop, 7 ** 3);
+  assert.equal(demo.counts.base, 14 ** 3);
+  near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
+  assert.equal(diagnostics.schema, 'peercompute.ulg.sph-initial-particle-edge-diagnostics.v0');
+  assert.equal(diagnostics.status, 'initial-particle-edges-effective');
+  assert.equal(diagnostics.requestedDropParticlesPerEdge, 7);
+  assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
+  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 14);
+  assert.equal(diagnostics.preservedRequestedRole, 'drop');
+  assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
+  assert.equal(viewState.initialParticleEdgeDiagnostics.effectiveDropParticlesPerEdge, 7);
+  assert.equal(viewState.initialParticleEdgeDiagnostics.effectiveBaseParticlesPerEdge, 14);
+});
+
+test('large requested drop edge is a lower bound for adaptive material spacing', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 450,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 7,
+    baseParticleEdge: 5
+  });
+  const spacing = demo.initialParticleSpacing;
+  const diagnostics = demo.initialParticleEdgeDiagnostics;
+
+  assert.equal(spacing.matchingMaterialState, false);
+  assert.equal(spacing.drop.requestedParticlesPerEdge, 7);
+  assert.equal(spacing.drop.particlesPerEdge, 7);
+  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-large-edge-preserved');
+  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(demo.counts.drop, 7 ** 3);
+  assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
+  assert.equal(diagnostics.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
+});
+
+test('matching material preserves equal high explicit role edges without inflating benchmark counts', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 7,
+    baseParticleEdge: 7
+  });
+  const spacing = demo.initialParticleSpacing;
+  const diagnostics = demo.initialParticleEdgeDiagnostics;
+
+  assert.equal(spacing.matchingMaterialState, true);
+  assert.equal(spacing.matchingMaterialStateSpacingUnified, false);
+  assert.equal(spacing.matchingMaterialStateSpacingPlan.strategy, 'preserve-both-requested-edges');
+  assert.equal(spacing.matchingMaterialStateSpacingPlan.preservedRequestedRole, 'both');
+  assert.equal(spacing.drop.particlesPerEdge, 7);
+  assert.equal(spacing.base.particlesPerEdge, 7);
+  assert.equal(demo.counts.drop, 7 ** 3);
+  assert.equal(demo.counts.base, 7 ** 3);
+  assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
+  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 7);
+  assert.equal(diagnostics.preservedRequestedRole, 'both');
+  assert.equal(diagnostics.totalGeneratedParticleCount, 2 * 7 ** 3);
+});
+
 test('particle phase + temperature come from the closure energy', () => {
   const demo = buildSphPhaseDemoState();
   const thermal = particleThermalState(demo);

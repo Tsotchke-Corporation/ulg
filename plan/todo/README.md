@@ -51,12 +51,13 @@ engine material-resolution bug: particle render modes must consume the same
 closure-derived optical/PBR rows as surfaces, with mobile/WebGL proxy material
 diagnostics when full PBR is unsupported.
 
-Current routing note, 2026-06-19 AKDT: the drop edge setting appears not to be
-respected for values larger than `6`. Track this in
-`plan/todo/drop-edge-large-size-respect-plan.md`. Treat it as a state
-initialization/particle placement bug: requested and effective drop dimensions,
-particle counts, render bounds, resident uploads, and reset flows must agree or
-publish an explicit clamp reason.
+Current routing note, 2026-06-19 AKDT: the drop edge setting's silent
+coarsening above `6` is fixed in the initializer and now reports
+`peercompute.ulg.sph-initial-particle-edge-diagnostics.v0`. Track remaining
+work in `plan/todo/drop-edge-large-size-respect-plan.md`: mounted browser
+reset/rebuild verification still needs to prove requested/effective drop
+dimensions, particle counts, render domains, and resident uploads agree after a
+scene reset.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

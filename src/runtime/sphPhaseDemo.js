@@ -53,6 +53,8 @@ const AVOGADRO_R = 8.314462618;
 const TAIT_EXPONENT = 7;
 const DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT = 64;
 const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
+const DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD = 7;
+const DEFAULT_INITIAL_MATCHING_MATERIAL_STATE_PARTICLE_BUDGET_MAX = 100000;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
   mechanics: true,
   gravity: true,
@@ -245,55 +247,186 @@ function relativeEdgeDeviation(edge, requestedEdge) {
   return Math.abs(edge - requested) / Math.max(1, requested);
 }
 
+function matchingMaterialStateCandidate({
+  dropSizeM,
+  baseSizeM,
+  dropEdge,
+  baseEdge,
+  dropRequestedEdge,
+  baseRequestedEdge,
+  targetSpacingM,
+  requestedParticleBudget,
+  strategy = 'adaptive-search',
+  preservedRequestedRole = null
+}) {
+  const dropSpacingM = dropSizeM / dropEdge;
+  const baseSpacingM = baseSizeM / baseEdge;
+  const particleBudget = dropEdge ** 3 + baseEdge ** 3;
+  const spacingMismatch = logSpacingError(dropSpacingM, baseSpacingM);
+  const targetSpacingError = 0.5 * (
+    logSpacingError(dropSpacingM, targetSpacingM)
+    + logSpacingError(baseSpacingM, targetSpacingM)
+  );
+  const budgetDeviation = Math.abs(particleBudget - requestedParticleBudget) / Math.max(1, requestedParticleBudget);
+  const requestedDeviation = (
+    relativeEdgeDeviation(dropEdge, dropRequestedEdge)
+    + relativeEdgeDeviation(baseEdge, baseRequestedEdge)
+  );
+  const score = spacingMismatch * 100 + targetSpacingError * 10 + budgetDeviation + requestedDeviation * 0.25;
+  return {
+    dropEdge,
+    baseEdge,
+    dropSpacingM,
+    baseSpacingM,
+    particleBudget,
+    spacingMismatch,
+    targetSpacingError,
+    budgetDeviation,
+    requestedDeviation,
+    score,
+    strategy,
+    preservedRequestedRole
+  };
+}
+
+function sameSpacingEdgeForAnchor({ anchorSizeM, anchorEdge, pairedSizeM }) {
+  const spacingM = anchorSizeM / Math.max(1, anchorEdge);
+  if (!(spacingM > 0)) return 1;
+  return Math.max(1, Math.round(pairedSizeM / spacingM));
+}
+
 function chooseMatchingMaterialStateEdges({
   dropSizeM,
   baseSizeM,
   dropRequestedParticlesPerEdge,
   baseRequestedParticlesPerEdge,
   targetSpacingM,
-  requestedParticleBudget
+  requestedParticleBudget,
+  preserveRequestedEdgeThreshold = DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD,
+  particleBudgetMax = DEFAULT_INITIAL_MATCHING_MATERIAL_STATE_PARTICLE_BUDGET_MAX
 }) {
   if (!(dropSizeM > 0) || !(baseSizeM > 0) || !(targetSpacingM > 0)) return null;
   const dropBounds = adaptiveParticleEdgeBounds(dropRequestedParticlesPerEdge);
   const baseBounds = adaptiveParticleEdgeBounds(baseRequestedParticlesPerEdge);
+  const preservedCandidates = [];
+  const rejectedPreservedCandidates = [];
+  const addPreservedCandidate = (candidate) => {
+    if (!(candidate?.dropEdge > 0) || !(candidate?.baseEdge > 0)) return;
+    if (particleBudgetMax > 0 && candidate.particleBudget > particleBudgetMax) {
+      rejectedPreservedCandidates.push({
+        strategy: candidate.strategy,
+        preservedRequestedRole: candidate.preservedRequestedRole,
+        particleBudget: candidate.particleBudget,
+        particleBudgetMax
+      });
+      return;
+    }
+    preservedCandidates.push(candidate);
+  };
+  if (
+    dropBounds.requested >= preserveRequestedEdgeThreshold
+    && baseBounds.requested >= preserveRequestedEdgeThreshold
+    && dropBounds.requested === baseBounds.requested
+  ) {
+    addPreservedCandidate(matchingMaterialStateCandidate({
+      dropSizeM,
+      baseSizeM,
+      dropEdge: dropBounds.requested,
+      baseEdge: baseBounds.requested,
+      dropRequestedEdge: dropBounds.requested,
+      baseRequestedEdge: baseBounds.requested,
+      targetSpacingM,
+      requestedParticleBudget,
+      strategy: 'preserve-both-requested-edges',
+      preservedRequestedRole: 'both'
+    }));
+    if (preservedCandidates.length > 0) {
+      return {
+        ...preservedCandidates[0],
+        requestedEdgePreservationStatus: 'preserved',
+        rejectedPreservedCandidates
+      };
+    }
+  }
+  if (dropBounds.requested >= preserveRequestedEdgeThreshold) {
+    addPreservedCandidate(matchingMaterialStateCandidate({
+      dropSizeM,
+      baseSizeM,
+      dropEdge: dropBounds.requested,
+      baseEdge: sameSpacingEdgeForAnchor({
+        anchorSizeM: dropSizeM,
+        anchorEdge: dropBounds.requested,
+        pairedSizeM: baseSizeM
+      }),
+      dropRequestedEdge: dropBounds.requested,
+      baseRequestedEdge: baseBounds.requested,
+      targetSpacingM,
+      requestedParticleBudget,
+      strategy: 'preserve-drop-requested-edge',
+      preservedRequestedRole: 'drop'
+    }));
+  }
+  if (baseBounds.requested >= preserveRequestedEdgeThreshold) {
+    addPreservedCandidate(matchingMaterialStateCandidate({
+      dropSizeM,
+      baseSizeM,
+      dropEdge: sameSpacingEdgeForAnchor({
+        anchorSizeM: baseSizeM,
+        anchorEdge: baseBounds.requested,
+        pairedSizeM: dropSizeM
+      }),
+      baseEdge: baseBounds.requested,
+      dropRequestedEdge: dropBounds.requested,
+      baseRequestedEdge: baseBounds.requested,
+      targetSpacingM,
+      requestedParticleBudget,
+      strategy: 'preserve-base-requested-edge',
+      preservedRequestedRole: 'base'
+    }));
+  }
+  if (preservedCandidates.length > 0) {
+    preservedCandidates.sort((a, b) =>
+      a.score - b.score
+      || a.particleBudget - b.particleBudget
+      || (a.preservedRequestedRole === 'drop' ? -1 : 1)
+    );
+    return {
+      ...preservedCandidates[0],
+      requestedEdgePreservationStatus: 'preserved',
+      rejectedPreservedCandidates
+    };
+  }
   let best = null;
   for (let dropEdge = dropBounds.minEdge; dropEdge <= dropBounds.maxEdge; dropEdge += 1) {
-    const dropSpacingM = dropSizeM / dropEdge;
     for (let baseEdge = baseBounds.minEdge; baseEdge <= baseBounds.maxEdge; baseEdge += 1) {
-      const baseSpacingM = baseSizeM / baseEdge;
-      const particleBudget = dropEdge ** 3 + baseEdge ** 3;
-      const spacingMismatch = logSpacingError(dropSpacingM, baseSpacingM);
-      const targetSpacingError = 0.5 * (
-        logSpacingError(dropSpacingM, targetSpacingM)
-        + logSpacingError(baseSpacingM, targetSpacingM)
-      );
-      const budgetDeviation = Math.abs(particleBudget - requestedParticleBudget) / Math.max(1, requestedParticleBudget);
-      const requestedDeviation = (
-        relativeEdgeDeviation(dropEdge, dropBounds.requested)
-        + relativeEdgeDeviation(baseEdge, baseBounds.requested)
-      );
-      const score = spacingMismatch * 100 + targetSpacingError * 10 + budgetDeviation + requestedDeviation * 0.25;
+      const candidate = matchingMaterialStateCandidate({
+        dropSizeM,
+        baseSizeM,
+        dropEdge,
+        baseEdge,
+        dropRequestedEdge: dropBounds.requested,
+        baseRequestedEdge: baseBounds.requested,
+        targetSpacingM,
+        requestedParticleBudget
+      });
       if (
         !best
-        || score < best.score - 1e-12
-        || (Math.abs(score - best.score) <= 1e-12 && targetSpacingError < best.targetSpacingError)
+        || candidate.score < best.score - 1e-12
+        || (Math.abs(candidate.score - best.score) <= 1e-12 && candidate.targetSpacingError < best.targetSpacingError)
       ) {
-        best = {
-          dropEdge,
-          baseEdge,
-          dropSpacingM,
-          baseSpacingM,
-          particleBudget,
-          spacingMismatch,
-          targetSpacingError,
-          budgetDeviation,
-          requestedDeviation,
-          score
-        };
+        best = candidate;
       }
     }
   }
-  return best;
+  return best
+    ? {
+      ...best,
+      requestedEdgePreservationStatus: rejectedPreservedCandidates.length > 0
+        ? 'blocked-particle-budget'
+        : 'not-requested',
+      rejectedPreservedCandidates
+    }
+    : null;
 }
 
 function resolveInitialParticleSpacingPlan({
@@ -348,15 +481,23 @@ function resolveInitialParticleSpacingPlan({
         spacingM: uniformSpacingM,
         uniformSpacingM,
         desiredParticlesPerEdge: requestedParticlesPerEdge,
-        densityKgPerM3
+        densityKgPerM3,
+        effectiveParticleEdgeStatus: 'fixed-requested-particles-per-edge',
+        requestedParticleEdgeLowerBoundApplied: false
       });
     }
     const desiredSpacingM = Math.cbrt(targetParticleMassKg / Math.max(densityKgPerM3, 1e-9));
     const desiredParticlesPerEdge = Math.max(1, sizeM / Math.max(desiredSpacingM, 1e-9));
-    const particlesPerEdge = cappedAdaptiveParticleEdge({
+    const adaptiveParticlesPerEdge = cappedAdaptiveParticleEdge({
       desiredEdge: desiredParticlesPerEdge,
       requestedEdge: requestedParticlesPerEdge
     });
+    const requestedParticleEdgeLowerBoundApplied =
+      requestedParticlesPerEdge >= DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD
+      && adaptiveParticlesPerEdge < requestedParticlesPerEdge;
+    const particlesPerEdge = requestedParticleEdgeLowerBoundApplied
+      ? requestedParticlesPerEdge
+      : adaptiveParticlesPerEdge;
     return withSupportMetadata({
       role,
       requestedParticlesPerEdge,
@@ -365,7 +506,12 @@ function resolveInitialParticleSpacingPlan({
       uniformSpacingM,
       desiredSpacingM,
       desiredParticlesPerEdge,
-      densityKgPerM3
+      adaptiveParticlesPerEdge,
+      densityKgPerM3,
+      effectiveParticleEdgeStatus: requestedParticleEdgeLowerBoundApplied
+        ? 'requested-large-edge-preserved'
+        : 'adaptive-density-target',
+      requestedParticleEdgeLowerBoundApplied
     });
   };
 
@@ -391,18 +537,35 @@ function resolveInitialParticleSpacingPlan({
       requestedParticleBudget
     })
     : null;
+  const matchingMaterialStateSpacingUnified = Boolean(
+    matchingMaterialStateEdges
+    && matchingMaterialStateEdges.spacingMismatch <= 1e-9
+  );
   if (matchingMaterialStateEdges) {
+    const preservedRequestedRole = matchingMaterialStateEdges.preservedRequestedRole;
     drop = withSupportMetadata({
       ...drop,
       particlesPerEdge: matchingMaterialStateEdges.dropEdge,
       spacingM: matchingMaterialStateEdges.dropSpacingM,
-      matchingMaterialStateSpacingUnified: true
+      matchingMaterialStateSpacingUnified,
+      effectiveParticleEdgeStatus: preservedRequestedRole === 'drop' || preservedRequestedRole === 'both'
+        ? 'matching-material-preserved-requested-edge'
+        : 'matching-material-state-spacing-unified',
+      requestedParticleEdgeLowerBoundApplied: preservedRequestedRole === 'drop'
+        || preservedRequestedRole === 'both'
+        || drop.requestedParticleEdgeLowerBoundApplied === true
     });
     base = withSupportMetadata({
       ...base,
       particlesPerEdge: matchingMaterialStateEdges.baseEdge,
       spacingM: matchingMaterialStateEdges.baseSpacingM,
-      matchingMaterialStateSpacingUnified: true
+      matchingMaterialStateSpacingUnified,
+      effectiveParticleEdgeStatus: preservedRequestedRole === 'base' || preservedRequestedRole === 'both'
+        ? 'matching-material-preserved-requested-edge'
+        : 'matching-material-state-spacing-unified',
+      requestedParticleEdgeLowerBoundApplied: preservedRequestedRole === 'base'
+        || preservedRequestedRole === 'both'
+        || base.requestedParticleEdgeLowerBoundApplied === true
     });
   }
   const roleSpacingM = [drop.spacingM, base.spacingM].filter((value) => Number.isFinite(value) && value > 0);
@@ -434,7 +597,7 @@ function resolveInitialParticleSpacingPlan({
     smoothingLengthCapM,
     smoothingLengthCapped: smoothingLengthM < uncappedSmoothingLengthM - 1e-12,
     matchingMaterialState: Boolean(matchingMaterialState),
-    matchingMaterialStateSpacingUnified: Boolean(matchingMaterialStateEdges),
+    matchingMaterialStateSpacingUnified,
     matchingMaterialStateSpacingPlan: matchingMaterialStateEdges
       ? {
         dropParticlesPerEdge: matchingMaterialStateEdges.dropEdge,
@@ -445,7 +608,11 @@ function resolveInitialParticleSpacingPlan({
         targetSpacingError: matchingMaterialStateEdges.targetSpacingError,
         particleBudget: matchingMaterialStateEdges.particleBudget,
         requestedParticleBudget,
-        budgetDeviation: matchingMaterialStateEdges.budgetDeviation
+        budgetDeviation: matchingMaterialStateEdges.budgetDeviation,
+        strategy: matchingMaterialStateEdges.strategy,
+        preservedRequestedRole: matchingMaterialStateEdges.preservedRequestedRole,
+        requestedEdgePreservationStatus: matchingMaterialStateEdges.requestedEdgePreservationStatus,
+        rejectedPreservedCandidates: matchingMaterialStateEdges.rejectedPreservedCandidates || []
       }
       : null,
     particleSizePolicy: {
@@ -493,6 +660,80 @@ function densityAtTemperatureKgPerM3(props, temperatureK) {
   const phase = equilibriumFromSpecificEnergy(props, u).stablePhase;
   const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
   return ph.densityKgPerM3;
+}
+
+function roleParticleEdgeDiagnostic(rolePlan, {
+  requestedParticlesPerEdge,
+  generatedParticleCount,
+  blockEdgeM
+} = {}) {
+  const requested = positiveParticleEdge(requestedParticlesPerEdge);
+  const effective = positiveParticleEdge(rolePlan?.particlesPerEdge, requested);
+  const count = Math.max(0, Math.round(Number(generatedParticleCount) || 0));
+  const expectedCount = effective ** 3;
+  return {
+    role: rolePlan?.role || null,
+    requestedParticlesPerEdge: requested,
+    effectiveParticlesPerEdge: effective,
+    generatedParticleCount: count,
+    expectedParticleCount: expectedCount,
+    particleCountMatchesEffectiveEdge: count === expectedCount,
+    blockEdgeM: Number.isFinite(Number(blockEdgeM)) ? Number(blockEdgeM) : null,
+    spacingM: Number.isFinite(Number(rolePlan?.spacingM)) ? Number(rolePlan.spacingM) : null,
+    uniformSpacingM: Number.isFinite(Number(rolePlan?.uniformSpacingM)) ? Number(rolePlan.uniformSpacingM) : null,
+    particleRadiusM: Number.isFinite(Number(rolePlan?.volumeEquivalentParticleRadiusM))
+      ? Number(rolePlan.volumeEquivalentParticleRadiusM)
+      : null,
+    densityKgPerM3: Number.isFinite(Number(rolePlan?.densityKgPerM3)) ? Number(rolePlan.densityKgPerM3) : null,
+    effectiveParticleEdgeStatus: rolePlan?.effectiveParticleEdgeStatus || null,
+    requestedParticleEdgeLowerBoundApplied: rolePlan?.requestedParticleEdgeLowerBoundApplied === true,
+    matchingMaterialStateSpacingUnified: rolePlan?.matchingMaterialStateSpacingUnified === true
+  };
+}
+
+function initialParticleEdgeDiagnostics({
+  initialParticleSpacing,
+  dropRequestedParticlesPerEdge,
+  baseRequestedParticlesPerEdge,
+  dropParticleCount,
+  baseParticleCount,
+  dropSizeM,
+  baseSizeM
+} = {}) {
+  const drop = roleParticleEdgeDiagnostic(initialParticleSpacing?.drop, {
+    requestedParticlesPerEdge: dropRequestedParticlesPerEdge,
+    generatedParticleCount: dropParticleCount,
+    blockEdgeM: dropSizeM
+  });
+  const base = roleParticleEdgeDiagnostic(initialParticleSpacing?.base, {
+    requestedParticlesPerEdge: baseRequestedParticlesPerEdge,
+    generatedParticleCount: baseParticleCount,
+    blockEdgeM: baseSizeM
+  });
+  const matchingPlan = initialParticleSpacing?.matchingMaterialStateSpacingPlan || null;
+  return {
+    schema: 'peercompute.ulg.sph-initial-particle-edge-diagnostics.v0',
+    status: drop.particleCountMatchesEffectiveEdge && base.particleCountMatchesEffectiveEdge
+      ? 'initial-particle-edges-effective'
+      : 'initial-particle-edge-count-mismatch',
+    requestedDropParticlesPerEdge: drop.requestedParticlesPerEdge,
+    requestedBaseParticlesPerEdge: base.requestedParticlesPerEdge,
+    effectiveDropParticlesPerEdge: drop.effectiveParticlesPerEdge,
+    effectiveBaseParticlesPerEdge: base.effectiveParticlesPerEdge,
+    drop,
+    base,
+    totalGeneratedParticleCount: drop.generatedParticleCount + base.generatedParticleCount,
+    matchingMaterialState: initialParticleSpacing?.matchingMaterialState === true,
+    matchingMaterialStateSpacingUnified: initialParticleSpacing?.matchingMaterialStateSpacingUnified === true,
+    matchingMaterialStateStrategy: matchingPlan?.strategy || null,
+    preservedRequestedRole: matchingPlan?.preservedRequestedRole || null,
+    requestedEdgePreservationStatus: matchingPlan?.requestedEdgePreservationStatus || (
+      drop.requestedParticleEdgeLowerBoundApplied || base.requestedParticleEdgeLowerBoundApplied
+        ? 'preserved'
+        : 'not-requested'
+    ),
+    rejectedPreservedCandidates: matchingPlan?.rejectedPreservedCandidates || []
+  };
 }
 
 function phasePropertiesFromParticle(properties, particle) {
@@ -790,6 +1031,15 @@ export function buildSphPhaseDemoState({
     baseMaterial,
     initialTemperaturesK: { drop: dropTempK, base: baseTempK, gas: scenario.gas.initialTemperatureK },
     initialParticleSpacing,
+    initialParticleEdgeDiagnostics: initialParticleEdgeDiagnostics({
+      initialParticleSpacing,
+      dropRequestedParticlesPerEdge: dropParticleEdge,
+      baseRequestedParticlesPerEdge: baseParticleEdge,
+      dropParticleCount: dropParticles.length,
+      baseParticleCount: baseParticles.length,
+      dropSizeM: ironEdge,
+      baseSizeM: iceEdge
+    }),
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };

@@ -3407,7 +3407,7 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
   });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedEdge}&basen=${requestedEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
+  await page.goto(`/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedEdge}&basen=${requestedEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawp=0&lawt=0&lawr=0&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
   }
@@ -3441,6 +3441,76 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
       && scene?.getSphGpuParticleUpload?.()?.particleCount === total
       && scene?.getMlsMpmGpuParticleUpload?.()?.particleCount === total;
   }, null, { timeout: 30_000 });
+
+  const postResetResident = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const execution = await scene.refreshMlsMpmResidentSteps({
+      preferWebGpu: true,
+      stepCount: 1,
+      readbackMode: 'no-full-readback',
+      compactSummaryMode: 'every-step',
+      compactSummaryScope: 'particle-visual',
+      fuseNoFullResidentMechanicsSequence: true,
+      fuseNoFullResidentMechanicsActiveGrid: true,
+      activeGridDispatchPlanRefreshMode: 'every-step',
+      force: true
+    });
+    overlay.__mlsMpmResidentSteps = execution;
+    overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+    const trace = overlay.__sphAppendResidentStageOrderTrace?.({
+      status: 'resident-execution-complete-post-reset-regression',
+      reason: 'mounted-reset-regression-post-reset-resident-step',
+      stepCount: 1,
+      readbackMode: 'no-full-readback',
+      continueFromResidentState: Boolean(execution?.continuedFromResidentState),
+      execution
+    }) || overlay.__sphResidentStageOrderTrace || null;
+    const finalStep = execution?.finalStep || overlay.__mlsMpmResidentStep || null;
+    const diagnostics = finalStep?.diagnostics || null;
+    const activeGridDispatch = finalStep?.stageTiming?.activeGridDispatch
+      || finalStep?.fusedResidentSequence?.activeGridDispatch
+      || finalStep?.gridUpdate?.activeGridDispatch
+      || finalStep?.p2gGridProjection?.activeGridDispatch
+      || null;
+    const traceSummary = trace?.lastEvent?.executionSummary || null;
+    return {
+      schema: execution?.schema ?? null,
+      status: execution?.status ?? null,
+      backend: execution?.backend ?? null,
+      readbackMode: execution?.readbackMode ?? null,
+      completedStepCount: execution?.completedStepCount ?? null,
+      continuationAvailable: execution?.continuationAvailable ?? null,
+      finalStepStatus: finalStep?.status ?? null,
+      finalReadbackMode: finalStep?.readbackMode ?? null,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      maxSpeedMPerS: diagnostics?.maxSpeedMPerS ?? null,
+      activeGridNodeCount: diagnostics?.activeGridNodeCount ?? null,
+      activeGridNodeCountAvailable: diagnostics?.activeGridNodeCountAvailable ?? null,
+      activeGridNodeSummaryStatus: diagnostics?.activeGridNodeSummaryStatus ?? null,
+      activeGridDispatchUseActiveGrid: activeGridDispatch?.useActiveGrid ?? null,
+      activeGridDispatchNodeCount: activeGridDispatch?.activeGridNodeCount
+        ?? activeGridDispatch?.activeNodeCount
+        ?? activeGridDispatch?.dispatchNodeCount
+        ?? null,
+      compactGpuSummaryStatus: diagnostics?.compactGpuSummaryStatus ?? null,
+      traceStatus: trace?.status ?? null,
+      traceEventCount: trace?.eventCount ?? null,
+      traceLastEventStatus: trace?.lastEvent?.status ?? null,
+      traceLastEventReason: trace?.lastEvent?.reason ?? null,
+      traceExecutionBackend: traceSummary?.backend ?? null,
+      traceExecutionReadbackMode: traceSummary?.readbackMode ?? null,
+      traceStageOrder: traceSummary?.stageOrder ?? [],
+      traceAuthorityStatus: traceSummary?.residentAuthorityLedgerStatus ?? null,
+      traceLeaseStatus: traceSummary?.residentBufferLeaseLedgerStatus ?? null,
+      traceActiveGridNodeCount: traceSummary?.diagnostics?.activeGridNodeCount ?? null,
+      traceActiveGridDispatchNodeCount: traceSummary?.activeGridDispatch?.activeGridNodeCount
+        ?? traceSummary?.activeGridDispatch?.activeNodeCount
+        ?? traceSummary?.activeGridDispatch?.dispatchNodeCount
+        ?? null,
+      traceMaxDisplacementM: traceSummary?.diagnostics?.maxDisplacementM ?? null
+    };
+  });
 
   const summary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -3523,6 +3593,33 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
   expect(summary.sphUpload.particleCount).toBe(expectedTotalCount);
   expect(summary.mlsUpload.status).toBe('webgpu-uploaded');
   expect(summary.mlsUpload.particleCount).toBe(expectedTotalCount);
+  expect(postResetResident.backend).toBe('webgpu');
+  expect(postResetResident.readbackMode).toBe('no-full-readback');
+  expect(postResetResident.completedStepCount).toBe(1);
+  expect(postResetResident.finalStepStatus).toBe('resident-step-webgpu-executed');
+  expect(postResetResident.finalReadbackMode).toBe('no-full-readback');
+  expect(postResetResident.maxDisplacementM).toBeGreaterThan(0);
+  expect(postResetResident.maxSpeedMPerS).toBeGreaterThan(0);
+  const postResetActiveGridNodeCount = postResetResident.activeGridNodeCount
+    ?? postResetResident.activeGridDispatchNodeCount;
+  expect(
+    postResetResident.activeGridDispatchUseActiveGrid,
+    JSON.stringify(postResetResident, null, 2)
+  ).toBe(true);
+  expect(postResetActiveGridNodeCount).toBeGreaterThan(0);
+  if (postResetResident.activeGridNodeCountAvailable === true) {
+    expect(postResetResident.activeGridNodeCount).toBeGreaterThan(0);
+    expect(postResetResident.activeGridNodeSummaryStatus).toBe('active-grid-node-summary-ready');
+  }
+  expect(postResetResident.traceLastEventStatus).toBe('resident-execution-complete-post-reset-regression');
+  expect(postResetResident.traceExecutionBackend).toBe('webgpu');
+  expect(postResetResident.traceExecutionReadbackMode).toBe('no-full-readback');
+  expect(postResetResident.traceStageOrder).toEqual(expect.arrayContaining(['p2g', 'gridUpdate', 'g2p']));
+  expect(postResetResident.traceAuthorityStatus).toBe('resident-authority-ledger-ready');
+  expect(postResetResident.traceLeaseStatus).toBe('resident-buffer-lease-ledger-ready');
+  expect(postResetResident.traceMaxDisplacementM).toBeGreaterThan(0);
+  expect(postResetResident.traceActiveGridNodeCount ?? postResetResident.traceActiveGridDispatchNodeCount)
+    .toBeGreaterThan(0);
   if (summary.renderState.schema) {
     expect(summary.renderState.particleCount).toBe(expectedTotalCount);
   }

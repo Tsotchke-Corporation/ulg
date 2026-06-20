@@ -1034,13 +1034,17 @@ state that moves on screen is the state the laws actually mutated.
      invalidation/resync, resident scheduling, stale/error/watchdog outcomes,
      and compact execution summaries with stage order, authority family owners,
      buffer lease status, active-grid fields when present, and next-buffer byte
-     counts. The remaining part of this item is to assert repeated post-reset
-     resident substeps with nonzero active-grid/motion evidence.
+     counts.
+   - 2026-06-19 AKDT update: the mounted reset regression now runs a post-reset
+     WebGPU no-full-readback resident MLS-MPM step through the engine API and
+     asserts nonzero visible displacement, active-grid dispatch evidence,
+     authority ledger readiness, and buffer-lease ledger readiness with the
+     mobile-sized viewport/console harness.
 6. Add failing regression assertions before broad changes:
    - H2O/H2O liquid block settles/merges without detached blobs or delayed
      cadence jumps;
-   - post-reset repeated substeps keep nonzero active grid nodes and visible
-     displacement;
+   - post-reset resident substeps keep nonzero active grid nodes and visible
+     displacement: covered by the mounted reset regression;
    - pressure force rows refresh even when render refresh is skipped;
    - pressure rows are actually consumed by grid/resident mechanics;
    - reaction/product/gas ledgers persist across repeated no-full-readback

@@ -191,9 +191,8 @@ test('resident stage-order execution summary preserves authority and active-grid
         compactSummaryScope: 'particle-visual',
         activeGridDispatch: {
           useActiveGrid: true,
-          activeGridNodeCount: 42,
+          activeNodeCount: 42,
           gridNodeScanCount: 256,
-          dispatchNodeCount: 42,
           dispatchWorkgroups: 1,
           maxSpeedMPerS: 0.25,
           safetyCells: 2
@@ -233,6 +232,8 @@ test('resident stage-order execution summary preserves authority and active-grid
   assert.equal(summary.available, true);
   assert.deepEqual(summary.stageOrder, ['p2g', 'gridUpdate', 'g2p']);
   assert.equal(summary.activeGridDispatch.activeGridNodeCount, 42);
+  assert.equal(summary.activeGridDispatch.activeNodeCount, 42);
+  assert.equal(summary.activeGridDispatch.dispatchNodeCount, 42);
   assert.equal(summary.diagnostics.maxDisplacementM, 0.0125);
   assert.equal(summary.residentAuthorityFamilyOwners['particle-kinematics'].ownerStage, 'g2p');
   assert.equal(summary.residentBufferLeaseLedgerStatus, 'resident-buffer-leases-valid');

@@ -438,9 +438,17 @@ export function summarizeResidentStageOrderExecution(execution = null) {
     } : null,
     activeGridDispatch: activeGridDispatch ? {
       useActiveGrid: activeGridDispatch.useActiveGrid === true,
-      activeGridNodeCount: activeGridDispatch.activeGridNodeCount ?? null,
+      activeGridNodeCount: activeGridDispatch.activeGridNodeCount
+        ?? activeGridDispatch.activeNodeCount
+        ?? null,
+      activeNodeCount: activeGridDispatch.activeNodeCount
+        ?? activeGridDispatch.activeGridNodeCount
+        ?? null,
       gridNodeScanCount: activeGridDispatch.gridNodeScanCount ?? null,
-      dispatchNodeCount: activeGridDispatch.dispatchNodeCount ?? null,
+      dispatchNodeCount: activeGridDispatch.dispatchNodeCount
+        ?? activeGridDispatch.activeNodeCount
+        ?? activeGridDispatch.activeGridNodeCount
+        ?? null,
       dispatchWorkgroups: activeGridDispatch.dispatchWorkgroups ?? null,
       maxSpeedMPerS: activeGridDispatch.maxSpeedMPerS ?? null,
       safetyCells: activeGridDispatch.safetyCells ?? null

@@ -13,7 +13,8 @@ The same generated-prefix coverage now extends through `I`, including `Rh`,
 selectable prefix through `Pr`, including the first lanthanide-band tranche
 `Ba`, `La`, `Ce`, and `Pr`, plus the cache-backed continuation `Nd`, `Pm`,
 `Sm`, `Eu`, `Gd`, `Tb`, `Dy`, `Ho`, `Er`, `Tm`, `Yb`, and `Lu`, rather than a hand-maintained
-first-tranche-only list.
+first-tranche-only list. The generated prefix now extends through `Au`,
+including `Hf`, `Ta`, `W`, `Re`, `Os`, `Ir`, `Pt`, and `Au`.
 
 Focused checks:
 
@@ -22,7 +23,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=66`.
+  passed with `recordCount=74`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run with cache write/hit
@@ -34,6 +35,7 @@ Focused checks:
 - Cache-backed tranche:
   the `Nd/Pm/Sm/Eu`, `Gd/Tb/Dy/Ho`, and `Er/Tm/Yb/Lu` write passes each
   reported `cache.hitCount=4` after their dry runs populated those rows.
+  The `Hf/Ta/W/Re/Os/Ir/Pt/Au` write pass reported `cache.hitCount=8`.
 - Build hygiene:
   `npm run build`, `git diff --check`, and `npm run icc:update` passed; the
   Vite build retained the existing large-chunk warning.

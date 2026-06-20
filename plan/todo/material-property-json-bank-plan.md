@@ -138,6 +138,12 @@ The checked-in bank now covers the selectable prefix through `Lu`, contains 66
 element rows, and leaves 45 selectable non-noble target rows. The write pass
 again reused all four dry-run cache entries with `cache.hitCount=4`.
 
+Status update, 2026-06-19 AKDT: post-lanthanide transition coverage adds
+`Hf`, `Ta`, `W`, `Re`, `Os`, `Ir`, `Pt`, and `Au`. The checked-in bank now
+covers the selectable prefix through `Au`, contains 74 element rows, and leaves
+37 selectable non-noble target rows. The cache-backed write reused all eight
+dry-run records with `cache.hitCount=8`.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

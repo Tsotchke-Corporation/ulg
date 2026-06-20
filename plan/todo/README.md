@@ -69,16 +69,16 @@ products resolve to nonblocked PBR rows. The remaining renderer-specific audit
 is the Three WebGPU material-proxy path plus an explicit air-particle visual
 scenario.
 
-Current routing note, 2026-06-19 AKDT: the drop edge setting's silent
-coarsening above `6` is fixed in the initializer and now reports
-`peercompute.ulg.sph-initial-particle-edge-diagnostics.v0`. Mounted
-mobile-shaped reset/rebuild coverage now proves a `dropn=7, basen=7` scene
-preserves requested/effective high edges after Reset, keeps particle/render
-domain counts aligned, and uploads the same count to SPH and MLS-MPM GPU
-particle buffers after an explicit Step. Remaining work in
-`plan/todo/drop-edge-large-size-respect-plan.md` is performance-roadmap
-coverage for the intentionally expanded same-material `dropn=7, basen=5`
-`14^3` base case, not the high-edge contract itself.
+Current routing note, 2026-06-19 AKDT: reopened by live report. The prior
+initializer/reset coverage showed `dropn=7, basen=7` preserving requested and
+effective high edges, but the current demo still appears not to respect drop
+edge for anything larger than `6`. Treat
+`plan/todo/drop-edge-large-size-respect-plan.md` as active again until a fresh
+browser/mobile-shaped repro proves the URL/UI value, initialized drop domain,
+render-domain counts, resident uploads, reset flow, and visible bounds all
+agree for values above `6`. Do not hide this behind a visual scale or the
+previous performance-roadmap note for the `dropn=7, basen=5` expanded base
+case.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
@@ -93,15 +93,20 @@ mode `extension-gpu-vertex-counter`, bridge status
 `native-webgpu-surface-consumer-ready`, and render status
 `native-webgpu-surface-consumer-rendered`. The native validation wait is now
 actually plumbed into the in-page probe, and local headless Chromium has been
-proven to screenshot a minimal WebGPU canvas clear as black while offscreen
-texture readback works. Current evidence
+proven to screenshot a minimal WebGPU canvas clear as black while standalone
+offscreen texture readback works. Current evidence
 `/tmp/ulg-native-validation-analysis-classified-probe.json` is console-clean,
 records `nativeSurfaceValidationWaitMs=2500`, classifies blank native canvas
 captures as `browserCanvasCaptureUnsupportedByNativeWebGpu=true`, and fails
 only on `resident-surface-visible-gpu-consumer-not-ready` because resident
 device readback/offscreen validation exhausts with `A valid external Instance
-reference no longer exists`. The remaining P0 is therefore resident-device
-validation/device lifetime and real mobile native rendering, not extension
+reference no longer exists`. Newer evidence
+`/tmp/ulg-native-device-texture-smoke-probe.json` keeps the same native path
+console-clean and proves the cached resident `GPUDevice` can pass both
+`MAP_READ` and a standalone `rgba8unorm` texture render/copy/MAP_READ smoke
+(`sample=[255,0,0,255]`). The blocker is therefore narrowed to native
+surface/offscreen validation readback and device lifetime around the engine
+main-canvas consumer, not generic resident-device texture readback, extension
 counter readback, blank headless screenshot chasing, overlay fallback, or CPU
 mesh optimization.
 

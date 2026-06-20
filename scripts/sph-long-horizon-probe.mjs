@@ -889,6 +889,8 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         submitTask: residentComputeManager.submitTask ?? null
       } : null,
       residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
+      residentWebGpuDeviceTextureReadbackSmoke:
+        sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
       cpuClosureTask: overlay?.__sphCpuClosureTask || null,
       workerRebuild: worker ? {
         schema: worker.schema ?? null,
@@ -1953,6 +1955,8 @@ async function runBrowserProbe({
         } : null,
         rendererInit: sceneUserData.sphRendererInit || null,
         residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
+        residentWebGpuDeviceTextureReadbackSmoke:
+          sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
         renderModeSelection: overlay.__sphRenderModeSelection || null,
@@ -2296,6 +2300,10 @@ async function runBrowserProbe({
               renderState.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null,
             surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus:
               renderState.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null,
+            surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus:
+              renderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null,
+            surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason:
+              renderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null,
             surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable:
               renderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             fullSurfaceDrawReadback: renderState.fullSurfaceDrawReadback ?? null,
@@ -2587,6 +2595,10 @@ async function runBrowserProbe({
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null,
             visibleGpuConsumerNativeDeviceMapSmokeStatus:
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null,
+            visibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null,
+            visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null,
             visibleGpuConsumerNativeTextureReadbackUnavailable:
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             gpuOnlyAggregateIndirectReady: surfaceDraw.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
@@ -5005,8 +5017,10 @@ function analyzeTimeline(timeline, {
       || /external Instance reference no longer exists|texture readback unavailable/i.test(String(
         metric?.renderState?.surfaceDrawRenderBridgePixelValidationReason
         ?? metric?.renderState?.surfaceDrawRenderBridgeOffscreenValidationReason
+        ?? metric?.renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
         ?? metric?.surfaceDraw?.renderBridgePixelValidationReason
         ?? metric?.surfaceDraw?.renderBridgeOffscreenValidationReason
+        ?? metric?.surfaceDraw?.visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
         ?? ''
       ))
     ))

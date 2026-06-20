@@ -11332,3 +11332,40 @@ Native visible-consumer fail-closed gate, 2026-06-19 AKDT:
   - Direct canvas validation remains the blocker:
     `blankCanvasFrameCount=3`, `nonblankCanvasFrameCount=0`,
     and analysis includes `visual-canvas-frames-all-blank`.
+
+Resident native texture readback smoke, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Focused tests:
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+  - New assertions keep native visible-consumer readiness blocked when the
+    resident-device texture readback smoke reports the texture-readback
+    unavailable class.
+- Whitespace:
+  `git diff --check` passed.
+- Browser native surface probe:
+  `/tmp/ulg-native-device-texture-smoke-probe.json`
+  - Expected partial/fail-closed result: probe `status=bad`, browser console
+    issues/warnings `0/0`.
+  - Native bridge selected correctly with `renderer=native-webgpu` and
+    `surfaceDraw=native-webgpu-surface-consumer`.
+  - Resident device MAP_READ smoke passed with expected/sample
+    `305419896`.
+  - New resident texture render/copy/MAP_READ smoke passed with
+    `sample=[255,0,0,255]`.
+  - The native bridge rendered
+    `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`
+    with `renderBridgeFrameCount=10`, but visible consumer remained
+    fail-closed:
+    `visibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-pixel-validation`.
+  - Bridge readback smoke still failed with
+    `A valid external Instance reference no longer exists`; offscreen
+    validation reported the same readback-unavailable class.
+- Port note:
+  An initial attempt against occupied `5173` failed during HTTP readiness with
+  `Timed out waiting for http://127.0.0.1:5173: fetch failed`; the successful
+  harness run used clean port `5631`.

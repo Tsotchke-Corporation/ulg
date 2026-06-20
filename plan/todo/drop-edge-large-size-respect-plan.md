@@ -41,6 +41,19 @@ resident GPU uploads, and reset/rebuild flows.
 
 ## Implementation Status
 
+2026-06-19 AKDT update:
+
+- Reopened by live demo report: drop edge still does not appear to be
+  respected for anything larger than `6`.
+- The prior `dropn=7, basen=7` mounted reset/rebuild evidence is now treated as
+  incomplete rather than definitive. The next pass must capture the actual
+  failing URL/UI path and compare requested edge, effective initialized edge,
+  particle/render-domain counts, resident uploads, reset state, and visible
+  bounds for values above `6`.
+- Keep this as an engine integration/initialization bug. Do not solve it with a
+  visual-only scale, and do not collapse it into the separate performance issue
+  where same-material spacing can intentionally expand the paired base block.
+
 2026-06-19 AKDT:
 
 - The initializer now treats explicit role edge requests above `6` as a lower

@@ -29545,3 +29545,49 @@ Remaining:
 
 - Fix actual native main-canvas presentation or same-device validation so the
   native path produces visible pixels; do not loosen the visibility gate.
+
+## 2026-06-19 AKDT - Resident Native Texture Readback Smoke
+
+Status:
+
+- Added a cached resident-device texture readback smoke for the native WebGPU
+  renderer path. It renders a 1x1 `rgba8unorm` target on the cached resident
+  `GPUDevice`, copies it to a MAP_READ buffer, records the sample, and threads
+  the result through scene diagnostics, resident visible-consumer state, and
+  the long-horizon browser probe.
+- Kept the visible native consumer fail-closed. The new smoke is diagnostic
+  evidence only; it does not promote the native surface consumer unless browser
+  pixel validation or the actual same-device surface/offscreen validation
+  passes.
+- Reopened the drop-edge >6 todo based on the latest live report. The previous
+  `dropn=7` mounted evidence is now treated as incomplete until a fresh
+  browser/mobile-shaped repro proves URL/UI, initialization, render-domain,
+  resident upload, reset, and visible-bounds agreement.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `git diff --check`.
+- PARTIAL/EXPECTED BAD:
+  `/tmp/ulg-native-device-texture-smoke-probe.json` ran the native WebGPU
+  surface consumer on a clean probe-owned port with browser console
+  issues/warnings `0/0`. The native bridge rendered
+  `native-webgpu-surface-consumer-rendered`, resident MAP_READ smoke passed,
+  and the new resident texture smoke passed with sample `[255,0,0,255]`.
+  The visible consumer stayed fail-closed because actual bridge readback smoke
+  still reports `A valid external Instance reference no longer exists` and
+  offscreen validation remains `not-run` for the same readback-unavailable
+  class.
+- NOTE: An attempted probe on occupied port `5173` failed before page load with
+  `Timed out waiting for http://127.0.0.1:5173: fetch failed`; this matches the
+  current HTTP/SSL/protocol confusion on the long-lived dev server rather than
+  a renderer result.
+
+Remaining:
+
+- Fix native surface/offscreen validation readback or device lifetime around
+  the engine main-canvas consumer. Basic resident-device buffer and texture
+  readback are no longer the likely root cause.

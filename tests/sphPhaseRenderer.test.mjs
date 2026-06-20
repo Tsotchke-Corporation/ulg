@@ -2358,6 +2358,34 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativeReadbackUnavailableBlocked.nativeReadbackFallbackValidated, false);
   assert.equal(nativeReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
 
+  const nativeDeviceTextureReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerDeviceMapSmokeStatus: 'passed',
+      nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus: 'not-run',
+      nativeSurfaceConsumerDeviceTextureReadbackSmokeReason:
+        'texture readback unavailable: resident WebGPU device texture readback smoke timed out'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativeDeviceTextureReadbackUnavailableBlocked.ready, false);
+  assert.equal(
+    nativeDeviceTextureReadbackUnavailableBlocked.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(
+    nativeDeviceTextureReadbackUnavailableBlocked.nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus,
+    'not-run'
+  );
+  assert.equal(nativeDeviceTextureReadbackUnavailableBlocked.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+
   const nativePixelReadbackUnavailableBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {

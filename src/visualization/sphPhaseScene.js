@@ -1301,6 +1301,12 @@ export function resolveResidentSurfaceBufferHandoff({
   };
 }
 
+function isNativeWebGpuTextureReadbackUnavailableReason(value) {
+  return /external Instance reference no longer exists|texture readback unavailable/i.test(
+    String(value || '')
+  );
+}
+
 export function resolveResidentSurfaceVisibleGpuConsumer({
   handoff = null,
   rendererCapability = null,
@@ -1335,12 +1341,16 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     rendererCapability?.nativeSurfaceConsumerOffscreenValidationReason ?? null;
   const deviceMapSmokeStatus =
     rendererCapability?.nativeSurfaceConsumerDeviceMapSmokeStatus ?? null;
+  const deviceTextureReadbackSmokeStatus =
+    rendererCapability?.nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus ?? null;
+  const deviceTextureReadbackSmokeReason =
+    rendererCapability?.nativeSurfaceConsumerDeviceTextureReadbackSmokeReason ?? null;
   const nativeRenderedFrameCount = Math.max(
     0,
     Math.round(Number(rendererCapability?.nativeSurfaceConsumerRenderedFrameCount) || 0)
   );
-  const textureReadbackUnavailable = /external Instance reference no longer exists|texture readback unavailable/i.test(
-    `${pixelValidationReason || ''} ${readbackSmokeValidationReason || ''} ${offscreenValidationReason || ''}`
+  const textureReadbackUnavailable = isNativeWebGpuTextureReadbackUnavailableReason(
+    `${pixelValidationReason || ''} ${readbackSmokeValidationReason || ''} ${offscreenValidationReason || ''} ${deviceTextureReadbackSmokeReason || ''}`
   );
   const nativeValidationPendingWithRenderedFrame = Boolean(
     nativeWebGpuBridgeBound
@@ -1423,6 +1433,8 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     nativeSurfaceConsumerOffscreenValidationStatus: offscreenValidationStatus,
     nativeSurfaceConsumerOffscreenValidationReason: offscreenValidationReason,
     nativeSurfaceConsumerDeviceMapSmokeStatus: deviceMapSmokeStatus,
+    nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus: deviceTextureReadbackSmokeStatus,
+    nativeSurfaceConsumerDeviceTextureReadbackSmokeReason: deviceTextureReadbackSmokeReason,
     nativeSurfaceConsumerTextureReadbackUnavailable: textureReadbackUnavailable
   };
 }
@@ -1463,6 +1475,10 @@ function assignResidentSurfaceVisibleGpuConsumer(target, visibleGpuConsumer) {
     visibleGpuConsumer.nativeSurfaceConsumerOffscreenValidationStatus;
   target.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
     visibleGpuConsumer.nativeSurfaceConsumerDeviceMapSmokeStatus;
+  target.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus =
+    visibleGpuConsumer.nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus;
+  target.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason =
+    visibleGpuConsumer.nativeSurfaceConsumerDeviceTextureReadbackSmokeReason;
   target.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
     visibleGpuConsumer.nativeSurfaceConsumerTextureReadbackUnavailable;
   return target;
@@ -5854,6 +5870,134 @@ export function createSphPhaseScene(container, {
     return scene.userData.sphResidentWebGpuDeviceMapSmoke;
   }
 
+  function publishResidentWebGpuDeviceTextureReadbackSmoke(record) {
+    scene.userData.sphResidentWebGpuDeviceTextureReadbackSmoke = record;
+    if (sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      refreshSphNativeWebGpuSurfaceVisibleConsumerFromBridge(sphResidentSurfaceDrawRenderBridge);
+    }
+    return record;
+  }
+
+  async function runResidentWebGpuDeviceTextureReadbackSmoke(device, {
+    source = 'cached-resident-webgpu-device'
+  } = {}) {
+    const startedAtMs = nowMs();
+    const statusBase = {
+      schema: 'peercompute.ulg.sph-resident-webgpu-device-texture-readback-smoke.v0',
+      source,
+      format: SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT,
+      startedAtMs,
+      rendererBackend: rendererBackendName(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    publishResidentWebGpuDeviceTextureReadbackSmoke({
+      ...statusBase,
+      status: 'pending',
+      reason: 'resident WebGPU device texture readback smoke validation is pending',
+      updatedAtMs: startedAtMs
+    });
+    let validationTexture = null;
+    let readback = null;
+    let mapped = false;
+    let timeoutHandle = null;
+    const readbackBytesPerRow = 256;
+    try {
+      if (
+        !device?.createTexture
+        || !device?.createBuffer
+        || !device?.createCommandEncoder
+        || !device?.queue?.submit
+      ) {
+        throw new Error('texture readback unavailable: resident WebGPU device lacks texture, encoder, queue, or MAP_READ support');
+      }
+      validationTexture = device.createTexture({
+        label: 'ulg-sph-resident-webgpu-device-texture-readback-smoke-target',
+        size: [1, 1],
+        format: SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT,
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
+      });
+      readback = device.createBuffer({
+        label: 'ulg-sph-resident-webgpu-device-texture-readback-smoke-readback',
+        size: readbackBytesPerRow,
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      });
+      const encoder = device.createCommandEncoder({
+        label: 'ulg-sph-resident-webgpu-device-texture-readback-smoke'
+      });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: validationTexture.createView(),
+          clearValue: { r: 1, g: 0, b: 0, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store'
+        }]
+      });
+      pass.end();
+      encoder.copyTextureToBuffer(
+        { texture: validationTexture },
+        {
+          buffer: readback,
+          bytesPerRow: readbackBytesPerRow,
+          rowsPerImage: 1
+        },
+        {
+          width: 1,
+          height: 1,
+          depthOrArrayLayers: 1
+        }
+      );
+      device.queue.submit([encoder.finish()]);
+      const mapPromise = Promise.resolve(device.queue?.onSubmittedWorkDone?.() ?? undefined)
+        .then(() => readback.mapAsync(GPU_MAP_MODE.READ));
+      mapPromise.catch(() => {});
+      await Promise.race([
+        mapPromise,
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new Error('texture readback unavailable: resident WebGPU device texture readback smoke timed out'));
+          }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
+        })
+      ]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      mapped = true;
+      const sample = Array.from(new Uint8Array(readback.getMappedRange(), 0, 4));
+      const passed = sample[0] >= 200 && sample[1] <= 32 && sample[2] <= 32 && sample[3] >= 200;
+      readback.unmap();
+      mapped = false;
+      readback.destroy?.();
+      validationTexture.destroy?.();
+      return publishResidentWebGpuDeviceTextureReadbackSmoke({
+        ...statusBase,
+        status: passed ? 'passed' : 'failed',
+        reason: passed
+          ? 'resident WebGPU device texture render/copy/MAP_READ smoke validation passed'
+          : 'resident WebGPU device texture render/copy/MAP_READ smoke validation returned an unexpected pixel',
+        sample,
+        elapsedMs: Math.max(0, nowMs() - startedAtMs),
+        updatedAtMs: nowMs()
+      });
+    } catch (error) {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (mapped) {
+        try {
+          readback?.unmap?.();
+        } catch (_) {}
+      }
+      readback?.destroy?.();
+      validationTexture?.destroy?.();
+      const reason = error instanceof Error ? error.message : String(error);
+      return publishResidentWebGpuDeviceTextureReadbackSmoke({
+        ...statusBase,
+        status: isNativeWebGpuTextureReadbackUnavailableReason(reason) ? 'not-run' : 'error',
+        reason,
+        elapsedMs: Math.max(0, nowMs() - startedAtMs),
+        updatedAtMs: nowMs()
+      });
+    }
+  }
+
   function requestCachedOpticalGpuDevice(ref = navigatorRef) {
     const rendererDeviceResult = rendererOwnedWebGpuDeviceResult();
     if (rendererDeviceResult) return Promise.resolve(rendererDeviceResult);
@@ -5888,6 +6032,10 @@ export function createSphPhaseScene(container, {
           result.mapSmokePromise = runResidentWebGpuDeviceMapSmoke(result.device, {
             source: 'cached-resident-webgpu-device'
           });
+          result.textureReadbackSmokePromise = Promise.resolve(result.mapSmokePromise)
+            .then(() => runResidentWebGpuDeviceTextureReadbackSmoke(result.device, {
+              source: 'cached-resident-webgpu-device'
+            }));
         }
         return result;
       }).catch((error) => {
@@ -8031,6 +8179,10 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null;
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null;
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
       }
@@ -8096,6 +8248,14 @@ export function createSphPhaseScene(container, {
       nativeSurfaceConsumerDeviceMapSmokeStatus:
         scene.userData.sphResidentWebGpuDeviceMapSmoke?.status
         ?? rendererCapability?.nativeSurfaceConsumerDeviceMapSmokeStatus
+        ?? null,
+      nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus:
+        scene.userData.sphResidentWebGpuDeviceTextureReadbackSmoke?.status
+        ?? rendererCapability?.nativeSurfaceConsumerDeviceTextureReadbackSmokeStatus
+        ?? null,
+      nativeSurfaceConsumerDeviceTextureReadbackSmokeReason:
+        scene.userData.sphResidentWebGpuDeviceTextureReadbackSmoke?.reason
+        ?? rendererCapability?.nativeSurfaceConsumerDeviceTextureReadbackSmokeReason
         ?? null,
       nativeSurfaceConsumerRenderedFrameCount:
         bridge?.frameCount
@@ -8319,6 +8479,10 @@ export function createSphPhaseScene(container, {
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null;
       sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null;
       sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
     }
@@ -11336,6 +11500,10 @@ export function createSphPhaseScene(container, {
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null;
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null;
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
         }
@@ -18705,6 +18873,10 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null,
         surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus:
           sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null,
+        surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null,
+        surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null,
         surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable:
           sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
         fullSurfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.fullSurfaceDrawReadback),

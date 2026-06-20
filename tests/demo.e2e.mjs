@@ -3453,6 +3453,7 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
     const sphUpload = scene?.getSphGpuParticleUpload?.() || null;
     const mlsUpload = scene?.getMlsMpmGpuParticleUpload?.() || null;
     const renderState = scene?.getSphResidentRenderState?.() || overlay?.__sphResidentRenderState || null;
+    const residentStageOrderTrace = overlay?.__sphResidentStageOrderTrace || null;
     const viewParticleCount = overlay?.__sphPhaseViewState?.positionsM?.length
       ? overlay.__sphPhaseViewState.positionsM.length / 3
       : null;
@@ -3481,7 +3482,24 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
         status: renderState?.status,
         source: renderState?.source,
         particleCount: renderState?.particleCount ?? null
-      }
+      },
+      residentStageOrderTrace: residentStageOrderTrace ? {
+        schema: residentStageOrderTrace.schema ?? null,
+        status: residentStageOrderTrace.status ?? null,
+        eventCount: residentStageOrderTrace.eventCount ?? null,
+        retainedEventCount: residentStageOrderTrace.retainedEventCount ?? null,
+        resetGeneration: residentStageOrderTrace.resetGeneration ?? null,
+        lastEventStatus: residentStageOrderTrace.lastEvent?.status ?? null,
+        lastEventParticleCount: residentStageOrderTrace.lastEvent?.particleCount ?? null,
+        lastEventResetStatus: residentStageOrderTrace.lastEvent?.resetStatus ?? null,
+        events: Array.isArray(residentStageOrderTrace.events)
+          ? residentStageOrderTrace.events.map((event) => ({
+            status: event.status ?? null,
+            particleCount: event.particleCount ?? null,
+            resetStatus: event.resetStatus ?? null
+          }))
+          : []
+      } : null
     };
   });
 
@@ -3508,6 +3526,18 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
   if (summary.renderState.schema) {
     expect(summary.renderState.particleCount).toBe(expectedTotalCount);
   }
+  expect(summary.residentStageOrderTrace?.schema).toBe('peercompute.ulg.sph-demo-resident-stage-order-trace.v0');
+  expect(summary.residentStageOrderTrace?.eventCount).toBeGreaterThanOrEqual(3);
+  expect(summary.residentStageOrderTrace?.events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        status: 'resident-reset-particle-state-resynced',
+        particleCount: expectedTotalCount,
+        resetStatus: 'particle-state-resynced-after-reset'
+      })
+    ])
+  );
+  expect(summary.residentStageOrderTrace?.lastEventStatus).toMatch(/^resident-/);
   expect(consoleIssues).toEqual([]);
 });
 

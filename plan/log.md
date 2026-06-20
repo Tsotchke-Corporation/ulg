@@ -30490,3 +30490,43 @@ Remaining:
 
 - Fix or bypass the same-device native surface readback lifetime issue without
   accepting blank mobile/native output as valid.
+
+## 2026-06-19 AKDT - Reset Resident Stage-Order Trace
+
+Status:
+
+- The mounted SPH phase demo now publishes
+  `peercompute.ulg.sph-demo-resident-stage-order-trace.v0` on the overlay and
+  scene userData.
+- The trace records reset invalidation, particle-state resync, resident
+  scheduling, stale/error/watchdog outcomes, and completed resident executions.
+- Resident execution trace events store compact stage order, backend/readback
+  mode, active-grid evidence, authority family owners, buffer lease status,
+  force/product/thermal diagnostics, and retained next-buffer byte counts
+  without keeping raw GPU objects in the trace.
+- The long-horizon probe captures the trace in browser snapshots and per-batch
+  metrics, including direct probe-driven resident batches that bypass the
+  mounted scheduler.
+
+Validation:
+
+- PASS:
+  `node --check tests/demo.e2e.mjs src/visualization/sphPhaseDemoMount.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs`.
+- PASS: `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs` with
+  `7/7`.
+- PASS:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase reset preserves drop edge above six through mounted render diagnostics"` with `1/1`.
+- PASS:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-stage-order-trace-smoke-3.json ULG_PROBE_FRAME_DIR=/tmp/ulg-stage-order-trace-smoke-3-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1&blob=1' node scripts/sph-long-horizon-probe.mjs`
+  - Status: `good`.
+  - Browser console issue count: `0`.
+  - Browser console warning count: `0`.
+  - Per-batch trace reached `resident-execution-complete-direct-probe` with
+    backend `webgpu`, readback `no-full-readback`, authority ledger ready, and
+    buffer lease ledger ready.
+
+Remaining:
+
+- Use this trace to pin post-reset repeated resident substeps with nonzero
+  active-grid/motion evidence and to diagnose pressure/render refresh
+  consumption order without relying on manual console inspection.

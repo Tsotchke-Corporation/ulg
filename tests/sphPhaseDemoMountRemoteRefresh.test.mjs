@@ -3,8 +3,11 @@ import { test } from 'node:test';
 
 import {
   SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
+  SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA,
   SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA,
+  appendResidentStageOrderTrace,
   runRemoteResidentTaskGraphRefreshPrelude,
+  summarizeResidentStageOrderExecution,
   workerRebuildResetGate
 } from '../src/visualization/sphPhaseDemoMount.js';
 
@@ -154,4 +157,126 @@ test('worker rebuild reset gate invalidates stale in-flight rebuild generations'
   assert.equal(gate.workerStatus.previousStatus, 'submitted');
   assert.equal(gate.workerStatus.updatedAtMs, 123.5);
   assert.notEqual(7, gate.generation);
+});
+
+test('resident stage-order execution summary preserves authority and active-grid evidence', () => {
+  const execution = {
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    backend: 'webgpu',
+    readbackMode: 'no-full-readback',
+    stepCount: 2,
+    completedStepCount: 2,
+    continuationAvailable: true,
+    normalHotLoopReadbackFree: true,
+    finalStep: {
+      status: 'resident-step-webgpu-executed',
+      backend: 'webgpu',
+      readbackMode: 'no-full-readback',
+      sequenceIndex: 1,
+      stageStatus: {
+        p2g: 'p2g-complete',
+        gridUpdate: 'grid-update-complete',
+        g2p: 'g2p-complete'
+      },
+      stageBackends: {
+        p2g: 'webgpu',
+        gridUpdate: 'webgpu',
+        g2p: 'webgpu'
+      },
+      stageTiming: {
+        schema: 'peercompute.ulg.mls-mpm-stage-timing.v0',
+        totalMs: 4.5,
+        stageMs: { p2g: 1.2, gridUpdate: 0.8, g2p: 1.5 },
+        compactSummaryScope: 'particle-visual',
+        activeGridDispatch: {
+          useActiveGrid: true,
+          activeGridNodeCount: 42,
+          gridNodeScanCount: 256,
+          dispatchNodeCount: 42,
+          dispatchWorkgroups: 1,
+          maxSpeedMPerS: 0.25,
+          safetyCells: 2
+        }
+      },
+      diagnostics: {
+        particleCount: 64,
+        gridNodeCount: 256,
+        activeGridNodeCount: 42,
+        activeGridNodeCountAvailable: true,
+        maxDisplacementM: 0.0125,
+        maxSpeedMPerS: 0.25,
+        pressureInterfaceForceRowCount: 3
+      },
+      residentAuthorityFamilyOwners: {
+        'particle-kinematics': {
+          ownerStage: 'g2p',
+          status: 'authoritative',
+          mutationMode: 'retained-gpu-buffer',
+          backend: 'webgpu',
+          reads: ['grid-velocity'],
+          writes: ['particle-state'],
+          nextConsumers: ['render-field']
+        }
+      },
+      residentBufferLeaseLedgerStatus: 'resident-buffer-leases-valid',
+      residentBufferLeaseResourceCount: 4,
+      residentBufferLeaseActiveLeaseCount: 3,
+      nextParticleBufferMode: 'retained-g2p-output-buffers',
+      nextParticleStateBufferByteLength: 2048,
+      nextParticleMechanicsBufferByteLength: 8192
+    }
+  };
+
+  const summary = summarizeResidentStageOrderExecution(execution);
+
+  assert.equal(summary.available, true);
+  assert.deepEqual(summary.stageOrder, ['p2g', 'gridUpdate', 'g2p']);
+  assert.equal(summary.activeGridDispatch.activeGridNodeCount, 42);
+  assert.equal(summary.diagnostics.maxDisplacementM, 0.0125);
+  assert.equal(summary.residentAuthorityFamilyOwners['particle-kinematics'].ownerStage, 'g2p');
+  assert.equal(summary.residentBufferLeaseLedgerStatus, 'resident-buffer-leases-valid');
+  assert.equal(summary.nextParticleBufferMode, 'retained-g2p-output-buffers');
+});
+
+test('resident stage-order trace is capped and stores compact execution summaries', () => {
+  let trace = appendResidentStageOrderTrace(null, {
+    status: 'resident-reset-invalidated',
+    reason: 'reset-button',
+    generation: 3,
+    updatedAtMs: 10
+  }, { maxEvents: 2 });
+  trace = appendResidentStageOrderTrace(trace, {
+    status: 'resident-reset-particle-state-resynced',
+    generation: 4,
+    stepCount: 125,
+    updatedAtMs: 20
+  }, { maxEvents: 2 });
+  trace = appendResidentStageOrderTrace(trace, {
+    status: 'resident-execution-complete',
+    generation: 4,
+    scheduleToken: 7,
+    stepCount: 2,
+    readbackMode: 'no-full-readback',
+    execution: {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      status: 'resident-steps-executed',
+      backend: 'webgpu',
+      readbackMode: 'no-full-readback',
+      completedStepCount: 2,
+      finalStep: {
+        stageStatus: { p2g: 'ok', gridUpdate: 'ok', g2p: 'ok' },
+        diagnostics: { activeGridNodeCount: 12, maxDisplacementM: 0.01 }
+      }
+    },
+    updatedAtMs: 30
+  }, { maxEvents: 2 });
+
+  assert.equal(trace.schema, SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA);
+  assert.equal(trace.eventCount, 3);
+  assert.equal(trace.retainedEventCount, 2);
+  assert.equal(trace.events[0].status, 'resident-reset-particle-state-resynced');
+  assert.equal(trace.lastEvent.status, 'resident-execution-complete');
+  assert.equal(trace.lastEvent.executionSummary.backend, 'webgpu');
+  assert.equal(trace.lastEvent.executionSummary.diagnostics.activeGridNodeCount, 12);
 });

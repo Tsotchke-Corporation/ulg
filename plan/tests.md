@@ -11978,3 +11978,26 @@ Native surface request retention and probe snapshot, 2026-06-19 AKDT:
   - Native GPU buffer handoff accepted: `true`.
   - Last `nativeSurfaceValidation.validationBlockerFamily`:
     `native-surface-validation-readback-lifetime`.
+
+Reset resident stage-order trace, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs src/visualization/sphPhaseDemoMount.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  passed.
+- Focused helper tests:
+  `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  - Passed: `7/7`.
+  - Covers capped trace append behavior and compact execution summaries with
+    authority/active-grid evidence.
+- Mounted reset e2e:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase reset preserves drop edge above six through mounted render diagnostics"`
+  - Passed: `1/1`.
+  - Confirms reset invalidation/resync events are retained and console issue
+    list stays empty.
+- Browser probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-stage-order-trace-smoke-3.json ULG_PROBE_FRAME_DIR=/tmp/ulg-stage-order-trace-smoke-3-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1&blob=1' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: status `good`.
+  - Browser console issue/warning counts: `0/0`.
+  - Per-batch trace reached `resident-execution-complete-direct-probe` with
+    WebGPU no-full-readback execution, authority ledger ready, and buffer
+    lease ledger ready.

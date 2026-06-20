@@ -931,6 +931,14 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         spanCount: Array.isArray(trace.spans) ? trace.spans.length : 0,
         lastSpan: Array.isArray(trace.spans) && trace.spans.length ? trace.spans[trace.spans.length - 1] : null
       } : null,
+      residentStageOrderTrace: overlay?.__sphResidentStageOrderTrace ? {
+        schema: overlay.__sphResidentStageOrderTrace.schema ?? null,
+        status: overlay.__sphResidentStageOrderTrace.status ?? null,
+        eventCount: overlay.__sphResidentStageOrderTrace.eventCount ?? null,
+        retainedEventCount: overlay.__sphResidentStageOrderTrace.retainedEventCount ?? null,
+        resetGeneration: overlay.__sphResidentStageOrderTrace.resetGeneration ?? null,
+        lastEvent: overlay.__sphResidentStageOrderTrace.lastEvent || null
+      } : null,
       setParticlesTiming: overlay?.__sphSetParticlesTiming || sceneUserData.sphSetParticlesTiming || null,
       surfaceApplyTiming: overlay?.__sphSurfaceApplyTiming || sceneUserData.sphSurfaceApplyTiming || null,
       rendererInit: sceneUserData.sphRendererInit || null,
@@ -2007,6 +2015,8 @@ async function runBrowserProbe({
         const plainSphStepResult = overlay.__sphLastStepResult || null;
         const residentAuthorityHost = overlay.__sphPeerComputeResidentAuthorityHost || null;
         const residentComputeManager = overlay.__sphResidentComputeManager || null;
+        const residentStageOrderTrace =
+          overlay.__sphResidentStageOrderTrace || sceneUserData.sphResidentStageOrderTrace || null;
         const sceneTimeS = finiteOrNull(
           plainSphStepResult?.time
             ?? residentStep?.particlePingPong?.nextTime
@@ -2037,6 +2047,14 @@ async function runBrowserProbe({
             status: residentComputeManager.status ?? null,
             source: residentComputeManager.source ?? null,
             submitTask: residentComputeManager.submitTask ?? null
+          } : null,
+          residentStageOrderTrace: residentStageOrderTrace ? {
+            schema: residentStageOrderTrace.schema ?? null,
+            status: residentStageOrderTrace.status ?? null,
+            eventCount: residentStageOrderTrace.eventCount ?? null,
+            retainedEventCount: residentStageOrderTrace.retainedEventCount ?? null,
+            resetGeneration: residentStageOrderTrace.resetGeneration ?? null,
+            lastEvent: residentStageOrderTrace.lastEvent || null
           } : null,
         mlsMpmMechanicsMaterialPhaseUpload: mechanicsMaterialPhaseUpload ? {
           schema: mechanicsMaterialPhaseUpload.schema ?? null,
@@ -3025,6 +3043,16 @@ async function runBrowserProbe({
             };
             overlay.__mlsMpmResidentSteps = execution;
             overlay.__mlsMpmResidentStep = finalStep;
+            overlay.__sphAppendResidentStageOrderTrace?.({
+              status: 'plain-sph-cpu-reference-batch-complete',
+              reason: 'sph-long-horizon-probe-direct-cpu-reference',
+              scheduleToken: batchIndex,
+              stepCount: driverStepsPerBatch,
+              readbackMode: 'cpu-reference-full-state',
+              continueFromResidentState: false,
+              residentExecutionPolicy,
+              execution
+            });
             markProbeProgress('plain-sph-batch-completed', {
               batchIndex,
               batchMs: performance.now() - started,
@@ -3109,6 +3137,16 @@ async function runBrowserProbe({
           });
           overlay.__mlsMpmResidentSteps = execution;
           overlay.__mlsMpmResidentStep = sceneApi.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+          overlay.__sphAppendResidentStageOrderTrace?.({
+            status: 'resident-execution-complete-direct-probe',
+            reason: 'sph-long-horizon-probe-direct-scene-refresh',
+            scheduleToken: batchIndex,
+            stepCount: requestedBatchSteps,
+            readbackMode: requestedReadbackMode,
+            continueFromResidentState: Boolean(execution?.continuedFromResidentState),
+            residentExecutionPolicy,
+            execution
+          });
           overlay.__sphUpdateResidentGasPressureSummary?.(overlay.__mlsMpmResidentStep);
           if ((batchIndex % requestedRenderEvery === 0 || batchIndex === requestedBatches) && sceneApi.refreshSphResidentRenderState) {
             markProbeProgress('resident-render-refresh-started', { batchIndex });

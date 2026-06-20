@@ -1029,6 +1029,13 @@ state that moves on screen is the state the laws actually mutated.
    - queue/fence evidence;
    - force/heat/reaction/product/gas delta;
    - next consumer.
+   - 2026-06-19 AKDT update: mounted demo and long-horizon probes now publish
+     `peercompute.ulg.sph-demo-resident-stage-order-trace.v0`. It records reset
+     invalidation/resync, resident scheduling, stale/error/watchdog outcomes,
+     and compact execution summaries with stage order, authority family owners,
+     buffer lease status, active-grid fields when present, and next-buffer byte
+     counts. The remaining part of this item is to assert repeated post-reset
+     resident substeps with nonzero active-grid/motion evidence.
 6. Add failing regression assertions before broad changes:
    - H2O/H2O liquid block settles/merges without detached blobs or delayed
      cadence jumps;

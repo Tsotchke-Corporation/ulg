@@ -135,11 +135,14 @@ const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
 const RESIDENT_RENDER_READBACK_CADENCE = 3;
 const RESIDENT_PENDING_SLOW_NOTICE_MS = 20_000;
 const RESIDENT_PENDING_WATCHDOG_MS = 120_000;
+const RESIDENT_STAGE_ORDER_TRACE_EVENT_LIMIT = 64;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_FRACTION = 1e-3;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_MIN_M = 1e-6;
 const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
 export const SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA =
   'peercompute.ulg.sph-demo-remote-resident-task-graph-refresh.v0';
+export const SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA =
+  'peercompute.ulg.sph-demo-resident-stage-order-trace.v0';
 export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sph',
   'sphPhase',
@@ -340,6 +343,215 @@ export function residentMotionDiagnostic({
     estimatedBatchDisplacementUpperBoundM,
     batchMotionEstimateVisible,
     compactGpuSummaryAvailable,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function compactResidentStageOrderFamilyOwners(familyOwners = {}) {
+  return Object.fromEntries(
+    Object.entries(familyOwners || {}).map(([family, owner]) => [family, {
+      family,
+      ownerStage: owner?.ownerStage ?? null,
+      status: owner?.status ?? null,
+      mutationMode: owner?.mutationMode ?? null,
+      backend: owner?.backend ?? null,
+      validationStatus: owner?.validationStatus ?? null,
+      source: owner?.source ?? null,
+      reads: [...(owner?.reads || [])],
+      writes: [...(owner?.writes || [])],
+      nextConsumers: [...(owner?.nextConsumers || [])]
+    }])
+  );
+}
+
+function residentStageOrderFromStatus(stageStatus = {}, stageBackends = {}) {
+  const preferredOrder = [
+    'p2g',
+    'pressureInterface',
+    'gridUpdate',
+    'g2p',
+    'thermalPhase',
+    'reactionProduct'
+  ];
+  const observed = new Set([
+    ...Object.keys(stageStatus || {}),
+    ...Object.keys(stageBackends || {})
+  ]);
+  return [
+    ...preferredOrder.filter((stage) => observed.has(stage)),
+    ...[...observed].filter((stage) => !preferredOrder.includes(stage)).sort()
+  ];
+}
+
+export function summarizeResidentStageOrderExecution(execution = null) {
+  const stepSummaries = Array.isArray(execution?.stepSummaries) ? execution.stepSummaries : [];
+  const lastStepSummary = stepSummaries.length ? stepSummaries[stepSummaries.length - 1] : null;
+  const finalStep = execution?.finalStep || null;
+  const stageTiming = finalStep?.stageTiming || lastStepSummary?.stageTiming || null;
+  const diagnostics = finalStep?.diagnostics || lastStepSummary?.diagnostics || {};
+  const stageStatus = finalStep?.stageStatus || lastStepSummary?.stageStatus || {};
+  const stageBackends = finalStep?.stageBackends || lastStepSummary?.stageBackends || {};
+  const familyOwners = execution?.residentAuthorityFamilyOwners
+    || finalStep?.residentAuthorityFamilyOwners
+    || finalStep?.residentAuthoritySummary?.familyOwners
+    || lastStepSummary?.residentAuthorityFamilyOwners
+    || {};
+  const activeGridDispatch = stageTiming?.activeGridDispatch
+    || finalStep?.stageTiming?.activeGridDispatch
+    || finalStep?.fusedResidentSequence?.activeGridDispatch
+    || finalStep?.gridUpdate?.activeGridDispatch
+    || finalStep?.p2gGridProjection?.activeGridDispatch
+    || null;
+  return {
+    schema: 'peercompute.ulg.sph-demo-resident-stage-order-execution-summary.v0',
+    available: Boolean(execution?.schema || finalStep?.schema),
+    executionSchema: execution?.schema || null,
+    status: execution?.status || finalStep?.status || null,
+    backend: execution?.backend || finalStep?.backend || null,
+    readbackMode: execution?.readbackMode || finalStep?.readbackMode || null,
+    normalHotLoopReadbackFree: Boolean(
+      execution?.normalHotLoopReadbackFree ?? finalStep?.normalHotLoopReadbackFree
+    ),
+    continuedFromResidentState: Boolean(execution?.continuedFromResidentState),
+    continuationAvailable: Boolean(execution?.continuationAvailable),
+    stepCount: execution?.stepCount ?? null,
+    completedStepCount: execution?.completedStepCount ?? null,
+    finalStepIndex: finalStep?.sequenceIndex ?? lastStepSummary?.index ?? null,
+    finalStepStatus: finalStep?.status || lastStepSummary?.status || null,
+    stageOrder: residentStageOrderFromStatus(stageStatus, stageBackends),
+    stageStatus: { ...(stageStatus || {}) },
+    stageBackends: { ...(stageBackends || {}) },
+    stageTiming: stageTiming ? {
+      schema: stageTiming.schema || null,
+      totalMs: stageTiming.totalMs ?? null,
+      stageMs: { ...(stageTiming.stageMs || {}) },
+      compactSummaryScope: stageTiming.compactSummaryScope ?? null,
+      activeGridDispatchPlanOnlyRequested: stageTiming.activeGridDispatchPlanOnlyRequested ?? null,
+      activeGridDispatchPlanOnlyEligible: stageTiming.activeGridDispatchPlanOnlyEligible ?? null,
+      activeGridDispatchPlanRefreshMode: stageTiming.activeGridDispatchPlanRefreshMode ?? null,
+      activeGridDispatchPlanRefreshRequested: stageTiming.activeGridDispatchPlanRefreshRequested ?? null,
+      activeGridDispatchPlanRefreshFinalStep: stageTiming.activeGridDispatchPlanRefreshFinalStep ?? null,
+      activeGridDispatchPlanRefreshSkippedReason: stageTiming.activeGridDispatchPlanRefreshSkippedReason ?? null
+    } : null,
+    activeGridDispatch: activeGridDispatch ? {
+      useActiveGrid: activeGridDispatch.useActiveGrid === true,
+      activeGridNodeCount: activeGridDispatch.activeGridNodeCount ?? null,
+      gridNodeScanCount: activeGridDispatch.gridNodeScanCount ?? null,
+      dispatchNodeCount: activeGridDispatch.dispatchNodeCount ?? null,
+      dispatchWorkgroups: activeGridDispatch.dispatchWorkgroups ?? null,
+      maxSpeedMPerS: activeGridDispatch.maxSpeedMPerS ?? null,
+      safetyCells: activeGridDispatch.safetyCells ?? null
+    } : null,
+    diagnostics: {
+      particleCount: diagnostics?.particleCount ?? null,
+      gridNodeCount: diagnostics?.gridNodeCount ?? null,
+      activeGridNodeCount: diagnostics?.activeGridNodeCount ?? null,
+      activeGridNodeCountAvailable: diagnostics?.activeGridNodeCountAvailable ?? null,
+      activeGridNodeSummaryStatus: diagnostics?.activeGridNodeSummaryStatus ?? null,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      maxSpeedMPerS: diagnostics?.maxSpeedMPerS ?? null,
+      pressureInterfaceForceRowCount: diagnostics?.pressureInterfaceForceRowCount ?? null,
+      pressureInterfaceAppliedImpulseMagnitudeNSeconds:
+        diagnostics?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? null,
+      reactionProductEventActiveEventCount: diagnostics?.reactionProductEventActiveEventCount ?? null,
+      reactionResidentProductMassStatus: diagnostics?.reactionResidentProductMassStatus ?? null,
+      thermalMechanicsRefreshStatus: diagnostics?.thermalMechanicsRefreshStatus ?? null
+    },
+    residentAuthorityLedgerStatus: execution?.residentAuthorityLedgerStatus
+      ?? finalStep?.residentAuthorityLedgerStatus
+      ?? lastStepSummary?.residentAuthorityLedgerStatus
+      ?? null,
+    residentAuthorityFamilyOwners: compactResidentStageOrderFamilyOwners(familyOwners),
+    residentAuthorityWarnings: [
+      ...(execution?.residentAuthorityWarnings || finalStep?.residentAuthorityWarnings || lastStepSummary?.residentAuthorityWarnings || [])
+    ],
+    residentAuthorityBlockers: [
+      ...(execution?.residentAuthorityBlockers || finalStep?.residentAuthorityBlockers || lastStepSummary?.residentAuthorityBlockers || [])
+    ],
+    residentBufferLeaseLedgerStatus: execution?.residentBufferLeaseLedgerStatus
+      ?? finalStep?.residentBufferLeaseLedgerStatus
+      ?? lastStepSummary?.residentBufferLeaseLedgerStatus
+      ?? null,
+    residentBufferLeaseResourceCount: execution?.residentBufferLeaseResourceCount
+      ?? finalStep?.residentBufferLeaseResourceCount
+      ?? lastStepSummary?.residentBufferLeaseResourceCount
+      ?? 0,
+    residentBufferLeaseActiveLeaseCount: execution?.residentBufferLeaseActiveLeaseCount
+      ?? finalStep?.residentBufferLeaseActiveLeaseCount
+      ?? lastStepSummary?.residentBufferLeaseActiveLeaseCount
+      ?? 0,
+    residentBufferLeaseWarnings: [
+      ...(execution?.residentBufferLeaseWarnings || finalStep?.residentBufferLeaseWarnings || lastStepSummary?.residentBufferLeaseWarnings || [])
+    ],
+    residentBufferLeaseBlockers: [
+      ...(execution?.residentBufferLeaseBlockers || finalStep?.residentBufferLeaseBlockers || lastStepSummary?.residentBufferLeaseBlockers || [])
+    ],
+    gpuResidentLaneStatus: finalStep?.gpuResidentLaneStatus
+      ?? lastStepSummary?.gpuResidentLaneStatus
+      ?? null,
+    gpuResidentLaneFenceStatus: finalStep?.gpuResidentLaneFenceStatus
+      ?? lastStepSummary?.gpuResidentLaneFenceStatus
+      ?? null,
+    gpuResidentLaneFenceSatisfied: finalStep?.gpuResidentLaneFenceSatisfied === true
+      || lastStepSummary?.gpuResidentLaneFenceSatisfied === true,
+    nextParticleBufferMode: execution?.nextParticleBufferMode
+      ?? finalStep?.nextParticleBufferMode
+      ?? lastStepSummary?.nextParticleBufferMode
+      ?? null,
+    nextParticleStateBufferByteLength: finalStep?.nextParticleStateBufferByteLength ?? 0,
+    nextParticleThermoBufferByteLength: finalStep?.nextParticleThermoBufferByteLength ?? 0,
+    nextParticleMechanicsBufferByteLength: finalStep?.nextParticleMechanicsBufferByteLength ?? 0,
+    residentProductMassStatus: finalStep?.residentProductMassStatus
+      ?? lastStepSummary?.residentProductMassStatus
+      ?? null,
+    residentProductMassProductEventRowCount: finalStep?.residentProductMassProductEventRowCount
+      ?? lastStepSummary?.residentProductMassProductEventRowCount
+      ?? 0
+  };
+}
+
+export function appendResidentStageOrderTrace(trace = null, event = {}, {
+  maxEvents = RESIDENT_STAGE_ORDER_TRACE_EVENT_LIMIT
+} = {}) {
+  const previousEvents = Array.isArray(trace?.events) ? trace.events : [];
+  const previousCount = Number.isFinite(Number(trace?.eventCount))
+    ? Math.max(0, Math.round(Number(trace.eventCount)))
+    : previousEvents.length;
+  const eventSequence = previousCount + 1;
+  const executionSummary = event.executionSummary
+    || summarizeResidentStageOrderExecution(event.execution || null);
+  const nextEvent = {
+    schema: 'peercompute.ulg.sph-demo-resident-stage-order-trace-event.v0',
+    eventSequence,
+    status: event.status || 'resident-stage-order-trace-event',
+    reason: event.reason || null,
+    generation: Number.isFinite(Number(event.generation)) ? Math.round(Number(event.generation)) : null,
+    scheduleToken: Number.isFinite(Number(event.scheduleToken)) ? Math.round(Number(event.scheduleToken)) : null,
+    signature: event.signature || null,
+    stepCount: Number.isFinite(Number(event.stepCount)) ? Math.round(Number(event.stepCount)) : null,
+    particleCount: Number.isFinite(Number(event.particleCount)) ? Math.round(Number(event.particleCount)) : null,
+    readbackMode: event.readbackMode || null,
+    continueFromResidentState: event.continueFromResidentState === true,
+    resetStatus: event.resetStatus || null,
+    pendingStatus: event.pendingStatus || null,
+    residentExecutionPolicy: event.residentExecutionPolicy ? { ...event.residentExecutionPolicy } : null,
+    executionSummary,
+    updatedAtMs: Number.isFinite(Number(event.updatedAtMs)) ? Number(event.updatedAtMs) : nowMs()
+  };
+  const limit = Math.max(1, Math.round(Number(maxEvents) || RESIDENT_STAGE_ORDER_TRACE_EVENT_LIMIT));
+  const events = [...previousEvents, nextEvent].slice(-limit);
+  return {
+    schema: SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA,
+    status: nextEvent.status,
+    eventCount: eventSequence,
+    retainedEventCount: events.length,
+    resetGeneration: nextEvent.generation ?? trace?.resetGeneration ?? null,
+    lastEvent: nextEvent,
+    events,
+    updatedAtMs: nextEvent.updatedAtMs,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -2867,6 +3079,11 @@ export async function mountSphPhaseDemoOverlay({
   let residentRenderReadbackSkippedCount = 0;
   let residentAccumulatedSubvisibleMotionM = 0;
   let residentSubvisibleMotionBurstCount = 0;
+  let residentStageOrderTrace = appendResidentStageOrderTrace(null, {
+    status: 'resident-stage-order-trace-initialized',
+    generation: particleSyncGeneration,
+    updatedAtMs: performance.now()
+  });
   let residentPerf = {
     schema: 'peercompute.ulg.sph-demo-resident-perf.v0',
     residentSubmissions: 0,
@@ -2888,6 +3105,8 @@ export async function mountSphPhaseDemoOverlay({
     fullPhysicsValidation: false
   };
   overlay.__sphResidentPerf = residentPerf;
+  overlay.__sphResidentStageOrderTrace = residentStageOrderTrace;
+  if (scene?.scene?.userData) scene.scene.userData.sphResidentStageOrderTrace = residentStageOrderTrace;
   publishPeerClosureCacheState();
   overlay.__sphPerformanceTrace = sphPerformanceTrace;
   overlay.__sphCpuClosureTask = cpuClosureTask;
@@ -3109,6 +3328,20 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__sphResidentPerf = residentPerf;
     return residentPerf;
   }
+
+  function publishResidentStageOrderTrace(event = {}) {
+    residentStageOrderTrace = appendResidentStageOrderTrace(residentStageOrderTrace, {
+      generation: particleSyncGeneration,
+      resetStatus: overlay.__sphResetStatus?.status || null,
+      pendingStatus: overlay.__mlsMpmResidentStepsPending?.status || null,
+      updatedAtMs: performance.now(),
+      ...event
+    });
+    overlay.__sphResidentStageOrderTrace = residentStageOrderTrace;
+    if (scene?.scene?.userData) scene.scene.userData.sphResidentStageOrderTrace = residentStageOrderTrace;
+    return residentStageOrderTrace;
+  }
+  overlay.__sphAppendResidentStageOrderTrace = publishResidentStageOrderTrace;
 
   function resetResidentPerf(reason) {
     residentRenderReadbackSequence = 0;
@@ -3838,6 +4071,16 @@ export async function mountSphPhaseDemoOverlay({
       generation,
       startedAtMs: performance.now()
     };
+    publishResidentStageOrderTrace({
+      status: force ? 'resident-execution-force-rescheduled' : 'resident-execution-pending',
+      signature,
+      scheduleToken,
+      stepCount: normalizedStepCount,
+      readbackMode,
+      continueFromResidentState: Boolean(continueFromResidentState),
+      residentExecutionPolicy,
+      generation
+    });
     overlay.__mlsMpmResidentStepsSlow = null;
     let scheduleContinuation = false;
     let scheduleLatestGeneration = false;
@@ -3896,6 +4139,17 @@ export async function mountSphPhaseDemoOverlay({
       };
       overlay.__mlsMpmResidentStepsSlow = null;
       overlay.__mlsMpmResidentStepsError = 'resident execution exceeded the stall watchdog; forced a fresh resident submission';
+      publishResidentStageOrderTrace({
+        status: 'resident-execution-watchdog-rescheduled',
+        reason: 'resident execution exceeded the stall watchdog; forced a fresh resident submission',
+        signature,
+        scheduleToken,
+        stepCount: normalizedStepCount,
+        readbackMode,
+        continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
+        generation
+      });
       updateResidentPerf({
         residentStepsPerSchedule: currentResidentStepsPerSchedule(),
         lastResidentWatchdogMs: elapsedMs
@@ -4005,6 +4259,18 @@ export async function mountSphPhaseDemoOverlay({
         overlay.__mlsMpmResidentStepsError = 'resident execution did not produce a step envelope';
         overlay.__mlsMpmResidentStepsPending = null;
         overlay.__mlsMpmResidentStepsSlow = null;
+        publishResidentStageOrderTrace({
+          status: 'resident-execution-missing-envelope',
+          reason: overlay.__mlsMpmResidentStepsError,
+          signature,
+          scheduleToken,
+          stepCount: normalizedStepCount,
+          readbackMode,
+          continueFromResidentState: Boolean(continueFromResidentState),
+          residentExecutionPolicy,
+          generation,
+          execution
+        });
         updateResidentPerf({
           lastResidentMs: residentMs,
           lastResidentBackend: execution?.backend || 'missing',
@@ -4036,6 +4302,17 @@ export async function mountSphPhaseDemoOverlay({
           phaseChangeValidation: false,
           fullPhysicsValidation: false
         };
+        publishResidentStageOrderTrace({
+          status: 'resident-execution-stale-discarded',
+          signature,
+          scheduleToken,
+          stepCount: normalizedStepCount,
+          readbackMode,
+          continueFromResidentState: Boolean(continueFromResidentState),
+          residentExecutionPolicy,
+          generation,
+          execution
+        });
         updateResidentPerf({
           staleResidentSubmissions: (residentPerf.staleResidentSubmissions || 0) + 1,
           lastStaleResidentMs: residentMs,
@@ -4071,6 +4348,17 @@ export async function mountSphPhaseDemoOverlay({
       overlay.__mlsMpmResidentSourceMode = execution?.residentSourceMode || 'cpu-packed-state';
       overlay.__mlsMpmResidentContinuedFromResidentState = Boolean(execution?.continuedFromResidentState);
       overlay.__mlsMpmResidentContinuationAvailable = Boolean(execution?.continuationAvailable);
+      publishResidentStageOrderTrace({
+        status: 'resident-execution-complete',
+        signature,
+        scheduleToken,
+        stepCount: normalizedStepCount,
+        readbackMode,
+        continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
+        generation,
+        execution
+      });
       updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
       if (initialResidentStageWorkersEnabled && !continueFromResidentState) {
         maybeRunMountedMechanicsStageWorkerLane({
@@ -4291,6 +4579,17 @@ export async function mountSphPhaseDemoOverlay({
       overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
       overlay.__mlsMpmResidentStepsPending = null;
       overlay.__mlsMpmResidentStepsSlow = null;
+      publishResidentStageOrderTrace({
+        status: 'resident-execution-error',
+        reason: overlay.__mlsMpmResidentStepsError,
+        signature,
+        scheduleToken,
+        stepCount: normalizedStepCount,
+        readbackMode,
+        continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
+        generation
+      });
       renderStatus();
       updateWarningBanner();
     }).finally(() => {
@@ -4498,6 +4797,11 @@ export async function mountSphPhaseDemoOverlay({
       generation: particleSyncGeneration,
       updatedAtMs: performance.now()
     };
+    publishResidentStageOrderTrace({
+      status: 'resident-reset-invalidated',
+      reason,
+      generation: particleSyncGeneration
+    });
     residentRenderReadbackSequence = 0;
     residentRenderReadbackCount = 0;
     residentRenderReadbackSkippedCount = 0;
@@ -4987,6 +5291,12 @@ export async function mountSphPhaseDemoOverlay({
         status: 'particle-state-resynced-after-reset',
         completedAtMs: performance.now()
       };
+      publishResidentStageOrderTrace({
+        status: 'resident-reset-particle-state-resynced',
+        reason: sourceMode,
+        generation: particleSyncGeneration,
+        particleCount: Math.floor((viewState.positionsM?.length || 0) / 3)
+      });
     }
     overlay.__sphPhysicalLawGroups = physicalLawGroupsFromControls();
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;

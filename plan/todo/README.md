@@ -2717,3 +2717,10 @@ coercing auto surface-summary mode to `skip`. Mobile-shaped native probes now
 reach the native direct-consumer handoff and bridge render path with console
 clean output; the remaining fail-closed blocker is
 `native-surface-validation-readback-lifetime`, not summary-only fallback.
+
+2026-06-19 reset trace note: the mounted demo now publishes a resident
+stage-order trace for reset invalidation/resync and resident execution
+completion/error/stale/watchdog outcomes. The long-horizon probe captures it in
+per-batch metrics, including direct probe-driven resident batches. Next reset
+work is to turn this trace into hard post-reset repeated-substep assertions for
+nonzero active-grid and visible/motion evidence.

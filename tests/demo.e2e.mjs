@@ -5863,7 +5863,7 @@ test('SPH phase demo reacts room-temperature Na + H2O through derived product cl
   expect(stepped.gasPressureSummary.totalPressurePa).toBeGreaterThan(101325);
 });
 
-test('SPH phase mounted resident alkali/H2O promotes product gas pressure', async ({ page }) => {
+test('SPH phase mounted resident active-metal/H2O promotes product gas pressure', async ({ page }) => {
   test.setTimeout(480_000);
   const consoleIssues = [];
   page.on('console', (message) => {
@@ -6308,6 +6308,28 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
   expectResidentProductCarryForward(cesiumContinued, cesiumLongHorizon);
   expect(cesiumLongHorizon.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(cesiumLongHorizon.renderState?.gasPressureSummarySource)
+    .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
+
+  await openResidentReactionScenario('Ca');
+  const calcium = await runResidentReactionRefresh('test-ca-h2o-resident-product-pressure');
+  expectResidentReactionRefresh(calcium, {
+    expectedMaterialKeys: ['Ca', 'h2o', 'caoh2', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false
+  });
+  const calciumContinued = await runResidentReactionRefresh('test-ca-h2o-resident-product-pressure-continued', {
+    continueFromResidentState: true
+  });
+  expectResidentReactionRefresh(calciumContinued, {
+    expectPressureInterface: false,
+    expectedMaterialKeys: ['Ca', 'h2o', 'caoh2', 'h2'],
+    expectDecodedMaxUnderGasCap: false,
+    expectGasRenderRows: false,
+    expectContinuation: true
+  });
+  expectResidentProductCarryForward(calcium, calciumContinued);
+  expect(calciumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+  expect(calciumContinued.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
   expect(consoleIssues).toEqual([]);
 });

@@ -37,17 +37,19 @@ physics loop is incoherent.
 
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
-sequence. The focused mounted alkali/H2O Playwright harness runs Na/H2O first
-pass, Na/H2O continuation, Na/H2O reset/post-reset, then K/H2O and Cs/H2O
-first pass plus two consecutive no-full resident continuation batches each.
-Each continuation proves resident product carry-forward, promoted
+sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.
+The focused mounted active-metal/H2O Playwright harness runs Na/H2O first pass,
+Na/H2O continuation, Na/H2O reset/post-reset, K/H2O and Cs/H2O first pass plus
+two consecutive no-full resident continuation batches each, then Ca/H2O first
+pass plus one no-full continuation. Each continuation proves resident product
+carry-forward, promoted
 `gpu-resident-pressure-interface-spatial-gas-ledger` pressure above baseline,
 render-state pressure consumption, G2P/render-row scale policies, support
 radius bounds, and clean WebGPU console output. Evidence:
-`PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ... --grep "resident alkali/H2O promotes product gas pressure"`
-passed `1/1` in `4.7m`. Remaining in this lane: representative non-alkali or
-multivalent reaction pairs once their pressure/product routes have stable
-browser-ready expectations.
+`PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs --grep "resident active-metal/H2O promotes product gas pressure"`
+passed `1/1` in `5.6m`. Remaining in this lane: broader long-horizon batches
+for non-alkali/multivalent pairs and representative non-water binary products
+once their pressure/product routes have stable browser-ready expectations.
 
 Current routing note, 2026-06-20 AKDT: the monolithic CPU MLS-MPM
 H2O/H2O liquid gate regressed after material/spacing work because wall-only

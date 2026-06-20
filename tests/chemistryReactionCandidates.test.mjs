@@ -28,18 +28,47 @@ test('formula parser accepts lowercase demo keys and binary compound formulas', 
   assert.deepEqual(describeChemicalFormula('Cl2').atomCounts, { 17: 2 });
 });
 
-test('Li, Na, and Cs water reactions are discovered by the same hydroxide family', () => {
-  const metals = ['Li', 'Na', 'Cs'];
+test('monovalent and divalent room-temperature water reactions share the hydroxide family', () => {
+  const metals = [
+    {
+      metal: 'Li',
+      productFormula: 'LiOH',
+      equation: '2 Li + 2 H2O -> 2 LiOH + H2',
+      reactants: [[2, 'Li'], [2, 'H2O']],
+      products: [[2, 'LiOH'], [1, 'H2']]
+    },
+    {
+      metal: 'Na',
+      productFormula: 'NaOH',
+      equation: '2 Na + 2 H2O -> 2 NaOH + H2',
+      reactants: [[2, 'Na'], [2, 'H2O']],
+      products: [[2, 'NaOH'], [1, 'H2']]
+    },
+    {
+      metal: 'Cs',
+      productFormula: 'CsOH',
+      equation: '2 Cs + 2 H2O -> 2 CsOH + H2',
+      reactants: [[2, 'Cs'], [2, 'H2O']],
+      products: [[2, 'CsOH'], [1, 'H2']]
+    },
+    {
+      metal: 'Ca',
+      productFormula: 'Ca(OH)2',
+      equation: 'Ca + 2 H2O -> Ca(OH)2 + H2',
+      reactants: [[1, 'Ca'], [2, 'H2O']],
+      products: [[1, 'Ca(OH)2'], [1, 'H2']]
+    }
+  ];
   const familyIds = new Set();
-  for (const metal of metals) {
+  for (const { metal, productFormula, equation, reactants, products } of metals) {
     const result = discoverReactionCandidates(metal, 'H2O');
     const candidate = onlyCandidate(result, 'active-metal-water-hydroxide');
     familyIds.add(candidate.familyId);
-    assert.equal(candidate.productFormula, `${metal}OH`);
-    assert.equal(candidate.equation, `2 ${metal} + 2 H2O -> 2 ${metal}OH + H2`);
+    assert.equal(candidate.productFormula, productFormula);
+    assert.equal(candidate.equation, equation);
     assert.equal(candidate.atomBalance.balanced, true);
-    assert.deepEqual(candidate.reactants.map(({ coefficient, formula }) => [coefficient, formula]), [[2, metal], [2, 'H2O']]);
-    assert.deepEqual(candidate.products.map(({ coefficient, formula }) => [coefficient, formula]), [[2, `${metal}OH`], [1, 'H2']]);
+    assert.deepEqual(candidate.reactants.map(({ coefficient, formula }) => [coefficient, formula]), reactants);
+    assert.deepEqual(candidate.products.map(({ coefficient, formula }) => [coefficient, formula]), products);
     assert.ok(candidate.energetics.specificEnthalpyJPerKgProduct < 0);
     assertUnvalidated(candidate);
   }

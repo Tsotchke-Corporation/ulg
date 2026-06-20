@@ -393,3 +393,35 @@ Remaining:
 
 - Add representative non-alkali or multivalent reaction pairs once their
   pressure/product routes have stable browser-ready expectations.
+
+## Implementation Status - 2026-06-20 AKDT
+
+Extended mounted resident browser coverage to the first multivalent
+active-metal/H2O case:
+
+- `chemistry/reactionCandidates` now has focused coverage proving Ca/H2O emits
+  the same `active-metal-water-hydroxide` family as Li/Na/Cs, with exact
+  divalent stoichiometry `Ca + 2 H2O -> Ca(OH)2 + H2`.
+- The SPH reaction discovery adapter now covers `Ca -> caoh2`, preserving the
+  balanced stoichiometry metadata and product closure production.
+- The mounted resident browser harness was renamed from alkali/H2O to
+  active-metal/H2O and now opens Ca/H2O after the Na/K/Cs sequence. Ca/H2O runs
+  a first no-full resident pass plus one continuation, asserting `Ca`, `h2o`,
+  `caoh2`, and `h2` material keys, resident product carry-forward, promoted
+  spatial gas pressure above baseline, render pressure consumption, clean
+  WebGPU console output, and the same G2P/render-row scale-bound policies.
+
+Validation:
+
+- `node --check tests/chemistryReactionCandidates.test.mjs`
+- `node --check tests/reactionDiscovery.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/chemistryReactionCandidates.test.mjs tests/reactionDiscovery.test.mjs tests/materialPropertyProvenance.test.mjs` passed `20/20`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs --grep "resident active-metal/H2O promotes product gas pressure"` passed `1/1` in `5.6m`.
+
+Remaining:
+
+- Add broader long-horizon resident batches for Ca/H2O and other non-alkali or
+  multivalent pairs.
+- Add representative non-water binary reaction products once their resident
+  pressure/product routes have stable browser-ready expectations.

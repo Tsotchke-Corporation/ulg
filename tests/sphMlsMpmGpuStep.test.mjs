@@ -3242,7 +3242,11 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
           interfaceContactKinematicsGpuDerived: true,
           interfaceContactKinematicsDerivationStatus: 'interface-contact-kinematics-gpu-derivation-submitted',
           interfaceContactKinematicsParticleSourceStatus: 'interface-contact-kinematics-particle-source-ready',
-          interfaceContactKinematicsParticleCount: 2
+          interfaceContactKinematicsParticleCount: 2,
+          interfaceContactKinematicsParticleBinGridStatus: 'interface-contact-particle-bin-grid-submitted',
+          interfaceContactKinematicsParticleBinGridEnabled: true,
+          interfaceContactKinematicsParticleBinGridCellCount: 8,
+          interfaceContactKinematicsParticleBinGridBinCapacity: 64
         }
       };
     },
@@ -3270,6 +3274,7 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
       stateBuffer,
       thermoBuffer
     },
+    boxDimsM: [4, 4, 4],
     readbackMode: 'no-full-readback',
     expectedOutputFamilies: ['pressure-interface-force-rows'],
     pressureInterfaceStageTask: true
@@ -3280,12 +3285,20 @@ test('SPH pressure interface stage forwards resident particle buffers for contac
   assert.equal(observedRunnerArgs.particleStateBuffer, stateBuffer);
   assert.equal(observedRunnerArgs.particleThermoBuffer, thermoBuffer);
   assert.equal(observedRunnerArgs.particleCount, 2);
+  assert.deepEqual(observedRunnerArgs.boxDimsM, [4, 4, 4]);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsGpuDerived, true);
   assert.equal(
     result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsDerivationStatus,
     'interface-contact-kinematics-gpu-derivation-submitted'
   );
+  assert.equal(
+    result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridStatus,
+    'interface-contact-particle-bin-grid-submitted'
+  );
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridEnabled, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridCellCount, 8);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsParticleBinGridBinCapacity, 64);
 });
 
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {

@@ -6937,6 +6937,10 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     interfaceContactKinematicsDerivationStatus: solver?.interfaceContactKinematicsDerivationStatus || null,
     interfaceContactKinematicsParticleSourceStatus: solver?.interfaceContactKinematicsParticleSourceStatus || null,
     interfaceContactKinematicsParticleCount: finiteNumber(solver?.interfaceContactKinematicsParticleCount, 0),
+    interfaceContactKinematicsParticleBinGridStatus: solver?.interfaceContactKinematicsParticleBinGridStatus || null,
+    interfaceContactKinematicsParticleBinGridEnabled: solver?.interfaceContactKinematicsParticleBinGridEnabled === true,
+    interfaceContactKinematicsParticleBinGridCellCount: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridCellCount, 0),
+    interfaceContactKinematicsParticleBinGridBinCapacity: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridBinCapacity, 0),
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -7210,6 +7214,7 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           particleStateBuffer: stageOptions.particleStateBuffer || stageOptions.sourceStateBuffer || stageOptions.sphParticleUpload?.stateBuffer || null,
           particleThermoBuffer: stageOptions.particleThermoBuffer || stageOptions.sourceThermoBuffer || stageOptions.sphParticleUpload?.thermoBuffer || null,
           particleCount: stageOptions.particleCount ?? stageOptions.sphParticleState?.particleCount ?? stageOptions.sphParticleUpload?.particleCount ?? null,
+          boxDimsM: stageOptions.boxDimsM || null,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
         });
@@ -7296,7 +7301,11 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     interfaceContactKinematicsGpuDerived: pressureInterfaceForceSolver?.interfaceContactKinematicsGpuDerived === true,
     interfaceContactKinematicsDerivationStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsDerivationStatus || null,
     interfaceContactKinematicsParticleSourceStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleSourceStatus || null,
-    interfaceContactKinematicsParticleCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleCount, 0)
+    interfaceContactKinematicsParticleCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleCount, 0),
+    interfaceContactKinematicsParticleBinGridStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridStatus || null,
+    interfaceContactKinematicsParticleBinGridEnabled: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridEnabled === true,
+    interfaceContactKinematicsParticleBinGridCellCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridCellCount, 0),
+    interfaceContactKinematicsParticleBinGridBinCapacity: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridBinCapacity, 0)
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);

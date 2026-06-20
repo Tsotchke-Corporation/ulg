@@ -1,6 +1,47 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
+## Current Focused Result - 2026-06-20 GPU Contact Kinematics Particle Bins
+
+The pressure-interface WebGPU producer now builds a bounded same-device
+particle-bin grid before deriving interface contact kinematics. The
+contact-kinematics shader scans neighboring bin cells around each interface
+centroid and falls forward to the old full-particle scan only when the bin grid
+is unavailable. Solver and stage evidence expose bin-grid
+status/enabled/cell-count/capacity. Empty pressure-interface gas-cell storage
+now uses a one-row 16-byte sentinel so browser WebGPU validation accepts the
+`array<vec4<f32>>` binding even when row count is zero.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
+  `node --check ulg-gpu-abi/src/wgsl.js` passed.
+- Contact/pressure/stage coverage:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` passed `71/71`, including the 16-byte empty
+  gas-cell sentinel guard.
+- ABI/grid/buffer coverage:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
+  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs` passed
+  `47/47`.
+- Direct browser WebGPU smoke:
+  imported the pressure-interface module through the live Vite server,
+  requested a real WebGPU device, ran synthetic retained H2O/Na contact rows,
+  reached `gpu-interface-element-neighbor-bin-contact-kinematics`, and captured
+  no console logs.
+- Whitespace:
+  `git diff --check` passed.
+- Build:
+  `npm run build` passed with only the existing Vite large-chunk warning.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `11/14` with the three expected
+  opt-in long-horizon skips.
+- ICC:
+  `npm run icc:update` passed with `indexedFiles=354` and
+  `memoryChunks=2085`.
+
+## Previous Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
 
 The pressure-interface WebGPU producer now derives missing per-interface
 contact kinematics from resident SPH particle state/thermo buffers before the

@@ -5,6 +5,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   sphPressureInterfaceContactKinematicsWgsl,
+  sphPressureInterfaceParticleBinsWgsl,
   sphPressureInterfaceForceRowsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
@@ -33,6 +34,9 @@ const DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE = 1e-4;
 const DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA = 5e5;
 const DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M = 0;
 const DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M = 0;
+const DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY = 64;
+const CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
+const CONTACT_PARTICLE_BIN_GRID_MAX_CELL_COUNT = CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -630,7 +634,7 @@ export function createPressureInterfaceParamsArray({
 }
 
 function writeStorageBuffer(device, label, data) {
-  const byteLength = Math.max(4, data?.byteLength ?? 0);
+  const byteLength = Math.max(16, data?.byteLength ?? 0);
   const buffer = tagWebGpuBufferDevice(device.createBuffer({
     label,
     size: byteLength,
@@ -708,19 +712,145 @@ export function createPressureInterfaceContactKinematicsParamsArray({
   contactPolicyRowCount = 0,
   derivationEnabled = false,
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
-  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M
+  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
+  particleBinGrid = null
 } = {}) {
-  const buffer = new ArrayBuffer(32);
+  const gridEnabled = particleBinGrid?.enabled === true;
+  const gridDims = Array.isArray(particleBinGrid?.gridDims)
+    ? particleBinGrid.gridDims
+    : [0, 0, 0];
+  const origin = Array.isArray(particleBinGrid?.originM)
+    ? particleBinGrid.originM
+    : [0, 0, 0];
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(elementCount, 0))), true);
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(contactPolicyRowCount, 0))), true);
   view.setUint32(12, derivationEnabled ? 1 : 0, true);
-  view.setFloat32(16, clampPositive(maxSearchRadiusM, DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M), true);
-  view.setFloat32(20, clampPositive(gapFloorM, DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M), true);
-  view.setFloat32(24, 0, true);
-  view.setFloat32(28, 0, true);
+  view.setUint32(16, gridEnabled ? 1 : 0, true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(particleBinGrid?.cellCount, 0))), true);
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(particleBinGrid?.binCapacity, 0))), true);
+  view.setUint32(28, Math.max(0, Math.round(finiteNumber(gridDims[0], 0))), true);
+  view.setUint32(32, Math.max(0, Math.round(finiteNumber(gridDims[1], 0))), true);
+  view.setUint32(36, Math.max(0, Math.round(finiteNumber(gridDims[2], 0))), true);
+  view.setFloat32(40, clampPositive(maxSearchRadiusM, DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M), true);
+  view.setFloat32(44, clampPositive(gapFloorM, DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M), true);
+  view.setFloat32(48, finiteNumber(origin[0], 0), true);
+  view.setFloat32(52, finiteNumber(origin[1], 0), true);
+  view.setFloat32(56, finiteNumber(origin[2], 0), true);
+  view.setFloat32(60, clampPositive(particleBinGrid?.cellSizeM, 0), true);
   return buffer;
+}
+
+export function createPressureInterfaceParticleBinParamsArray({
+  particleCount = 0,
+  particleBinGrid = null
+} = {}) {
+  const gridEnabled = particleBinGrid?.enabled === true;
+  const gridDims = Array.isArray(particleBinGrid?.gridDims)
+    ? particleBinGrid.gridDims
+    : [0, 0, 0];
+  const origin = Array.isArray(particleBinGrid?.originM)
+    ? particleBinGrid.originM
+    : [0, 0, 0];
+  const boxDims = Array.isArray(particleBinGrid?.boxDimsM)
+    ? particleBinGrid.boxDimsM
+    : [0, 0, 0];
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(particleBinGrid?.cellCount, 0))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(particleBinGrid?.binCapacity, 0))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(gridDims[0], 0))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(gridDims[1], 0))), true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(gridDims[2], 0))), true);
+  view.setUint32(24, gridEnabled ? 1 : 0, true);
+  view.setUint32(28, 0, true);
+  view.setFloat32(32, finiteNumber(origin[0], 0), true);
+  view.setFloat32(36, finiteNumber(origin[1], 0), true);
+  view.setFloat32(40, finiteNumber(origin[2], 0), true);
+  view.setFloat32(44, clampPositive(particleBinGrid?.cellSizeM, 0), true);
+  view.setFloat32(48, clampPositive(particleBinGrid?.cellSizeM, 0) > 0 ? 1 / particleBinGrid.cellSizeM : 0, true);
+  view.setFloat32(52, clampPositive(boxDims[0], 0), true);
+  view.setFloat32(56, clampPositive(boxDims[1], 0), true);
+  view.setFloat32(60, clampPositive(boxDims[2], 0), true);
+  return buffer;
+}
+
+function maxContactPolicySupportRadiusM(packedContactPolicy = null) {
+  const rows = packedContactPolicy?.rows;
+  const rowCount = Math.max(0, Math.round(finiteNumber(packedContactPolicy?.rowCount, 0)));
+  let maxSupportRadiusM = 0;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    maxSupportRadiusM = Math.max(
+      maxSupportRadiusM,
+      clampPositive(rows?.[rowIndex * SPH_ALGORITHM_CONTACT_POLICY_FLOATS + 6], 0)
+    );
+  }
+  return maxSupportRadiusM;
+}
+
+export function resolvePressureInterfaceParticleBinGrid({
+  boxDimsM = null,
+  packedContactPolicy = null,
+  maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
+  binCapacity = DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY
+} = {}) {
+  const dims = vector3From(boxDimsM, [0, 0, 0]).map((value) => clampPositive(value, 0));
+  if (dims.some((value) => value <= 0)) {
+    return {
+      status: 'interface-contact-particle-bin-grid-unavailable',
+      reason: 'box dimensions unavailable',
+      enabled: false,
+      gridDims: [0, 0, 0],
+      boxDimsM: dims,
+      originM: [0, 0, 0],
+      cellSizeM: 0,
+      cellCount: 0,
+      binCapacity: 0
+    };
+  }
+  const capacity = Math.max(1, Math.round(finiteNumber(binCapacity, DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY)));
+  const maxDimM = Math.max(...dims);
+  const supportRadiusM = maxContactPolicySupportRadiusM(packedContactPolicy);
+  const requestedSearchRadiusM = Math.max(
+    clampPositive(maxSearchRadiusM, 0),
+    supportRadiusM * 2,
+    maxDimM / CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS,
+    1e-6
+  );
+  const gridDims = dims.map((dim) => Math.max(
+    1,
+    Math.min(CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS, Math.ceil(dim / requestedSearchRadiusM))
+  ));
+  const cellCount = gridDims[0] * gridDims[1] * gridDims[2];
+  if (cellCount <= 0 || cellCount > CONTACT_PARTICLE_BIN_GRID_MAX_CELL_COUNT) {
+    return {
+      status: 'interface-contact-particle-bin-grid-unavailable',
+      reason: 'derived bin grid exceeds bounded cell budget',
+      enabled: false,
+      gridDims,
+      boxDimsM: dims,
+      originM: [0, 0, 0],
+      cellSizeM: requestedSearchRadiusM,
+      cellCount,
+      binCapacity: capacity
+    };
+  }
+  return {
+    status: 'interface-contact-particle-bin-grid-ready',
+    reason: null,
+    enabled: true,
+    gridDims,
+    boxDimsM: dims,
+    originM: [0, 0, 0],
+    cellSizeM: requestedSearchRadiusM,
+    cellCount,
+    binCapacity: capacity,
+    maxSupportRadiusM: supportRadiusM,
+    maxSearchRadiusM: Math.max(clampPositive(maxSearchRadiusM, 0), supportRadiusM * 2)
+  };
 }
 
 export function canDeriveInterfaceContactKinematicsOnGpu({
@@ -738,6 +868,125 @@ export function canDeriveInterfaceContactKinematicsOnGpu({
   );
 }
 
+function createDisabledContactParticleBinBuffers(device, particleBinGrid = null) {
+  const countsBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-particle-bin-counts-disabled',
+    new Uint32Array(1)
+  );
+  const indicesBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-particle-bin-indices-disabled',
+    new Uint32Array([0xffffffff])
+  );
+  return {
+    schema: 'peercompute.ulg.sph-pressure-interface-particle-bin-grid.v0',
+    status: particleBinGrid?.status || 'interface-contact-particle-bin-grid-disabled',
+    reason: particleBinGrid?.reason || 'particle bin grid disabled',
+    enabled: false,
+    particleBinGrid: particleBinGrid || null,
+    countsBuffer,
+    indicesBuffer,
+    cleanupBuffers: [countsBuffer, indicesBuffer]
+  };
+}
+
+export function runSphPressureInterfaceParticleBinsWebGpu({
+  device,
+  particleSource,
+  particleBinGrid
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSphPressureInterfaceParticleBinsWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (particleSource?.ready !== true || particleBinGrid?.enabled !== true) {
+    return createDisabledContactParticleBinBuffers(device, particleBinGrid);
+  }
+  const cellCount = Math.max(0, Math.round(finiteNumber(particleBinGrid.cellCount, 0)));
+  const binCapacity = Math.max(1, Math.round(finiteNumber(particleBinGrid.binCapacity, DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY)));
+  if (cellCount <= 0) {
+    return createDisabledContactParticleBinBuffers(device, {
+      ...particleBinGrid,
+      status: 'interface-contact-particle-bin-grid-unavailable',
+      reason: 'particle bin grid has no cells',
+      enabled: false
+    });
+  }
+  const counts = new Uint32Array(cellCount);
+  const indices = new Uint32Array(cellCount * binCapacity);
+  indices.fill(0xffffffff);
+  const countsBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-particle-bin-counts',
+    counts
+  );
+  const indicesBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-particle-bin-indices',
+    indices
+  );
+  const metadataBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-particle-bin-metadata',
+    new Uint32Array(4)
+  );
+  const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-particle-bin-params',
+    size: 64,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceParticleBinParamsArray({
+    particleCount: particleSource.particleCount,
+    particleBinGrid
+  }));
+  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-pressure-interface-particle-bins.v0',
+    label: 'ulg-sph-pressure-interface-particle-bins',
+    code: sphPressureInterfaceParticleBinsWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: particleSource.stateBuffer } },
+      { binding: 1, resource: { buffer: countsBuffer } },
+      { binding: 2, resource: { buffer: indicesBuffer } },
+      { binding: 3, resource: { buffer: metadataBuffer } },
+      { binding: 4, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.max(1, Math.ceil(particleSource.particleCount / 64)));
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  return {
+    schema: 'peercompute.ulg.sph-pressure-interface-particle-bin-grid.v0',
+    status: 'interface-contact-particle-bin-grid-submitted',
+    reason: null,
+    enabled: true,
+    particleBinGrid,
+    countsBuffer,
+    indicesBuffer,
+    metadataBuffer,
+    paramsBuffer,
+    cellCount,
+    binCapacity,
+    queueCompletionStatus: 'queue-submitted',
+    queueCompletionMethod: 'queue.submit',
+    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer]
+  };
+}
+
 export function runSphPressureInterfaceContactKinematicsWebGpu({
   device,
   packedInterfaceElements,
@@ -745,6 +994,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   interfaceElementsBuffer,
   contactPolicyBuffer,
   particleSource,
+  particleBinGrid = null,
+  particleBins = null,
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M
 } = {}) {
@@ -765,19 +1016,21 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   }), device);
   const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-sph-pressure-interface-contact-kinematics-params',
-    size: 32,
+    size: 64,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   }), device);
+  const resolvedParticleBins = particleBins || createDisabledContactParticleBinBuffers(device, particleBinGrid);
   device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
     contactPolicyRowCount: packedContactPolicy.rowCount,
     derivationEnabled: true,
     maxSearchRadiusM,
-    gapFloorM
+    gapFloorM,
+    particleBinGrid: resolvedParticleBins.enabled ? resolvedParticleBins.particleBinGrid : null
   }));
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v0',
+    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v1',
     label: 'ulg-sph-pressure-interface-contact-kinematics',
     code: sphPressureInterfaceContactKinematicsWgsl,
     entryPoint: 'main',
@@ -787,7 +1040,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(2, 'read-only-storage'),
       computeBufferBinding(3, 'read-only-storage'),
       computeBufferBinding(4, 'storage'),
-      computeBufferBinding(5, 'uniform')
+      computeBufferBinding(5, 'uniform'),
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -798,7 +1053,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 2, resource: { buffer: particleSource.thermoBuffer } },
       { binding: 3, resource: { buffer: contactPolicyBuffer } },
       { binding: 4, resource: { buffer: outputBuffer } },
-      { binding: 5, resource: { buffer: paramsBuffer } }
+      { binding: 5, resource: { buffer: paramsBuffer } },
+      { binding: 6, resource: { buffer: resolvedParticleBins.countsBuffer } },
+      { binding: 7, resource: { buffer: resolvedParticleBins.indicesBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -817,11 +1074,18 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
     particleCount: particleSource.particleCount,
     contactPolicyRowCount: packedContactPolicy.rowCount,
+    particleBinGridStatus: resolvedParticleBins.status,
+    particleBinGridEnabled: resolvedParticleBins.enabled === true,
+    particleBinGrid: resolvedParticleBins.particleBinGrid || null,
+    particleBinGridCellCount: resolvedParticleBins.cellCount || resolvedParticleBins.particleBinGrid?.cellCount || 0,
+    particleBinGridBinCapacity: resolvedParticleBins.binCapacity || resolvedParticleBins.particleBinGrid?.binCapacity || 0,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
-    derivation: 'gpu-interface-element-nearest-particle-contact-kinematics',
+    derivation: resolvedParticleBins.enabled
+      ? 'gpu-interface-element-neighbor-bin-contact-kinematics'
+      : 'gpu-interface-element-nearest-particle-contact-kinematics',
     source: 'resident-sph-particle-state-and-thermo-buffers',
-    cleanupBuffers: [paramsBuffer],
+    cleanupBuffers: [paramsBuffer, ...(resolvedParticleBins.cleanupBuffers || [])],
     destroyContactKinematicsBuffer() {
       outputBuffer.destroy?.();
     }
@@ -967,6 +1231,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   particleCount = null,
   contactKinematicsMaxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   contactKinematicsGapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
+  contactKinematicsParticleBinCapacity = DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY,
+  boxDimsM = null,
   retainForceRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -1001,6 +1267,14 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     packedContactKinematics,
     particleSource
   });
+  const contactKinematicsParticleBinGrid = contactKinematicsGpuDerivationEligible
+    ? resolvePressureInterfaceParticleBinGrid({
+        boxDimsM,
+        packedContactPolicy,
+        maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
+        binCapacity: contactKinematicsParticleBinCapacity
+      })
+    : null;
   const pressureModelId = packedGasPressureCells.rowCount > 0 && pressureFieldResolution.localPressureGradientReady
     ? 1
     : 0;
@@ -1061,6 +1335,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
           : 'interface-contact-kinematics-uses-element-fields-or-unavailable',
         interfaceContactKinematicsParticleSourceStatus: particleSource.status,
         interfaceContactKinematicsParticleCount: particleSource.particleCount,
+        interfaceContactKinematicsParticleBinGridStatus: contactKinematicsParticleBinGrid?.status || null,
+        interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsParticleBinGrid?.enabled === true,
+        interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsParticleBinGrid?.cellCount || 0,
+        interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsParticleBinGrid?.binCapacity || 0,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1083,6 +1361,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   let contactKinematicsGpuDerived = false;
   const contactKinematicsCleanupBuffers = [];
   if (contactKinematicsGpuDerivationEligible) {
+    const particleBins = runSphPressureInterfaceParticleBinsWebGpu({
+      device,
+      particleSource,
+      particleBinGrid: contactKinematicsParticleBinGrid
+    });
     contactKinematicsGpuDerivation = runSphPressureInterfaceContactKinematicsWebGpu({
       device,
       packedInterfaceElements: packed,
@@ -1090,6 +1373,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceElementsBuffer: inputBuffer,
       contactPolicyBuffer,
       particleSource,
+      particleBinGrid: contactKinematicsParticleBinGrid,
+      particleBins,
       maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
       gapFloorM: contactKinematicsGapFloorM
     });
@@ -1244,6 +1529,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleCount: particleSource.particleCount,
       interfaceContactKinematicsParticleSourceDeviceId: particleSource.sourceDeviceId,
       interfaceContactKinematicsConsumerDeviceId: particleSource.consumerDeviceId,
+      interfaceContactKinematicsParticleBinGridStatus: contactKinematicsGpuDerivation?.particleBinGridStatus || contactKinematicsParticleBinGrid?.status || null,
+      interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
+      interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
+      interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1308,6 +1597,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
             : 'interface-contact-kinematics-uses-element-fields-or-unavailable'),
       interfaceContactKinematicsParticleSourceStatus: particleSource.status,
       interfaceContactKinematicsParticleCount: particleSource.particleCount,
+      interfaceContactKinematicsParticleBinGridStatus: contactKinematicsGpuDerivation?.particleBinGridStatus || contactKinematicsParticleBinGrid?.status || null,
+      interfaceContactKinematicsParticleBinGridEnabled: contactKinematicsGpuDerivation?.particleBinGridEnabled === true,
+      interfaceContactKinematicsParticleBinGridCellCount: contactKinematicsGpuDerivation?.particleBinGridCellCount || contactKinematicsParticleBinGrid?.cellCount || 0,
+      interfaceContactKinematicsParticleBinGridBinCapacity: contactKinematicsGpuDerivation?.particleBinGridBinCapacity || contactKinematicsParticleBinGrid?.binCapacity || 0,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

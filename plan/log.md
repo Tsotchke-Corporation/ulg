@@ -1,5 +1,51 @@
 # ULG Implementation Log
 
+## 2026-06-20 AKDT - GPU Particle-Bin Contact Kinematics Producer
+
+Status:
+
+- Added a same-device `sphPressureInterfaceParticleBinsWgsl` producer for the
+  pressure-interface contact path. Resident SPH particle rows are binned into a
+  bounded grid with per-cell counts, fixed-capacity particle indices, and
+  overflow metadata before contact-kinematics derivation.
+- Extended contact-kinematics params and WGSL bindings so the derivation pass
+  scans neighboring bin cells around each interface centroid instead of the
+  whole particle buffer when the bin grid is ready. The previous full-particle
+  scan remains a fail-forward path when box bounds or grid capacity are not
+  available.
+- Threaded bin-grid diagnostics through the pressure-interface solver and
+  MLS-MPM pressure-stage evidence: status, enabled flag, cell count, and bin
+  capacity.
+- Raised the pressure-interface empty gas-cell storage sentinel to one
+  16-byte row so browsers accept the zero-row `array<vec4<f32>>` binding.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` reported `71/71`.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
+  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
+  reported `47/47`.
+- PASS: direct browser WebGPU smoke through the live Vite server reached
+  `gpu-interface-element-neighbor-bin-contact-kinematics` with no console
+  logs.
+- PASS: `git diff --check`.
+- PASS: `npm run build`.
+  - Vite reported only the existing large chunk-size warning.
+- PASS: `npm run test:physics-atomics`.
+  - Passed `11/14` with the three expected opt-in long-horizon skips.
+- PASS: `npm run icc:update`.
+  - Indexed `354` files and `2085` memory chunks.
+
+Remaining:
+
+- Add overflow/adaptive-capacity diagnostics and browser visual acceptance.
+- Replace the fixed-capacity bin rows with a prefix-scan compact bin list if
+  overflow starts dropping meaningful contact particles in dense reactions.
+
 ## 2026-06-20 06:11 AKDT - Algorithm Contact Pair Force Rows
 
 Status:

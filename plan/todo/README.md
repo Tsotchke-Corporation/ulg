@@ -55,7 +55,18 @@ material-bank warm-input sentinels is closed: thermal and mechanics now bind a
 browser-console issues. Continue contact work by replacing the current per-interface GPU
 particle scan with a tiled/neighbor-list producer, adding browser visual
 acceptance, and keeping the response in the physics stage; do not replace this
-with renderer overlays or post-hoc particle position clamps.
+with renderer overlays or post-hoc particle position clamps. Follow-up,
+2026-06-20 AKDT: the first GPU neighbor producer is now in place for this path.
+The pressure stage builds a bounded fixed-capacity particle-bin grid on the
+same WebGPU device, the contact-kinematics shader scans neighboring cells
+instead of every particle when the bin grid is ready, and diagnostics report
+bin-grid status/enabled/cell-count/capacity through the solver and
+ComputeManager stage evidence. Empty pressure-interface gas-cell storage
+sentinels now bind a 16-byte zero row instead of a 4-byte buffer, closing the
+browser validation warning found during the direct WebGPU smoke. Remaining
+contact-performance work is adaptive overflow handling/readback and, if fixed
+capacity proves too lossy, a prefix-scan compact bin list; then broader visual
+acceptance.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

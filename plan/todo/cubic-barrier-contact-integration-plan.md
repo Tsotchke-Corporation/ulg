@@ -2,6 +2,22 @@
 
 Date: 2026-06-18 AKDT
 
+Status update, 2026-06-20 AKDT: the first tiled/neighbor producer slice for
+GPU-derived contact kinematics is implemented. Before contact-kinematics
+derivation, the pressure-interface WebGPU path now bins resident particle rows
+into a bounded same-device grid with fixed per-cell capacity, counts, indices,
+and overflow metadata. The kinematics shader consumes those bin buffers and
+searches neighboring cells around each interface centroid instead of scanning
+the whole particle buffer when the grid is ready; the old full scan remains a
+fail-forward path when bounds or box dimensions cannot support the bin grid.
+Solver and ComputeManager stage evidence report bin-grid status, enablement,
+cell count, and capacity. A direct browser WebGPU smoke of the pressure
+producer reached `gpu-interface-element-neighbor-bin-contact-kinematics` with
+no console logs after the empty gas-cell sentinel was raised to one 16-byte
+storage row. Remaining work is overflow/adaptive-capacity diagnostics,
+longer-horizon browser visual acceptance, and a prefix-scan compact bin list
+if fixed capacity starts dropping meaningful contact particles.
+
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` can now use GPU-derived interface kinematics in
 the no-full pressure path. When interface elements lack explicit `gapM` /

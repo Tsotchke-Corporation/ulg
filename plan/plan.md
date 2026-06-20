@@ -20,7 +20,11 @@ sentinel validation failure by binding 64-byte zero-row sentinels in thermal
 and mechanics passes; `/tmp/ulg-contact-kinematics-gpu-probe-rerun.json` is
 console-clean. The next physics target is replacing the per-interface GPU
 particle scan with a tiled/neighbor-list contact producer plus broader browser
-visual acceptance. The next rendering target remains native WebGPU
+visual acceptance. Follow-up: the first same-device particle-bin producer now
+runs before GPU contact-kinematics derivation, and the kinematics shader scans
+neighboring bin cells when grid bounds are available. The remaining contact
+physics target is adaptive overflow/prefix-scan bin compaction plus broader
+browser visual acceptance. The next rendering target remains native WebGPU
 validation/presentation evidence, not an overlay or CPU mesh fallback.
 
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are

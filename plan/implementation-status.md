@@ -2,7 +2,31 @@
 
 Updated: 2026-06-20 GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
-Latest checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path can now
+Latest added scope, 2026-06-20 AKDT: GPU particle-bin interface contact
+kinematics producer and pressure-interface empty storage sentinel fix.
+
+Latest checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path now
+derives contact kinematics through a same-device particle-bin producer when
+resident SPH particle buffers are available. A new
+`sphPressureInterfaceParticleBinsWgsl` pass bins particle state rows into a
+bounded grid with counts, indices, and overflow metadata. The
+`sphPressureInterfaceContactKinematicsWgsl` pass consumes those bins and scans
+neighboring cells around each interface centroid instead of scanning the whole
+particle buffer when the bin grid is ready, while retaining the previous full
+scan as a fail-forward path. Pressure-stage solver and ComputeManager evidence
+publish bin-grid status, enabled flag, cell count, and bin capacity. The
+pressure-interface empty gas-cell storage sentinel now binds one 16-byte row,
+closing the browser validation warning found in direct WebGPU smoke. Focused
+validation passed syntax checks, `71/71` pressure/MLS-MPM stage tests, and
+`47/47` ABI/grid/buffer tests; a direct browser WebGPU smoke reached
+`gpu-interface-element-neighbor-bin-contact-kinematics` with no console logs.
+`git diff --check`, `npm run build`, `npm run test:physics-atomics` (`11/14`
+with three expected opt-in skips), and `npm run icc:update`
+(`indexedFiles=354`, `memoryChunks=2085`) also passed. Remaining contact work
+is overflow/adaptive-capacity diagnostics, a prefix-scan compact bin list if
+fixed-cap cells prove lossy, and broader browser visual acceptance.
+
+Previous checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path can now
 derive per-interface contact kinematics from resident SPH particle state and
 thermo buffers when interface elements do not already carry test/oracle gap
 fields. The new `sphPressureInterfaceContactKinematicsWgsl` stage runs before

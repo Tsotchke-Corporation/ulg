@@ -5185,16 +5185,102 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphPressureInterfaceParticleBinsWgsl = `
+struct ParticleBinParams {
+  particle_count: u32,
+  cell_count: u32,
+  bin_capacity: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  bins_enabled: u32,
+  _pad0: u32,
+  origin_x_m: f32,
+  origin_y_m: f32,
+  origin_z_m: f32,
+  cell_size_m: f32,
+  inv_cell_size_m: f32,
+  box_x_m: f32,
+  box_y_m: f32,
+  box_z_m: f32,
+};
+
+@group(0) @binding(0) var<storage, read> particle_state_rows: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> particle_bin_counts: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> particle_bin_indices: array<u32>;
+@group(0) @binding(3) var<storage, read_write> particle_bin_metadata: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> params: ParticleBinParams;
+
+fn particle_bin_state_row0(particle_index: u32) -> vec4<f32> {
+  return particle_state_rows[particle_index * 2u];
+}
+
+fn particle_bin_clamp_coord(value: f32, axis_count: u32) -> u32 {
+  if (axis_count <= 1u) {
+    return 0u;
+  }
+  let raw = floor(value * params.inv_cell_size_m);
+  let clamped = clamp(raw, 0.0, f32(axis_count - 1u));
+  return u32(clamped);
+}
+
+fn particle_bin_cell_index(coords: vec3<u32>) -> u32 {
+  return coords.x + coords.y * params.grid_nx + coords.z * params.grid_nx * params.grid_ny;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (
+    params.bins_enabled == 0u
+    || particle_index >= params.particle_count
+    || params.cell_count == 0u
+    || params.bin_capacity == 0u
+    || params.cell_size_m <= 0.0
+  ) {
+    return;
+  }
+  let state0 = particle_bin_state_row0(particle_index);
+  if (state0.w <= 0.0) {
+    return;
+  }
+  let relative = state0.xyz - vec3<f32>(params.origin_x_m, params.origin_y_m, params.origin_z_m);
+  let coords = vec3<u32>(
+    particle_bin_clamp_coord(relative.x, params.grid_nx),
+    particle_bin_clamp_coord(relative.y, params.grid_ny),
+    particle_bin_clamp_coord(relative.z, params.grid_nz)
+  );
+  let cell_index = particle_bin_cell_index(coords);
+  if (cell_index >= params.cell_count) {
+    return;
+  }
+  let slot = atomicAdd(&particle_bin_counts[cell_index], 1u);
+  if (slot < params.bin_capacity) {
+    particle_bin_indices[cell_index * params.bin_capacity + slot] = particle_index;
+  } else {
+    atomicAdd(&particle_bin_metadata[0u], 1u);
+  }
+}
+`;
+
 export const sphPressureInterfaceContactKinematicsWgsl = `
 struct ContactKinematicsParams {
   element_count: u32,
   particle_count: u32,
   contact_policy_row_count: u32,
   derivation_enabled: u32,
+  particle_bin_grid_enabled: u32,
+  particle_bin_cell_count: u32,
+  particle_bin_capacity: u32,
+  particle_bin_grid_nx: u32,
+  particle_bin_grid_ny: u32,
+  particle_bin_grid_nz: u32,
   max_search_radius_m: f32,
   gap_floor_m: f32,
-  _pad0: f32,
-  _pad1: f32,
+  particle_bin_origin_x_m: f32,
+  particle_bin_origin_y_m: f32,
+  particle_bin_origin_z_m: f32,
+  particle_bin_cell_size_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
@@ -5203,6 +5289,17 @@ struct ContactKinematicsParams {
 @group(0) @binding(3) var<storage, read> contact_policy_rows: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> contact_kinematics_rows: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: ContactKinematicsParams;
+@group(0) @binding(6) var<storage, read> particle_bin_counts: array<u32>;
+@group(0) @binding(7) var<storage, read> particle_bin_indices: array<u32>;
+
+struct CkParticleCandidate {
+  source_match: u32,
+  target_match: u32,
+  signed_m: f32,
+  lateral2: f32,
+  velocity: vec3<f32>,
+  mass_kg: f32,
+};
 
 fn ck_state_row0(particle_index: u32) -> vec4<f32> {
   return particle_state_rows[particle_index * 2u];
@@ -5244,6 +5341,75 @@ fn ck_normal_from_element(row2: vec4<f32>, row3: vec4<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0);
   }
   return normalize(normal);
+}
+
+fn ck_candidate_for_particle(
+  particle_index: u32,
+  centroid: vec3<f32>,
+  normal: vec3<f32>,
+  search_radius_m: f32,
+  search_radius2: f32,
+  element_material_id: f32,
+  element_phase_id: f32,
+  target_material_id: f32,
+  target_phase_id: f32
+) -> CkParticleCandidate {
+  var candidate = CkParticleCandidate(
+    0u,
+    0u,
+    0.0,
+    0.0,
+    vec3<f32>(0.0),
+    0.0
+  );
+  let thermo0 = ck_thermo_row0(particle_index);
+  let thermo2 = ck_thermo_row2(particle_index);
+  if (thermo2.z <= 0.0) {
+    return candidate;
+  }
+  let state0 = ck_state_row0(particle_index);
+  let state1 = ck_state_row1(particle_index);
+  if (state0.w <= 0.0) {
+    return candidate;
+  }
+  let delta = state0.xyz - centroid;
+  let signed_m = dot(delta, normal);
+  let distance2 = dot(delta, delta);
+  let lateral2 = max(distance2 - signed_m * signed_m, 0.0);
+  if (lateral2 > search_radius2 || abs(signed_m) > search_radius_m) {
+    return candidate;
+  }
+  let same_source_material = abs(thermo0.x - element_material_id) < 0.5 && ck_phase_matches(thermo0.y, element_phase_id);
+  let same_target_material = abs(thermo0.x - target_material_id) < 0.5 && ck_phase_matches(thermo0.y, target_phase_id);
+  candidate.source_match = select(0u, 1u, same_source_material);
+  candidate.target_match = select(0u, 1u, same_target_material);
+  candidate.signed_m = signed_m;
+  candidate.lateral2 = lateral2;
+  candidate.velocity = state1.xyz;
+  candidate.mass_kg = state0.w;
+  return candidate;
+}
+
+fn ck_particle_bin_ready() -> bool {
+  return params.particle_bin_grid_enabled != 0u
+    && params.particle_bin_cell_count > 0u
+    && params.particle_bin_capacity > 0u
+    && params.particle_bin_grid_nx > 0u
+    && params.particle_bin_grid_ny > 0u
+    && params.particle_bin_grid_nz > 0u
+    && params.particle_bin_cell_size_m > 0.0;
+}
+
+fn ck_bin_cell_index(coords: vec3<u32>) -> u32 {
+  return coords.x + coords.y * params.particle_bin_grid_nx + coords.z * params.particle_bin_grid_nx * params.particle_bin_grid_ny;
+}
+
+fn ck_bin_coord(value: f32, axis_count: u32) -> u32 {
+  if (axis_count <= 1u) {
+    return 0u;
+  }
+  let raw = floor(value / params.particle_bin_cell_size_m);
+  return u32(clamp(raw, 0.0, f32(axis_count - 1u)));
 }
 
 @compute @workgroup_size(64)
@@ -5304,47 +5470,119 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var source_mass_kg = 0.0;
   var target_mass_kg = 0.0;
 
-  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
-    let thermo0 = ck_thermo_row0(particle_index);
-    let thermo2 = ck_thermo_row2(particle_index);
-    if (thermo2.z <= 0.0) {
-      continue;
-    }
-    let state0 = ck_state_row0(particle_index);
-    let state1 = ck_state_row1(particle_index);
-    if (state0.w <= 0.0) {
-      continue;
-    }
-    let delta = state0.xyz - centroid;
-    let signed_m = dot(delta, normal);
-    let distance2 = dot(delta, delta);
-    let lateral2 = max(distance2 - signed_m * signed_m, 0.0);
-    if (lateral2 > search_radius2 || abs(signed_m) > search_radius_m) {
-      continue;
-    }
-    let same_source_material = abs(thermo0.x - element_material_id) < 0.5 && ck_phase_matches(thermo0.y, element_phase_id);
-    let same_target_material = abs(thermo0.x - target_material_id) < 0.5 && ck_phase_matches(thermo0.y, target_phase_id);
-    let signed2 = signed_m * signed_m;
-    if (same_source_material) {
-      let source_side_penalty = select(0.0, search_radius2, signed_m > support_radius_m * 0.25);
-      let score = lateral2 + signed2 + source_side_penalty;
-      if (score < source_score) {
-        source_score = score;
-        source_index = particle_index;
-        source_signed_m = signed_m;
-        source_velocity = state1.xyz;
-        source_mass_kg = state0.w;
+  if (ck_particle_bin_ready()) {
+    let relative_centroid = centroid - vec3<f32>(
+      params.particle_bin_origin_x_m,
+      params.particle_bin_origin_y_m,
+      params.particle_bin_origin_z_m
+    );
+    let center_coords = vec3<i32>(
+      i32(ck_bin_coord(relative_centroid.x, params.particle_bin_grid_nx)),
+      i32(ck_bin_coord(relative_centroid.y, params.particle_bin_grid_ny)),
+      i32(ck_bin_coord(relative_centroid.z, params.particle_bin_grid_nz))
+    );
+    let radius_cells = min(
+      i32(8),
+      max(1, i32(ceil(search_radius_m / params.particle_bin_cell_size_m)))
+    );
+    for (var dz = -radius_cells; dz <= radius_cells; dz = dz + 1) {
+      let cz = center_coords.z + dz;
+      if (cz < 0 || cz >= i32(params.particle_bin_grid_nz)) {
+        continue;
+      }
+      for (var dy = -radius_cells; dy <= radius_cells; dy = dy + 1) {
+        let cy = center_coords.y + dy;
+        if (cy < 0 || cy >= i32(params.particle_bin_grid_ny)) {
+          continue;
+        }
+        for (var dx = -radius_cells; dx <= radius_cells; dx = dx + 1) {
+          let cx = center_coords.x + dx;
+          if (cx < 0 || cx >= i32(params.particle_bin_grid_nx)) {
+            continue;
+          }
+          let cell_index = ck_bin_cell_index(vec3<u32>(u32(cx), u32(cy), u32(cz)));
+          if (cell_index >= params.particle_bin_cell_count) {
+            continue;
+          }
+          let count = min(particle_bin_counts[cell_index], params.particle_bin_capacity);
+          for (var slot = 0u; slot < count; slot = slot + 1u) {
+            let particle_index = particle_bin_indices[cell_index * params.particle_bin_capacity + slot];
+            if (particle_index >= params.particle_count) {
+              continue;
+            }
+            let candidate = ck_candidate_for_particle(
+              particle_index,
+              centroid,
+              normal,
+              search_radius_m,
+              search_radius2,
+              element_material_id,
+              element_phase_id,
+              target_material_id,
+              target_phase_id
+            );
+            let signed2 = candidate.signed_m * candidate.signed_m;
+            if (candidate.source_match != 0u) {
+              let source_side_penalty = select(0.0, search_radius2, candidate.signed_m > support_radius_m * 0.25);
+              let score = candidate.lateral2 + signed2 + source_side_penalty;
+              if (score < source_score) {
+                source_score = score;
+                source_index = particle_index;
+                source_signed_m = candidate.signed_m;
+                source_velocity = candidate.velocity;
+                source_mass_kg = candidate.mass_kg;
+              }
+            }
+            if (candidate.target_match != 0u) {
+              let target_side_penalty = select(0.0, search_radius2, candidate.signed_m < -support_radius_m * 0.25);
+              let score = candidate.lateral2 + signed2 + target_side_penalty;
+              if (score < target_score) {
+                target_score = score;
+                target_index = particle_index;
+                target_signed_m = candidate.signed_m;
+                target_velocity = candidate.velocity;
+                target_mass_kg = candidate.mass_kg;
+              }
+            }
+          }
+        }
       }
     }
-    if (same_target_material) {
-      let target_side_penalty = select(0.0, search_radius2, signed_m < -support_radius_m * 0.25);
-      let score = lateral2 + signed2 + target_side_penalty;
-      if (score < target_score) {
-        target_score = score;
-        target_index = particle_index;
-        target_signed_m = signed_m;
-        target_velocity = state1.xyz;
-        target_mass_kg = state0.w;
+  } else {
+    for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+      let candidate = ck_candidate_for_particle(
+        particle_index,
+        centroid,
+        normal,
+        search_radius_m,
+        search_radius2,
+        element_material_id,
+        element_phase_id,
+        target_material_id,
+        target_phase_id
+      );
+      let signed2 = candidate.signed_m * candidate.signed_m;
+      if (candidate.source_match != 0u) {
+        let source_side_penalty = select(0.0, search_radius2, candidate.signed_m > support_radius_m * 0.25);
+        let score = candidate.lateral2 + signed2 + source_side_penalty;
+        if (score < source_score) {
+          source_score = score;
+          source_index = particle_index;
+          source_signed_m = candidate.signed_m;
+          source_velocity = candidate.velocity;
+          source_mass_kg = candidate.mass_kg;
+        }
+      }
+      if (candidate.target_match != 0u) {
+        let target_side_penalty = select(0.0, search_radius2, candidate.signed_m < -support_radius_m * 0.25);
+        let score = candidate.lateral2 + signed2 + target_side_penalty;
+        if (score < target_score) {
+          target_score = score;
+          target_index = particle_index;
+          target_signed_m = candidate.signed_m;
+          target_velocity = candidate.velocity;
+          target_mass_kg = candidate.mass_kg;
+        }
       }
     }
   }

@@ -126,6 +126,12 @@ prefix through `Eu`, contains 58 element rows, and leaves 53 selectable
 non-noble target rows. The dry run wrote four local cache entries and the write
 pass reused all four with `cache.hitCount=4`.
 
+Status update, 2026-06-19 AKDT: the second cache-backed lanthanide continuation
+adds `Gd`, `Tb`, `Dy`, and `Ho`. The checked-in bank now covers the selectable
+prefix through `Ho`, contains 62 element rows, and leaves 49 selectable
+non-noble target rows. The write pass again reused all four dry-run cache
+entries with `cache.hitCount=4`.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

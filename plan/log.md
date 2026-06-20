@@ -35,6 +35,9 @@ Status:
 - Used the cache-backed loop to add `Nd`, `Pm`, `Sm`, and `Eu`. The bank now
   contains 58 rows, leaves 53 selectable non-noble targets, and the write pass
   reported `cache.hitCount=4`.
+- Added `Gd`, `Tb`, `Dy`, and `Ho` through the same cache-backed loop. The
+  bank now contains 62 rows, leaves 49 selectable non-noble targets, and the
+  write pass again reported `cache.hitCount=4`.
 
 Validation:
 
@@ -48,6 +51,8 @@ Validation:
 - PASS: `node scripts/material-properties/generate-material-property-bank.mjs
   --grid=80 --limit=4 --progress --write` reused the dry-run cache for
   `Nd/Pm/Sm/Eu` with `hitCount=4`.
+- PASS: the same cache-backed generator path reused dry-run cache for
+  `Gd/Tb/Dy/Ho` with `hitCount=4`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

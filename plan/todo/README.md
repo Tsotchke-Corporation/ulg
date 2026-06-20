@@ -134,7 +134,8 @@ generator runs read/write ignored local records under
 the JSON summary, and support `--cache-dir` plus `--no-cache`. The first
 cache-backed write added `Nd`, `Pm`, `Sm`, and `Eu`, moving the bank to 58 rows
 and leaving 53 selectable non-noble targets; the write pass reported
-`cache.hitCount=4`.
+`cache.hitCount=4`. The next cache-backed write added `Gd`, `Tb`, `Dy`, and
+`Ho`, moving the bank to 62 rows and leaving 49 selectable non-noble targets.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

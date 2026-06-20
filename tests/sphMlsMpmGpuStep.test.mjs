@@ -4812,6 +4812,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    reactionParticleBinMetadataReadback: true,
     reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
     thermalStepOptions: {
       thermalResponseGraphUpload
@@ -4929,6 +4930,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
       assert.equal(args.readReactionGasSpeciesSummary, false);
       assert.equal(args.readReactionProductInventory, false);
       assert.equal(args.readReactionAtomResidual, false);
+      assert.equal(args.reactionParticleBinMetadataReadback, true);
       assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
       const productEventBuffer = tracker.buffer('reaction-product-events-after-thermal');
       return {

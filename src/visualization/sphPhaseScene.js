@@ -7635,6 +7635,7 @@ export function createSphPhaseScene(container, {
     fuseNoFullResidentActiveGrid = false,
     measureFusedSequenceQueueFence = false,
     contactKinematicsParticleBinMetadataReadback = false,
+    reactionParticleBinMetadataReadback = false,
     activeGridDispatchPlanRefreshMode = null,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined
@@ -7671,7 +7672,8 @@ export function createSphPhaseScene(container, {
       `activeGridPlanRefresh=${normalizedActiveGridDispatchPlanRefreshMode}`,
       `activeGridSafety=${normalizedActiveGridSafetyCells}`,
       `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`,
-      `contactBinMetadataReadback=${Boolean(contactKinematicsParticleBinMetadataReadback) ? 1 : 0}`
+      `contactBinMetadataReadback=${Boolean(contactKinematicsParticleBinMetadataReadback) ? 1 : 0}`,
+      `reactionBinMetadataReadback=${Boolean(reactionParticleBinMetadataReadback) ? 1 : 0}`
     ].join('|');
   }
 
@@ -12960,6 +12962,7 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
     pressureInterfaceGasCellFieldAdmission = null,
     contactKinematicsParticleBinMetadataReadback = false,
+    reactionParticleBinMetadataReadback = false,
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
     g2pRunner = undefined
@@ -12987,6 +12990,9 @@ export function createSphPhaseScene(container, {
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
+    const requestedReactionParticleBinMetadataReadback = Boolean(
+      reactionParticleBinMetadataReadback
+    );
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const signature = mlsMpmResidentStepSignatureFor({
       gridSpacingM,
@@ -12999,7 +13005,9 @@ export function createSphPhaseScene(container, {
       internalPressureScale: effectiveInternalPressureScale,
       physicalLawGroups: lawGroups,
       contactKinematicsParticleBinMetadataReadback:
-        requestedContactKinematicsParticleBinMetadataReadback
+        requestedContactKinematicsParticleBinMetadataReadback,
+      reactionParticleBinMetadataReadback:
+        requestedReactionParticleBinMetadataReadback
     });
     if (!force && mlsMpmResidentStepSignature === signature && mlsMpmResidentStep) {
       return mlsMpmResidentStep;
@@ -13096,6 +13104,8 @@ export function createSphPhaseScene(container, {
           pressureInterfaceGasCellFieldAdmission,
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
+          reactionParticleBinMetadataReadback:
+            requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
@@ -13160,7 +13170,9 @@ export function createSphPhaseScene(container, {
             internalPressureScale: effectiveInternalPressureScale,
             physicalLawGroups: lawGroups,
             contactKinematicsParticleBinMetadataReadback:
-              requestedContactKinematicsParticleBinMetadataReadback
+              requestedContactKinematicsParticleBinMetadataReadback,
+            reactionParticleBinMetadataReadback:
+              requestedReactionParticleBinMetadataReadback
           }) !== signature
         ) {
           destroyMlsMpmResidentStepBuffers(execution, { destroyInputResidentProductMass: true });
@@ -13227,6 +13239,7 @@ export function createSphPhaseScene(container, {
     fusedActiveGridSafetyCells = undefined,
     thermalStepOptions: thermalStepOptionOverrides = null,
     contactKinematicsParticleBinMetadataReadback = false,
+    reactionParticleBinMetadataReadback = false,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
@@ -13278,6 +13291,9 @@ export function createSphPhaseScene(container, {
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
+    const requestedReactionParticleBinMetadataReadback = Boolean(
+      reactionParticleBinMetadataReadback
+    );
     const requestedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
       activeGridDispatchPlanRefreshMode ?? (
         requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
@@ -13299,7 +13315,9 @@ export function createSphPhaseScene(container, {
       activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
       compactSummaryMode: requestedCompactSummaryMode,
       contactKinematicsParticleBinMetadataReadback:
-        requestedContactKinematicsParticleBinMetadataReadback
+        requestedContactKinematicsParticleBinMetadataReadback,
+      reactionParticleBinMetadataReadback:
+        requestedReactionParticleBinMetadataReadback
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
@@ -13350,6 +13368,8 @@ export function createSphPhaseScene(container, {
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
+      reactionParticleBinMetadataReadback:
+        requestedReactionParticleBinMetadataReadback,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells
     });
@@ -13512,6 +13532,8 @@ export function createSphPhaseScene(container, {
           pressureInterfaceGasCellFieldAdmission,
           contactKinematicsParticleBinMetadataReadback:
             requestedContactKinematicsParticleBinMetadataReadback,
+          reactionParticleBinMetadataReadback:
+            requestedReactionParticleBinMetadataReadback,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
@@ -13737,6 +13759,8 @@ export function createSphPhaseScene(container, {
             measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
             contactKinematicsParticleBinMetadataReadback:
               requestedContactKinematicsParticleBinMetadataReadback,
+            reactionParticleBinMetadataReadback:
+              requestedReactionParticleBinMetadataReadback,
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
             activeGridSafetyCells: normalizedActiveGridSafetyCells
           }) !== signature

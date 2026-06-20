@@ -64,6 +64,12 @@ Tactical status, 2026-06-19 AKDT:
   console-clean and reports `fixed-capacity-particle-bin-grid` with `343`
   cells. This closes the first reaction-locality slice; prefix-scan compact
   bins should wait for measured overflow/dense-chemistry evidence.
+- Reaction-bin exact overflow metadata readback is now debug-opt-in and
+  browser-clean. `reactionBinMetadataReadback=1` reaches the scene/resident
+  reaction kernel, copies the 16-byte metadata block through a buffer with
+  explicit `COPY_SRC` usage, and reports completed overflow diagnostics. The
+  Na/H2O debug probe reports overflow count `0`, so prefix-scan reaction bins
+  remain deferred until a dense chemistry case proves fixed-capacity overflow.
 - `peercompute.ulg.mls-mpm-p2g-backend-policy.v0` now makes the P2G backend
   explicit. The current WebGPU path reports `resident-scatter`, and requests
   for `ocean-tiled-experimental` fail closed to resident scatter with

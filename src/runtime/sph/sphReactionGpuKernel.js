@@ -1521,6 +1521,8 @@ function outputEnvelope({
   reactionProposalNeighborMode = null,
   reactionParticleBinGrid = null,
   reactionParticleBins = null,
+  reactionParticleBinOverflowStatus = null,
+  reactionParticleBinOverflowCount = null,
   queueCompletionStatus = null,
   queueCompletionMethod = null,
   scratchBufferCleanupStatus = null
@@ -1625,6 +1627,9 @@ function outputEnvelope({
     reactionParticleBinGridEstimatedOverflowRisk: reactionParticleBinGrid?.estimatedOverflowRisk === true,
     reactionParticleBinGridIndexBufferByteLength: reactionParticleBins?.indexBufferByteLength ?? reactionParticleBinGrid?.indexBufferByteLength ?? 0,
     reactionParticleBinGridMaxContactRadiusM: reactionParticleBinGrid?.maxContactRadiusM ?? 0,
+    reactionParticleBinOverflowStatus,
+    reactionParticleBinOverflowCount,
+    reactionParticleBinOverflowMetadataReadbackRequested: reactionParticleBins?.overflowMetadataReadbackRequested === true,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     scientificValidation: false,
@@ -1793,7 +1798,8 @@ function createReactionParticleBinBuffers({
   sphParticleState,
   reactionTable,
   boxDimsM = null,
-  binCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY
+  binCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY,
+  readbackMetadata = false
 } = {}) {
   const particleBinGrid = resolveReactionParticleBinGrid({
     boxDimsM,
@@ -1820,8 +1826,16 @@ function createReactionParticleBinBuffers({
   const metadataBuffer = writeStorageBuffer(
     device,
     disabled ? 'ulg-sph-reaction-particle-bin-metadata-disabled' : 'ulg-sph-reaction-particle-bin-metadata',
-    new Uint32Array(4)
+    new Uint32Array(4),
+    GPU_BUFFER_USAGE.COPY_SRC
   );
+  const metadataReadbackBuffer = readbackMetadata === true && !disabled
+    ? device.createBuffer({
+        label: 'ulg-sph-reaction-particle-bin-metadata-readback',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      })
+    : null;
   const paramsBuffer = device.createBuffer({
     label: disabled ? 'ulg-sph-reaction-particle-bin-params-disabled' : 'ulg-sph-reaction-particle-bin-params',
     size: 64,
@@ -1841,13 +1855,18 @@ function createReactionParticleBinBuffers({
     countsBuffer,
     indicesBuffer,
     metadataBuffer,
+    metadataReadbackBuffer,
     paramsBuffer,
     cellCount: disabled ? 0 : particleBinGrid.cellCount,
     binCapacity: disabled ? 0 : particleBinGrid.binCapacity,
     averageOccupancy: particleBinGrid.averageOccupancy || 0,
     estimatedOverflowRisk: particleBinGrid.estimatedOverflowRisk === true,
     indexBufferByteLength: disabled ? 0 : indices.byteLength,
-    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer]
+    overflowMetadataStatus: metadataReadbackBuffer
+      ? 'particle-bin-overflow-readback-requested'
+      : (disabled ? null : 'particle-bin-overflow-metadata-unread'),
+    overflowMetadataReadbackRequested: metadataReadbackBuffer != null,
+    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, metadataReadbackBuffer, paramsBuffer].filter(Boolean)
   };
 }
 
@@ -1941,6 +1960,7 @@ export async function runSphReactionStepWebGpu({
   thermalResponseGraphUpload = null,
   boxDimsM = null,
   reactionParticleBinCapacity = DEFAULT_REACTION_PARTICLE_BIN_CAPACITY,
+  reactionParticleBinMetadataReadback = false,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
   readbackMode = FULL_READBACK_MODE,
@@ -2005,7 +2025,8 @@ export async function runSphReactionStepWebGpu({
     sphParticleState,
     reactionTable,
     boxDimsM,
-    binCapacity: reactionParticleBinCapacity
+    binCapacity: reactionParticleBinCapacity,
+    readbackMetadata: reactionParticleBinMetadataReadback
   });
   const proposalBuffer = writeStorageBuffer(
     device,
@@ -2206,7 +2227,20 @@ export async function runSphReactionStepWebGpu({
   pass.setBindGroup(0, unpackBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.end();
+  if (reactionParticleBins.metadataReadbackBuffer) {
+    encoder.copyBufferToBuffer(reactionParticleBins.metadataBuffer, 0, reactionParticleBins.metadataReadbackBuffer, 0, 16);
+  }
   device.queue.submit([encoder.finish()]);
+
+  let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
+  let reactionParticleBinOverflowCount = null;
+  if (reactionParticleBins.metadataReadbackBuffer) {
+    await reactionParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    const metadata = new Uint32Array(reactionParticleBins.metadataReadbackBuffer.getMappedRange()).slice(0, 4);
+    reactionParticleBinOverflowCount = metadata[0] || 0;
+    reactionParticleBinOverflowStatus = 'particle-bin-overflow-readback-completed';
+    reactionParticleBins.metadataReadbackBuffer.unmap();
+  }
 
   let reactionSummary = null;
   const temporarySummaryBuffers = [];
@@ -2369,7 +2403,9 @@ export async function runSphReactionStepWebGpu({
       ? 'fixed-capacity-particle-bin-grid'
       : 'all-particle-scan-fallback',
     reactionParticleBinGrid: reactionParticleBins.particleBinGrid,
-    reactionParticleBins
+    reactionParticleBins,
+    reactionParticleBinOverflowStatus,
+    reactionParticleBinOverflowCount
   });
 }
 

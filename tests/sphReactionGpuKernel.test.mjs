@@ -473,8 +473,10 @@ test('SPH reaction optional WebGPU accepts no-full retained output without CPU p
     preferWebGpu: true,
     device: {},
     readbackMode: 'no-full-readback',
+    reactionParticleBinMetadataReadback: true,
     webGpuRunner(args) {
       assert.equal(args.readbackMode, 'no-full-readback');
+      assert.equal(args.reactionParticleBinMetadataReadback, true);
       return {
         schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
         backend: 'webgpu',

@@ -31021,3 +31021,43 @@ Remaining:
 - Run broader multi-batch chemistry scenarios after the next resident cadence
   slice so the performance signal is not dominated by startup and render-row
   readback.
+
+## 2026-06-20 AKDT - Reaction-Bin Overflow Metadata Debug Readback
+
+Status:
+
+- Added opt-in reaction-bin overflow metadata readback with
+  `reactionParticleBinMetadataReadback`, URL aliases
+  `reactionBinMetadataReadback=1`/`reactionParticleBinMetadataReadback=1`, and
+  probe env aliases `ULG_PROBE_REACTION_BIN_METADATA_READBACK`/
+  `ULG_PROBE_REACTION_PARTICLE_BIN_METADATA_READBACK`.
+- The browser harness initially proved the flag reached the page but not the
+  resident reaction kernel. Fixed propagation through `sphPhaseScene`
+  signatures/options and MLS-MPM resident reaction options.
+- The first real WebGPU validation then exposed an invalid command buffer:
+  reaction-bin metadata was copied for debug readback without `COPY_SRC` usage.
+  Fixed the metadata buffer usage without changing default hot-loop behavior.
+- Mounted stage-order diagnostics now report
+  `reactionParticleBinOverflowStatus`,
+  `reactionParticleBinOverflowCount`, and
+  `reactionParticleBinOverflowMetadataReadbackRequested`.
+
+Validation:
+
+- PASS:
+  `node --test tests/sphReactionGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  with `86/86`.
+- PASS:
+  `/tmp/ulg-reaction-bin-metadata-browser-probe-final.json`
+  - `status=good`
+  - `analysis.issues=[]`
+  - `browserConsole.issueCount=0`
+  - final diagnostics:
+    `reactionParticleBinOverflowStatus=particle-bin-overflow-readback-completed`,
+    `reactionParticleBinOverflowCount=0`,
+    `reactionParticleBinOverflowMetadataReadbackRequested=true`.
+
+Remaining:
+
+- Keep prefix-scan compact reaction bins conditional on measured overflow in
+  dense chemistry scenarios; default no-full reaction runs remain readback-free.

@@ -5958,10 +5958,21 @@ Current state:
 - Browser evidence at `/tmp/ulg-reaction-bin-browser-probe-final.json` is
   `status=good`, console-clean, and reports
   `fixed-capacity-particle-bin-grid` with `343` reaction bin cells.
+- Reaction-bin exact overflow metadata is now a browser-safe debug opt-in.
+  `reactionBinMetadataReadback=1`/`ULG_PROBE_REACTION_BIN_METADATA_READBACK=1`
+  propagates through mounted resident policy, scene signatures, direct
+  resident execution, and the reaction kernel. The metadata buffer now carries
+  explicit `COPY_SRC` usage for the 16-byte debug copy, and resident mounted
+  diagnostics publish overflow status/count/request evidence.
+- Browser evidence at
+  `/tmp/ulg-reaction-bin-metadata-browser-probe-final.json` is `status=good`,
+  console-clean, and reports
+  `reactionParticleBinOverflowStatus=particle-bin-overflow-readback-completed`,
+  `reactionParticleBinOverflowCount=0`, and
+  `reactionParticleBinOverflowMetadataReadbackRequested=true`.
 
 Still open:
 
-- Add exact overflow diagnostics/prefix-scan compaction for reaction bins only
-  if dense chemistry scenarios exceed the current bounded adaptive capacity.
-  Next higher-leverage performance work remains resident sequence/cadence and
-  reducing render-row readback pressure.
+- Prefix-scan compact reaction bins should stay conditional on measured dense
+  chemistry overflow. Next higher-leverage performance work remains resident
+  sequence/cadence and reducing render-row readback pressure.

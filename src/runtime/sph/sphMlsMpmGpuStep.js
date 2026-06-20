@@ -3397,6 +3397,10 @@ function reactionSummaryDiagnostics(reactionStep) {
     reactionParticleBinGridEstimatedOverflowRisk: reactionResult?.reactionParticleBinGridEstimatedOverflowRisk === true,
     reactionParticleBinGridIndexBufferByteLength: reactionResult?.reactionParticleBinGridIndexBufferByteLength ?? 0,
     reactionParticleBinGridMaxContactRadiusM: reactionResult?.reactionParticleBinGridMaxContactRadiusM ?? 0,
+    reactionParticleBinOverflowStatus: reactionResult?.reactionParticleBinOverflowStatus ?? null,
+    reactionParticleBinOverflowCount: reactionResult?.reactionParticleBinOverflowCount ?? null,
+    reactionParticleBinOverflowMetadataReadbackRequested:
+      reactionResult?.reactionParticleBinOverflowMetadataReadbackRequested === true,
     reactionCompactLedgerAvailable: summary?.compactLedgerAvailable ?? false,
     reactionProductInventoryCount: summary?.productInventoryCount ?? 0,
     reactionProductInventoryReadbackByteLength: summary?.productInventoryReadbackByteLength ?? 0,
@@ -10066,7 +10070,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
               } : {}),
               ...(includeReactionProductStage ? {
                 reactionTable: stepOptions.reactionTable || null,
-                reactionStepOptions: stepOptions.reactionStepOptions || {}
+                reactionStepOptions: {
+                  ...(stepOptions.reactionStepOptions || {}),
+                  reactionParticleBinMetadataReadback:
+                    stepOptions.reactionParticleBinMetadataReadback === true
+                    || stepOptions.reactionStepOptions?.reactionParticleBinMetadataReadback === true
+                }
               } : {})
             }
           }
@@ -12097,6 +12106,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   reactionTable = null,
   reactionStepRunner = runSphReactionStepWebGpu,
   reactionStepOptions = {},
+  reactionParticleBinMetadataReadback = false,
   sourceSlot = sphParticleUpload?.slot ?? 0,
   readbackMode = FULL_READBACK_MODE,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
@@ -12393,7 +12403,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
         ...noFullReactionSummaryDefaults,
-        ...reactionStepOptions
+        ...reactionStepOptions,
+        reactionParticleBinMetadataReadback:
+          reactionParticleBinMetadataReadback === true
+          || reactionStepOptions.reactionParticleBinMetadataReadback === true
       }));
     }
   }
@@ -13314,6 +13327,10 @@ function summarizeResidentStepForSequence(step, index) {
       reactionParticleBinGridEstimatedOverflowRisk: step.diagnostics?.reactionParticleBinGridEstimatedOverflowRisk === true,
       reactionParticleBinGridIndexBufferByteLength: step.diagnostics?.reactionParticleBinGridIndexBufferByteLength ?? 0,
       reactionParticleBinGridMaxContactRadiusM: step.diagnostics?.reactionParticleBinGridMaxContactRadiusM ?? 0,
+      reactionParticleBinOverflowStatus: step.diagnostics?.reactionParticleBinOverflowStatus ?? null,
+      reactionParticleBinOverflowCount: step.diagnostics?.reactionParticleBinOverflowCount ?? null,
+      reactionParticleBinOverflowMetadataReadbackRequested:
+        step.diagnostics?.reactionParticleBinOverflowMetadataReadbackRequested === true,
       reactionProductInventoryCount: step.diagnostics?.reactionProductInventoryCount ?? 0,
       reactionProductInventoryReadbackByteLength: step.diagnostics?.reactionProductInventoryReadbackByteLength ?? 0,
       reactionProductEventRowCount: step.diagnostics?.reactionProductEventRowCount ?? 0,

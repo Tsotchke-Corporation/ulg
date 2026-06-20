@@ -474,6 +474,10 @@ export function summarizeResidentStageOrderExecution(execution = null) {
       reactionParticleBinGridBinCapacity: diagnostics?.reactionParticleBinGridBinCapacity ?? null,
       reactionParticleBinGridIndexBufferByteLength: diagnostics?.reactionParticleBinGridIndexBufferByteLength ?? null,
       reactionParticleBinGridMaxContactRadiusM: diagnostics?.reactionParticleBinGridMaxContactRadiusM ?? null,
+      reactionParticleBinOverflowStatus: diagnostics?.reactionParticleBinOverflowStatus ?? null,
+      reactionParticleBinOverflowCount: diagnostics?.reactionParticleBinOverflowCount ?? null,
+      reactionParticleBinOverflowMetadataReadbackRequested:
+        diagnostics?.reactionParticleBinOverflowMetadataReadbackRequested ?? null,
       thermalMechanicsRefreshStatus: diagnostics?.thermalMechanicsRefreshStatus ?? null
     },
     residentAuthorityLedgerStatus: execution?.residentAuthorityLedgerStatus
@@ -1949,6 +1953,13 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('contactKinematicsParticleBinMetadataReadback'),
     false
   );
+  const initialReactionBinMetadataReadbackEnabled = booleanUrlParam(
+    initialHash.get('reactionBinMetadataReadback')
+      ?? initialQuery.get('reactionBinMetadataReadback')
+      ?? initialHash.get('reactionParticleBinMetadataReadback')
+      ?? initialQuery.get('reactionParticleBinMetadataReadback'),
+    false
+  );
   function residentExecutionPolicyFromUrl() {
     return {
       schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
@@ -1959,7 +1970,9 @@ export async function mountSphPhaseDemoOverlay({
       activeGridSafetyCells: initialResidentActiveGridSafetyCells,
       measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled,
       contactKinematicsParticleBinMetadataReadback:
-        initialContactBinMetadataReadbackEnabled
+        initialContactBinMetadataReadbackEnabled,
+      reactionParticleBinMetadataReadback:
+        initialReactionBinMetadataReadbackEnabled
     };
   }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
@@ -2119,6 +2132,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
     if (initialContactBinMetadataReadbackEnabled) q.set('contactBinMetadataReadback', '1');
+    if (initialReactionBinMetadataReadbackEnabled) q.set('reactionBinMetadataReadback', '1');
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
   applyUrlToControls(); // restore from the URL before the first build
@@ -2327,7 +2341,9 @@ export async function mountSphPhaseDemoOverlay({
       `fuse-seq=${effective?.fuseNoFullResidentMechanicsSequence ? 'on' : 'off'}`,
       `active-grid=${effective?.fuseNoFullResidentMechanicsActiveGrid ? 'on' : 'off'}`,
       `safety=${effective?.activeGridSafetyCells ?? 'default'}`,
-      `queue-fence=${effective?.measureFusedSequenceQueueFence ? 'on' : 'off'}`
+      `queue-fence=${effective?.measureFusedSequenceQueueFence ? 'on' : 'off'}`,
+      `contact-bin=${effective?.contactKinematicsParticleBinMetadataReadback ? 'readback' : 'off'}`,
+      `reaction-bin=${effective?.reactionParticleBinMetadataReadback ? 'readback' : 'off'}`
     ].join(' ');
   }
 

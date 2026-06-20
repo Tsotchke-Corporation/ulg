@@ -93,6 +93,19 @@ shows `fixed-capacity-particle-bin-grid` with `343` cells. Remaining reaction
 hot-loop work is prefix-scan/compacted bins only if dense chemistry scenarios
 show fixed-bin overflow, plus broader multi-batch chemistry validation.
 
+Current routing note, 2026-06-20 AKDT: reaction-bin exact overflow metadata is
+now available as an explicit debug opt-in, mirroring the contact-bin path. The
+`reactionBinMetadataReadback=1` URL/probe flag survives mounted resident policy,
+scene signatures, MLS-MPM resident execution, and the reaction kernel. The
+debug path copies reaction-bin metadata from GPU to a tiny readback buffer and
+publishes `reactionParticleBinOverflowStatus`,
+`reactionParticleBinOverflowCount`, and requested/readback evidence in resident
+stage-order diagnostics. Default no-full hot-loop runs still do not request
+this CPU fence. Browser evidence at
+`/tmp/ulg-reaction-bin-metadata-browser-probe-final.json` is `status=good`,
+console-clean, and reports `particle-bin-overflow-readback-completed` with
+overflow count `0`.
+
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by
 MLS-MPM packing. `createUlgRenderFieldBufferVolumeDescriptor()` selects the

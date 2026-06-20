@@ -339,13 +339,19 @@ function appendQueryParam(url, key, value) {
   return `${base}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}${hash}`;
 }
 
-function withBrowserProbeParams(url, { contactBinMetadataReadback = false } = {}) {
+function withBrowserProbeParams(url, {
+  contactBinMetadataReadback = false,
+  reactionBinMetadataReadback = false
+} = {}) {
   const value = String(url || DEFAULT_URL);
   let next = value;
   if (!/[?&#]visualCapture=/.test(next)) next = appendQueryParam(next, 'visualCapture', '1');
   if (!/[?&#]residentAuto=/.test(next)) next = appendQueryParam(next, 'residentAuto', '0');
   if (contactBinMetadataReadback && !/[?&#]contactBinMetadataReadback=/.test(next)) {
     next = appendQueryParam(next, 'contactBinMetadataReadback', '1');
+  }
+  if (reactionBinMetadataReadback && !/[?&#]reactionBinMetadataReadback=/.test(next)) {
+    next = appendQueryParam(next, 'reactionBinMetadataReadback', '1');
   }
   return next;
 }
@@ -1039,6 +1045,7 @@ async function runBrowserProbe({
   surfaceDrawDiagnosticMaxResolution,
   disablePressureInterface,
   contactBinMetadataReadback = false,
+  reactionBinMetadataReadback = false,
   anomalyRowReadback,
   residentBufferDebug,
   compactSummaryScope,
@@ -1069,7 +1076,10 @@ async function runBrowserProbe({
         window.__ULG_SPH_NATIVE_SURFACE_CONSUMER_DEBUG_MODE = mode;
       }, nativeSurfaceDebugMode);
     }
-    const target = new URL(withBrowserProbeParams(scenarioUrl, { contactBinMetadataReadback }), baseUrl).toString();
+    const target = new URL(withBrowserProbeParams(scenarioUrl, {
+      contactBinMetadataReadback,
+      reactionBinMetadataReadback
+    }), baseUrl).toString();
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     if (await page.locator('#sph-phase-overlay').count() === 0) {
       await page.locator('#run-sph-phase').click({ timeout: timeoutMs });
@@ -1114,6 +1124,7 @@ async function runBrowserProbe({
       surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
       disablePressureInterface: requestedDisablePressureInterface,
       contactBinMetadataReadback: requestedContactBinMetadataReadback,
+      reactionBinMetadataReadback: requestedReactionBinMetadataReadback,
       anomalyRowReadback: requestedAnomalyRowReadback,
       residentBufferDebug: requestedResidentBufferDebug,
       compactSummaryScope: requestedCompactSummaryScope,
@@ -3160,6 +3171,8 @@ async function runBrowserProbe({
             pressureInterfaceForceRowsBuffer: requestedDisablePressureInterface ? null : undefined,
             contactKinematicsParticleBinMetadataReadback:
               Boolean(requestedContactBinMetadataReadback),
+            reactionParticleBinMetadataReadback:
+              Boolean(requestedReactionBinMetadataReadback),
             thermalStepOptions: Number.isFinite(requestedThermalWallRate)
             ? { wallRate: requestedThermalWallRate }
             : undefined,
@@ -3294,6 +3307,7 @@ async function runBrowserProbe({
         nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
         pressureInterfaceDisabled: Boolean(requestedDisablePressureInterface),
         contactBinMetadataReadback: Boolean(requestedContactBinMetadataReadback),
+        reactionBinMetadataReadback: Boolean(requestedReactionBinMetadataReadback),
         anomalyRowReadback: Boolean(requestedAnomalyRowReadback),
         residentBufferDebug: Boolean(requestedResidentBufferDebug),
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
@@ -3329,6 +3343,7 @@ async function runBrowserProbe({
       surfaceDrawDiagnosticMaxResolution,
       disablePressureInterface,
       contactBinMetadataReadback,
+      reactionBinMetadataReadback,
       anomalyRowReadback,
       residentBufferDebug,
       compactSummaryScope,
@@ -3474,7 +3489,8 @@ async function runDirectResidentProbe({
   fusedActiveGridSafetyCells = null,
   activeGridDispatchPlanRefreshMode = 'final-only',
   measureGpuQueueFence = false,
-  contactBinMetadataReadback = false
+  contactBinMetadataReadback = false,
+  reactionBinMetadataReadback = false
 }) {
   const browser = await launchProbeBrowser();
   const page = await newProbePage(browser);
@@ -3502,6 +3518,7 @@ async function runDirectResidentProbe({
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       measureGpuQueueFence: requestedMeasureGpuQueueFence,
       contactBinMetadataReadback: requestedContactBinMetadataReadback,
+      reactionBinMetadataReadback: requestedReactionBinMetadataReadback,
       defaults
     }) => {
       const finiteOrNull = (value) => {
@@ -4469,7 +4486,9 @@ async function runDirectResidentProbe({
               activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
               measureFusedSequenceQueueFence: requestedMeasureGpuQueueFence,
               contactKinematicsParticleBinMetadataReadback:
-                Boolean(requestedContactBinMetadataReadback)
+                Boolean(requestedContactBinMetadataReadback),
+              reactionParticleBinMetadataReadback:
+                Boolean(requestedReactionBinMetadataReadback)
             });
             metrics.push(sample({
               batchIndex,
@@ -4543,6 +4562,7 @@ async function runDirectResidentProbe({
         activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
         measureGpuQueueFence: requestedMeasureGpuQueueFence,
         contactBinMetadataReadback: Boolean(requestedContactBinMetadataReadback),
+        reactionBinMetadataReadback: Boolean(requestedReactionBinMetadataReadback),
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         renderEveryBatches: 0,
         errors,
@@ -4570,6 +4590,7 @@ async function runDirectResidentProbe({
       activeGridDispatchPlanRefreshMode,
       measureGpuQueueFence,
       contactBinMetadataReadback,
+      reactionBinMetadataReadback,
       defaults: {
         wallTemperatureK: DEFAULT_WALL_TEMPERATURE_K,
         dropTemperatureK: DEFAULT_DROP_TEMPERATURE_K,
@@ -6147,6 +6168,11 @@ async function main() {
       ?? process.env.ULG_PROBE_CONTACT_KINEMATICS_PARTICLE_BIN_METADATA_READBACK,
     false
   );
+  const reactionBinMetadataReadback = booleanEnv(
+    process.env.ULG_PROBE_REACTION_BIN_METADATA_READBACK
+      ?? process.env.ULG_PROBE_REACTION_PARTICLE_BIN_METADATA_READBACK,
+    false
+  );
   const anomalyRowReadback = process.env.ULG_PROBE_ANOMALY_ROW_READBACK === '1'
     || process.env.ULG_PROBE_RENDER_ANOMALY_ROW_READBACK === '1';
   const residentBufferDebug = process.env.ULG_PROBE_RESIDENT_BUFFER_DEBUG === '1'
@@ -6259,7 +6285,8 @@ async function main() {
         fusedActiveGridSafetyCells,
         activeGridDispatchPlanRefreshMode,
         measureGpuQueueFence,
-        contactBinMetadataReadback
+        contactBinMetadataReadback,
+        reactionBinMetadataReadback
       })
       : await runBrowserProbe({
         baseUrl: server.baseUrl,
@@ -6279,6 +6306,7 @@ async function main() {
         surfaceDrawDiagnosticMaxResolution,
         disablePressureInterface,
         contactBinMetadataReadback,
+        reactionBinMetadataReadback,
         anomalyRowReadback,
         residentBufferDebug,
         compactSummaryScope,
@@ -6343,7 +6371,7 @@ async function main() {
       probeMode,
       scenarioUrl: probeMode === 'direct-resident'
         ? scenarioUrl
-        : withBrowserProbeParams(scenarioUrl, { contactBinMetadataReadback }),
+        : withBrowserProbeParams(scenarioUrl, { contactBinMetadataReadback, reactionBinMetadataReadback }),
       thresholds,
       visualFrameArtifacts,
       timeline,

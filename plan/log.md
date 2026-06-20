@@ -29283,3 +29283,46 @@ Remaining:
 
 - Extend the material-resolution audit matrix to Pd, Fe, air, products, and the
   Three WebGPU renderer material-proxy path.
+
+## 2026-06-19 18:18 AKDT - Air/Pd/Fe Particle PBR Audit
+
+Status:
+
+- Added a transparent dry-air Rayleigh PBR branch to `opticalRenderParams()` so
+  air no longer packs as a blocked black optical table row.
+- Included phase-density in the optical render cache key so gas-density-backed
+  optical rows do not alias across material states.
+- Verified Pd and Fe variable-size particle spheres use closure-derived PBR and
+  the metallic visibility proxy on mobile-shaped WebGL.
+- Verified NaOH and CsOH product materials resolve to nonblocked
+  closure-derived PBR rows in the material audit.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/opticalClosure.js`.
+- PASS: `node --check tests/opticalClosure.test.mjs`.
+- PASS: `node --check tests/opticalGpuBuffers.test.mjs`.
+- PASS: `node --test tests/opticalClosure.test.mjs` with `10/10`.
+- PASS: `node --test tests/opticalGpuBuffers.test.mjs` with `19/19`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` with `37/37`.
+- PASS: `npm run test:physics-atomics` with `11/11`; the three long-horizon
+  acceptance gates were skipped by opt-in policy.
+- PASS: material registry audit for Pd, Fe, Na, and Cs scenarios showed air,
+  H2O, selected conductor drops, and product materials all resolve to
+  nonblocked PBR rows.
+- PASS: `/tmp/ulg-particle-pbr-pd-mobile-spheres-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`,
+  one nonblank mobile-shaped frame, material keys `h2o` and `Pd`,
+  closure-derived sphere PBR, and metallic visibility proxy count `1`.
+- PASS: `/tmp/ulg-particle-pbr-fe-mobile-spheres-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`,
+  material keys `h2o` and `fe`, closure-derived sphere PBR, and metallic
+  visibility proxy count `1`.
+
+Remaining:
+
+- Add an explicit air-particle visual scenario after the renderer has a cheap
+  gas-particle path.
+- Audit the Three WebGPU renderer material-proxy path for the same particle PBR
+  diagnostics.

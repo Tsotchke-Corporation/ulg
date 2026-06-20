@@ -11138,3 +11138,44 @@ Particle sphere PBR metallic visibility, 2026-06-19 17:46 AKDT:
     `renderBridgeSphereMetallicVisibilityProxyCount=1`,
     transmission proxy count `2`, fallback color count `1`, and min/max sphere
     radius `0.045374006032943726` / `0.5262995958328247`.
+
+Air/Pd/Fe particle PBR audit, 2026-06-19 18:18 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/opticalClosure.js`,
+  `node --check tests/opticalClosure.test.mjs`, and
+  `node --check tests/opticalGpuBuffers.test.mjs` passed.
+- Focused tests:
+  `node --test tests/opticalClosure.test.mjs`
+  - Passed: `10/10`.
+  - New coverage proves `air` derives `gas-rayleigh-transparent-pbr`, high
+    transmission, nonzero Rayleigh scattering samples, accepted material PBR
+    policy, and nonblack base color.
+  `node --test tests/opticalGpuBuffers.test.mjs`
+  - Passed: `19/19`.
+  - New coverage proves packed optical GPU rows and lookup decode air as an
+    accepted transparent Rayleigh PBR record instead of blocked black.
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+  `node --test tests/sphPhaseDemo.test.mjs`
+  - Passed: `37/37`.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; the three long-horizon acceptance gates were skipped by
+    their opt-in environment guard.
+- Material registry audit:
+  Pd, Fe, Na, and Cs scenarios resolve H2O, air, selected conductor drops, and
+  product materials (`naoh`, `csoh`) as nonblocked closure-derived PBR rows.
+- Browser mobile-shaped sphere probes:
+  `/tmp/ulg-particle-pbr-pd-mobile-spheres-probe.json`
+  - Passed with `status=good`, analysis `good`, browser console
+    issues/warnings `0/0`, one nonblank captured frame, material keys `h2o`
+    and `Pd`, sphere PBR source `closure-derived-pbr`,
+    `renderBridgeSphereMetallicVisibilityProxyCount=1`, and min/max sphere
+    radius `0.06203504651784897` / `0.1551002413034439`.
+  `/tmp/ulg-particle-pbr-fe-mobile-spheres-probe.json`
+  - Passed with `status=good`, analysis `good`, browser console
+    issues/warnings `0/0`, material keys `h2o` and `fe`, sphere PBR source
+    `closure-derived-pbr`, `renderBridgeSphereMetallicVisibilityProxyCount=1`,
+    and min/max sphere radius `0.07754381000995636` /
+    `0.15509283542633057`.

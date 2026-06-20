@@ -97,6 +97,26 @@ test('render params are derived from the optics: iron opaque metal, water refrac
   assert.ok(steam.ior < 1.01); // vapour barely refracts (n ~ 1)
   assert.ok(steam.transmission > water.transmission); // pure vapour is optically thinner than liquid
   assert.equal(steam.condensationScatter, 0);
+
+  const air = opticalRenderParams({
+    material: 'air',
+    phase: 'gas',
+    pathLengthM: 10,
+    properties: { phases: [{ name: 'gas', densityKgPerM3: 1.225 }] }
+  });
+  assert.equal(air.vertexColorPolicy, 'material-pbr');
+  assert.equal(air.renderModel, 'gas-rayleigh-transparent-pbr');
+  assert.equal(air.blocked, undefined);
+  assert.ok(air.ior > 1 && air.ior < 1.001);
+  assert.ok(air.transmission > 0.999);
+  assert.ok(air.opacity > 0 && air.opacity < 0.001);
+  assert.ok(air.baseColorSrgb.every((value) => value > 0.8));
+  assert.ok(air.spectralSamples.some((sample) => sample.scatteringCoefficientPerM > 0));
+  assert.ok(
+    air.spectralSamples[0].scatteringCoefficientPerM
+      > air.spectralSamples.at(-1).scatteringCoefficientPerM
+  );
+  assert.equal(air.provenance.source, 'dry-air-rayleigh-scattering-reference-composition');
 });
 
 test('supersaturated water vapor derives visible droplet scattering without changing pure vapor', () => {

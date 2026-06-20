@@ -292,6 +292,33 @@ test('optical GPU table and lookup distinguish phase-resolved optical state', ()
   assert.equal(lookup.queries[2], stableOpticalStateId(supersaturatedState));
 });
 
+test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked black', () => {
+  const table = buildOpticalGpuTable([
+    {
+      material: 'air',
+      phase: 'gas',
+      properties: { phases: [{ name: 'gas', densityKgPerM3: 1.225 }] }
+    }
+  ]);
+  const metadata = table.recordMetadata[0];
+  assert.equal(table.recordCount, 1);
+  assert.equal(metadata.material, 'air');
+  assert.equal(metadata.phase, 'gas');
+  assert.equal(metadata.renderModel, 'gas-rayleigh-transparent-pbr');
+
+  const lookup = buildOpticalGpuLookupQueries(table, [{ material: 'air', phase: 'gas' }]);
+  const result = sampleOpticalGpuTableCpu(table, lookup);
+  const [row] = decodeOpticalGpuLookupOutputRows(result, lookup);
+  assert.equal(row.material, 'air');
+  assert.equal(row.phase, 'gas');
+  assert.equal(row.status, 1);
+  assert.notEqual(row.status, 255);
+  assert.ok(row.transmission > 0.999);
+  assert.ok(row.opacity < 0.001);
+  assert.ok(row.scatteringCoefficientPerM > 0);
+  assert.ok(row.baseColorLinear.every((value) => value > 0.6));
+});
+
 test('optical GPU lookup output rows decode draw-state fields with query metadata', () => {
   const { lookup, cpuReference } = createLookupFixture();
   const rows = decodeOpticalGpuLookupOutputRows(cpuReference, lookup);

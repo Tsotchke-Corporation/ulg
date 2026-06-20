@@ -53,9 +53,12 @@ WebGL sphere bridge lacks reliable environment lighting. Evidence:
 with zero console issues/warnings, two nonblank mobile-shaped canvas captures,
 sphere material keys `h2o`, `naoh`, and `Na`, closure-derived sphere PBR, and
 `renderBridgeSphereMetallicVisibilityProxyCount=1`. Track remaining broader
-coverage in `plan/todo/particle-pbr-material-closure-rendering-plan.md`: run the
-same material-resolution diagnostics across Pd/Fe/air/product materials and the
-WebGPU renderer proxy paths.
+coverage in `plan/todo/particle-pbr-material-closure-rendering-plan.md`: air now
+packs as `gas-rayleigh-transparent-pbr` instead of blocked black, Pd and Fe
+mobile-shaped sphere probes are console-clean with metallic proxy count `1`, and
+products resolve to nonblocked PBR rows. The remaining renderer-specific audit
+is the Three WebGPU material-proxy path plus an explicit air-particle visual
+scenario.
 
 Current routing note, 2026-06-19 AKDT: the drop edge setting's silent
 coarsening above `6` is fixed in the initializer and now reports

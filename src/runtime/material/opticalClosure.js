@@ -37,6 +37,9 @@ const WATER_TRIPLE_POINT_K = 273.16;
 const WATER_TRIPLE_POINT_PRESSURE_PA = 611.657;
 const WATER_VAPORIZATION_LATENT_HEAT_J_PER_KG = 2.5e6;
 const LIQUID_WATER_DENSITY_KG_PER_M3 = 997;
+const STANDARD_AIR_DENSITY_KG_PER_M3 = 1.225;
+const STANDARD_AIR_RAYLEIGH_SCATTERING_550NM_PER_M = 1.1e-5;
+const AIR_REFRACTIVE_INDEX_VISIBLE = 1.000293;
 export const WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL = 'clausius-clapeyron-droplet-scattering-v0';
 
 function gauss(x, mu, s1, s2) {
@@ -119,6 +122,17 @@ function stableObjectKey(value) {
     .join('|');
 }
 
+function phaseDensityKgPerM3(properties, phase = null) {
+  if (!properties || typeof properties !== 'object') return null;
+  const phaseName = String(phase || '').toLowerCase();
+  const phaseRecord = Array.isArray(properties.phases)
+    ? properties.phases.find((candidate) => String(candidate?.name || '').toLowerCase() === phaseName)
+      || properties.phases[0]
+    : null;
+  const density = Number(phaseRecord?.densityKgPerM3 ?? properties.densityKgPerM3);
+  return Number.isFinite(density) && density > 0 ? density : null;
+}
+
 function oscillatorCacheKey(oscillators) {
   if (!Array.isArray(oscillators) || oscillators.length === 0) return 'none';
   return oscillators
@@ -139,6 +153,7 @@ function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, 
     stableNumber(pathLengthM),
     stableObjectKey(opticalState),
     stableNumber(conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3),
+    stableNumber(phaseDensityKgPerM3(properties, phase)),
     stableNumber(properties?.electronicGapEv),
     oscillatorCacheKey(properties?.opticalInterbandOscillators),
     Array.isArray(properties?.intrinsicColorSrgb) ? properties.intrinsicColorSrgb.map(stableNumber).join(',') : 'no-intrinsic'
@@ -333,6 +348,58 @@ function absorptionSpectralSample(nm, { absorptionCoefficientPerM, pathLengthM, 
     n,
     k
   };
+}
+
+function airRayleighScatteringCoefficientPerM(nm, densityScale = 1) {
+  const wavelengthScale = (550 / Math.max(1, Number(nm) || 550)) ** 4;
+  return STANDARD_AIR_RAYLEIGH_SCATTERING_550NM_PER_M
+    * Math.max(0, Number.isFinite(densityScale) ? densityScale : 1)
+    * wavelengthScale;
+}
+
+function airRayleighOpticalRenderParams({ phase = 'gas', pathLengthM = 0.3, properties = null } = {}) {
+  const density = phaseDensityKgPerM3(properties, phase) ?? STANDARD_AIR_DENSITY_KG_PER_M3;
+  const densityScale = density / STANDARD_AIR_DENSITY_KG_PER_M3;
+  const scatteringCoefficientPerM = visibleLuminousMean((nm) => (
+    airRayleighScatteringCoefficientPerM(nm, densityScale)
+  ));
+  const opticalDepth = scatteringCoefficientPerM * Math.max(0, pathLengthM);
+  const transmission = Math.exp(-Math.min(80, opticalDepth));
+  const opacity = opticalDepthToOpacity(opticalDepth);
+  const baseColor = spectralResponseToSrgb((nm) => 0.85 + 0.15 * (450 / nm) ** 4);
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
+    absorptionCoefficientPerM: 0,
+    pathLengthM,
+    reflectance: 0,
+    scatteringCoefficientPerM: airRayleighScatteringCoefficientPerM(nm, densityScale),
+    n: AIR_REFRACTIVE_INDEX_VISIBLE,
+    k: 0
+  }));
+  return withPbrMetadata({
+    metalness: 0,
+    roughness: 0.92,
+    transmission,
+    ior: AIR_REFRACTIVE_INDEX_VISIBLE,
+    opacity,
+    attenuationColor: [1, 1, 1],
+    attenuationDistanceM: Infinity,
+    condensationScatter: 0,
+    internalScatter: scatteringCoefficientPerM,
+    scatteringCoefficientPerM,
+    opticalDepth,
+    absorptionCoefficientPerM: 0,
+    provenance: {
+      status: 'derived',
+      source: 'dry-air-rayleigh-scattering-reference-composition',
+      method: 'standard dry-air density + Rayleigh 1/lambda^4 molecular scattering -> optically thin transparent PBR row',
+      inputs: { phase, pathLengthM, densityKgPerM3: density, densityScale },
+      validation: false
+    }
+  }, {
+    baseColorSrgb: [baseColor.r, baseColor.g, baseColor.b],
+    renderModel: 'gas-rayleigh-transparent-pbr',
+    spectralSamples
+  });
 }
 
 function canonicalElementZ(material) {
@@ -725,13 +792,6 @@ function waterBeerLambertAttenuation() {
   return { attenuationColor: [c.r, c.g, c.b], attenuationDistanceM };
 }
 
-function phaseDensityKgPerM3(properties, phase) {
-  const phases = properties?.phases || [];
-  const exact = phases.find((candidate) => candidate.name === phase);
-  const fallback = phases.find((candidate) => candidate.densityKgPerM3 > 0);
-  return exact?.densityKgPerM3 ?? fallback?.densityKgPerM3 ?? null;
-}
-
 function bandGapAbsorptionCoefficientPerM(nm, { properties, phase = 'solid' }) {
   const gapEv = properties?.electronicGapEv;
   if (!(gapEv >= 0)) return null;
@@ -808,6 +868,9 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
       atomicNumberZ: canonicalElementZ(material),
       interbandOscillators: properties?.opticalInterbandOscillators
     });
+  }
+  if (material === 'air') {
+    return airRayleighOpticalRenderParams({ phase, pathLengthM, properties });
   }
   if (material === 'h2o' || material === 'steam' || material === 'ice') {
     const isVapor = material === 'steam' || phase === 'gas';

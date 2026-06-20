@@ -64,7 +64,28 @@ material, phase, temperature, and pressure are known.
 
 ## Remaining
 
-- Extend browser evidence to Pd, Fe, air, and representative product materials
-  once those scenarios are cheap enough to run in one matrix.
+- Extend browser evidence to air as an actual visible gas-particle path once the
+  renderer has a cheap air particle scenario. Air now has a packed transparent
+  Rayleigh PBR optical row instead of a blocked black row, but current sphere
+  probes do not instantiate air particles.
 - Audit the Three WebGPU material-proxy path separately; this slice covered the
   mobile WebGL sphere bridge that was rendering sodium as black.
+
+## Progress - 2026-06-19 AKDT, Air/Pd/Fe Audit
+
+- Added a transparent dry-air Rayleigh optical PBR row to
+  `opticalRenderParams()`. This closes the mismatch where
+  `intrinsicColorSrgb()` advertised air Rayleigh scattering but the packed
+  optical table marked air as blocked black.
+- Added optical closure and optical GPU table tests proving air records use
+  `gas-rayleigh-transparent-pbr`, high transmission, nonzero Rayleigh
+  scattering samples, and accepted lookup status.
+- Rechecked material scenarios for Pd, Fe, Na, and Cs. Air, products
+  (`naoh`, `csoh`), H2O, and selected conductor drops all resolve to nonblocked
+  closure-derived PBR rows.
+- Added browser evidence for Pd and Fe mobile-shaped variable-size sphere
+  probes:
+  `/tmp/ulg-particle-pbr-pd-mobile-spheres-probe.json` and
+  `/tmp/ulg-particle-pbr-fe-mobile-spheres-probe.json` completed `status=good`
+  with browser console issues/warnings `0/0`, closure-derived sphere PBR, and
+  metallic visibility proxy count `1`.

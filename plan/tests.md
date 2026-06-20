@@ -11856,3 +11856,26 @@ Material bank GPU warm-row and particle-size packing, 2026-06-19 AKDT:
 - Browser bundle:
   `npm run build`
   - Passed. Vite reported only the existing large chunk-size warning.
+
+Material bank render-row shader consumer, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphRenderGpuKernel.js`,
+  `node --check ulg-gpu-abi/src/wgsl.js`, and
+  `node --check tests/sphRenderGpuKernel.test.mjs` passed.
+- Focused render-kernel command:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "material-bank particle-size|particle scale cap|retain resident rows"`
+  - Passed: `54/54`.
+  - Covers the new binding `5` material-bank particle-size row consumer,
+    shader-source guards, retained render rows, and scale-cap contracts.
+- Full render-kernel suite:
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `54/54`.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=111`.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.
+- Whitespace:
+  `git diff --check` passed.

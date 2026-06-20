@@ -172,6 +172,16 @@ starts. Still open: shader-side consumers for the packed rows, noble-gas or
 full-periodic-table policy if the UI exposes those elements later, and Phase 2
 reference/crystalline structures.
 
+Status update, 2026-06-19 AKDT: the first shader-side consumer is now wired.
+`sphRenderRowsWgsl` binds the packed particle-size row table at binding `5` and
+uses accepted role rows as a non-authoritative rest-volume seed before the
+MLS-MPM mechanics override. The WebGPU extraction path can borrow the
+pre-uploaded material-bank particle-size buffer or pack rows from the retained
+particle state, and reports
+`peercompute.ulg.sph-render-row-material-bank-particle-size-consumer.v0`.
+Remaining consumers are mechanics/EOS/thermal/optical kernels plus Phase 2
+reference-quality/crystalline rows.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

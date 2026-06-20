@@ -30300,3 +30300,38 @@ Remaining:
   than only descriptor/upload availability.
 - Expand from active-row coverage to the full selectable non-noble element
   list.
+
+## 2026-06-19 AKDT - Material Bank Render-Row Shader Consumer
+
+Status:
+
+- `sphRenderRowsWgsl` now binds packed material-bank particle-size rows at
+  binding `5` and resolves accepted role rows into a non-authoritative
+  rest-volume seed before MLS-MPM mechanics override.
+- `extractSphRenderRowsWebGpu()` can borrow the pre-uploaded material-bank
+  particle-size buffer from SPH upload state or create a packed fallback buffer
+  from retained particle state.
+- Render-row extraction now reports
+  `peercompute.ulg.sph-render-row-material-bank-particle-size-consumer.v0`
+  diagnostics so the first shader-side consumer is visible in probe output.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "material-bank particle-size|particle scale cap|retain resident rows"` with `54/54`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `54/54`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=111`.
+- PASS: `npm run build` with the existing large chunk warning only.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Bind material-bank rows into mechanics, EOS, thermal, and optical shader
+  consumers where the rows can provide safe warm-starts without becoming
+  authoritative physics.
+- Replace reduced-estimate rows with reference-quality rows and Phase 2
+  crystalline structure rows.

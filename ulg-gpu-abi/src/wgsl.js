@@ -3025,8 +3025,10 @@ struct RenderRowsParams {
   has_mechanics: u32,
   max_support_radius_m: f32,
   max_gas_radius_m: f32,
-  _pad0: f32,
-  _pad1: f32,
+  material_bank_particle_size_row_count: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -3034,8 +3036,11 @@ struct RenderRowsParams {
 @group(0) @binding(2) var<storage, read_write> render_rows: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: RenderRowsParams;
 @group(0) @binding(4) var<storage, read> mls_mpm_mechanics: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> material_bank_particle_size_rows: array<vec4<f32>>;
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+const MATERIAL_BANK_PARTICLE_SIZE_ROW_VEC4_STRIDE: u32 = 4u;
+const MATERIAL_BANK_GPU_ROW_STATUS_READY: u32 = 1u;
 const RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO: f32 = 4.0;
 const RENDER_ROW_MAX_VOLUME_RATIO_J: f32 = 64.0;
 
@@ -3053,6 +3058,33 @@ fn volume_from_radius_m(radius_m: f32) -> f32 {
   return (4.0 * 3.141592653589793 * radius_m * radius_m * radius_m) / 3.0;
 }
 
+fn material_bank_rest_volume_for_role(role_id: f32) -> f32 {
+  if (role_id <= 0.0 || params.material_bank_particle_size_row_count == 0u) {
+    return 0.0;
+  }
+  var row_index = 0u;
+  loop {
+    if (row_index >= params.material_bank_particle_size_row_count) {
+      break;
+    }
+    let base = row_index * MATERIAL_BANK_PARTICLE_SIZE_ROW_VEC4_STRIDE;
+    let row0 = material_bank_particle_size_rows[base];
+    let row1 = material_bank_particle_size_rows[base + 1u];
+    let row3 = material_bank_particle_size_rows[base + 3u];
+    let row_status = u32(row3.y + 0.5);
+    if (abs(row0.x - role_id) < 0.5 && row_status == MATERIAL_BANK_GPU_ROW_STATUS_READY) {
+      if (row1.w > 0.0) {
+        return row1.w;
+      }
+      if (row1.z > 0.0) {
+        return volume_from_radius_m(row1.z);
+      }
+    }
+    row_index = row_index + 1u;
+  }
+  return 0.0;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
@@ -3064,11 +3096,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let thermo0 = sph_thermo[particle_index * 3u];
   let thermo1 = sph_thermo[particle_index * 3u + 1u];
   let thermo2 = sph_thermo[particle_index * 3u + 2u];
+  var render_domain_id: f32 = 0.0;
+  if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {
+    render_domain_id = 1.0;
+  }
+  if (
+    render_domain_id == 0.0
+    && params.render_domain_drop_count > 0u
+    && particle_index >= params.render_domain_base_count
+    && particle_index < params.render_domain_base_count + params.render_domain_drop_count
+  ) {
+    render_domain_id = 2.0;
+  }
   var volume_ratio_j = 1.0;
   var rest_volume_m3 = 0.0;
   var pressure_pa = 0.0;
   if (thermo0.w > 0.0 && pos_mass.w > 0.0) {
     rest_volume_m3 = pos_mass.w / thermo0.w;
+  }
+  let bank_rest_volume_m3 = material_bank_rest_volume_for_role(render_domain_id);
+  if (bank_rest_volume_m3 > 0.0) {
+    rest_volume_m3 = bank_rest_volume_m3;
   }
   if (params.has_mechanics != 0u) {
     let mechanics4 = mls_mpm_mechanics[particle_index * 8u + 4u];
@@ -3111,18 +3159,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (rest_volume_m3 > 0.0) {
       effective_volume_ratio_j = max(current_volume_m3 / rest_volume_m3, 1.0e-9);
     }
-  }
-  var render_domain_id: f32 = 0.0;
-  if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {
-    render_domain_id = 1.0;
-  }
-  if (
-    render_domain_id == 0.0
-    && params.render_domain_drop_count > 0u
-    && particle_index >= params.render_domain_base_count
-    && particle_index < params.render_domain_base_count + params.render_domain_drop_count
-  ) {
-    render_domain_id = 2.0;
   }
   let render_row_base = particle_index * RENDER_ROW_VEC4_STRIDE;
   render_rows[render_row_base] = pos_mass;

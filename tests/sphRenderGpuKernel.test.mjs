@@ -516,6 +516,10 @@ test('SPH render rows proxy gas-phase particle radius at kernel scale', () => {
 test('SPH render row WGSL applies the same particle scale cap as the CPU contract', () => {
   assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO:\s*f32\s*=\s*4\.0/);
   assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
+  assert.match(sphRenderRowsWgsl, /material_bank_particle_size_row_count:\s*u32/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\)\s+@binding\(5\)\s+var<storage,\s*read>\s+material_bank_particle_size_rows/);
+  assert.match(sphRenderRowsWgsl, /fn material_bank_rest_volume_for_role\(role_id:\s*f32\)\s*->\s*f32/);
+  assert.match(sphRenderRowsWgsl, /let bank_rest_volume_m3\s*=\s*material_bank_rest_volume_for_role\(render_domain_id\)/);
   assert.match(sphRenderRowsWgsl, /raw_particle_radius_m\s*>\s*rest_particle_radius_m\s*\*\s*RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO/);
   assert.match(sphRenderRowsWgsl, /effective_volume_ratio_j\s*=\s*RENDER_ROW_MAX_VOLUME_RATIO_J/);
   assert.match(sphRenderRowsWgsl, /max_support_radius_m:\s*f32/);
@@ -525,6 +529,56 @@ test('SPH render row WGSL applies the same particle scale cap as the CPU contrac
   assert.match(sphRenderRowsWgsl, /u32\(thermo0\.y\s*\+\s*0\.5\)\s*==\s*3u/);
   assert.match(sphRenderRowsWgsl, /particle_radius_m\s*>\s*params\.max_gas_radius_m/);
   assert.match(sphRenderRowsWgsl, /current_volume_m3\s*=\s*volume_from_radius_m\(params\.max_gas_radius_m\)/);
+});
+
+test('SPH render row WebGPU extraction binds material-bank particle-size rows for shader consumption', async () => {
+  const packed = packedRenderParticles();
+  const particleSizeRows = Float32Array.from([
+    1, 79, 293.15, 101325,
+    1, 0.1, 0.05, 0.0005235988,
+    19300, 64, 0.1, 0,
+    0, 1, 0, 0
+  ]);
+  packed.materialPropertyBankParticleSizeTable = {
+    rowCount: 1,
+    rows: particleSizeRows
+  };
+  const materialBankParticleSizeBuffer = { label: 'test-material-bank-particle-size-buffer' };
+  const { device, dispatches } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array()
+  });
+
+  const result = await extractSphRenderRowsWebGpu({
+    device,
+    sphParticleState: packed,
+    sphParticleUpload: {
+      stateBuffer: { label: 'borrowed-state-buffer' },
+      thermoBuffer: { label: 'borrowed-thermo-buffer' },
+      materialPropertyBankParticleSizeBuffer: materialBankParticleSizeBuffer,
+      materialPropertyBankParticleSizeRowCount: 1
+    },
+    readbackMode: 'no-full-readback',
+    retainRenderRowsBuffer: true,
+    renderDomainBaseCount: 1
+  });
+
+  assert.equal(
+    result.materialPropertyBankParticleSizeConsumer.schema,
+    'peercompute.ulg.sph-render-row-material-bank-particle-size-consumer.v0'
+  );
+  assert.equal(
+    result.materialPropertyBankParticleSizeConsumer.status,
+    'shader-bound-material-bank-particle-size-rows'
+  );
+  assert.equal(result.materialPropertyBankParticleSizeConsumer.rowCount, 1);
+  assert.equal(result.materialPropertyBankParticleSizeConsumer.shaderBinding, 5);
+  assert.equal(result.materialPropertyBankParticleSizeConsumer.bufferSource, 'sph-particle-upload');
+  assert.equal(result.materialPropertyBankParticleSizeConsumer.mechanicsOverridePreserved, true);
+
+  const renderRowsBindGroup = dispatches[0].bindGroup;
+  const entry = renderRowsBindGroup.entries.find((candidate) => candidate.binding === 5);
+  assert.equal(entry.resource.buffer, materialBankParticleSizeBuffer);
+  result.destroyRenderRowsBuffer();
 });
 
 test('SPH render rows encode base/drop render domains without changing material identity', () => {

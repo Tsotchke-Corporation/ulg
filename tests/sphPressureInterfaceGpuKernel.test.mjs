@@ -5,6 +5,7 @@ import {
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  createPressureInterfaceContactKinematicsParamsArray,
   createPressureInterfaceParamsArray,
   normalizeAlgorithmContactPairResponsePolicy,
   packAlgorithmContactPolicyRows,
@@ -221,6 +222,23 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   assert.equal(contactKinematics.rowStrideFloats, SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS);
   assert.deepEqual([...contactKinematics.rows.slice(0, 4)], [0.20000000298023224, 0, 0, 1]);
 
+  const kinematicsParams = createPressureInterfaceContactKinematicsParamsArray({
+    elementCount: 2,
+    particleCount: 8,
+    contactPolicyRowCount: 1,
+    derivationEnabled: true,
+    maxSearchRadiusM: 0.5,
+    gapFloorM: 0.001
+  });
+  const kinematicsView = new DataView(kinematicsParams);
+  assert.equal(kinematicsParams.byteLength, 32);
+  assert.equal(kinematicsView.getUint32(0, true), 2);
+  assert.equal(kinematicsView.getUint32(4, true), 8);
+  assert.equal(kinematicsView.getUint32(8, true), 1);
+  assert.equal(kinematicsView.getUint32(12, true), 1);
+  assert.ok(Math.abs(kinematicsView.getFloat32(16, true) - 0.5) < 1e-9);
+  assert.ok(Math.abs(kinematicsView.getFloat32(20, true) - 0.001) < 1e-9);
+
   const params = createPressureInterfaceParamsArray({
     elementCount: 2,
     pressurePa: 120000,
@@ -364,6 +382,75 @@ test('pressure/interface WebGPU producer applies algorithm contact-pair pressure
   assert.ok(Math.abs(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0] - 245000) < 1e-6);
   assert.ok(Math.abs(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1] - 245000) < 1e-6);
   assert.ok(Math.abs(result.pressureInterfaceForceSolver.totalAbsMaterialForceN - 490000) < 1e-6);
+});
+
+test('pressure/interface WebGPU producer derives contact kinematics from resident particle buffers', async () => {
+  const device = fakePressureDevice();
+  const fieldWithoutKinematics = interfaceFieldFixture();
+  for (const element of fieldWithoutKinematics.elements) {
+    delete element.gapM;
+    delete element.normalVelocityMPerS;
+    delete element.representativeMassKg;
+  }
+  const stateBuffer = device.createBuffer({
+    label: 'test-sph-state-source',
+    size: 2 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const thermoBuffer = device.createBuffer({
+    label: 'test-sph-thermo-source',
+    size: 2 * 12 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+
+  const result = await runSphPressureInterfaceForceRowsWebGpu({
+    device,
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 120000,
+      gasCellField: {
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 120000,
+        pressureFieldMode: 'uniform-single-cell-sealed-gas',
+        pressureFieldResolution: 'lumped-sealed-box',
+        gradientStatus: 'uniform-sealed-gas-pressure-zero-gradient'
+      }
+    },
+    pressureInterfaceCoupling: {
+      schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
+      status: 'pressure-interface-coupling-ready-for-solver',
+      forceCouplingStatus: 'pressure-interface-coupling-ready'
+    },
+    materialInterfaceField: fieldWithoutKinematics,
+    algorithmMaterialContactRows: algorithmContactRowsFixture(),
+    sphParticleUpload: {
+      schema: 'peercompute.ulg.test-sph-particle-upload.v0',
+      status: 'webgpu-uploaded',
+      particleCount: 2,
+      stateBuffer,
+      thermoBuffer
+    },
+    retainForceRowsBuffer: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsGpuDerivationEligible, true);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsGpuDerived, true);
+  assert.equal(
+    result.pressureInterfaceForceSolver.interfaceContactKinematicsDerivationStatus,
+    'interface-contact-kinematics-gpu-derivation-submitted'
+  );
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleSourceStatus, 'interface-contact-kinematics-particle-source-ready');
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleCount, 2);
+  assert.equal(result.interfaceContactKinematicsGpuDerived, true);
+  assert.equal(device.bindGroups.length, 2);
+  assert.equal(device.bindGroups[0].entries.length, 6);
+  assert.equal(device.bindGroups[0].entries[1].resource.buffer, stateBuffer);
+  assert.equal(device.bindGroups[0].entries[2].resource.buffer, thermoBuffer);
+  assert.equal(device.bindGroups[1].entries[5].resource.buffer.label, 'ulg-sph-pressure-interface-contact-kinematics-derived');
+  assert.deepEqual(device.dispatches, [1, 1]);
+  assert.equal(device.submissions.length, 2);
 });
 
 test('pressure/interface contact policy waits for interface kinematics', async () => {

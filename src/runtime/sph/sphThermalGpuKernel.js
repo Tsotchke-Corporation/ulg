@@ -20,7 +20,10 @@ import {
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../material/materialPropertyBank.js';
+import {
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
+} from '../material/materialPropertyBank.js';
 import {
   orderedSegments,
   segmentEnergyAbove,
@@ -1264,7 +1267,7 @@ function resolveMaterialBankWarmInputShaderBinding(device, {
   const emptyBuffer = writeStorageBuffer(
     device,
     'ulg-sph-thermal-material-bank-warm-input-rows-empty',
-    new Float32Array(0)
+    new Float32Array(MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length)
   );
   return {
     buffer: emptyBuffer,

@@ -3,6 +3,24 @@
 Date: 2026-06-18 AKDT
 
 Status update, 2026-06-20 AKDT: compact
+`algorithmMaterialContactRows` can now use GPU-derived interface kinematics in
+the no-full pressure path. When interface elements lack explicit `gapM` /
+normal-velocity fields but retained SPH particle state and thermo buffers are
+available on the pressure-stage device, a dedicated contact-kinematics WGSL
+pass scans resident particle rows per interface element, writes the existing
+four-float kinematics buffer, and the force-row WGSL consumes it on the same
+queue before grid update. ComputeManager pressure-stage evidence reports
+GPU-derivation eligibility/status and particle-source readiness. Browser
+verification then found separate invalid command-buffer spam from 4-byte empty
+material-bank warm-input sentinel buffers in thermal/mechanics; those sentinels
+now bind one 64-byte zero row while preserving shader row count `0`, and
+`/tmp/ulg-contact-kinematics-gpu-probe-rerun.json` is `status=good` with zero
+browser-console issues. The next contact slice is not another renderer
+workaround: replace the current per-interface particle scan with a
+tiled/neighbor-list resident contact producer and validate it in broader
+browser visual scenarios.
+
+Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` now also feed material-interface force-row
 production through an explicit kinematics-gated cubic-barrier response. The
 pressure-interface WebGPU producer packs contact policy rows from the compact

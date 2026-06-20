@@ -5,6 +5,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -159,7 +160,7 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
   const emptyBuffer = writeStorageBuffer(
     device,
     'ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty',
-    new Float32Array(0)
+    new Float32Array(MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length)
   );
   return {
     buffer: emptyBuffer,

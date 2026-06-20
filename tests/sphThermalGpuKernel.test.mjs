@@ -4,6 +4,7 @@ import { ULG_CLOSURE_LAW_GRAPH_SCHEMA } from '../ulg-gpu-abi/src/index.js';
 import { evaluateClosureLawGraphCpu } from '../src/runtime/closureLawGraph.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { stableOpticalMaterialId, GPU_PHASE_IDS } from '../src/runtime/material/opticalGpuBuffers.js';
+import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../src/runtime/material/materialPropertyBank.js';
 import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEquilibrium.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { createSphState } from '../src/runtime/sph/sphState.js';
@@ -674,6 +675,54 @@ test('SPH thermal WebGPU defers retained output buffer destruction until submitt
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-state').length, 1);
   assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-thermo').length, 1);
   assert.equal(device.fenceRequestedCount, 2);
+});
+
+test('SPH thermal WebGPU binds full-row empty material-bank warm input sentinel', async () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const device = fakeThermalDeviceWithFence();
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseRecordBuffer: { label: 'response-records' },
+    responseBuffer: { label: 'responses' },
+    graphNodeBuffer: { label: 'graph-nodes' },
+    graphSampleBuffer: { label: 'graph-samples' },
+    responseBufferByteLength: responseTable.responses.byteLength,
+    graphSampleBufferByteLength: graphSet.graphBank.sampleRows.byteLength
+  };
+
+  const result = await runSphThermalStepWebGpu({
+    device,
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable,
+    thermalResponseGraphUpload,
+    sphParticleUpload: {
+      stateBuffer: { label: 'source-state' },
+      thermoBuffer: { label: 'source-thermo' }
+    },
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.deepEqual(
+    device.queueWrites.find((write) => write.label === 'ulg-sph-thermal-material-bank-warm-input-rows-empty'),
+    {
+      label: 'ulg-sph-thermal-material-bank-warm-input-rows-empty',
+      offset: 0,
+      byteLength: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT
+    }
+  );
+  assert.equal(result.materialPropertyBankWarmInputConsumer.shaderRowCount, 0);
+  result.destroyOutputParticleBuffers();
+  device.resolveFence();
+  await Promise.resolve();
+  await Promise.resolve();
 });
 
 test('SPH thermal parity rejects state or thermo drift', () => {

@@ -3180,6 +3180,114 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
   assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsReadyCount, 2);
 });
 
+test('SPH pressure interface stage forwards resident particle buffers for contact kinematics', async () => {
+  const stateBuffer = { label: 'stage-test-sph-state-buffer' };
+  const thermoBuffer = { label: 'stage-test-sph-thermo-buffer' };
+  let observedRunnerArgs = null;
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    elementCount: 1,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      }
+    ]
+  };
+  const result = await runSphPressureInterfaceStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    computeTaskId: 'ulg:test:pressure-interface-stage-particle-forward',
+    preferWebGpu: true,
+    device: {
+      createBuffer() {},
+      queue: { writeBuffer() {} }
+    },
+    pressureInterfaceForceRowsWebGpuRunner(args) {
+      observedRunnerArgs = args;
+      return {
+        backend: 'webgpu',
+        status: 'pressure-interface-stage-solver-ready',
+        executionSource: 'sphPressureInterfaceForceRowsWebGpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        forceRowCount: 1,
+        forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+        forceRowByteLength: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+        forceRowValues: new Float32Array(),
+        pressureInterfaceForceSolver: {
+          schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+          status: 'pressure-interface-force-solver-ready',
+          forceApplicationStatus: 'solver-ready-not-applied',
+          forceRowCount: 1,
+          forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
+          forceRowValues: new Float32Array(),
+          forceRowsBufferRetained: true,
+          conservationStatus: 'pairwise-equal-opposite-force-conservative',
+          conservationResidualMagnitudeN: 0,
+          interfaceContactKinematicsGpuDerivationEligible: true,
+          interfaceContactKinematicsGpuDerived: true,
+          interfaceContactKinematicsDerivationStatus: 'interface-contact-kinematics-gpu-derivation-submitted',
+          interfaceContactKinematicsParticleSourceStatus: 'interface-contact-kinematics-particle-source-ready',
+          interfaceContactKinematicsParticleCount: 2
+        }
+      };
+    },
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 120000
+    },
+    pressureInterfaceCoupling: {
+      schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
+      status: 'pressure-interface-coupling-ready-for-solver',
+      forceCouplingStatus: 'pressure-interface-coupling-ready'
+    },
+    materialInterfaceField,
+    algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 4e9 }),
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 2,
+      step: 4
+    },
+    sphParticleUpload: {
+      schema: 'peercompute.ulg.test-sph-particle-upload.v0',
+      status: 'webgpu-uploaded',
+      particleCount: 2,
+      stateBuffer,
+      thermoBuffer
+    },
+    readbackMode: 'no-full-readback',
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+
+  assert.equal(observedRunnerArgs.sphParticleUpload.stateBuffer, stateBuffer);
+  assert.equal(observedRunnerArgs.sphParticleUpload.thermoBuffer, thermoBuffer);
+  assert.equal(observedRunnerArgs.particleStateBuffer, stateBuffer);
+  assert.equal(observedRunnerArgs.particleThermoBuffer, thermoBuffer);
+  assert.equal(observedRunnerArgs.particleCount, 2);
+  assert.equal(result.interfaceContactKinematicsGpuDerived, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsGpuDerived, true);
+  assert.equal(
+    result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsDerivationStatus,
+    'interface-contact-kinematics-gpu-derivation-submitted'
+  );
+});
+
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',

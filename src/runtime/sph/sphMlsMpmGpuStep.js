@@ -6932,6 +6932,11 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     interfaceContactKinematicsStatus: solver?.interfaceContactKinematicsStatus || null,
     interfaceContactKinematicsRowCount: finiteNumber(solver?.interfaceContactKinematicsRowCount, 0),
     interfaceContactKinematicsReadyCount: finiteNumber(solver?.interfaceContactKinematicsReadyCount, 0),
+    interfaceContactKinematicsGpuDerivationEligible: solver?.interfaceContactKinematicsGpuDerivationEligible === true,
+    interfaceContactKinematicsGpuDerived: solver?.interfaceContactKinematicsGpuDerived === true,
+    interfaceContactKinematicsDerivationStatus: solver?.interfaceContactKinematicsDerivationStatus || null,
+    interfaceContactKinematicsParticleSourceStatus: solver?.interfaceContactKinematicsParticleSourceStatus || null,
+    interfaceContactKinematicsParticleCount: finiteNumber(solver?.interfaceContactKinematicsParticleCount, 0),
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -7200,6 +7205,11 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           algorithmMaterialContactRows: stageOptions.algorithmMaterialContactRows || null,
           algorithmContactPairResponseScale: stageOptions.algorithmContactPairResponseScale,
           algorithmContactMaxPressurePa: stageOptions.algorithmContactMaxPressurePa,
+          sphParticleState: stageOptions.sphParticleState || null,
+          sphParticleUpload: stageOptions.sphParticleUpload || null,
+          particleStateBuffer: stageOptions.particleStateBuffer || stageOptions.sourceStateBuffer || stageOptions.sphParticleUpload?.stateBuffer || null,
+          particleThermoBuffer: stageOptions.particleThermoBuffer || stageOptions.sourceThermoBuffer || stageOptions.sphParticleUpload?.thermoBuffer || null,
+          particleCount: stageOptions.particleCount ?? stageOptions.sphParticleState?.particleCount ?? stageOptions.sphParticleUpload?.particleCount ?? null,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
         });
@@ -7281,7 +7291,12 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     maxAlgorithmContactPressurePa: finiteNumber(pressureInterfaceForceSolver?.maxAlgorithmContactPressurePa, 0),
     interfaceContactKinematicsStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsStatus || null,
     interfaceContactKinematicsRowCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsRowCount, 0),
-    interfaceContactKinematicsReadyCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsReadyCount, 0)
+    interfaceContactKinematicsReadyCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsReadyCount, 0),
+    interfaceContactKinematicsGpuDerivationEligible: pressureInterfaceForceSolver?.interfaceContactKinematicsGpuDerivationEligible === true,
+    interfaceContactKinematicsGpuDerived: pressureInterfaceForceSolver?.interfaceContactKinematicsGpuDerived === true,
+    interfaceContactKinematicsDerivationStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsDerivationStatus || null,
+    interfaceContactKinematicsParticleSourceStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsParticleSourceStatus || null,
+    interfaceContactKinematicsParticleCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsParticleCount, 0)
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);
@@ -9547,6 +9562,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         pressureInterfaceForcePreview: stepOptions.pressureInterfaceForcePreview || null,
         pressureInterfaceGasCellFieldImport: pressureInputs.pressureInterfaceGasCellFieldImport,
         pressureInterfaceGasCellFieldAdmission: pressureInputs.pressureInterfaceGasCellFieldAdmission,
+        sphParticleState,
+        sphParticleUpload: stepOptions.sphParticleUpload || null,
+        particleStateBuffer: stepOptions.sphParticleUpload?.stateBuffer || null,
+        particleThermoBuffer: stepOptions.sphParticleUpload?.thermoBuffer || null,
+        particleCount: sphParticleState?.particleCount ?? stepOptions.sphParticleUpload?.particleCount ?? null,
         boxDimsM: dims,
         laneId: laneStagePlanId,
         stateKey: laneStagePlanStateKey,

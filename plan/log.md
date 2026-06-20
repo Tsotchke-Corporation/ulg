@@ -30702,3 +30702,91 @@ Remaining:
   reaction-neighborhood state. The current slice accepts kinematics carried on
   interface elements and proves the CPU/WebGPU force path; it does not yet
   synthesize those fields from the resident particle/interface buffers.
+
+## 2026-06-20 AKDT - GPU-Derived Interface Contact Kinematics
+
+Status:
+
+- Added a dedicated `sphPressureInterfaceContactKinematicsWgsl` compute stage
+  that runs before pressure/interface force-row production when contact policy
+  rows exist, interface elements lack explicit kinematics, and retained SPH
+  particle state/thermo buffers are available on the same WebGPU device.
+- The stage writes the existing four-float contact kinematics ABI
+  (`gapM`, normal velocity, representative mass, status), and the existing
+  pressure force-row WGSL consumes that derived buffer on the same queue.
+- The pressure-stage ComputeManager wrapper now forwards retained particle
+  uploads/source buffers to the WebGPU force-row producer. Stage evidence
+  reports GPU-derivation eligibility, derivation status, particle-source
+  status, and particle count.
+- Cross-device particle buffers are blocked before binding through the existing
+  WebGPU device identity helper instead of recreating the previous
+  wrong-device bind-group failure class.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- PASS:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS:
+  `node --check ulg-gpu-abi/src/wgsl.js`
+- PASS:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `71/71`.
+- PASS:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
+  with `47/47`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Replace the current per-interface GPU particle scan with a tiled/neighbor-list
+  contact kinematics producer, then validate the contact response through
+  browser visual scenarios with clean console output.
+
+## 2026-06-20 AKDT - Empty Material-Bank Sentinels Stop Browser Invalid Command Buffers
+
+Status:
+
+- The contact-kinematics browser probe initially failed from two WebGPU binding
+  validation errors unrelated to the new contact shader:
+  `ulg-sph-thermal-material-bank-warm-input-rows-empty` and
+  `ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty` were 4-byte empty
+  buffers bound to WGSL storage arrays whose minimum binding size is one
+  16-float material-bank warm-input row.
+- Thermal and mechanics empty warm-input sentinels now allocate one full
+  material-bank warm-input row while retaining shader row count `0`, so the
+  shader sees no warm-input data but WebGPU validation has a legal binding.
+- Regression coverage asserts the empty sentinel queue writes are 64 bytes and
+  that the consumer row count remains zero.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js`
+- PASS:
+  `node --check src/runtime/sph/sphThermalGpuKernel.js`
+- PASS:
+  `node --test tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `92/92`.
+- PASS:
+  `/tmp/ulg-contact-kinematics-gpu-probe-rerun.json`
+  - `status=good`
+  - `analysis.issues=[]`
+  - `browserConsole.issueCount=0`
+  - `browserConsole.warningCounts={}`
+- PASS:
+  `npm run build`
+  - Vite reported only the existing large chunk-size warning.
+- PASS:
+  `npm run test:physics-atomics`
+  - Passed `11/14` with the three expected opt-in long-horizon skips.
+- PASS:
+  `npm run icc:update`
+  - Indexed `354` files and `2079` memory chunks.
+
+Remaining:
+
+- Continue the contact performance roadmap with a tiled/neighbor-list
+  kinematics producer. The current browser console blocker is closed for this
+  focused scenario.

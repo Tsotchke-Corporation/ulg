@@ -1,5 +1,53 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
+
+The pressure-interface WebGPU producer now derives missing per-interface
+contact kinematics from resident SPH particle state/thermo buffers before the
+force-row stage. The new kinematics pass writes the existing four-float
+`gapM`/normal-velocity/mass/status ABI, then the force-row WGSL consumes that
+buffer on the same device/queue. The pressure-stage ComputeManager wrapper
+forwards retained particle uploads and exposes derivation diagnostics. The same
+focused browser pass also fixed thermal/mechanics empty material-bank
+warm-input bindings by allocating one full 64-byte sentinel row while keeping
+shader row count zero.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
+  `node --check ulg-gpu-abi/src/wgsl.js` passed.
+- Contact/pressure/stage coverage:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` passed `71/71`.
+- Thermal/mechanics sentinel coverage:
+  `node --test tests/sphMechanicsRefreshGpuKernel.test.mjs
+  tests/sphThermalGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` passed `92/92`.
+- ABI/grid/buffer coverage:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
+  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs` passed
+  `47/47`.
+- Browser console gate:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-contact-kinematics-gpu-probe-rerun.json
+  ULG_PROBE_PORT=5662 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1
+  ULG_PROBE_READBACK_MODE=no-full-readback
+  ULG_PROBE_RENDER_READBACK_MODE=no-full-readback
+  ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback
+  ULG_PROBE_FAIL_ON_BAD=0 node scripts/sph-long-horizon-probe.mjs` passed
+  with `status=good`, no analysis issues, and zero browser-console issues.
+- Whitespace:
+  `git diff --check` passed.
+- Build:
+  `npm run build` passed with only the existing Vite large-chunk warning.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `11/14` with the three expected
+  opt-in long-horizon skips.
+- ICC:
+  `npm run icc:update` passed with `indexedFiles=354` and
+  `memoryChunks=2079`.
+
 ## Current Focused Result - 2026-06-20 Algorithm Contact Pair Force Rows
 
 `algorithmMaterialContactRows` now feed material-interface force-row production.
@@ -7,22 +55,6 @@ The pressure-interface WebGPU producer packs bounded contact policy rows and
 binds them in WGSL; the CPU oracle and pressure-stage task path use the same
 matching/capping logic. Grid update continues to consume the unchanged
 16-float force-row ABI.
-
-Focused checks:
-
-- Syntax:
-  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
-  `node --check src/runtime/sphPhaseDemo.js`,
-  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
-  `node --check ulg-gpu-abi/src/wgsl.js` passed.
-- Contact/pressure/stage coverage:
-  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
-  tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs` passed
-  `111/111`.
-- ABI/grid/buffer coverage:
-  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
-  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs` passed
-  `47/47`.
 
 ## Current Focused Result - 2026-06-20 Algorithm Row Runtime Consumers
 

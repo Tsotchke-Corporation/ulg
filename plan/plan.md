@@ -10,10 +10,18 @@ pressure force-row producer. The producer now applies a kinematics-gated
 cubic-barrier contact pressure term for matching contact policy rows in CPU and
 WebGPU paths while preserving the grid-update force-row ABI. Policy rows alone
 do not fabricate material/material pressure; interface elements need gap/normal
-velocity evidence. The next physics target is automatic derivation of those
-per-interface kinematics from resident interface/reaction-neighborhood state.
-The next rendering target remains native WebGPU validation/presentation
-evidence, not an overlay or CPU mesh fallback.
+velocity evidence. That evidence can now be produced in the no-full WebGPU
+pressure path from resident SPH particle state and thermo buffers: the
+pressure-stage task forwards retained particle uploads, a dedicated
+contact-kinematics WGSL pass runs before force-row production on the same
+device/queue, and the existing four-float kinematics ABI is consumed by the
+force-row shader. Browser verification also closed the empty material-bank
+sentinel validation failure by binding 64-byte zero-row sentinels in thermal
+and mechanics passes; `/tmp/ulg-contact-kinematics-gpu-probe-rerun.json` is
+console-clean. The next physics target is replacing the per-interface GPU
+particle scan with a tiled/neighbor-list contact producer plus broader browser
+visual acceptance. The next rendering target remains native WebGPU
+validation/presentation evidence, not an overlay or CPU mesh fallback.
 
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
 now cached as a resident WebGPU upload instead of being rebuilt inside every

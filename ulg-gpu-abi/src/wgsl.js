@@ -5185,6 +5185,190 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphPressureInterfaceContactKinematicsWgsl = `
+struct ContactKinematicsParams {
+  element_count: u32,
+  particle_count: u32,
+  contact_policy_row_count: u32,
+  derivation_enabled: u32,
+  max_search_radius_m: f32,
+  gap_floor_m: f32,
+  _pad0: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> particle_state_rows: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> particle_thermo_rows: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> contact_policy_rows: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> contact_kinematics_rows: array<vec4<f32>>;
+@group(0) @binding(5) var<uniform> params: ContactKinematicsParams;
+
+fn ck_state_row0(particle_index: u32) -> vec4<f32> {
+  return particle_state_rows[particle_index * 2u];
+}
+
+fn ck_state_row1(particle_index: u32) -> vec4<f32> {
+  return particle_state_rows[particle_index * 2u + 1u];
+}
+
+fn ck_thermo_row0(particle_index: u32) -> vec4<f32> {
+  return particle_thermo_rows[particle_index * 3u];
+}
+
+fn ck_thermo_row2(particle_index: u32) -> vec4<f32> {
+  return particle_thermo_rows[particle_index * 3u + 2u];
+}
+
+fn ck_phase_matches(particle_phase_id: f32, required_phase_id: f32) -> bool {
+  return required_phase_id <= 0.5 || abs(particle_phase_id - required_phase_id) < 0.5;
+}
+
+fn ck_policy_matches_element(row0: vec4<f32>, row2: vec4<f32>, material_id: f32, phase_id: f32) -> bool {
+  if (row2.y <= 0.0) {
+    return false;
+  }
+  let material_match = abs(material_id - row0.x) < 0.5 || abs(material_id - row0.y) < 0.5;
+  let phase_match = (row0.z <= 0.5 && row0.w <= 0.5)
+    || abs(phase_id - row0.z) < 0.5
+    || abs(phase_id - row0.w) < 0.5;
+  return material_match && phase_match;
+}
+
+fn ck_normal_from_element(row2: vec4<f32>, row3: vec4<f32>) -> vec3<f32> {
+  var normal = row2.xyz;
+  if (dot(normal, normal) <= 1.0e-24) {
+    normal = vec3<f32>(row2.w, row3.x, row3.y);
+  }
+  if (dot(normal, normal) <= 1.0e-24) {
+    return vec3<f32>(0.0, 1.0, 0.0);
+  }
+  return normalize(normal);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let element_index = global_id.x;
+  if (element_index >= params.element_count) {
+    return;
+  }
+  contact_kinematics_rows[element_index] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (params.derivation_enabled == 0u || params.particle_count == 0u || params.contact_policy_row_count == 0u) {
+    return;
+  }
+
+  let element_row0 = interface_elements[element_index * 4u];
+  let element_row1 = interface_elements[element_index * 4u + 1u];
+  let element_row2 = interface_elements[element_index * 4u + 2u];
+  let element_row3 = interface_elements[element_index * 4u + 3u];
+  let element_material_id = element_row0.y;
+  let element_phase_id = element_row0.z;
+  let centroid = element_row1.xyz;
+  let area_m2 = element_row1.w;
+  let element_status = element_row3.w;
+  if (element_status <= 0.0 || area_m2 <= 0.0) {
+    return;
+  }
+
+  var selected = false;
+  var target_material_id = 0.0;
+  var target_phase_id = 0.0;
+  var support_radius_m = params.max_search_radius_m;
+  for (var policy_index = 0u; policy_index < params.contact_policy_row_count; policy_index = policy_index + 1u) {
+    let policy_row0 = contact_policy_rows[policy_index * 4u];
+    let policy_row1 = contact_policy_rows[policy_index * 4u + 1u];
+    let policy_row2 = contact_policy_rows[policy_index * 4u + 2u];
+    if (!selected && ck_policy_matches_element(policy_row0, policy_row2, element_material_id, element_phase_id)) {
+      let match_a = abs(element_material_id - policy_row0.x) < 0.5;
+      target_material_id = select(policy_row0.x, policy_row0.y, match_a);
+      target_phase_id = select(policy_row0.z, policy_row0.w, match_a);
+      support_radius_m = max(policy_row1.z, support_radius_m);
+      selected = true;
+    }
+  }
+  if (!selected) {
+    return;
+  }
+
+  let normal = ck_normal_from_element(element_row2, element_row3);
+  let search_radius_m = max(max(support_radius_m * 2.0, params.max_search_radius_m), 1.0e-6);
+  let search_radius2 = search_radius_m * search_radius_m;
+  var source_score = 1.0e30;
+  var target_score = 1.0e30;
+  var source_index = 4294967295u;
+  var target_index = 4294967295u;
+  var source_signed_m = 0.0;
+  var target_signed_m = 0.0;
+  var source_velocity = vec3<f32>(0.0);
+  var target_velocity = vec3<f32>(0.0);
+  var source_mass_kg = 0.0;
+  var target_mass_kg = 0.0;
+
+  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+    let thermo0 = ck_thermo_row0(particle_index);
+    let thermo2 = ck_thermo_row2(particle_index);
+    if (thermo2.z <= 0.0) {
+      continue;
+    }
+    let state0 = ck_state_row0(particle_index);
+    let state1 = ck_state_row1(particle_index);
+    if (state0.w <= 0.0) {
+      continue;
+    }
+    let delta = state0.xyz - centroid;
+    let signed_m = dot(delta, normal);
+    let distance2 = dot(delta, delta);
+    let lateral2 = max(distance2 - signed_m * signed_m, 0.0);
+    if (lateral2 > search_radius2 || abs(signed_m) > search_radius_m) {
+      continue;
+    }
+    let same_source_material = abs(thermo0.x - element_material_id) < 0.5 && ck_phase_matches(thermo0.y, element_phase_id);
+    let same_target_material = abs(thermo0.x - target_material_id) < 0.5 && ck_phase_matches(thermo0.y, target_phase_id);
+    let signed2 = signed_m * signed_m;
+    if (same_source_material) {
+      let source_side_penalty = select(0.0, search_radius2, signed_m > support_radius_m * 0.25);
+      let score = lateral2 + signed2 + source_side_penalty;
+      if (score < source_score) {
+        source_score = score;
+        source_index = particle_index;
+        source_signed_m = signed_m;
+        source_velocity = state1.xyz;
+        source_mass_kg = state0.w;
+      }
+    }
+    if (same_target_material) {
+      let target_side_penalty = select(0.0, search_radius2, signed_m < -support_radius_m * 0.25);
+      let score = lateral2 + signed2 + target_side_penalty;
+      if (score < target_score) {
+        target_score = score;
+        target_index = particle_index;
+        target_signed_m = signed_m;
+        target_velocity = state1.xyz;
+        target_mass_kg = state0.w;
+      }
+    }
+  }
+
+  if (source_index == 4294967295u || target_index == 4294967295u || source_index == target_index) {
+    return;
+  }
+  let signed_span_m = target_signed_m - source_signed_m;
+  let direction_sign = select(-1.0, 1.0, signed_span_m >= 0.0);
+  let gap_m = max(abs(signed_span_m), params.gap_floor_m);
+  let relative_normal_velocity_m_per_s = dot(target_velocity - source_velocity, normal * direction_sign);
+  var representative_mass_kg = 0.0;
+  if (source_mass_kg > 0.0 && target_mass_kg > 0.0) {
+    representative_mass_kg = (source_mass_kg * target_mass_kg) / max(source_mass_kg + target_mass_kg, 1.0e-12);
+  }
+  contact_kinematics_rows[element_index] = vec4<f32>(
+    gap_m,
+    relative_normal_velocity_m_per_s,
+    representative_mass_kg,
+    1.0
+  );
+}
+`;
+
 export const mlsMpmG2pReconstructWgsl = `
 struct G2pParams {
   particle_count: u32,

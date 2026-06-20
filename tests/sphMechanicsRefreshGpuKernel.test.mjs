@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../src/runtime/material/materialPropertyBank.js';
+import {
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
+} from '../src/runtime/material/materialPropertyBank.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
 import {
   buildMlsMpmMechanicsMaterialTable,
@@ -463,6 +466,15 @@ test('WebGPU mechanics refresh reuses uploaded material phase records', async ()
   assert.equal(result.mechanicsMaterialPhaseUploadStatus, 'webgpu-uploaded');
   assert.equal(result.mechanicsMaterialPhaseUploadReused, true);
   assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-material-phase-records'), false);
+  assert.deepEqual(
+    queueWrites.find((write) => write.label === 'ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty'),
+    {
+      label: 'ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty',
+      offset: 0,
+      byteLength: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT
+    }
+  );
+  assert.equal(result.mechanicsMaterialBankWarmInputConsumer.shaderRowCount, 0);
   assert.equal(materialPhaseUpload.destroyed, false);
   destroyMlsMpmMechanicsMaterialPhaseUpload(materialPhaseUpload);
   assert.equal(materialPhaseUpload.destroyed, true);

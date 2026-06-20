@@ -45,10 +45,17 @@ Contact policy alone no longer fabricates material/material force: a matching
 interface element must carry gap evidence before the force row receives a
 bounded contact pressure. Stage task evidence reports policy rows, applied
 contact rows, pair keys, max contact pressure, and interface-kinematics
-ready/row counts. Continue contact work by deriving those per-interface
-kinematics automatically from resident interface/reaction-neighborhood state;
-do not replace this with renderer overlays or post-hoc particle position
-clamps.
+ready/row counts. The no-full WebGPU path can now derive missing contact
+kinematics from resident SPH particle state/thermo buffers with a same-device
+pre-force compute pass, so this is no longer restricted to element-provided
+test fields. The focused browser-console blocker from 4-byte empty
+material-bank warm-input sentinels is closed: thermal and mechanics now bind a
+64-byte zero-row sentinel while reporting shader row count `0`, and
+`/tmp/ulg-contact-kinematics-gpu-probe-rerun.json` is `status=good` with zero
+browser-console issues. Continue contact work by replacing the current per-interface GPU
+particle scan with a tiled/neighbor-list producer, adding browser visual
+acceptance, and keeping the response in the physics stage; do not replace this
+with renderer overlays or post-hoc particle position clamps.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

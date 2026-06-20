@@ -149,6 +149,8 @@ const SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT = 'rgba8unorm';
 const SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS = 1000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
+export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
+export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 32 * 1024 * 1024;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
 const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT = Object.freeze({});
 const SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS = Object.freeze({
@@ -3433,6 +3435,51 @@ function normalizeResidentReadbackMode(value) {
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
 const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 64;
+
+export function estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
+  resolution,
+  surfaceCount = 1
+) {
+  const resolvedResolution = Math.max(2, Math.round(Number(resolution) || 2));
+  const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
+  const dualGridVoxelCount = Math.max(0, resolvedResolution - 1) ** 3;
+  return resolvedSurfaceCount
+    * dualGridVoxelCount
+    * SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
+    * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+}
+
+export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surfaceCount, {
+  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+  maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+} = {}) {
+  const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
+  const resolvedBudget = Math.max(
+    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    Math.round(
+      Number(maxVertexRowsBufferByteLength)
+      || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+    )
+  );
+  const resolvedRequestedMax = Math.max(
+    2,
+    Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION)
+  );
+  const bytesPerDualGridVoxel = SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
+    * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const budgetedDualGridVoxelsPerSurface = Math.max(
+    1,
+    Math.floor(resolvedBudget / resolvedSurfaceCount / bytesPerDualGridVoxel)
+  );
+  const budgetedDualGridResolution = Math.max(1, Math.floor(Math.cbrt(budgetedDualGridVoxelsPerSurface)));
+  return Math.max(2, Math.min(
+    resolvedRequestedMax,
+    RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+    budgetedDualGridResolution + 1
+  ));
+}
 
 export function normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM, fieldPadding = FIELD_PADDING) {
   const radius = Number.isFinite(radiusM) && radiusM > 0 ? radiusM : 0;
@@ -17252,6 +17299,8 @@ export function createSphPhaseScene(container, {
     surfaceDrawDiagnosticMode = 'auto',
     surfaceDrawDiagnosticMaxFieldCells = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT,
     surfaceDrawDiagnosticMaxResolution = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT,
+    nativeMarchingCubesMaxVertexRowsBufferByteLength =
+      SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
     surfaceDrawOverlayPolicyOverride = null,
     residentAuthorityHost = null,
     pressureInterfaceGasCellFieldAdmission = null,
@@ -17628,6 +17677,13 @@ export function createSphPhaseScene(container, {
         2,
         Math.round(Number(surfaceDrawDiagnosticMaxResolution) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT)
       );
+      const requestedNativeMarchingCubesMaxVertexRowsBufferByteLength = Math.max(
+        SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        Math.round(
+          Number(nativeMarchingCubesMaxVertexRowsBufferByteLength)
+          || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+        )
+      );
       markSphResidentRenderProgress('resident-render-rows-started', {
         stage: 'render-rows',
         particleCount: nextSphParticleState.particleCount,
@@ -17794,11 +17850,41 @@ export function createSphPhaseScene(container, {
           maxResolution: requestedSurfaceDrawDiagnosticMaxResolution
         })
         : null;
+      const useNativeMarchingCubesSurfaceTableBudget = Boolean(
+        shouldRetainRenderFieldBufferHandoff
+        && shouldUseNativeWebGpuSurfaceConsumerBridge
+        && nativeSurfaceExtractionAllowed
+        && !useDiagnosticSurfaceTable
+        && !shouldUseResidentRenderRowBridge
+      );
+      const nativeMarchingCubesSurfaceTableMaxResolution = useNativeMarchingCubesSurfaceTableBudget
+        ? nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(fieldBatches.length, {
+          maxVertexRowsBufferByteLength: requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+          maxResolution: RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+        })
+        : null;
+      const residentBudgetedSurfaceTable = useNativeMarchingCubesSurfaceTableBudget
+        ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
+          maxResolution: nativeMarchingCubesSurfaceTableMaxResolution
+        })
+        : residentSurfaceTable;
+      const nativeMarchingCubesSurfaceTableBudgetStatus = useNativeMarchingCubesSurfaceTableBudget
+        ? (nativeMarchingCubesSurfaceTableMaxResolution < RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+          ? 'native-marching-cubes-surface-table-resolution-budgeted'
+          : 'native-marching-cubes-surface-table-resolution-uncapped')
+        : 'native-marching-cubes-surface-table-budget-inactive';
+      const nativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength =
+        useNativeMarchingCubesSurfaceTableBudget
+          ? estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
+            nativeMarchingCubesSurfaceTableMaxResolution,
+            fieldBatches.length
+          )
+          : 0;
       const surfaceTable = useDiagnosticSurfaceTable
         ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
           maxResolution: diagnosticSurfaceTableMaxResolution
         })
-        : residentSurfaceTable;
+        : residentBudgetedSurfaceTable;
       markSphResidentRenderProgress('resident-render-surface-table-ready', {
         stage: 'surface-table',
         surfaceCount: surfaceTable.surfaceCount,
@@ -17808,6 +17894,11 @@ export function createSphPhaseScene(container, {
         diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
         diagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
         diagnosticSurfaceTableMaxResolution,
+        nativeMarchingCubesSurfaceTableBudgetStatus,
+        nativeMarchingCubesSurfaceTableMaxResolution,
+        nativeMarchingCubesMaxVertexRowsBufferByteLength:
+          requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+        nativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
         overlayPolicyStatus: surfaceOverlayPolicy.status ?? null
       });
       const shouldBuildRetainedSurfaceDrawDiagnostics = Boolean(
@@ -19346,6 +19437,14 @@ export function createSphPhaseScene(container, {
         surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
         surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
         surfaceDrawDiagnosticSurfaceTableMaxResolution: diagnosticSurfaceTableMaxResolution,
+        surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus:
+          nativeMarchingCubesSurfaceTableBudgetStatus,
+        surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution:
+          nativeMarchingCubesSurfaceTableMaxResolution,
+        surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength:
+          requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
+        surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength:
+          nativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
         surfaceDrawDiagnosticsBuilt: Boolean(
           requestedSurfaceDrawDiagnosticMode === 'metadata'
           && nextResidentSurfaceDraw?.status

@@ -1,14 +1,33 @@
 # Implementation Status
 
-Updated: 2026-06-20 GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-20 native marching-cubes vertex-row budget, GPU-resident interface contact kinematics derivation, WebGPU empty material-bank sentinel binding fix, kinematics-gated material-interface cubic-barrier contact response, algorithm contact row material-interface force-row consumer, native surface extraction row consumption, algorithm contact row wall-barrier consumer, WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
-Latest added scope, 2026-06-20 AKDT: native/engine-owned surface consumer
-device reuse and no-full browser probe evidence.
+Latest added scope, 2026-06-20 AKDT: native marching-cubes surface
+vertex-row budgeting for the engine-owned no-full consumer path.
 
-Latest checkpoint, 2026-06-20 AKDT: the native rendering path now
-keeps the native/engine-owned surface consumer current across resident no-full
-refreshes. `requestCachedOpticalGpuDevice()` reuses an existing native
-main-canvas consumer GPUDevice before requesting a new adapter, and transient
+Latest checkpoint, 2026-06-20 AKDT: native/extension marching-cubes
+render-field extraction now caps the surface-table resolution from a
+conservative ULG vertex-row byte budget before creating no-full GPU buffers.
+The 64^3 case that implied a 240,045,120-byte single-surface row upper bound is
+now covered by a pure renderer test, and the active native WebGPU consumer path
+uses the default 32 MiB budget without adding an overlay or CPU fallback.
+Validation passed syntax checks, focused renderer tests (`70/70`), the native
+surface harness (`5/5`), and
+`/tmp/ulg-native-10k-bench-budgeted-surface.json`, which is `status=good`,
+console-clean, keeps `estimatedReadbackBytesPerStep=0`, selects native
+surface-table max resolution `23` for the active multi-surface benchmark case,
+and reports `surfaceDrawCompactedVertexRowsBufferByteLength=10222080` instead
+of the prior ~240 MB hotspot. `npm run build` passed with the existing large
+chunk warning, `git diff --check` passed, and `npm run icc:update` refreshed
+`indexedFiles=354` / `memoryChunks=2104`. Continue by replacing the
+intermediate compact position to ULG 16-float-row expansion with a direct
+compact-position/native draw consumer, then move ownership toward the planned
+worker/engine split.
+
+Previous checkpoint, 2026-06-20 AKDT: the native rendering path kept the
+native/engine-owned surface consumer current across resident no-full refreshes.
+`requestCachedOpticalGpuDevice()` reuses an existing native main-canvas
+consumer GPUDevice before requesting a new adapter, and transient
 `requestAdapter returned null` results no longer poison the cached resident
 device. The long-horizon probe now accepts current resident render-source
 samples over advancing metric time as no-full evidence instead of demanding CPU
@@ -16,12 +35,9 @@ motion readback. Validation passed syntax checks, the native surface harness
 (`5/5`), focused renderer tests (`69/69`), and
 `/tmp/ulg-native-device-reuse-probe-2.json`, which is `status=good` with
 `analysis.issues=[]`, browser console issue count `0`, two current resident
-render-source samples, zero stale samples, and nonblank Playwright
-canvas/page captures. `npm run build` passed with the existing large chunk
-warning, and `npm run icc:update` refreshed `indexedFiles=354` /
-`memoryChunks=2102`. Continue by broadening native no-full surface scenarios
-and moving ownership toward the planned worker/engine split; do not replace
-this path with an overlay.
+render-source samples, zero stale samples, and nonblank Playwright canvas/page
+captures. `npm run build` passed with the existing large chunk warning, and
+`npm run icc:update` refreshed `indexedFiles=354` / `memoryChunks=2102`.
 
 Previous checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path now
 derives contact kinematics through a same-device particle-bin producer when

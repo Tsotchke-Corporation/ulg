@@ -31157,3 +31157,60 @@ Remaining:
   smoke and move renderer/physics synchronization toward the planned
   worker/engine ownership split. Keep this engine-integrated; do not add an
   overlay.
+
+## 2026-06-20 AKDT - Native Marching-Cubes Surface Vertex-Row Budget
+
+Status:
+
+- Native/extension marching-cubes render-field extraction now caps render-field
+  surface-table resolution from a conservative ULG vertex-row byte budget before
+  the extension creates no-full GPU buffers.
+- The cap is applied only to the native WebGPU surface-consumer render-field
+  handoff path. It keeps the engine-integrated, GPU-resident path intact and
+  does not add an overlay or CPU mesh fallback.
+- The budget math is pinned by a renderer unit test: a 64^3 render field has a
+  240,045,120-byte conservative row upper bound, while the default 32 MiB
+  budget resolves to a capped native render-field resolution.
+
+Validation:
+
+- PASS:
+  `node --check src/visualization/sphPhaseScene.js`
+- PASS:
+  `node --check scripts/sph-performance-benchmark.mjs`
+- PASS:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native marching|native WebGPU|renderer-owned|render-row|resident render source"`
+  with `70/70`.
+- PASS:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  with `5/5`.
+- Browser benchmark:
+  `/tmp/ulg-native-10k-bench-budgeted-surface.json`
+  - `status=good`, `probeStatus=good`.
+  - Browser console issue count: `0`.
+  - Actual particles: `9826`.
+  - `estimatedReadbackBytesPerStep=0`.
+  - `surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus=native-marching-cubes-surface-table-resolution-budgeted`.
+  - `surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution=23`.
+  - `surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength=33554432`.
+  - `surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength=30666240`.
+  - `surfaceDrawCompactedVertexRowsBufferByteLength=10222080`, down from the
+    prior ~240 MB native hotspot for the same benchmark shape.
+  - `surfaceDrawVertexCount=159720`, `surfaceDrawTriangleCount=53240`.
+  - Native bridge rendered through `native-webgpu-surface-consumer-rendered`.
+- PASS:
+  `npm run build`
+  with the existing large chunk warning only.
+- PASS:
+  `npm run icc:update`
+  with `indexedFiles=354` and `memoryChunks=2104`.
+
+Remaining:
+
+- Replace the intermediate compact-position-to-ULG-16-float-row expansion with
+  a direct compact-position/native draw consumer so we stop allocating a full
+  ULG render row per marching-cubes vertex.
+- Continue moving native presentation/physics synchronization into the planned
+  worker/engine ownership split.

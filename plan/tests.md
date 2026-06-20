@@ -12338,3 +12338,45 @@ Native consumer device reuse and no-full evidence slice, 2026-06-20 AKDT:
 - ICC:
   `npm run icc:update`
   - Passed with `indexedFiles=354` and `memoryChunks=2102`.
+
+Native marching-cubes vertex-row budget slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Focused renderer/native tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native marching|native WebGPU|renderer-owned|render-row|resident render source"`
+  - Passed: `70/70`.
+  - Covers the native marching-cubes conservative row-budget helper, including
+    the exact 64^3 -> 240,045,120-byte upper-bound regression number.
+- Native harness tests:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `5/5`.
+- Browser native 10k benchmark:
+  `ULG_BENCH_OUTPUT=/tmp/ulg-native-10k-bench-budgeted-surface.json ULG_BENCH_PORT=5685 ULG_BENCH_TIMEOUT_MS=240000 ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  - Passed: `status=good`, `probeStatus=good`.
+  - Browser console issue count: `0`.
+  - Actual particles: `9826`.
+  - `estimatedReadbackBytesPerStep=0`.
+  - `surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus=native-marching-cubes-surface-table-resolution-budgeted`.
+  - `surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution=23`.
+  - `surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength=33554432`.
+  - `surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength=30666240`.
+  - `surfaceDrawCompactedVertexRowsBufferByteLength=10222080`.
+  - `surfaceDrawVertexCount=159720`.
+  - `surfaceDrawTriangleCount=53240`.
+- Build:
+  `npm run build`
+  - Passed with the existing large chunk warning only.
+- Whitespace:
+  `git diff --check`
+  passed.
+- ICC:
+  `npm run icc:update`
+  - Passed with `indexedFiles=354` and `memoryChunks=2104`.

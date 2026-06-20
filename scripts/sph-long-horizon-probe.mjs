@@ -2345,6 +2345,14 @@ async function runBrowserProbe({
               renderState.surfaceDrawAggregateIndirectRowsBufferByteLength ?? null,
             surfaceDrawCompactedVertexRowsBufferRetained: renderState.surfaceDrawCompactedVertexRowsBufferRetained ?? null,
             surfaceDrawCompactedVertexRowsBufferByteLength: renderState.surfaceDrawCompactedVertexRowsBufferByteLength ?? null,
+            surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus:
+              renderState.surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus ?? null,
+            surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution:
+              renderState.surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution ?? null,
+            surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength:
+              renderState.surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength ?? null,
+            surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength:
+              renderState.surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength ?? null,
             surfaceDrawVisibleRendererBridge: renderState.surfaceDrawVisibleRendererBridge ?? null,
             surfaceDrawVisibleRenderSource: renderState.surfaceDrawVisibleRenderSource ?? null,
             surfaceDrawOverlayPolicyStatus: renderState.surfaceDrawOverlayPolicyStatus ?? null,

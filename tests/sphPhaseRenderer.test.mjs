@@ -19,6 +19,7 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES,
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
   createContinuousSurfaceBatches,
   createResidentMaterialSeedSurfaceBatches,
   resolveSphScenePixelRatio,
@@ -75,7 +76,9 @@ import {
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial,
   stabilizeSurfaceMeshMaterialForRenderer,
-  createThreeWebGpuResidentBridgeMaterialProxy
+  createThreeWebGpuResidentBridgeMaterialProxy,
+  estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
+  nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget
 } from '../src/visualization/sphPhaseScene.js';
 import {
   GPU_PHASE_IDS,
@@ -167,6 +170,25 @@ test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layou
   assert.equal(recovered.width, 390);
   assert.equal(recovered.height, 844);
   assert.equal(recovered.aspect, 390 / 844);
+});
+
+test('SPH native marching-cubes surface resolution budgets conservative vertex rows', () => {
+  assert.equal(
+    estimateNativeMarchingCubesVertexRowsByteLengthForResolution(64),
+    240_045_120
+  );
+
+  const defaultResolution = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(1);
+  const defaultByteLength =
+    estimateNativeMarchingCubesVertexRowsByteLengthForResolution(defaultResolution);
+  assert.equal(defaultResolution, 33);
+  assert.ok(defaultByteLength <= SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT);
+
+  const twoSurfaceResolution = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(2);
+  const twoSurfaceByteLength =
+    estimateNativeMarchingCubesVertexRowsByteLengthForResolution(twoSurfaceResolution, 2);
+  assert.ok(twoSurfaceResolution < defaultResolution);
+  assert.ok(twoSurfaceByteLength <= SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT);
 });
 
 test('SPH renderer backend option normalizes WebGPU as opt-in', () => {

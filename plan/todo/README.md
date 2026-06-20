@@ -173,6 +173,22 @@ captures. Continue this lane by broadening native-surface scenarios and then
 moving ownership toward the worker/engine split; do not replace it with an
 overlay.
 
+Current routing note, 2026-06-20 AKDT: native/extension marching-cubes render
+fields now apply a conservative GPU vertex-row memory budget before extraction.
+The problematic 64^3 resident field implied a 240,045,120-byte ULG
+vertex-row upper bound for a single surface; the native consumer path now caps
+the render-field surface table from the default 32 MiB row budget while staying
+GPU-resident and no-full-readback. Benchmark evidence at
+`/tmp/ulg-native-10k-bench-budgeted-surface.json` is `status=good`,
+console-clean, keeps `estimatedReadbackBytesPerStep=0`, reports
+`surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus=native-marching-cubes-surface-table-resolution-budgeted`,
+selects native max resolution `23` for the active multi-surface case, and
+reduces `surfaceDrawCompactedVertexRowsBufferByteLength` from the previous
+~240 MB hotspot to `10,222,080` bytes. Continue this lane by replacing the
+intermediate ULG 16-float row expansion with a direct compact-position/native
+draw consumer, then move renderer/physics synchronization into the planned
+worker/engine ownership split.
+
 Current routing note, 2026-06-20 AKDT: the material JSON bank now has the first
 Phase 2 element crystalline-structure seed checked in and validated. The
 `element-crystal-structures` bank covers active solid Li, Na, K, Rb, Cs, Fe,

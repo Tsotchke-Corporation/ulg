@@ -563,6 +563,22 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const surfaceDrawDiagnosticFallbackReason = renderState?.surfaceDrawDiagnosticFallbackReason
     ?? surfaceDraw?.diagnosticFallbackReason
     ?? null;
+  const surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus =
+    renderState?.surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus
+      ?? null;
+  const surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution
+  );
+  const surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength
+  );
+  const surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength
+  );
   const renderRowsReadbackByteLength = numberOrNull(renderState?.renderRowsReadbackByteLength);
   const surfaceDrawSummaryReadbackByteLength = numberOrNull(
     renderState?.surfaceDrawSummaryReadbackByteLength ?? surfaceDraw?.surfaceDrawSummaryReadbackByteLength
@@ -847,6 +863,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawExtensionSurfaceRefreshElapsedMs,
     surfaceDrawRequestedDiagnosticMode,
     surfaceDrawDiagnosticFallbackReason,
+    surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus,
+    surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution,
+    surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength,
+    surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,
     surfaceDrawReadback: renderState?.surfaceDrawReadback ?? surfaceDraw?.surfaceDrawReadback ?? null,
     renderRowsReadback: renderState?.renderRowsReadback ?? null,

@@ -1222,6 +1222,18 @@ export function resolveResidentSurfaceBufferHandoff({
     0,
     Math.round(Number(surfaceDraw?.compactedVertexRowsBufferByteLength) || 0)
   );
+  const compactPositionRowsBufferRetained = Boolean(surfaceDraw?.compactPositionRowsBufferRetained);
+  const compactPositionRowsBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.compactPositionRowsBufferByteLength) || 0)
+  );
+  const compactPositionRowsStrideFloats = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.compactPositionRowsStrideFloats) || 0)
+  );
+  const compactPositionRowsFromBytes = compactPositionRowsStrideFloats > 0
+    ? Math.floor(compactPositionRowsBufferByteLength / (compactPositionRowsStrideFloats * Float32Array.BYTES_PER_ELEMENT))
+    : 0;
   const compactedRowsFromBytes = Math.floor(
     compactedVertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
@@ -1239,7 +1251,8 @@ export function resolveResidentSurfaceBufferHandoff({
     0,
     Math.floor(Number(surfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount) || 0),
     sourceVertexRowCount,
-    compactedRowsFromBytes
+    compactedRowsFromBytes,
+    compactPositionRowsFromBytes
   );
   const alignedUpperBoundVertexCount = upperBoundVertexCount - (upperBoundVertexCount % 3);
   const upperBoundTriangleCount = Math.max(
@@ -1259,8 +1272,10 @@ export function resolveResidentSurfaceBufferHandoff({
     && drawRowsBufferByteLength > 0
     && drawIndirectRowsBufferRetained
     && drawIndirectRowsBufferByteLength > 0
-    && compactedVertexRowsBufferRetained
-    && compactedVertexRowsBufferByteLength > 0;
+    && (
+      (compactedVertexRowsBufferRetained && compactedVertexRowsBufferByteLength > 0)
+      || (compactPositionRowsBufferRetained && compactPositionRowsBufferByteLength > 0)
+    );
   const hasRetainedRenderFieldBuffers = renderFieldRowsBufferRetained
     && renderFieldRowsBufferByteLength > 0
     && renderFieldSurfaceBufferRetained
@@ -1299,7 +1314,11 @@ export function resolveResidentSurfaceBufferHandoff({
     || status === 'resident-render-field-buffer-direct-consumer-ready';
   const surfaceExtractionInputKind = handoffKind === 'render-field-buffers'
     ? 'render-field-density-storage-buffer'
-    : (handoffKind === 'surface-draw-buffers' ? 'surface-draw-compact-vertex-buffer' : null);
+    : (handoffKind === 'surface-draw-buffers'
+      ? (compactPositionRowsBufferRetained
+        ? 'surface-draw-compact-position-buffer'
+        : 'surface-draw-compact-vertex-buffer')
+      : null);
   const surfaceExtractionConsumerKind = handoffKind === 'render-field-buffers'
     ? 'native-webgpu-marching-cubes-buffer-volume'
     : (handoffKind === 'surface-draw-buffers' ? 'direct-gpu-draw-consumer' : null);
@@ -1323,7 +1342,9 @@ export function resolveResidentSurfaceBufferHandoff({
     surfaceExtractionInputLayout: handoffKind === 'render-field-buffers'
       ? 'peercompute.ulg.sph-gpu-render-field-cell-row.density-x-f32.v0'
       : (handoffKind === 'surface-draw-buffers'
-        ? 'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0'
+        ? (compactPositionRowsBufferRetained
+          ? 'peercompute.webgpu-marching-cubes.compact-position-rows.v0'
+          : 'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0')
         : null),
     surfaceExtractionConsumerKind,
     surfaceExtractionRequiredAdapter: handoffKind === 'render-field-buffers'
@@ -1342,6 +1363,9 @@ export function resolveResidentSurfaceBufferHandoff({
     drawAggregateIndirectRowsBufferByteLength,
     compactedVertexRowsBufferRetained,
     compactedVertexRowsBufferByteLength,
+    compactPositionRowsBufferRetained,
+    compactPositionRowsBufferByteLength,
+    compactPositionRowsStrideFloats,
     renderFieldRowsBufferRetained,
     renderFieldRowsBufferByteLength,
     renderFieldSurfaceBufferRetained,
@@ -3284,6 +3308,133 @@ fn fs_oit_main(in: VertexOut) -> OitFragmentOut {
 }
 `;
 
+export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH =
+  16 * Float32Array.BYTES_PER_ELEMENT + 144;
+
+export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
+  SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
+    .replace(
+      `struct CameraUniform {
+  view_projection: mat4x4<f32>,
+};`,
+      `struct CameraUniform {
+  view_projection: mat4x4<f32>,
+  vertex_count: u32,
+  source_stride_floats: u32,
+  surface_index: u32,
+  triangle_count: u32,
+  material_id: f32,
+  phase_id: f32,
+  optical_state_id: f32,
+  density: f32,
+  isolation: f32,
+  source_voxel_base: f32,
+  transparency_class_id: f32,
+  depth_write_flag: f32,
+  render_order: f32,
+  fallback_normal_x: f32,
+  fallback_normal_y: f32,
+  fallback_normal_z: f32,
+  position_scale_m: f32,
+  position_origin_x_m: f32,
+  position_origin_y_m: f32,
+  position_origin_z_m: f32,
+  position_grid_bias: f32,
+  position_transform_enabled: f32,
+  position_transform_pad0: f32,
+  position_transform_pad1: f32,
+  position_clamp_min_x_m: f32,
+  position_clamp_min_y_m: f32,
+  position_clamp_min_z_m: f32,
+  position_clamp_max_x_m: f32,
+  position_clamp_max_y_m: f32,
+  position_clamp_max_z_m: f32,
+  position_clamp_enabled: f32,
+  position_clamp_pad0: f32,
+  bounds_center_x_m: f32,
+  bounds_center_y_m: f32,
+  bounds_center_z_m: f32,
+  bounds_radius_m: f32,
+};`
+    )
+    .replace(
+      '@group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;',
+      '@group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;'
+    )
+    .replace(
+      /@vertex\nfn vs_main\(@builtin\(vertex_index\) vertex_index: u32\) -> VertexOut \{[\s\S]*?\n\}\n\nfn resident_surface_color/,
+      `fn compact_position(vertex_index: u32) -> vec3<f32> {
+  let offset = vertex_index * camera_data.source_stride_floats;
+  return vec3<f32>(
+    compact_position_rows[offset + 0u],
+    compact_position_rows[offset + 1u],
+    compact_position_rows[offset + 2u]
+  );
+}
+
+fn compact_world_position(vertex_index: u32) -> vec3<f32> {
+  var p = compact_position(vertex_index);
+  if (camera_data.position_transform_enabled > 0.5) {
+    p = vec3<f32>(
+      camera_data.position_origin_x_m,
+      camera_data.position_origin_y_m,
+      camera_data.position_origin_z_m
+    ) + (p + vec3<f32>(camera_data.position_grid_bias)) * camera_data.position_scale_m;
+  }
+  if (camera_data.position_clamp_enabled > 0.5) {
+    p = clamp(
+      p,
+      vec3<f32>(
+        camera_data.position_clamp_min_x_m,
+        camera_data.position_clamp_min_y_m,
+        camera_data.position_clamp_min_z_m
+      ),
+      vec3<f32>(
+        camera_data.position_clamp_max_x_m,
+        camera_data.position_clamp_max_y_m,
+        camera_data.position_clamp_max_z_m
+      )
+    );
+  }
+  return p;
+}
+
+fn compact_normal(vertex_index: u32) -> vec3<f32> {
+  let triangle_base = vertex_index - (vertex_index % 3u);
+  let p0 = compact_world_position(triangle_base + 0u);
+  let p1 = compact_world_position(triangle_base + 1u);
+  let p2 = compact_world_position(triangle_base + 2u);
+  let n = cross(p1 - p0, p2 - p0);
+  if (length(n) <= 0.000000000001) {
+    return normalize(vec3<f32>(
+      camera_data.fallback_normal_x,
+      camera_data.fallback_normal_y,
+      camera_data.fallback_normal_z
+    ) + vec3<f32>(0.0001, 0.0002, 0.0003));
+  }
+  return normalize(n);
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  let position_m = compact_world_position(vertex_index);
+  var out: VertexOut;
+  var clip = camera_data.view_projection * vec4<f32>(position_m, 1.0);
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  if (clip.w <= 0.0) {
+    clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  }
+  out.position = clip;
+  out.normal = compact_normal(vertex_index);
+  out.material_id = camera_data.material_id;
+  out.phase_id = camera_data.phase_id;
+  out.optical_state_id = camera_data.optical_state_id;
+  return out;
+}
+
+fn resident_surface_color`
+    );
+
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL = `
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -4419,6 +4570,15 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
 	    bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
 	  target.renderBridgeNativeSurfaceDeferredResourceReleasePending =
 	    bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
+  target.renderBridgeExternalGpuBufferByteLength = bridge.externalGpuBufferByteLength ?? 0;
+  target.renderBridgeExternalGpuBufferInputLayout = bridge.externalGpuBufferInputLayout ?? null;
+  target.renderBridgeExternalGpuBufferVertexRowStrideFloats =
+    bridge.externalGpuBufferVertexRowStrideFloats ?? 0;
+  target.renderBridgeCompactPositionDirectInput = Boolean(bridge.compactPositionDirectInput);
+  target.renderBridgeCompactPositionDirectInputByteLength =
+    bridge.compactPositionDirectInputByteLength ?? 0;
+  target.renderBridgeCompactPositionDirectInputVertexCount =
+    bridge.compactPositionDirectInputVertexCount ?? 0;
 	  return target;
 	}
 
@@ -4534,6 +4694,15 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
 	    bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
 	  target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending =
 	    bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
+  target.surfaceDrawRenderBridgeExternalGpuBufferByteLength = bridge.externalGpuBufferByteLength ?? 0;
+  target.surfaceDrawRenderBridgeExternalGpuBufferInputLayout = bridge.externalGpuBufferInputLayout ?? null;
+  target.surfaceDrawRenderBridgeExternalGpuBufferVertexRowStrideFloats =
+    bridge.externalGpuBufferVertexRowStrideFloats ?? 0;
+  target.surfaceDrawRenderBridgeCompactPositionDirectInput = Boolean(bridge.compactPositionDirectInput);
+  target.surfaceDrawRenderBridgeCompactPositionDirectInputByteLength =
+    bridge.compactPositionDirectInputByteLength ?? 0;
+  target.surfaceDrawRenderBridgeCompactPositionDirectInputVertexCount =
+    bridge.compactPositionDirectInputVertexCount ?? 0;
 	  return target;
 	}
 
@@ -10866,6 +11035,212 @@ export function createSphPhaseScene(container, {
     return bridge;
   }
 
+  function finiteVector3(value, fallback = [0, 0, 0]) {
+    const source = Array.isArray(value) || ArrayBuffer.isView(value) ? value : fallback;
+    return [
+      Number.isFinite(Number(source[0])) ? Number(source[0]) : fallback[0],
+      Number.isFinite(Number(source[1])) ? Number(source[1]) : fallback[1],
+      Number.isFinite(Number(source[2])) ? Number(source[2]) : fallback[2]
+    ];
+  }
+
+  function normalizeVector3ForUniform(value, fallback = [0, 1, 0]) {
+    const v = finiteVector3(value, fallback);
+    const length = Math.hypot(v[0], v[1], v[2]);
+    if (!(length > 1e-12)) return [...fallback];
+    return [v[0] / length, v[1] / length, v[2] / length];
+  }
+
+  function resolveCompactPositionSurfaceDrawState(surfaceDrawExecution = {}) {
+    const surface = Array.isArray(surfaceDrawExecution?.surfaces)
+      ? (surfaceDrawExecution.surfaces[0] || {})
+      : {};
+    const positionTransform = surfaceDrawExecution?.positionTransform || {};
+    const positionClamp = surfaceDrawExecution?.positionClamp || {};
+    const transformEnabled = Boolean(positionTransform.enabled);
+    const clampEnabled = Boolean(positionClamp.enabled);
+    return {
+      vertexCount: Math.max(0, Math.floor(Number(
+        surfaceDrawExecution?.sourceVertexRowCount
+          ?? surfaceDrawExecution?.compactPositionRowsVertexCount
+          ?? surfaceDrawExecution?.compactPositionRowsBufferRowCount
+          ?? surfaceDrawExecution?.vertexCount
+      ) || 0)),
+      sourceStrideFloats: Math.max(3, Math.round(Number(
+        surfaceDrawExecution?.compactPositionRowsStrideFloats
+          ?? surfaceDrawExecution?.sourceVertexStrideFloats
+          ?? 4
+      ) || 4)),
+      surfaceIndex: Math.max(0, Math.round(Number(surface.surfaceIndex ?? surfaceDrawExecution?.surfaceIndex) || 0)),
+      triangleCount: Math.max(0, Math.floor(Number(surface.triangleCount ?? surfaceDrawExecution?.triangleCount) || 0)),
+      materialId: Number.isFinite(Number(surface.materialId ?? surfaceDrawExecution?.materialId))
+        ? Number(surface.materialId ?? surfaceDrawExecution?.materialId)
+        : 0,
+      phaseId: Number.isFinite(Number(surface.phaseId ?? surfaceDrawExecution?.phaseId))
+        ? Number(surface.phaseId ?? surfaceDrawExecution?.phaseId)
+        : 0,
+      opticalStateId: Number.isFinite(Number(surface.opticalStateId ?? surfaceDrawExecution?.opticalStateId))
+        ? Number(surface.opticalStateId ?? surfaceDrawExecution?.opticalStateId)
+        : 0,
+      density: Number.isFinite(Number(surfaceDrawExecution?.density)) ? Number(surfaceDrawExecution.density) : 0,
+      isolation: Number.isFinite(Number(surfaceDrawExecution?.isolation)) ? Number(surfaceDrawExecution.isolation) : 0,
+      sourceVoxelBase: Number.isFinite(Number(surfaceDrawExecution?.sourceVoxelLinearIndex))
+        ? Number(surfaceDrawExecution.sourceVoxelLinearIndex)
+        : 0,
+      transparencyClassId: Number.isFinite(Number(surface.transparencyClassId ?? surfaceDrawExecution?.transparencyClassId))
+        ? Number(surface.transparencyClassId ?? surfaceDrawExecution?.transparencyClassId)
+        : 0,
+      depthWriteFlag: Number.isFinite(Number(surface.depthWriteFlag ?? surfaceDrawExecution?.depthWriteFlag))
+        ? Number(surface.depthWriteFlag ?? surfaceDrawExecution?.depthWriteFlag)
+        : 1,
+      renderOrder: Number.isFinite(Number(surface.renderOrder ?? surfaceDrawExecution?.renderOrder))
+        ? Number(surface.renderOrder ?? surfaceDrawExecution?.renderOrder)
+        : Number(surface.surfaceIndex ?? 0),
+      fallbackNormal: normalizeVector3ForUniform(surfaceDrawExecution?.fallbackNormal, [0, 1, 0]),
+      positionScaleM: transformEnabled && Number.isFinite(Number(positionTransform.scaleM))
+        ? Number(positionTransform.scaleM)
+        : 1,
+      positionOriginM: transformEnabled ? finiteVector3(positionTransform.originM, [0, 0, 0]) : [0, 0, 0],
+      positionGridBias: transformEnabled && Number.isFinite(Number(positionTransform.gridBias))
+        ? Number(positionTransform.gridBias)
+        : 0,
+      positionTransformEnabled: transformEnabled ? 1 : 0,
+      positionClampMinM: clampEnabled ? finiteVector3(positionClamp.minM, [0, 0, 0]) : [0, 0, 0],
+      positionClampMaxM: clampEnabled ? finiteVector3(positionClamp.maxM, [0, 0, 0]) : [0, 0, 0],
+      positionClampEnabled: clampEnabled ? 1 : 0,
+      boundsCenterM: finiteVector3(surface.boundsCenterM, [0, 0, 0]),
+      boundsRadiusM: Number.isFinite(Number(surface.boundsRadiusM)) ? Number(surface.boundsRadiusM) : 0
+    };
+  }
+
+  function compactPositionCameraUniformPayload({
+    viewProjection,
+    compactPositionDrawState
+  } = {}) {
+    const payload = new ArrayBuffer(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH);
+    const matrix = new Float32Array(payload, 0, 16);
+    const matrixSource = Array.isArray(viewProjection?.elements) || ArrayBuffer.isView(viewProjection?.elements)
+      ? viewProjection.elements
+      : (Array.isArray(viewProjection) || ArrayBuffer.isView(viewProjection) ? viewProjection : null);
+    if (matrixSource) {
+      matrix.set(Array.from(matrixSource).slice(0, 16), 0);
+    }
+    const view = new DataView(payload);
+    const state = compactPositionDrawState || {};
+    const fallbackNormal = finiteVector3(state.fallbackNormal, [0, 1, 0]);
+    const originM = finiteVector3(state.positionOriginM, [0, 0, 0]);
+    const clampMinM = finiteVector3(state.positionClampMinM, [0, 0, 0]);
+    const clampMaxM = finiteVector3(state.positionClampMaxM, [0, 0, 0]);
+    const boundsCenterM = finiteVector3(state.boundsCenterM, [0, 0, 0]);
+    const f32 = (offset, value) => view.setFloat32(
+      64 + offset,
+      Number.isFinite(Number(value)) ? Number(value) : 0,
+      true
+    );
+    const u32 = (offset, value) => view.setUint32(
+      64 + offset,
+      Math.max(0, Math.round(Number(value) || 0)),
+      true
+    );
+    u32(0, state.vertexCount);
+    u32(4, Math.max(3, state.sourceStrideFloats));
+    u32(8, state.surfaceIndex);
+    u32(12, state.triangleCount);
+    f32(16, state.materialId);
+    f32(20, state.phaseId);
+    f32(24, state.opticalStateId);
+    f32(28, state.density);
+    f32(32, state.isolation);
+    f32(36, state.sourceVoxelBase);
+    f32(40, state.transparencyClassId);
+    f32(44, state.depthWriteFlag);
+    f32(48, state.renderOrder);
+    f32(52, fallbackNormal[0]);
+    f32(56, fallbackNormal[1]);
+    f32(60, fallbackNormal[2]);
+    f32(64, state.positionScaleM ?? 1);
+    f32(68, originM[0]);
+    f32(72, originM[1]);
+    f32(76, originM[2]);
+    f32(80, state.positionGridBias);
+    f32(84, state.positionTransformEnabled);
+    f32(88, 0);
+    f32(92, 0);
+    f32(96, clampMinM[0]);
+    f32(100, clampMinM[1]);
+    f32(104, clampMinM[2]);
+    f32(108, clampMaxM[0]);
+    f32(112, clampMaxM[1]);
+    f32(116, clampMaxM[2]);
+    f32(120, state.positionClampEnabled);
+    f32(124, 0);
+    f32(128, boundsCenterM[0]);
+    f32(132, boundsCenterM[1]);
+    f32(136, boundsCenterM[2]);
+    f32(140, state.boundsRadiusM);
+    return payload;
+  }
+
+  function resolveNativeSurfaceDrawInput(surfaceDrawExecution = {}) {
+    const compactPositionRowsBuffer = surfaceDrawExecution?.compactPositionRowsBuffer || null;
+    const compactPositionRowsBufferByteLength = Math.max(
+      0,
+      Math.round(Number(surfaceDrawExecution?.compactPositionRowsBufferByteLength) || 0)
+    );
+    const compactPositionVertexCount = Math.max(0, Math.floor(Number(
+      surfaceDrawExecution?.sourceVertexRowCount
+        ?? surfaceDrawExecution?.compactPositionRowsVertexCount
+        ?? surfaceDrawExecution?.compactPositionRowsBufferRowCount
+        ?? surfaceDrawExecution?.vertexCount
+    ) || 0));
+    if (
+      compactPositionRowsBuffer
+      && compactPositionRowsBufferByteLength > 0
+      && compactPositionVertexCount >= 3
+      && surfaceDrawExecution?.directCompactPositionDraw === true
+    ) {
+      return {
+        layout: 'webgpu-marching-cubes-compact-position-rows',
+        buffer: compactPositionRowsBuffer,
+        byteLength: compactPositionRowsBufferByteLength,
+        sourceVertexRowCount: compactPositionVertexCount - (compactPositionVertexCount % 3),
+        rowStrideFloats: Math.max(3, Math.round(Number(
+          surfaceDrawExecution?.compactPositionRowsStrideFloats
+            ?? surfaceDrawExecution?.sourceVertexStrideFloats
+            ?? 4
+        ) || 4)),
+        normalAttribute: false,
+        normalAttributeDisabledReason:
+          'native WebGPU surface consumer derives flat normals from compact marching-cubes triangle position rows',
+        compactPositionDrawState: resolveCompactPositionSurfaceDrawState(surfaceDrawExecution)
+      };
+    }
+    const vertexRowsBuffer = surfaceDrawExecution?.compactedVertexRowsBuffer || null;
+    const vertexRowsBufferByteLength = Math.max(
+      0,
+      Math.round(Number(surfaceDrawExecution?.compactedVertexRowsBufferByteLength) || 0)
+    );
+    const sourceVertexRowCount = Math.max(
+      0,
+      Math.floor(Number(
+        surfaceDrawExecution?.sourceVertexRowCount
+          ?? surfaceDrawExecution?.vertexCount
+          ?? (vertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT))
+      ) || 0)
+    );
+    return {
+      layout: 'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0',
+      buffer: vertexRowsBuffer,
+      byteLength: vertexRowsBufferByteLength,
+      sourceVertexRowCount,
+      rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+      normalAttribute: false,
+      normalAttributeDisabledReason:
+        'native WebGPU surface consumer reads packed normals directly from retained compact vertex rows',
+      compactPositionDrawState: null
+    };
+  }
+
   function createSphResidentSurfaceDrawNativeWebGpuConsumerBridge({
     surfaceDrawExecution,
     rendererCapability = null
@@ -10887,23 +11262,12 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       };
     }
-    const vertexRowsBuffer = surfaceDrawExecution?.compactedVertexRowsBuffer || null;
-    const vertexRowsBufferByteLength = Math.max(0, Math.round(Number(
-      surfaceDrawExecution?.compactedVertexRowsBufferByteLength
-    ) || 0));
-    const sourceVertexRowCount = Math.max(
-      0,
-      Math.floor(Number(
-        surfaceDrawExecution?.sourceVertexRowCount
-          ?? surfaceDrawExecution?.vertexCount
-          ?? (vertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT))
-      ) || 0)
-    );
-    if (!vertexRowsBuffer || sourceVertexRowCount < 3) {
+    const nativeInput = resolveNativeSurfaceDrawInput(surfaceDrawExecution);
+    if (!nativeInput.buffer || nativeInput.sourceVertexRowCount < 3) {
       return {
         schema,
         status: 'native-webgpu-surface-consumer-unavailable',
-        reason: 'retained compact vertex row GPUBuffer with at least one triangle is required',
+        reason: 'retained ULG surface vertex rows or compact marching-cubes position rows with at least one triangle are required',
         rendererBridge,
         visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
         overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
@@ -10956,8 +11320,16 @@ export function createSphPhaseScene(container, {
     }
     try {
       const gpu = navigatorRef?.gpu || globalThis.navigator?.gpu;
-      if (!device?.createRenderPipeline || !surfaceDrawExecution?.compactedVertexRowsBuffer || !surfaceDrawExecution?.drawIndirectRowsBuffer) {
-        return { status: 'surface-draw-overlay-unavailable', reason: 'retained compact vertex and indirect buffers are required' };
+      const nativeDrawInput = resolveNativeSurfaceDrawInput(surfaceDrawExecution);
+      const surfaceInputBuffer = nativeDrawInput.buffer || null;
+      const surfaceInputLayout = nativeDrawInput.layout;
+      const useCompactPositionRows =
+        surfaceInputLayout === 'webgpu-marching-cubes-compact-position-rows';
+      const cameraBufferByteLength = useCompactPositionRows
+        ? SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH
+        : 16 * Float32Array.BYTES_PER_ELEMENT;
+      if (!device?.createRenderPipeline || !surfaceInputBuffer || !surfaceDrawExecution?.drawIndirectRowsBuffer) {
+        return { status: 'surface-draw-overlay-unavailable', reason: 'retained surface input and indirect buffers are required' };
       }
       const canvas = useNativeConsumer
         ? nativeConsumer.canvas
@@ -11004,6 +11376,8 @@ export function createSphPhaseScene(container, {
         && previousBridge.oitCompositePipeline
         && previousBridge.oitCompositeBindGroupLayout
         && previousBridge.oitSampler
+        && previousBridge.surfaceInputLayout === surfaceInputLayout
+        && (previousBridge.cameraBufferByteLength ?? 0) >= cameraBufferByteLength
         && previousBridge.opticalGpuBuffers?.recordsBuffer
         && previousBridge.opticalGpuBuffers?.spectralSamplesBuffer
         && previousBridge.opticalGpuTable === bridgeOpticalGpuTable
@@ -11014,7 +11388,7 @@ export function createSphPhaseScene(container, {
           label: 'ulg-sph-resident-surface-draw-overlay-bind-group',
           layout: previousBridge.bindGroupLayout,
           entries: [
-            { binding: 0, resource: { buffer: surfaceDrawExecution.compactedVertexRowsBuffer } },
+            { binding: 0, resource: { buffer: surfaceInputBuffer } },
             { binding: 1, resource: { buffer: previousBridge.cameraBuffer } },
             { binding: 2, resource: { buffer: previousBridge.opticalGpuBuffers.recordsBuffer } },
             { binding: 3, resource: { buffer: previousBridge.opticalGpuBuffers.spectralSamplesBuffer } }
@@ -11048,7 +11422,10 @@ export function createSphPhaseScene(container, {
           opticalSpectralSampleCount: bridgeOpticalGpuTable.spectralSampleCount,
           opticalSpectralSampleStrideFloats: bridgeOpticalGpuTable.spectralSampleStrideFloats,
           temporalSwapPolicy: SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
-          indirectStrideBytes
+          indirectStrideBytes,
+          surfaceInputLayout,
+          surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         };
         Object.assign(previousBridge, {
           status: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS,
@@ -11062,11 +11439,17 @@ export function createSphPhaseScene(container, {
           format,
           engineIntegration: 'native-webgpu-engine-main-canvas-no-overlay',
           externalGpuBufferGeometry: true,
-          externalGpuBufferByteLength: surfaceDrawExecution?.compactedVertexRowsBufferByteLength ?? 0,
-          externalGpuBufferVertexRowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
-          externalGpuBufferNormalAttribute: false,
+          externalGpuBufferByteLength: nativeDrawInput.byteLength,
+          externalGpuBufferVertexRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          externalGpuBufferInputLayout: surfaceInputLayout,
+          externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
           externalGpuBufferNormalAttributeDisabledReason:
-            'native WebGPU surface consumer reads packed normals directly from retained compact vertex rows',
+            nativeDrawInput.normalAttributeDisabledReason,
+          compactPositionDirectInput: useCompactPositionRows,
+          compactPositionDirectInputByteLength:
+            useCompactPositionRows ? nativeDrawInput.byteLength : 0,
+          compactPositionDirectInputVertexCount:
+            useCompactPositionRows ? nativeDrawInput.sourceVertexRowCount : 0,
           externalGpuBufferIndirect: Boolean(surfaceDrawExecution?.drawIndirectRowsBufferRetained),
           externalGpuBufferIndirectRuntimeValidated: true,
           externalGpuBufferIndirectDisabledReason: null,
@@ -11118,6 +11501,9 @@ export function createSphPhaseScene(container, {
             nativeConsumer?.offscreenValidationPixelCount ?? previousBridge.offscreenValidationPixelCount ?? null,
           backgroundClearValue: { r: 0.094, g: 0.133, b: 0.169, a: 1 },
           drawState,
+          surfaceInputLayout,
+          surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          cameraBufferByteLength,
           drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
@@ -11145,7 +11531,9 @@ export function createSphPhaseScene(container, {
       }
       const module = device.createShaderModule({
         label: 'ulg-sph-resident-surface-draw-overlay',
-        code: SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
+        code: useCompactPositionRows
+          ? SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL
+          : SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
       });
       const oitCompositeModule = device.createShaderModule({
         label: 'ulg-sph-resident-surface-draw-oit-composite',
@@ -11305,14 +11693,14 @@ export function createSphPhaseScene(container, {
       });
       const cameraBuffer = device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-camera',
-        size: 16 * Float32Array.BYTES_PER_ELEMENT,
+        size: cameraBufferByteLength,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       });
       const bindGroup = device.createBindGroup({
         label: 'ulg-sph-resident-surface-draw-overlay-bind-group',
         layout: bindGroupLayout,
         entries: [
-          { binding: 0, resource: { buffer: surfaceDrawExecution.compactedVertexRowsBuffer } },
+          { binding: 0, resource: { buffer: surfaceInputBuffer } },
           { binding: 1, resource: { buffer: cameraBuffer } },
           { binding: 2, resource: { buffer: opticalGpuBuffers.recordsBuffer } },
           { binding: 3, resource: { buffer: opticalGpuBuffers.spectralSamplesBuffer } }
@@ -11347,13 +11735,19 @@ export function createSphPhaseScene(container, {
           : 'webgpu-overlay-canvas',
         externalGpuBufferGeometry: useNativeConsumer,
         externalGpuBufferByteLength:
-          useNativeConsumer ? (surfaceDrawExecution?.compactedVertexRowsBufferByteLength ?? 0) : 0,
+          useNativeConsumer ? nativeDrawInput.byteLength : 0,
         externalGpuBufferVertexRowStrideFloats:
-          useNativeConsumer ? SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS : 0,
-        externalGpuBufferNormalAttribute: false,
+          useNativeConsumer ? nativeDrawInput.rowStrideFloats : 0,
+        externalGpuBufferInputLayout: useNativeConsumer ? surfaceInputLayout : null,
+        externalGpuBufferNormalAttribute: Boolean(nativeDrawInput.normalAttribute),
         externalGpuBufferNormalAttributeDisabledReason: useNativeConsumer
-          ? 'native WebGPU surface consumer reads packed normals directly from retained compact vertex rows'
+          ? nativeDrawInput.normalAttributeDisabledReason
           : null,
+        compactPositionDirectInput: Boolean(useNativeConsumer && useCompactPositionRows),
+        compactPositionDirectInputByteLength:
+          useNativeConsumer && useCompactPositionRows ? nativeDrawInput.byteLength : 0,
+        compactPositionDirectInputVertexCount:
+          useNativeConsumer && useCompactPositionRows ? nativeDrawInput.sourceVertexRowCount : 0,
         externalGpuBufferIndirect: Boolean(
           useNativeConsumer && surfaceDrawExecution?.drawIndirectRowsBufferRetained
         ),
@@ -11420,6 +11814,9 @@ export function createSphPhaseScene(container, {
         oitCompositePipelineLayout,
         oitSampler,
         cameraBuffer,
+        cameraBufferByteLength,
+        surfaceInputLayout,
+        surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
           bindGroup,
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
@@ -11441,7 +11838,10 @@ export function createSphPhaseScene(container, {
           opticalSpectralSampleCount: bridgeOpticalGpuTable.spectralSampleCount,
           opticalSpectralSampleStrideFloats: bridgeOpticalGpuTable.spectralSampleStrideFloats,
           temporalSwapPolicy: SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
-          indirectStrideBytes
+          indirectStrideBytes,
+          surfaceInputLayout,
+          surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
+          compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         },
         drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
         drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
@@ -11800,7 +12200,18 @@ export function createSphPhaseScene(container, {
       camera.updateMatrixWorld?.();
       camera.matrixWorldInverse?.copy?.(camera.matrixWorld)?.invert?.();
       const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
+      if (drawState.surfaceInputLayout === 'webgpu-marching-cubes-compact-position-rows') {
+        bridge.device.queue.writeBuffer(
+          bridge.cameraBuffer,
+          0,
+          compactPositionCameraUniformPayload({
+            viewProjection,
+            compactPositionDrawState: drawState.compactPositionDrawState
+          })
+        );
+      } else {
+        bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
+      }
       const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
         ? drawState.drawOrder
         : residentSurfaceDrawOrder(
@@ -16923,6 +17334,7 @@ export function createSphPhaseScene(container, {
         positionClampMaxM,
         readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
+        translateVertexRows: !renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge,
         retainVertexRowsBuffer: true,
         retainDrawRowsBuffer: true,
         retainDrawIndirectRowsBuffer: true,
@@ -16998,6 +17410,14 @@ export function createSphPhaseScene(container, {
         drawAggregateIndirectRowsBufferByteLength: surfaceDrawExecution.drawAggregateIndirectRowsBufferByteLength ?? 0,
         compactedVertexRowsBufferRetained: Boolean(surfaceDrawExecution.compactedVertexRowsBufferRetained),
         compactedVertexRowsBufferByteLength: surfaceDrawExecution.compactedVertexRowsBufferByteLength ?? 0,
+        compactPositionRowsBufferRetained: Boolean(surfaceDrawExecution.compactPositionRowsBufferRetained),
+        compactPositionRowsBufferByteLength: surfaceDrawExecution.compactPositionRowsBufferByteLength ?? 0,
+        compactPositionRowsBufferRowCount: surfaceDrawExecution.compactPositionRowsBufferRowCount ?? 0,
+        compactPositionRowsVertexCount: surfaceDrawExecution.compactPositionRowsVertexCount ?? 0,
+        compactPositionRowsStrideFloats: surfaceDrawExecution.compactPositionRowsStrideFloats ?? 0,
+        compactPositionRowsStrideBytes: surfaceDrawExecution.compactPositionRowsStrideBytes ?? 0,
+        compactPositionRowsFormat: surfaceDrawExecution.compactPositionRowsFormat ?? null,
+        directCompactPositionDraw: Boolean(surfaceDrawExecution.directCompactPositionDraw),
         residentBufferLeaseLedgerStatus: translation.residentBufferLeaseLedgerStatus ?? null,
         residentBufferLeaseResourceCount: translation.residentBufferLeaseResourceCount ?? 0,
         residentBufferLeaseActiveLeaseCount: translation.residentBufferLeaseActiveLeaseCount ?? 0,
@@ -17097,6 +17517,16 @@ export function createSphPhaseScene(container, {
             ? 'three-webgpu-renderer-owned-scene-object-external-buffer'
             : 'three-renderer-owned-scene-object-no-overlay'))
           : 'three-renderer-owned-scene-state-no-overlay',
+        renderBridgeExternalGpuBufferGeometry: Boolean(renderBridge?.externalGpuBufferGeometry),
+        renderBridgeExternalGpuBufferByteLength: renderBridge?.externalGpuBufferByteLength ?? 0,
+        renderBridgeExternalGpuBufferInputLayout: renderBridge?.externalGpuBufferInputLayout ?? null,
+        renderBridgeExternalGpuBufferVertexRowStrideFloats:
+          renderBridge?.externalGpuBufferVertexRowStrideFloats ?? 0,
+        renderBridgeCompactPositionDirectInput: Boolean(renderBridge?.compactPositionDirectInput),
+        renderBridgeCompactPositionDirectInputByteLength:
+          renderBridge?.compactPositionDirectInputByteLength ?? 0,
+        renderBridgeCompactPositionDirectInputVertexCount:
+          renderBridge?.compactPositionDirectInputVertexCount ?? 0,
         renderBridgeNativeWebGpuSurfaceConsumer: Boolean(renderBridge?.nativeWebGpuSurfaceConsumer),
         renderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:
           renderBridge?.nativeWebGpuSurfaceConsumerEngineIntegration ?? null,
@@ -17248,6 +17678,8 @@ export function createSphPhaseScene(container, {
         drawRowsBufferRetained: residentDraw.drawRowsBufferRetained,
         drawIndirectRowsBufferRetained: residentDraw.drawIndirectRowsBufferRetained,
         compactedVertexRowsBufferRetained: residentDraw.compactedVertexRowsBufferRetained,
+        compactPositionRowsBufferRetained: residentDraw.compactPositionRowsBufferRetained,
+        directCompactPositionDraw: residentDraw.directCompactPositionDraw,
         renderBridgePlanStatus: residentDraw.renderBridgePlanStatus,
         renderBridgePlanEffectiveMode: residentDraw.renderBridgePlanEffectiveMode,
         renderBridgePlanFallbackThreeCompact: residentDraw.renderBridgePlanFallbackThreeCompact,
@@ -18860,7 +19292,9 @@ export function createSphPhaseScene(container, {
               readbackMode: RESIDENT_NO_FULL_READBACK_MODE
             });
             const gpuBufferHandoffDefaultReason = gpuBufferHandoff.handoffKind === 'surface-draw-buffers'
-              ? 'native marching-cubes extension produced retained ULG surface buffers for the engine-owned direct consumer path'
+              ? (nextResidentSurfaceDraw.directCompactPositionDraw
+                ? 'native marching-cubes extension produced retained compact position rows for the engine-owned direct consumer path'
+                : 'native marching-cubes extension produced retained ULG surface buffers for the engine-owned direct consumer path')
               : 'retained render-field and surface buffers are ready for the engine-owned marching-cubes/direct-consumer path';
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSchema = gpuBufferHandoff.schema;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReady = gpuBufferHandoff.ready;
@@ -19592,6 +20026,22 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.drawAggregateIndirectRowsBufferByteLength ?? 0,
         surfaceDrawCompactedVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.compactedVertexRowsBufferRetained),
         surfaceDrawCompactedVertexRowsBufferByteLength: sphResidentSurfaceDraw?.compactedVertexRowsBufferByteLength ?? 0,
+        surfaceDrawCompactPositionRowsBufferRetained:
+          Boolean(sphResidentSurfaceDraw?.compactPositionRowsBufferRetained),
+        surfaceDrawCompactPositionRowsBufferByteLength:
+          sphResidentSurfaceDraw?.compactPositionRowsBufferByteLength ?? 0,
+        surfaceDrawCompactPositionRowsBufferRowCount:
+          sphResidentSurfaceDraw?.compactPositionRowsBufferRowCount ?? 0,
+        surfaceDrawCompactPositionRowsVertexCount:
+          sphResidentSurfaceDraw?.compactPositionRowsVertexCount ?? 0,
+        surfaceDrawCompactPositionRowsStrideFloats:
+          sphResidentSurfaceDraw?.compactPositionRowsStrideFloats ?? 0,
+        surfaceDrawCompactPositionRowsStrideBytes:
+          sphResidentSurfaceDraw?.compactPositionRowsStrideBytes ?? 0,
+        surfaceDrawCompactPositionRowsFormat:
+          sphResidentSurfaceDraw?.compactPositionRowsFormat ?? null,
+        surfaceDrawDirectCompactPositionDraw:
+          Boolean(sphResidentSurfaceDraw?.directCompactPositionDraw),
         surfaceDrawLeaseStatus: sphResidentSurfaceDraw?.residentBufferLeaseLedgerStatus ?? null,
         surfaceDrawLeaseResourceCount: sphResidentSurfaceDraw?.residentBufferLeaseResourceCount ?? 0,
         surfaceDrawLeaseActiveCount: sphResidentSurfaceDraw?.residentBufferLeaseActiveLeaseCount ?? 0,
@@ -19747,6 +20197,12 @@ export function createSphPhaseScene(container, {
           ?? null,
         surfaceDrawRenderBridgeExternalGpuBufferGeometry:
           Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferGeometry),
+        surfaceDrawRenderBridgeExternalGpuBufferByteLength:
+          sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferByteLength ?? 0,
+        surfaceDrawRenderBridgeExternalGpuBufferInputLayout:
+          sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferInputLayout ?? null,
+        surfaceDrawRenderBridgeExternalGpuBufferVertexRowStrideFloats:
+          sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferVertexRowStrideFloats ?? 0,
         surfaceDrawRenderBridgeExternalGpuBufferNormalAttribute:
           Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferNormalAttribute),
         surfaceDrawRenderBridgeExternalGpuBufferNormalAttributeDisabledReason:
@@ -19757,6 +20213,12 @@ export function createSphPhaseScene(container, {
           Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectRuntimeValidated),
         surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason:
           sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
+        surfaceDrawRenderBridgeCompactPositionDirectInput:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeCompactPositionDirectInput),
+        surfaceDrawRenderBridgeCompactPositionDirectInputByteLength:
+          sphResidentSurfaceDraw?.renderBridgeCompactPositionDirectInputByteLength ?? 0,
+        surfaceDrawRenderBridgeCompactPositionDirectInputVertexCount:
+          sphResidentSurfaceDraw?.renderBridgeCompactPositionDirectInputVertexCount ?? 0,
         surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumer:
           Boolean(sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumer),
         surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerEngineIntegration:

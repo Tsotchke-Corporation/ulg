@@ -12195,6 +12195,9 @@ Contact-bin diagnostic flag lifetime fix, 2026-06-20 AKDT:
 - Whitespace:
   `git diff --check`
   passed.
+- ICC:
+  `npm run icc:update`
+  - Passed with `indexedFiles=354` and `memoryChunks=2111`.
 - Focused pressure/interface and MLS-MPM runtime tests:
   `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
   - Passed: `72/72`.
@@ -12380,3 +12383,52 @@ Native marching-cubes vertex-row budget slice, 2026-06-20 AKDT:
 - ICC:
   `npm run icc:update`
   - Passed with `indexedFiles=354` and `memoryChunks=2104`.
+
+Direct compact-position native surface draw slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  passed.
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Adapter tests:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `19/19`.
+  - Covers metadata-only compact direct draw, no allocation of
+    `ulg-sph-extension-surface-vertices`, retained extension compact position
+    source metadata, and retained draw/indirect buffer lease cleanup.
+- Focused renderer tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "compact-position|surface buffer handoff"`
+  - Passed: `71/71`.
+  - Covers compact-position native WGSL, PBR/optical fragment path retention,
+    triangle-normal derivation, and direct compact-position handoff readiness.
+- Browser native 10k benchmark:
+  `ULG_BENCH_OUTPUT=/tmp/ulg-native-10k-bench-direct-compact-v2.json ULG_BENCH_PORT=5687 ULG_BENCH_TIMEOUT_MS=240000 ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  - Passed: `status=good`, `probeStatus=good`.
+  - Browser console issue count: `0`.
+  - Actual particles: `9826`.
+  - `estimatedReadbackBytesPerStep=0`.
+  - `validResidentSurfaceBufferHandoff=true`.
+  - `surfaceDrawRenderBridgeExternalGpuBufferInputLayout=webgpu-marching-cubes-compact-position-rows`.
+  - `surfaceDrawDirectCompactPositionDraw=true`.
+  - `surfaceDrawCompactedVertexRowsBufferByteLength=0`.
+  - `surfaceDrawCompactPositionRowsBufferByteLength=2555520`.
+  - `surfaceDrawCompactPositionRowsVertexCount=159720`.
+  - `surfaceDrawCompactPositionRowsStrideFloats=4`.
+  - Native bridge rendered through `native-webgpu-surface-consumer-rendered`.
+- Combined focused tests:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `90/90`.
+- Build:
+  `npm run build`
+  - Passed with the existing large chunk warning only.
+- Whitespace:
+  `git diff --check`
+  passed.

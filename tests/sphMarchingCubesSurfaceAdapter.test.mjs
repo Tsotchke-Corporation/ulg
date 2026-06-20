@@ -30,6 +30,7 @@ import {
   createUlgWebGpuMarchingCubesExtensionAdapter,
   summarizeWebGpuMarchingCubesExtensionExecution,
   translateWebGpuMarchingCubesSurfaceToUlgRows,
+  webGpuMarchingCubesExtensionCompactSurfaceDrawWgsl,
   webGpuMarchingCubesExtensionSurfaceRowsWgsl
 } from '../src/runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 
@@ -1061,6 +1062,75 @@ test('ULG GPU builder reuses the extension surface translation pipeline on the s
   assert.equal(second.translationPipelineCacheStatus, 'pipeline-cache-hit');
   assert.equal(shaderModules.length, 1);
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
+});
+
+test('ULG GPU builder can retain compact position rows for direct native draw without ULG vertex expansion', async () => {
+  const { device, shaderModules, bindGroups, dispatches, createdBuffers, queueWrites } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    vertexCount: 9,
+    includeOutputDescriptors: true,
+    vertexCountMode: 'gpu-counter'
+  });
+
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback',
+    translateVertexRows: false,
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(result.status, 'extension-surface-compact-position-direct-resident-webgpu');
+  assert.equal(result.directCompactPositionDraw, true);
+  assert.equal(result.hotLoopUlgVertexRowExpansionSkipped, true);
+  assert.equal(result.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(result.vertexRowsBufferClearStatus, 'skipped-direct-compact-position-draw');
+  assert.equal(result.compactPositionRowsBufferRetained, true);
+  assert.equal(result.compactPositionRowsBufferByteLength, 9 * 4 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.compactPositionRowsVertexCount, 9);
+  assert.equal(result.compactPositionRowsStrideFloats, 4);
+
+  assert.equal(result.surfaceVertices.status, 'surface-vertices-resident-extension-compact-position-direct');
+  assert.equal(result.surfaceVertices.directCompactPositionDraw, true);
+  assert.equal(result.surfaceVertices.vertexRowsBufferRetained, false);
+  assert.equal(result.surfaceVertices.vertexRowsBufferByteLength, 0);
+  assert.equal(result.surfaceVertices.compactPositionRowsBufferRetained, true);
+  assert.equal(result.surfaceVertices.compactPositionRowsBuffer, execution.result.buffer);
+
+  assert.equal(result.surfaceDraw.status, 'surface-draw-resident-extension-compact-position-direct');
+  assert.equal(result.surfaceDraw.directCompactPositionDraw, true);
+  assert.equal(result.surfaceDraw.compactionMode, 'webgpu-extension-compact-position-direct-draw-metadata');
+  assert.equal(result.surfaceDraw.compactedVertexRowsBufferRetained, false);
+  assert.equal(result.surfaceDraw.compactedVertexRowsBufferByteLength, 0);
+  assert.equal(result.surfaceDraw.compactPositionRowsBufferRetained, true);
+  assert.equal(result.surfaceDraw.compactPositionRowsBuffer, execution.result.buffer);
+  assert.equal(result.surfaceDraw.drawRowsBufferRetained, true);
+  assert.equal(result.surfaceDraw.drawIndirectRowsBufferRetained, true);
+
+  assert.equal(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-vertices'), false);
+  assert.equal(shaderModules.length, 1);
+  assert.equal(shaderModules[0].code, webGpuMarchingCubesExtensionCompactSurfaceDrawWgsl);
+  assert.match(shaderModules[0].code, /SurfaceTranslationParams|actual_triangle_count|surface_draw_indirect_rows/);
+  assert.equal(bindGroups.length, 1);
+  assert.equal(bindGroups[0].entries.length, 4);
+  assert.equal(bindGroups[0].entries[0].resource.buffer.label, 'ulg-sph-extension-surface-draw');
+  assert.equal(bindGroups[0].entries[1].resource.buffer.label, 'ulg-sph-extension-surface-draw-indirect');
+  assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-extension-surface-translation-params');
+  assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-source-vertex-count');
+  assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
+  assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
+  assert.equal(result.residentBufferLeaseResourceCount, 2);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
+
+  const retainedBuffers = [
+    result.surfaceDraw.drawRowsBuffer,
+    result.surfaceDraw.drawIndirectRowsBuffer
+  ];
+  result.releaseExtensionSurfaceBufferLeases();
+  result.destroyExtensionSurfaceBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
+  assert.equal(execution.result.buffer.destroyed, undefined);
 });
 
 test('ULG GPU builder exposes full-readback rows for the Three compact scene bridge', async () => {

@@ -189,6 +189,22 @@ intermediate ULG 16-float row expansion with a direct compact-position/native
 draw consumer, then move renderer/physics synchronization into the planned
 worker/engine ownership split.
 
+Current routing note, 2026-06-20 AKDT: the native/engine-owned surface
+consumer now draws the extension's retained compact `float32x4` marching-cubes
+position rows directly. The native path skips the intermediate ULG 16-float
+surface vertex-row expansion, keeps the compact extension buffer alive as an
+extension-owned source, writes only draw/indirect metadata on the ULG side, and
+uses a compact-position vertex shader that derives flat triangle normals while
+preserving the closure-derived optical/PBR fragment path. Browser benchmark
+evidence at `/tmp/ulg-native-10k-bench-direct-compact-v2.json` is
+`status=good`, console-clean, keeps `estimatedReadbackBytesPerStep=0`, reports
+`surfaceDrawRenderBridgeExternalGpuBufferInputLayout=webgpu-marching-cubes-compact-position-rows`,
+`surfaceDrawCompactedVertexRowsBufferByteLength=0`, and
+`surfaceDrawCompactPositionRowsBufferByteLength=2555520` for the same 159,720
+drawn vertices. Continue this lane by fixing native presentation validation and
+renderer/physics synchronization in the engine/worker ownership split; do not
+reintroduce the expanded ULG row buffer for the native hot path.
+
 Current routing note, 2026-06-20 AKDT: the material JSON bank now has the first
 Phase 2 element crystalline-structure seed checked in and validated. The
 `element-crystal-structures` bank covers active solid Li, Na, K, Rb, Cs, Fe,

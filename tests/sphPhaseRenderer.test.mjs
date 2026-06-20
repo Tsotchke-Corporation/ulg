@@ -9,6 +9,8 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+  SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
+  SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
@@ -1836,6 +1838,19 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /reveal_texture/);
 });
 
+test('SPH resident compact-position native shader keeps PBR optics and derives triangle normals', () => {
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 208);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_position_rows: array<f32>/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_world_position/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_normal/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /cross\(p1 - p0, p2 - p0\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /out\.material_id = camera_data\.material_id/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /@binding\(2\).*optical_records/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn find_optical_material/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /dielectric_f0/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn fs_oit_main/);
+});
+
 test('SPH resident render-row overlay shader draws directly from retained GPU rows', () => {
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /@binding\(0\).*render_rows/);
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /@binding\(1\).*camera_data/);
@@ -2367,6 +2382,38 @@ test('SPH resident surface buffer handoff accepts retained no-readback draw or r
   assert.equal(ready.sourceVertexCounterBufferByteLength, 16);
   assert.equal(ready.drawAggregateIndirectRowsBufferRetained, true);
   assert.equal(ready.drawAggregateIndirectRowsBufferByteLength, 4 * Uint32Array.BYTES_PER_ELEMENT);
+
+  const compactPositionReady = resolveResidentSurfaceBufferHandoff({
+    surfaceDraw: {
+      readbackMode: 'no-full-readback',
+      surfaceDrawReadback: false,
+      surfaceDrawSummaryReadback: false,
+      fullSurfaceDrawReadback: false,
+      drawRowsBufferRetained: true,
+      drawRowsBufferByteLength: 16 * Float32Array.BYTES_PER_ELEMENT,
+      drawIndirectRowsBufferRetained: true,
+      drawIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
+      compactedVertexRowsBufferRetained: false,
+      compactedVertexRowsBufferByteLength: 0,
+      compactPositionRowsBufferRetained: true,
+      compactPositionRowsBufferByteLength: 21 * 4 * Float32Array.BYTES_PER_ELEMENT,
+      compactPositionRowsStrideFloats: 4,
+      sourceVertexRowCount: 21
+    }
+  });
+  assert.equal(compactPositionReady.status, 'resident-surface-buffer-direct-consumer-ready');
+  assert.equal(compactPositionReady.ready, true);
+  assert.equal(compactPositionReady.handoffKind, 'surface-draw-buffers');
+  assert.equal(compactPositionReady.surfaceExtractionInputKind, 'surface-draw-compact-position-buffer');
+  assert.equal(
+    compactPositionReady.surfaceExtractionInputLayout,
+    'peercompute.webgpu-marching-cubes.compact-position-rows.v0'
+  );
+  assert.equal(compactPositionReady.surfaceExtractionConsumerKind, 'direct-gpu-draw-consumer');
+  assert.equal(compactPositionReady.upperBoundVertexCount, 21);
+  assert.equal(compactPositionReady.upperBoundTriangleCount, 7);
+  assert.equal(compactPositionReady.compactPositionRowsBufferRetained, true);
+  assert.equal(compactPositionReady.compactPositionRowsBufferByteLength, 21 * 4 * Float32Array.BYTES_PER_ELEMENT);
 
   const readback = resolveResidentSurfaceBufferHandoff({
     surfaceDraw: {

@@ -592,6 +592,37 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const surfaceDrawCompactedVertexRowsBufferByteLength = numberOrNull(
     renderState?.surfaceDrawCompactedVertexRowsBufferByteLength ?? surfaceDraw?.compactedVertexRowsBufferByteLength
   );
+  const surfaceDrawCompactPositionRowsBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawCompactPositionRowsBufferByteLength ?? surfaceDraw?.compactPositionRowsBufferByteLength
+  );
+  const surfaceDrawRenderBridgeExternalGpuBufferInputLayout =
+    renderState?.surfaceDrawRenderBridgeExternalGpuBufferInputLayout
+      ?? surfaceDraw?.renderBridgeExternalGpuBufferInputLayout
+      ?? null;
+  const surfaceDrawCompactPositionRowsStrideFloats = numberOrNull(
+    renderState?.surfaceDrawCompactPositionRowsStrideFloats
+      ?? surfaceDraw?.compactPositionRowsStrideFloats
+      ?? (surfaceDrawRenderBridgeExternalGpuBufferInputLayout === 'webgpu-marching-cubes-compact-position-rows' ? 4 : null)
+  );
+  const surfaceDrawCompactPositionRowsVertexCountDirect = numberOrNull(
+    renderState?.surfaceDrawCompactPositionRowsVertexCount ?? surfaceDraw?.compactPositionRowsVertexCount
+  );
+  const surfaceDrawCompactPositionRowsVertexCount = surfaceDrawCompactPositionRowsVertexCountDirect
+    ?? (
+      Number(surfaceDrawCompactPositionRowsBufferByteLength ?? 0) > 0
+      && Number(surfaceDrawCompactPositionRowsStrideFloats ?? 0) > 0
+        ? Math.floor(
+            Number(surfaceDrawCompactPositionRowsBufferByteLength)
+            / (Number(surfaceDrawCompactPositionRowsStrideFloats) * Float32Array.BYTES_PER_ELEMENT)
+          )
+        : null
+  );
+  const surfaceDrawDirectCompactPositionDraw =
+    renderState?.surfaceDrawDirectCompactPositionDraw ?? surfaceDraw?.directCompactPositionDraw ?? null;
+  const surfaceDrawRenderBridgeCompactPositionDirectInput =
+    renderState?.surfaceDrawRenderBridgeCompactPositionDirectInput
+      ?? surfaceDraw?.renderBridgeCompactPositionDirectInput
+      ?? null;
   const surfaceDrawRenderFieldRowsBufferByteLength = numberOrNull(
     renderState?.surfaceDrawRenderFieldRowsBufferByteLength ?? surfaceDraw?.renderFieldRowsBufferByteLength
   );
@@ -663,7 +694,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     && (
       (
         surfaceDrawGpuBufferHandoffKind === 'surface-draw-buffers'
-        && Number(surfaceDrawCompactedVertexRowsBufferByteLength ?? 0) > 0
+        && (
+          Number(surfaceDrawCompactedVertexRowsBufferByteLength ?? 0) > 0
+          || Number(surfaceDrawCompactPositionRowsBufferByteLength ?? 0) > 0
+        )
         && Number(surfaceDrawIndirectRowsBufferByteLength ?? 0) > 0
         && Number(surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? 0) >= 3
       )
@@ -877,6 +911,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawRowsBufferByteLength,
     surfaceDrawIndirectRowsBufferByteLength,
     surfaceDrawCompactedVertexRowsBufferByteLength,
+    surfaceDrawCompactPositionRowsBufferByteLength,
+    surfaceDrawCompactPositionRowsVertexCount,
+    surfaceDrawCompactPositionRowsStrideFloats,
+    surfaceDrawDirectCompactPositionDraw,
+    surfaceDrawRenderBridgeExternalGpuBufferInputLayout,
+    surfaceDrawRenderBridgeCompactPositionDirectInput,
     surfaceDrawRenderFieldRowsBufferByteLength,
     surfaceDrawRenderFieldRowsBufferBorrowed,
     surfaceDrawRenderFieldRowsBufferReused,

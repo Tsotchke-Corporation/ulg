@@ -2345,6 +2345,16 @@ async function runBrowserProbe({
               renderState.surfaceDrawAggregateIndirectRowsBufferByteLength ?? null,
             surfaceDrawCompactedVertexRowsBufferRetained: renderState.surfaceDrawCompactedVertexRowsBufferRetained ?? null,
             surfaceDrawCompactedVertexRowsBufferByteLength: renderState.surfaceDrawCompactedVertexRowsBufferByteLength ?? null,
+            surfaceDrawCompactPositionRowsBufferRetained:
+              renderState.surfaceDrawCompactPositionRowsBufferRetained ?? null,
+            surfaceDrawCompactPositionRowsBufferByteLength:
+              renderState.surfaceDrawCompactPositionRowsBufferByteLength ?? null,
+            surfaceDrawDirectCompactPositionDraw:
+              renderState.surfaceDrawDirectCompactPositionDraw ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferInputLayout:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferInputLayout ?? null,
+            surfaceDrawRenderBridgeCompactPositionDirectInput:
+              renderState.surfaceDrawRenderBridgeCompactPositionDirectInput ?? null,
             surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus:
               renderState.surfaceDrawNativeMarchingCubesSurfaceTableBudgetStatus ?? null,
             surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution:
@@ -2723,6 +2733,9 @@ async function runBrowserProbe({
             drawAggregateIndirectRowsBufferByteLength: surfaceDraw.drawAggregateIndirectRowsBufferByteLength ?? null,
             compactedVertexRowsBufferRetained: surfaceDraw.compactedVertexRowsBufferRetained ?? null,
             compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
+            compactPositionRowsBufferRetained: surfaceDraw.compactPositionRowsBufferRetained ?? null,
+            compactPositionRowsBufferByteLength: surfaceDraw.compactPositionRowsBufferByteLength ?? null,
+            directCompactPositionDraw: surfaceDraw.directCompactPositionDraw ?? null,
             renderFieldRowsBufferRetained: surfaceDraw.renderFieldRowsBufferRetained ?? null,
             renderFieldRowsBufferByteLength: surfaceDraw.renderFieldRowsBufferByteLength ?? null,
             renderFieldRowsBufferBorrowed: surfaceDraw.renderFieldRowsBufferBorrowed ?? null,
@@ -5064,12 +5077,23 @@ function analyzeTimeline(timeline, {
         ?? metric?.renderState?.surfaceDrawCompactedVertexRowsBufferByteLength
         ?? 0
     );
+    const compactPositionRowsBufferByteLength = Number(
+      metric?.surfaceDraw?.compactPositionRowsBufferByteLength
+        ?? metric?.renderState?.surfaceDrawCompactPositionRowsBufferByteLength
+        ?? 0
+    );
     const retainedResidentDrawBuffers = Boolean(
       metric?.surfaceDraw?.drawIndirectRowsBufferRetained
         ?? metric?.renderState?.surfaceDrawIndirectRowsBufferRetained
     ) && Boolean(
-      metric?.surfaceDraw?.compactedVertexRowsBufferRetained
+      (
+        metric?.surfaceDraw?.compactedVertexRowsBufferRetained
         ?? metric?.renderState?.surfaceDrawCompactedVertexRowsBufferRetained
+      )
+      || (
+        metric?.surfaceDraw?.compactPositionRowsBufferRetained
+        ?? metric?.renderState?.surfaceDrawCompactPositionRowsBufferRetained
+      )
     );
     const residentDrawCountsUnknown = (
       (metric?.surfaceDraw?.activeSurfaceCount ?? metric?.renderState?.surfaceDrawActiveSurfaceCount ?? null) == null
@@ -5093,7 +5117,7 @@ function analyzeTimeline(timeline, {
           residentDrawCountsUnknown
           && retainedResidentDrawBuffers
           && sourceVertexRowCount > 0
-          && compactedVertexRowsBufferByteLength > 0
+          && (compactedVertexRowsBufferByteLength > 0 || compactPositionRowsBufferByteLength > 0)
         )
       );
     const threeRenderRowPointsVisible = (

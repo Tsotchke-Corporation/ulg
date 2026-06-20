@@ -6035,3 +6035,72 @@ Still open:
 - The actual performance/correctness fix is still the native/engine-owned GPU
   render consumer: visible particles/surfaces must update from retained GPU
   buffers without CPU render-row readback or stale retained Three geometry.
+
+## 2026-06-20 Status Update - Direct Compact-Position Native Surface Draw
+
+Current state:
+
+- Native/extension marching-cubes surface draw now has a direct
+  compact-position path for the engine-owned native WebGPU consumer.
+- `buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu()` accepts
+  `translateVertexRows: false` in no-full mode, runs a metadata-only GPU kernel
+  for draw/indirect rows, keeps the compact extension position buffer as
+  extension-owned input, and skips allocation of
+  `ulg-sph-extension-surface-vertices`.
+- The native surface consumer selects a compact-position WGSL vertex path that
+  reads `float32x4` position rows, maps them into world space, derives flat
+  triangle normals, and preserves the existing closure-derived optical/PBR
+  fragment shader.
+- Direct compact handoff diagnostics now flow through resident surface draw,
+  render state, benchmark, and long-horizon probe summaries.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+- PASS:
+  `node --check src/visualization/sphPhaseScene.js`
+- PASS:
+  `node --check scripts/sph-performance-benchmark.mjs`
+- PASS:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  with `19/19`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "compact-position|surface buffer handoff"`
+  with `71/71`.
+- PASS:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `90/90`.
+- PASS:
+  `/tmp/ulg-native-10k-bench-direct-compact-v2.json`
+  - `status=good`, `probeStatus=good`.
+  - Browser console issue count: `0`.
+  - Actual particles: `9826`.
+  - `estimatedReadbackBytesPerStep=0`.
+  - `validResidentSurfaceBufferHandoff=true`.
+  - `surfaceDrawRenderBridgeExternalGpuBufferInputLayout=webgpu-marching-cubes-compact-position-rows`.
+  - `surfaceDrawRenderBridgeCompactPositionDirectInput=true`.
+  - `surfaceDrawDirectCompactPositionDraw=true`.
+  - `surfaceDrawCompactedVertexRowsBufferByteLength=0`.
+  - `surfaceDrawCompactPositionRowsBufferByteLength=2555520`.
+  - `surfaceDrawCompactPositionRowsVertexCount=159720`.
+  - `surfaceDrawCompactPositionRowsStrideFloats=4`.
+  - Native bridge rendered through `native-webgpu-surface-consumer-rendered`.
+- PASS:
+  `npm run build`
+  with the existing large chunk warning only.
+- PASS:
+  `git diff --check`
+- PASS:
+  `npm run icc:update`
+  with `indexedFiles=354` and `memoryChunks=2111`.
+
+Still open:
+
+- Native visible-consumer validation still fails closed behind
+  `resident-surface-visible-gpu-consumer-blocked-pixel-validation` until the
+  browser-frame/native readback validation story is completed.
+- Continue moving renderer/physics synchronization and native presentation
+  ownership toward the planned worker/engine split.

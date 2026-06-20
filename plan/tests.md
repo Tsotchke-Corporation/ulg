@@ -19,6 +19,8 @@ It now extends through `Ra`, including `Hg`, `Tl`, `Pb`, `Bi`, `Po`, `At`,
 `Fr`, and `Ra`.
 It now extends through `Cm`, including `Ac`, `Th`, `Pa`, `U`, `Np`, `Pu`,
 `Am`, and `Cm`.
+It now extends through `Rf`, including `Bk`, `Cf`, `Es`, `Fm`, `Md`, `No`,
+`Lr`, and `Rf`.
 
 Focused checks:
 
@@ -27,7 +29,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=90`.
+  passed with `recordCount=98`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run with cache write/hit
@@ -42,6 +44,7 @@ Focused checks:
   The `Hf/Ta/W/Re/Os/Ir/Pt/Au` write pass reported `cache.hitCount=8`.
   The `Hg/Tl/Pb/Bi/Po/At/Fr/Ra` write pass also reported `cache.hitCount=8`.
   The `Ac/Th/Pa/U/Np/Pu/Am/Cm` write pass reported `cache.hitCount=8`.
+  The `Bk/Cf/Es/Fm/Md/No/Lr/Rf` write pass reported `cache.hitCount=8`.
 - Build hygiene:
   `npm run build`, `git diff --check`, and `npm run icc:update` passed; the
   Vite build retained the existing large-chunk warning.

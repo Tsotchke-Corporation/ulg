@@ -148,6 +148,9 @@ non-noble targets remaining.
 The first actinide tranche reaches `Cm`; `Ac`, `Th`, `Pa`, `U`, `Np`, `Pu`,
 `Am`, and `Cm` bring the bank to 90 rows with 21 selectable non-noble targets
 remaining.
+The actinide tail now reaches `Rf`; `Bk`, `Cf`, `Es`, `Fm`, `Md`, `No`, `Lr`,
+and `Rf` bring the bank to 98 rows with 13 selectable non-noble targets
+remaining.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

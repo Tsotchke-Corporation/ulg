@@ -13,11 +13,14 @@ Status:
   `gridPointsN=80` provenance.
 - The checked-in element bank now contains 14 rows; 97 selectable non-noble
   targets remain for later bounded batches before Phase 1 coverage is done.
+- Continued the bounded expansion with `Mg`, `Al`, `Si`, `P`, `S`, `Cl`, `Ca`,
+  and `Sc`. The checked-in bank now contains 22 rows, leaving 89 selectable
+  non-noble targets.
 
 Validation:
 
 - PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
-  reported `recordCount=14`.
+  reported `recordCount=22`.
 - PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
   and `node --check tests/materialPropertyBank.test.mjs`.
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.

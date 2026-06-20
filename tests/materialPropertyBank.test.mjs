@@ -31,7 +31,21 @@ function clone(value) {
 }
 
 const ACTIVE_ELEMENT_BANK_SYMBOLS = Object.freeze(['H', 'O', 'Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
-const GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS = Object.freeze(['Be', 'B', 'C', 'N', 'F']);
+const GENERATED_TRANCHE_ELEMENT_BANK_SYMBOLS = Object.freeze([
+  'Be',
+  'B',
+  'C',
+  'N',
+  'F',
+  'Mg',
+  'Al',
+  'Si',
+  'P',
+  'S',
+  'Cl',
+  'Ca',
+  'Sc'
+]);
 
 test('element material property bank validates against schema and normalizes lookup keys', async () => {
   const bank = await readJson('../data/material-properties/elements.json');

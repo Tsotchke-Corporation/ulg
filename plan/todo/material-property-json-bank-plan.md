@@ -78,6 +78,12 @@ checked-in bank to 14 rows. Full selectable non-noble coverage is still open:
 97 target rows remain after this tranche, so continue expanding in reviewable
 bounded batches instead of blocking on one full sweep.
 
+Status update, 2026-06-19 AKDT: the second bounded selectable tranche adds
+`Mg`, `Al`, `Si`, `P`, `S`, `Cl`, `Ca`, and `Sc`. The checked-in bank now has
+22 element rows; 89 selectable non-noble target rows remain. The generator path
+is still intentionally non-authoritative and uses `reduced-estimate` closure
+rows as warm starts until reference/crystal/compound records replace them.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

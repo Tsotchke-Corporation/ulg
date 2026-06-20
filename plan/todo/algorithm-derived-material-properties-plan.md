@@ -96,6 +96,13 @@ crystal packing diagnostic radius. This satisfies the generic initialization
 row scaffold; the open work is to derive solver-specific MLS-MPM mechanics,
 contact, and marching-cubes/surface rows from this contract.
 
+MLS-MPM mechanics status, 2026-06-20 AKDT: `buildMlsMpmGpuParticleBuffers()`
+now emits `peercompute.ulg.algorithm-material-mls-mpm-mechanics-rows.v0`.
+These compact rows are derived from the packed mechanics buffer and the
+particle initialization rows, aggregating role/material/phase mechanics and
+carrying crystal metadata forward. Contact policy and marching-cubes/surface
+policy are still open consumers.
+
 ## Completion Gates
 
 - Same material and temperature produce consistent drop/base particle mass,

@@ -180,6 +180,37 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.equal(sphPacked.materialPropertyBankParticleSizeTable.rowCount, 1);
   assert.equal(mlsPacked.materialPropertyBankWarmInputTable.rowCount, 1);
   assert.equal(mlsPacked.materialPropertyBankParticleSizeTable.rowCount, 1);
+  assert.equal(
+    mlsPacked.algorithmMaterialMlsMpmMechanicsRows.schema,
+    'peercompute.ulg.algorithm-material-mls-mpm-mechanics-rows.v0'
+  );
+  assert.equal(mlsPacked.algorithmMaterialMlsMpmMechanicsRows.status, 'algorithm-derived-mls-mpm-mechanics-rows-ready');
+  assert.equal(mlsPacked.algorithmMaterialMlsMpmMechanicsRows.rowCount, 2);
+  const dropMechanicsRow = mlsPacked.algorithmMaterialMlsMpmMechanicsRows.rows.find((row) => row.role === 'drop');
+  assert.equal(dropMechanicsRow.schema, 'peercompute.ulg.algorithm-material-mls-mpm-mechanics-row.v0');
+  assert.equal(dropMechanicsRow.material, 'fe');
+  assert.equal(dropMechanicsRow.particleInitializationRowStatus, 'algorithm-derived-particle-initialization-row-ready');
+  assert.equal(dropMechanicsRow.particleRadiusPolicy, 'closure-rest-volume-authoritative');
+  assert.ok(dropMechanicsRow.particleCount > 0);
+  assert.ok(dropMechanicsRow.restVolumeM3Mean > 0);
+  assert.ok(dropMechanicsRow.soundSpeedMPerSMean > 0);
+
+  const sodiumDemo = buildSphPhaseDemoState({
+    dropMaterial: 'Na',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const sodiumMlsPacked = buildMlsMpmGpuParticleBuffers(sodiumDemo.state, {
+    materialProperties: sodiumDemo.materialProperties,
+    initialParticleSpacing: sodiumDemo.initialParticleSpacing
+  });
+  const sodiumDropRow = sodiumMlsPacked.algorithmMaterialMlsMpmMechanicsRows.rows.find((row) => row.role === 'drop');
+  assert.equal(sodiumDropRow.material, 'Na');
+  assert.equal(sodiumDropRow.crystalStructureKey, 'na-bcc-alpha');
+  assert.equal(sodiumDropRow.crystalPackingFraction, 0.68);
 
   const sphBuffers = uploadSphGpuParticleBuffers(device, sphPacked);
   const mlsBuffers = uploadMlsMpmGpuParticleBuffers(device, mlsPacked);

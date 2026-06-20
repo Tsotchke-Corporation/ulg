@@ -2,10 +2,16 @@ export const ULG_ALGORITHM_PARTICLE_INITIALIZATION_ROWS_SCHEMA =
   'peercompute.ulg.algorithm-material-particle-initialization-rows.v0';
 export const ULG_ALGORITHM_PARTICLE_INITIALIZATION_ROW_SCHEMA =
   'peercompute.ulg.algorithm-material-particle-initialization-row.v0';
+export const ULG_ALGORITHM_MLS_MPM_MECHANICS_ROWS_SCHEMA =
+  'peercompute.ulg.algorithm-material-mls-mpm-mechanics-rows.v0';
+export const ULG_ALGORITHM_MLS_MPM_MECHANICS_ROW_SCHEMA =
+  'peercompute.ulg.algorithm-material-mls-mpm-mechanics-row.v0';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+  if (Number.isFinite(number)) return number;
+  const fallbackNumber = Number(fallback);
+  return Number.isFinite(fallbackNumber) ? fallbackNumber : 0;
 }
 
 function particleRadiusFromCrystalPackingFraction(spacingM, packingFraction) {
@@ -111,5 +117,119 @@ export function buildAlgorithmMaterialParticleInitializationRows({
         crystalStructureKey: row.crystalStructureKey
       }))
     }
+  };
+}
+
+function initializationRowsByRole(particleInitializationRows) {
+  const map = new Map();
+  for (const row of particleInitializationRows?.rows || []) {
+    if (row?.role) map.set(row.role, row);
+  }
+  return map;
+}
+
+function createMechanicsAccumulator({ role, material, phase, initializationRow }) {
+  return {
+    role,
+    material,
+    phase,
+    initializationRow,
+    particleCount: 0,
+    solidParticleCount: 0,
+    restVolumeM3Sum: 0,
+    effectiveBulkModulusPaSum: 0,
+    shearModulusPaSum: 0,
+    lameLambdaPaSum: 0,
+    soundSpeedMPerSSum: 0,
+    dynamicViscosityPaSSum: 0,
+    surfaceTensionNPerMSum: 0,
+    maxHydrostaticPressurePa: 0
+  };
+}
+
+export function buildAlgorithmMlsMpmMechanicsRows({
+  particles = [],
+  metadata = [],
+  mechanics = null,
+  mechanicsStrideFloats = 32,
+  particleInitializationRows = null
+} = {}) {
+  const initRowsByRole = initializationRowsByRole(particleInitializationRows);
+  const groups = new Map();
+  const particleCount = Array.isArray(particles) ? particles.length : 0;
+  for (let index = 0; index < particleCount; index += 1) {
+    const particle = particles[index] || {};
+    const meta = metadata[index] || {};
+    const role = particle.role || meta.role || (particle.material === 'h2o' ? 'base' : 'drop');
+    const material = meta.material || particle.material || 'unknown';
+    const phase = meta.phase || particle.phase || 'unknown';
+    const key = `${role}|${material}|${phase}`;
+    let accumulator = groups.get(key);
+    if (!accumulator) {
+      accumulator = createMechanicsAccumulator({
+        role,
+        material,
+        phase,
+        initializationRow: initRowsByRole.get(role) || null
+      });
+      groups.set(key, accumulator);
+    }
+    const offset = index * mechanicsStrideFloats;
+    accumulator.particleCount += 1;
+    accumulator.solidParticleCount += finiteNumber(mechanics?.[offset + 20], meta.solid ? 1 : 0) > 0.5 ? 1 : 0;
+    accumulator.restVolumeM3Sum += finiteNumber(mechanics?.[offset + 19], 0);
+    accumulator.effectiveBulkModulusPaSum += finiteNumber(mechanics?.[offset + 22], meta.effectiveBulkModulusPa);
+    accumulator.shearModulusPaSum += finiteNumber(mechanics?.[offset + 23], meta.shearModulusPa);
+    accumulator.lameLambdaPaSum += finiteNumber(mechanics?.[offset + 24], meta.lameLambdaPa);
+    accumulator.soundSpeedMPerSSum += finiteNumber(mechanics?.[offset + 25], meta.soundSpeedMPerS);
+    accumulator.dynamicViscosityPaSSum += finiteNumber(mechanics?.[offset + 29], meta.dynamicViscosityPaS);
+    accumulator.surfaceTensionNPerMSum += finiteNumber(mechanics?.[offset + 30], meta.surfaceTensionNPerM);
+    accumulator.maxHydrostaticPressurePa = Math.max(
+      accumulator.maxHydrostaticPressurePa,
+      finiteNumber(mechanics?.[offset + 28], meta.hydrostaticPressurePa)
+    );
+  }
+  const rows = [...groups.values()]
+    .sort((a, b) => String(a.role).localeCompare(String(b.role)) || String(a.material).localeCompare(String(b.material)))
+    .map((accumulator) => {
+      const count = Math.max(1, accumulator.particleCount);
+      const init = accumulator.initializationRow;
+      return {
+        schema: ULG_ALGORITHM_MLS_MPM_MECHANICS_ROW_SCHEMA,
+        status: 'algorithm-derived-mls-mpm-mechanics-row-ready',
+        role: accumulator.role,
+        material: accumulator.material,
+        phase: accumulator.phase,
+        particleCount: accumulator.particleCount,
+        solidParticleCount: accumulator.solidParticleCount,
+        restVolumeM3Mean: accumulator.restVolumeM3Sum / count,
+        effectiveBulkModulusPaMean: accumulator.effectiveBulkModulusPaSum / count,
+        shearModulusPaMean: accumulator.shearModulusPaSum / count,
+        lameLambdaPaMean: accumulator.lameLambdaPaSum / count,
+        soundSpeedMPerSMean: accumulator.soundSpeedMPerSSum / count,
+        dynamicViscosityPaSMean: accumulator.dynamicViscosityPaSSum / count,
+        surfaceTensionNPerMMean: accumulator.surfaceTensionNPerMSum / count,
+        maxHydrostaticPressurePa: accumulator.maxHydrostaticPressurePa,
+        crystalStructureKey: init?.crystalStructureKey ?? null,
+        crystalPackingFraction: finiteNumber(init?.crystalPackingFraction, 0),
+        particleInitializationRowStatus: init?.status ?? null,
+        particleRadiusPolicy: init?.particleRadiusPolicy ?? null,
+        strictSourceOfTruth: false,
+        provenance: {
+          source: 'algorithm-derived-mls-mpm-mechanics-row',
+          particleInitializationRowSchema: init?.schema ?? null
+        }
+      };
+    });
+  return {
+    schema: ULG_ALGORITHM_MLS_MPM_MECHANICS_ROWS_SCHEMA,
+    status: rows.length > 0
+      ? 'algorithm-derived-mls-mpm-mechanics-rows-ready'
+      : 'algorithm-derived-mls-mpm-mechanics-rows-empty',
+    rowCount: rows.length,
+    rows,
+    particleCount,
+    strictSourceOfTruth: false,
+    derivationAuthority: 'packed-mls-mpm-mechanics-buffer-with-particle-initialization-rows'
   };
 }

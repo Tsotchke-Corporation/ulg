@@ -90,6 +90,15 @@ state-valid crystal packing diagnostics. The solid Na row carries
 rejected crystal warm input. Next row contracts should specialize this data for
 MLS-MPM mechanics/contact and marching-cubes isovalue/smoothing/normal policy.
 
+Current routing note, 2026-06-20 AKDT: MLS-MPM packing now publishes compact
+`algorithmMaterialMlsMpmMechanicsRows` derived from the actual mechanics buffer
+and particle initialization rows. The rows aggregate role/material/phase
+particle count, rest volume, bulk/shear/lambda/sound-speed, viscosity,
+surface-tension, hydrostatic pressure, and carried crystal metadata such as
+`na-bcc-alpha`. Next solver-specific work is contact stiffness/impulse policy
+and marching-cubes surface extraction policy, using these compact rows instead
+of scanning every particle or inventing renderer-side constants.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

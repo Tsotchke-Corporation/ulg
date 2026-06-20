@@ -326,6 +326,13 @@ WGSL status check was corrected to read the same status slot the JavaScript
 packer writes. The remaining work is broader algorithm-row derivation, not
 additional renderer constants.
 
+Algorithm-row note, 2026-06-20 AKDT: the accepted warm inputs now feed
+`algorithmMaterialParticleInitializationRows`. These rows expose closure
+density, spacing, rest volume, applied radius, smoothing/support metadata, and
+state-valid crystal packing diagnostics for downstream solver-specific row
+derivation. They deliberately keep crystal packing as diagnostic until an
+MLS-MPM/contact/marching-cubes consumer has a validated policy for applying it.
+
 ### Phase 3 - Common Compound Bank
 
 Create `data/material-properties/common-compounds.json` for the top 1000 common

@@ -81,6 +81,15 @@ particle-size row ABI now matches the WGSL consumer: row status is read from
 coordination number, and atoms per conventional cell. Continue by deriving
 MLS-MPM/contact/marching-cubes algorithm rows from these accepted warm inputs.
 
+Current routing note, 2026-06-20 AKDT: the first algorithm-derived particle
+initialization row contract now exists. `buildSphPhaseDemoState()` publishes
+`algorithmMaterialParticleInitializationRows` with closure-derived density,
+spacing, rest volume, applied radius, smoothing/support metadata, and optional
+state-valid crystal packing diagnostics. The solid Na row carries
+`na-bcc-alpha`; invalid hot Fe remains closure-rest-volume authoritative with a
+rejected crystal warm input. Next row contracts should specialize this data for
+MLS-MPM mechanics/contact and marching-cubes isovalue/smoothing/normal policy.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

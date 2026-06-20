@@ -194,6 +194,15 @@ test('demo initial particle spacing carries default material bank warm inputs', 
   assert.equal(viewState.sphGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
   assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankWarmInputTable.rowCount, 1);
   assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
+  assert.equal(
+    viewState.initialParticleSpacing.algorithmMaterialParticleInitializationRows.schema,
+    'peercompute.ulg.algorithm-material-particle-initialization-rows.v0'
+  );
+  assert.equal(viewState.initialParticleSpacing.algorithmMaterialParticleInitializationRows.rowCount, 2);
+  assert.equal(
+    viewState.initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationStatus,
+    'algorithm-derived-particle-initialization-rows-ready'
+  );
 });
 
 test('demo initial particle spacing carries crystal packing rows for valid solid elements', () => {
@@ -232,6 +241,22 @@ test('demo initial particle spacing carries crystal packing rows for valid solid
   near(particleSizeTable.rows[13], 0.68);
   assert.equal(particleSizeTable.rows[14], 8);
   assert.equal(particleSizeTable.rows[15], 2);
+
+  const algorithmRows = demo.initialParticleSpacing.algorithmMaterialParticleInitializationRows;
+  assert.equal(algorithmRows.status, 'algorithm-derived-particle-initialization-rows-ready');
+  assert.equal(algorithmRows.rowCount, 2);
+  const dropRow = algorithmRows.rows.find((row) => row.role === 'drop');
+  assert.equal(dropRow.schema, 'peercompute.ulg.algorithm-material-particle-initialization-row.v0');
+  assert.equal(dropRow.material, 'Na');
+  assert.equal(dropRow.crystalStructureKey, 'na-bcc-alpha');
+  assert.equal(dropRow.crystalPackingFraction, 0.68);
+  assert.equal(dropRow.particleRadiusPolicy, 'closure-rest-volume-authoritative-crystal-packing-diagnostic');
+  assert.ok(dropRow.crystalPackingParticleRadiusM > 0);
+  near(dropRow.appliedParticleRadiusM, dropRow.volumeEquivalentParticleRadiusM);
+  assert.equal(
+    demo.initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationRowCount,
+    2
+  );
 });
 
 test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {

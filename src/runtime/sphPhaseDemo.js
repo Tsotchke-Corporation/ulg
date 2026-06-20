@@ -56,6 +56,7 @@ import {
   DEFAULT_MATERIAL_PROPERTY_BANK,
   DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK
 } from './material/defaultMaterialPropertyBank.js';
+import { buildAlgorithmMaterialParticleInitializationRows } from './material/algorithmMaterialRows.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -1180,6 +1181,18 @@ export function buildSphPhaseDemoState({
     initialParticleSpacing.particleSizePolicy.materialPropertyBankParticleSizePackingRowCount =
       initialParticleSpacing.materialPropertyBankParticleSizePackingTable.rowCount;
   }
+  initialParticleSpacing.algorithmMaterialParticleInitializationRows =
+    buildAlgorithmMaterialParticleInitializationRows({
+      initialParticleSpacing,
+      dropMaterial,
+      baseMaterial,
+      dropTemperatureK: dropTempK,
+      baseTemperatureK: baseTempK
+    });
+  initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationRowCount =
+    initialParticleSpacing.algorithmMaterialParticleInitializationRows.rowCount;
+  initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationStatus =
+    initialParticleSpacing.algorithmMaterialParticleInitializationRows.status;
 
   const dropParticles = fillCube({
     material: dropMaterial,

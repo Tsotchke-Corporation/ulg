@@ -87,6 +87,15 @@ diagnostics.
 5. Promote derivation and packing to Worker/WebGPU-resident paths once CPU
    parity and provenance gates pass.
 
+Current status, 2026-06-20 AKDT: the first CPU-side particle initialization
+row contract is in place as
+`peercompute.ulg.algorithm-material-particle-initialization-rows.v0`. It is
+fed by the closure-derived initial spacing plan plus versioned material-bank
+and crystal-bank warm inputs, and reports applied radius separately from
+crystal packing diagnostic radius. This satisfies the generic initialization
+row scaffold; the open work is to derive solver-specific MLS-MPM mechanics,
+contact, and marching-cubes/surface rows from this contract.
+
 ## Completion Gates
 
 - Same material and temperature produce consistent drop/base particle mass,

@@ -19,11 +19,14 @@ Status:
 - Continued with the slower transition/metalloid tranche `Ti`, `V`, `Cr`,
   `Mn`, `Co`, `Ni`, `Cu`, `Zn`, `Ga`, `Ge`, `As`, and `Se`, bringing the bank
   to 34 rows and leaving 77 selectable non-noble targets.
+- Added the next bounded tranche `Br`, `Sr`, `Y`, `Zr`, `Nb`, `Mo`, `Tc`, and
+  `Ru`, bringing the bank to 42 rows and leaving 69 selectable non-noble
+  targets.
 
 Validation:
 
 - PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
-  reported `recordCount=34`.
+  reported `recordCount=42`.
 - PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
   and `node --check tests/materialPropertyBank.test.mjs`.
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.

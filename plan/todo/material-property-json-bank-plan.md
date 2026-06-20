@@ -91,6 +91,13 @@ element rows, and leaves 77 selectable non-noble target rows for later bounded
 generation. This tranche was slower than the first two, so keep future writes
 bounded and console-progress visible.
 
+Status update, 2026-06-19 AKDT: the fourth bounded selectable tranche adds
+`Br`, `Sr`, `Y`, `Zr`, `Nb`, `Mo`, `Tc`, and `Ru`. The checked-in bank now
+covers the selectable prefix through `Ru`, contains 42 element rows, and
+leaves 69 selectable non-noble target rows. Future transition/lanthanide/
+actinide writes should stay in small batches unless the generator gets cached
+intermediate electronic-structure solves.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

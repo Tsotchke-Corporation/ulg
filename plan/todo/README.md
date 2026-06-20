@@ -117,6 +117,9 @@ the nine active/PBR probe rows. A second tranche now adds `Mg`, `Al`, `Si`,
 `P`, `S`, `Cl`, `Ca`, and `Sc`, leaving 89 selectable non-noble targets.
 A slower third tranche now adds the selectable prefix through `Se`, bringing
 the bank to 34 rows and leaving 77 selectable non-noble targets. Continue
+bounded generation now reaches `Ru`: the fourth tranche added `Br`, `Sr`, `Y`,
+`Zr`, `Nb`, `Mo`, `Tc`, and `Ru`, bringing the bank to 42 rows and leaving 69
+selectable non-noble targets. Continue
 `plan/todo/material-property-json-bank-plan.md` by adding selectable non-noble
 elements in reviewable batches and then binding the packed rows from the
 current upload buffers into shader-side consumers.

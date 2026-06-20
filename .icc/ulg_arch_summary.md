@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `354`
-- total lines indexed: `248791`
+- total lines indexed: `248902`
 - languages: `{"markdown": 133, "javascript": 110, "text": 90, "json": 20, "c": 1}`
 
 ## Important Files
@@ -47,11 +47,11 @@
 ## Top Modules
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
-- `tests`: 76 files, 47687 lines, symbols=0, tests=76, languages={"text": 76}
+- `tests`: 76 files, 47701 lines, symbols=0, tests=76, languages={"text": 76}
 - `src/runtime`: 31 files, 18930 lines, symbols=417, tests=0, languages={"javascript": 31}
-- `src/runtime/sph`: 28 files, 39694 lines, symbols=871, tests=0, languages={"javascript": 28}
-- `plan/todo`: 24 files, 13411 lines, symbols=0, tests=0, languages={"markdown": 24}
-- `src/runtime/material`: 21 files, 5827 lines, symbols=240, tests=0, languages={"javascript": 21}
+- `src/runtime/sph`: 28 files, 39701 lines, symbols=871, tests=0, languages={"javascript": 28}
+- `plan/todo`: 24 files, 13427 lines, symbols=0, tests=0, languages={"markdown": 24}
+- `src/runtime/material`: 21 files, 5901 lines, symbols=243, tests=0, languages={"javascript": 21}
 - `.`: 10 files, 2232 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
@@ -94,7 +94,7 @@
 | 3788 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 3773 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 2955 | `plan/plan.md` | markdown |
-| 2869 | `plan/todo/README.md` | markdown |
+| 2878 | `plan/todo/README.md` | markdown |
 | 2606 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2173 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2105 | `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js` | javascript |

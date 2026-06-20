@@ -194,6 +194,19 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.ok(dropMechanicsRow.particleCount > 0);
   assert.ok(dropMechanicsRow.restVolumeM3Mean > 0);
   assert.ok(dropMechanicsRow.soundSpeedMPerSMean > 0);
+  assert.equal(
+    mlsPacked.algorithmMaterialContactRows.schema,
+    'peercompute.ulg.algorithm-material-contact-rows.v0'
+  );
+  assert.equal(mlsPacked.algorithmMaterialContactRows.status, 'algorithm-derived-contact-rows-ready');
+  assert.equal(mlsPacked.algorithmMaterialContactRows.rowCount, 1);
+  const contactRow = mlsPacked.algorithmMaterialContactRows.rows[0];
+  assert.equal(contactRow.schema, 'peercompute.ulg.algorithm-material-contact-row.v0');
+  assert.deepEqual(contactRow.roles, ['drop', 'base']);
+  assert.ok(contactRow.normalStiffnessPa > 0);
+  assert.ok(contactRow.supportRadiusM > 0);
+  assert.equal(contactRow.forceMutationAuthority, 'not-authoritative-contact-policy-row');
+  assert.equal(contactRow.impulsePolicy, 'bounded-by-softer-constituent-and-initial-support-radius');
 
   const sodiumDemo = buildSphPhaseDemoState({
     dropMaterial: 'Na',
@@ -211,6 +224,7 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.equal(sodiumDropRow.material, 'Na');
   assert.equal(sodiumDropRow.crystalStructureKey, 'na-bcc-alpha');
   assert.equal(sodiumDropRow.crystalPackingFraction, 0.68);
+  assert.equal(sodiumMlsPacked.algorithmMaterialContactRows.rows[0].crystalStructureKeys[0], 'na-bcc-alpha');
 
   const sphBuffers = uploadSphGpuParticleBuffers(device, sphPacked);
   const mlsBuffers = uploadMlsMpmGpuParticleBuffers(device, mlsPacked);

@@ -99,6 +99,15 @@ surface-tension, hydrostatic pressure, and carried crystal metadata such as
 and marching-cubes surface extraction policy, using these compact rows instead
 of scanning every particle or inventing renderer-side constants.
 
+Current routing note, 2026-06-20 AKDT: MLS-MPM packing now also emits
+`algorithmMaterialContactRows`, a non-authoritative contact-policy view derived
+from compact mechanics rows. The row pairs drop/base materials, uses the softer
+constituent normal stiffness, carries viscosity/support radius and crystal
+structure keys, and explicitly reports
+`forceMutationAuthority=not-authoritative-contact-policy-row`. The next
+algorithm-row consumer is marching-cubes/surface extraction policy, followed by
+validated force-kernel consumption of the contact rows.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

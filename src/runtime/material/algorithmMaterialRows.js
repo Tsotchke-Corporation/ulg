@@ -6,6 +6,10 @@ export const ULG_ALGORITHM_MLS_MPM_MECHANICS_ROWS_SCHEMA =
   'peercompute.ulg.algorithm-material-mls-mpm-mechanics-rows.v0';
 export const ULG_ALGORITHM_MLS_MPM_MECHANICS_ROW_SCHEMA =
   'peercompute.ulg.algorithm-material-mls-mpm-mechanics-row.v0';
+export const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA =
+  'peercompute.ulg.algorithm-material-contact-rows.v0';
+export const ULG_ALGORITHM_CONTACT_MATERIAL_ROW_SCHEMA =
+  'peercompute.ulg.algorithm-material-contact-row.v0';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -212,6 +216,9 @@ export function buildAlgorithmMlsMpmMechanicsRows({
         maxHydrostaticPressurePa: accumulator.maxHydrostaticPressurePa,
         crystalStructureKey: init?.crystalStructureKey ?? null,
         crystalPackingFraction: finiteNumber(init?.crystalPackingFraction, 0),
+        initializationSpacingM: finiteNumber(init?.spacingM, 0),
+        initializationAppliedParticleRadiusM: finiteNumber(init?.appliedParticleRadiusM, 0),
+        initializationTargetSmoothingLengthM: finiteNumber(init?.targetSmoothingLengthM, 0),
         particleInitializationRowStatus: init?.status ?? null,
         particleRadiusPolicy: init?.particleRadiusPolicy ?? null,
         strictSourceOfTruth: false,
@@ -231,5 +238,72 @@ export function buildAlgorithmMlsMpmMechanicsRows({
     particleCount,
     strictSourceOfTruth: false,
     derivationAuthority: 'packed-mls-mpm-mechanics-buffer-with-particle-initialization-rows'
+  };
+}
+
+function nonZeroMin(values) {
+  const positive = values.map((value) => finiteNumber(value, 0)).filter((value) => value > 0);
+  return positive.length > 0 ? Math.min(...positive) : 0;
+}
+
+function materialContactPairRows(rows) {
+  const dropRows = rows.filter((row) => row.role === 'drop');
+  const baseRows = rows.filter((row) => row.role === 'base');
+  const pairs = [];
+  for (const drop of dropRows) {
+    for (const base of baseRows) {
+      pairs.push([drop, base]);
+    }
+  }
+  return pairs;
+}
+
+export function buildAlgorithmMaterialContactRows({
+  mlsMpmMechanicsRows = null
+} = {}) {
+  const mechanicsRows = Array.isArray(mlsMpmMechanicsRows?.rows) ? mlsMpmMechanicsRows.rows : [];
+  const rows = materialContactPairRows(mechanicsRows).map(([drop, base]) => {
+    const dropNormal = finiteNumber(drop.effectiveBulkModulusPaMean, 0)
+      + (4 / 3) * finiteNumber(drop.shearModulusPaMean, 0);
+    const baseNormal = finiteNumber(base.effectiveBulkModulusPaMean, 0)
+      + (4 / 3) * finiteNumber(base.shearModulusPaMean, 0);
+    const supportRadiusM = Math.max(
+      finiteNumber(drop.initializationTargetSmoothingLengthM, 0),
+      finiteNumber(base.initializationTargetSmoothingLengthM, 0),
+      finiteNumber(drop.initializationAppliedParticleRadiusM, 0) + finiteNumber(base.initializationAppliedParticleRadiusM, 0)
+    );
+    return {
+      schema: ULG_ALGORITHM_CONTACT_MATERIAL_ROW_SCHEMA,
+      status: 'algorithm-derived-contact-row-ready',
+      pairKey: `${drop.role}:${drop.material}|${base.role}:${base.material}`,
+      roles: [drop.role, base.role],
+      materials: [drop.material, base.material],
+      phases: [drop.phase, base.phase],
+      normalStiffnessPa: nonZeroMin([dropNormal, baseNormal]),
+      dampingViscosityPaS: Math.max(
+        finiteNumber(drop.dynamicViscosityPaSMean, 0),
+        finiteNumber(base.dynamicViscosityPaSMean, 0)
+      ),
+      supportRadiusM,
+      softerMaterial: dropNormal > 0 && baseNormal > 0 && dropNormal <= baseNormal ? drop.material : base.material,
+      crystalStructureKeys: [drop.crystalStructureKey, base.crystalStructureKey],
+      impulsePolicy: 'bounded-by-softer-constituent-and-initial-support-radius',
+      strictSourceOfTruth: false,
+      forceMutationAuthority: 'not-authoritative-contact-policy-row',
+      provenance: {
+        source: 'algorithm-derived-contact-row',
+        mechanicsRowsSchema: mlsMpmMechanicsRows?.schema ?? null
+      }
+    };
+  });
+  return {
+    schema: ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA,
+    status: rows.length > 0
+      ? 'algorithm-derived-contact-rows-ready'
+      : 'algorithm-derived-contact-rows-empty',
+    rowCount: rows.length,
+    rows,
+    strictSourceOfTruth: false,
+    derivationAuthority: 'mls-mpm-mechanics-rows-contact-policy-view'
   };
 }

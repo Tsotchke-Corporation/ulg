@@ -12,7 +12,10 @@ import {
   buildMaterialPropertyBankGpuWarmInputTable,
   buildMaterialPropertyBankParticleSizePackingTable
 } from '../material/materialPropertyBank.js';
-import { buildAlgorithmMlsMpmMechanicsRows } from '../material/algorithmMaterialRows.js';
+import {
+  buildAlgorithmMaterialContactRows,
+  buildAlgorithmMlsMpmMechanicsRows
+} from '../material/algorithmMaterialRows.js';
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 
 export {
@@ -500,6 +503,9 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     particleInitializationRows: initialParticleSpacing?.algorithmMaterialParticleInitializationRows ?? null
   });
+  const algorithmMaterialContactRows = buildAlgorithmMaterialContactRows({
+    mlsMpmMechanicsRows: algorithmMaterialMlsMpmMechanicsRows
+  });
   return {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
@@ -527,6 +533,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
     algorithmMaterialMlsMpmMechanicsRows,
+    algorithmMaterialContactRows,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

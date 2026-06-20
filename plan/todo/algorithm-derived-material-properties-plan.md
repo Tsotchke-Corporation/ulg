@@ -103,6 +103,13 @@ particle initialization rows, aggregating role/material/phase mechanics and
 carrying crystal metadata forward. Contact policy and marching-cubes/surface
 policy are still open consumers.
 
+Contact policy status, 2026-06-20 AKDT:
+`peercompute.ulg.algorithm-material-contact-rows.v0` now derives a drop/base
+contact-policy view from the MLS-MPM mechanics rows. It is explicitly
+non-authoritative for force mutation and carries stiffness, damping/support,
+and crystal-key metadata for the future force kernel. Marching-cubes/surface
+policy remains the next unimplemented row family.
+
 ## Completion Gates
 
 - Same material and temperature produce consistent drop/base particle mass,

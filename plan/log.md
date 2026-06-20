@@ -29591,3 +29591,37 @@ Remaining:
 - Fix native surface/offscreen validation readback or device lifetime around
   the engine main-canvas consumer. Basic resident-device buffer and texture
   readback are no longer the likely root cause.
+
+## 2026-06-19 AKDT - Native Surface Readback Classification
+
+Status:
+
+- Moved native surface/offscreen validation submission to run after the visible
+  native canvas render submit, using a fresh validation encoder after the
+  render work is queued.
+- Classified native readback-smoke `external Instance` failures as
+  texture-readback-unavailable `not-run` results instead of generic errors,
+  matching the offscreen validation path.
+- Kept the native visible consumer fail-closed. This change improves diagnosis
+  and scheduling but does not claim native visibility is validated.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `63/63`.
+- PASS: `git diff --check`.
+- PARTIAL/EXPECTED BAD:
+  `/tmp/ulg-native-readback-classified-probe.json` ran the native WebGPU
+  surface consumer with browser console issues/warnings `0/0`, resident MAP
+  smoke `passed`, resident texture smoke `passed`, native bridge render status
+  `native-webgpu-surface-consumer-rendered`, and visible consumer still
+  fail-closed. The bridge readback smoke now reports `not-run` with
+  `texture readback unavailable: native WebGPU same-device readback smoke
+  validation unavailable in this browser: A valid external Instance reference
+  no longer exists`.
+
+Remaining:
+
+- Actual native surface/offscreen readback still needs a deeper device/context
+  lifetime fix. The current result is correct fail-closed classification, not a
+  rendering signoff.

@@ -11369,3 +11369,27 @@ Resident native texture readback smoke, 2026-06-19 AKDT:
   An initial attempt against occupied `5173` failed during HTTP readiness with
   `Timed out waiting for http://127.0.0.1:5173: fetch failed`; the successful
   harness run used clean port `5631`.
+
+Native surface readback classification, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` passed.
+- Focused tests:
+  `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `63/63`.
+- Whitespace:
+  `git diff --check` passed.
+- Browser native surface probe:
+  `/tmp/ulg-native-readback-classified-probe.json`
+  - Expected partial/fail-closed result: probe `status=bad`, browser console
+    issues/warnings `0/0`.
+  - Resident device MAP_READ and standalone texture readback smokes both
+    passed.
+  - Native bridge rendered
+    `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`
+    with `renderBridgeFrameCount=10`.
+  - Visible consumer remained blocked:
+    `visibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-pixel-validation`.
+  - Native bridge readback smoke is now classified as `not-run` with
+    texture-readback-unavailable reason instead of generic `error`; offscreen
+    validation remains `not-run` for the same external-instance class.

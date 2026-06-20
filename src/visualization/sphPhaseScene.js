@@ -8649,9 +8649,12 @@ export function createSphPhaseScene(container, {
             bridge.readbackSmokeValidationPending = false;
             readbackBuffer?.destroy?.();
             validationTexture?.destroy?.();
+            const message = error instanceof Error ? error.message : String(error);
             publishSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, {
-              status: 'error',
-              reason: error instanceof Error ? error.message : String(error)
+              status: isNativeWebGpuTextureReadbackUnavailableReason(message) ? 'not-run' : 'error',
+              reason: isNativeWebGpuTextureReadbackUnavailableReason(message)
+                ? `texture readback unavailable: native WebGPU same-device readback smoke validation unavailable in this browser: ${message}`
+                : message
             });
           });
       };
@@ -8659,9 +8662,12 @@ export function createSphPhaseScene(container, {
       bridge.readbackSmokeValidationPending = false;
       readbackBuffer?.destroy?.();
       validationTexture?.destroy?.();
+      const message = error instanceof Error ? error.message : String(error);
       publishSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, {
-        status: 'error',
-        reason: error instanceof Error ? error.message : String(error)
+        status: isNativeWebGpuTextureReadbackUnavailableReason(message) ? 'not-run' : 'error',
+        reason: isNativeWebGpuTextureReadbackUnavailableReason(message)
+          ? `texture readback unavailable: native WebGPU same-device readback smoke validation unavailable in this browser: ${message}`
+          : message
       });
       return null;
     }
@@ -11238,45 +11244,6 @@ export function createSphPhaseScene(container, {
 	        nativeSurfaceValidationCadence.readbackSmokeValidationNeeded;
 	      bridge.nativeSurfaceOffscreenValidationNeeded =
 	        nativeSurfaceValidationCadence.offscreenValidationNeeded;
-	      if (
-	        !nativeSurfaceClearOnly
-	        && bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	        && nativeSurfaceValidationCadence.validationEncoderRequired
-	      ) {
-	        const validationEncoder = bridge.device.createCommandEncoder({
-	          label: 'ulg-sph-native-webgpu-surface-draw-validation'
-	        });
-	        const validationCompletions = [];
-	        if (nativeSurfaceValidationCadence.readbackSmokeValidationNeeded) {
-	          const completeNativeReadbackSmokeValidation =
-	            beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
-	          if (completeNativeReadbackSmokeValidation) {
-	            validationCompletions.push(completeNativeReadbackSmokeValidation);
-	          }
-	        }
-	        if (nativeSurfaceValidationCadence.offscreenValidationNeeded) {
-	          const completeNativeOffscreenValidation =
-	            beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
-	              bridge,
-	              validationEncoder,
-	              {
-	                drawCount: submittedDrawCount,
-	                opaqueDraws,
-	                transparentDraws
-	              }
-	            );
-	          if (completeNativeOffscreenValidation) {
-	            validationCompletions.push(completeNativeOffscreenValidation);
-	          }
-	        }
-	        if (validationCompletions.length > 0) {
-	          bridge.device.queue.submit([validationEncoder.finish()]);
-	          for (const completeValidation of validationCompletions) {
-	            completeValidation();
-	          }
-	          scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge);
-	        }
-	      }
 	      const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
 	      const canvasTexture = bridge.context.getCurrentTexture();
 	      const canvasView = canvasTexture.createView();
@@ -11413,6 +11380,45 @@ export function createSphPhaseScene(container, {
 	          : 'webgpu-overlay-rendered')
 	      });
 	      completeNativePixelValidation?.();
+	      if (
+	        !nativeSurfaceClearOnly
+	        && bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+	        && nativeSurfaceValidationCadence.validationEncoderRequired
+	      ) {
+	        const validationEncoder = bridge.device.createCommandEncoder({
+	          label: 'ulg-sph-native-webgpu-surface-draw-validation'
+	        });
+	        const validationCompletions = [];
+	        if (nativeSurfaceValidationCadence.readbackSmokeValidationNeeded) {
+	          const completeNativeReadbackSmokeValidation =
+	            beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
+	          if (completeNativeReadbackSmokeValidation) {
+	            validationCompletions.push(completeNativeReadbackSmokeValidation);
+	          }
+	        }
+	        if (nativeSurfaceValidationCadence.offscreenValidationNeeded) {
+	          const completeNativeOffscreenValidation =
+	            beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
+	              bridge,
+	              validationEncoder,
+	              {
+	                drawCount: submittedDrawCount,
+	                opaqueDraws,
+	                transparentDraws
+	              }
+	            );
+	          if (completeNativeOffscreenValidation) {
+	            validationCompletions.push(completeNativeOffscreenValidation);
+	          }
+	        }
+	        if (validationCompletions.length > 0) {
+	          bridge.device.queue.submit([validationEncoder.finish()]);
+	          for (const completeValidation of validationCompletions) {
+	            completeValidation();
+	          }
+	          scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge);
+	        }
+	      }
 	      bridge.frameCount += 1;
 	      bridge.lastRenderStatus = nativeSurfaceClearOnly
 	        ? 'native-webgpu-surface-consumer-debug-clear-rendered'

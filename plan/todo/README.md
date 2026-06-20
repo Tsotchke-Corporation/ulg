@@ -108,7 +108,9 @@ console-clean and proves the cached resident `GPUDevice` can pass both
 surface/offscreen validation readback and device lifetime around the engine
 main-canvas consumer, not generic resident-device texture readback, extension
 counter readback, blank headless screenshot chasing, overlay fallback, or CPU
-mesh optimization.
+mesh optimization. `/tmp/ulg-native-readback-classified-probe.json` now
+classifies that bridge readback-smoke failure as texture-readback-unavailable
+`not-run` while leaving the visible consumer fail-closed.
 
 Current routing note, 2026-06-19 AKDT: the native surface bridge now includes a
 diagnostic offscreen same-device validation pass. It draws the same retained

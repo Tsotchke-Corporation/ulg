@@ -11760,3 +11760,45 @@ Default material bank loader, 2026-06-19 AKDT:
   - Passed. Vite reported only the existing large chunk-size warning.
 - Whitespace:
   `git diff --check` passed.
+- Whitespace:
+  `git diff --check` passed.
+
+Material bank GPU warm-row and particle-size packing, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/materialPropertyBank.js`,
+  `node --check src/runtime/sph/sphGpuBuffers.js`,
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/runtime/sphPhaseViewState.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/materialPropertyBank.test.mjs`,
+  `node --check tests/sphGpuBuffers.test.mjs`,
+  `node --check tests/sphPhaseDemo.test.mjs`, and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- Material bank suite:
+  `node --test tests/materialPropertyBank.test.mjs`
+  - Passed: `7/7`.
+  - Covers packed warm-input rows and particle-size rows as
+    `strictSourceOfTruth: false` GPU-ready warm metadata.
+- GPU particle buffer suite:
+  `node --test tests/sphGpuBuffers.test.mjs`
+  - Passed: `10/10`.
+  - Covers optional SPH and MLS-MPM upload buffers for warm-input and
+    particle-size rows, including destroy ownership.
+- SPH demo suite command:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "material bank warm inputs|GPU uploads include material-bank|initial particle spacing carries default"`
+  - Passed: `41/41`.
+  - Confirms demo initialization and view-state SPH/MLS-MPM descriptors carry
+    one accepted Fe warm row while `h2o` remains an explicit missing compound
+    bank row.
+- PeerCompute integration command:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "initial particle-size packing rows"`
+  - Passed: `18/18`.
+  - Confirms remote seed graphs preserve optional `initialParticleSpacing` and
+    hash differently when particle-size packing rows are present.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=9`.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.

@@ -2,6 +2,56 @@ export const MATERIAL_PROPERTY_BANK_SCHEMA = 'peercompute.ulg.material-property-
 export const MATERIAL_PROPERTY_BANK_SCHEMA_VERSION = 1;
 export const MATERIAL_PROPERTY_BANK_RECORD_SCHEMA = 'peercompute.ulg.material-property-bank.element.v0';
 export const MATERIAL_PROPERTY_BANK_WARM_INPUT_SCHEMA = 'peercompute.ulg.material-property-bank.warm-input.v0';
+export const MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA =
+  'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0';
+export const MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA =
+  'peercompute.ulg.material-property-bank.particle-size-packing-table.v0';
+export const MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'atomicNumber:f32',
+  'temperatureK:f32',
+  'pressurePa:f32',
+  'targetNeighborCount:f32',
+  'phaseCount:f32',
+  'baseColorSrgbR:f32',
+  'baseColorSrgbG:f32',
+  'baseColorSrgbB:f32',
+  'metalness:f32',
+  'roughness:f32',
+  'ior:f32',
+  'strictSourceOfTruth:f32',
+  'status:f32',
+  'pad0:f32',
+  'pad1:f32'
+]);
+export const MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT = Object.freeze([
+  'roleId:f32',
+  'materialId:f32',
+  'temperatureK:f32',
+  'pressurePa:f32',
+  'particlesPerEdge:f32',
+  'spacingM:f32',
+  'volumeEquivalentParticleRadiusM:f32',
+  'restVolumeM3:f32',
+  'densityKgPerM3:f32',
+  'targetNeighborCount:f32',
+  'smoothingLengthM:f32',
+  'strictSourceOfTruth:f32',
+  'status:f32',
+  'pad0:f32',
+  'pad1:f32',
+  'pad2:f32'
+]);
+
+export const MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS = Object.freeze({
+  ready: 1,
+  missingRoleWarmInput: 255
+});
+
+const MATERIAL_PROPERTY_BANK_ROLE_IDS = Object.freeze({
+  drop: 1,
+  base: 2
+});
 
 const ACCEPTED_PROVENANCE_STATUSES = new Set([
   'precomputed-json-bank',
@@ -17,6 +67,47 @@ function finiteNumber(value, fallback = 0) {
 
 function cloneRecord(record) {
   return JSON.parse(JSON.stringify(record));
+}
+
+function roleEntriesFromWarmInputs(warmInputs) {
+  const roles = warmInputs?.roles || {};
+  return Object.entries(roles)
+    .filter(([, warmInput]) => warmInput?.schema === MATERIAL_PROPERTY_BANK_WARM_INPUT_SCHEMA)
+    .sort(([a], [b]) => String(a).localeCompare(String(b)));
+}
+
+function emptyWarmInputTable() {
+  return {
+    schema: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+    status: 'material-bank-gpu-warm-input-table-empty',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: new Float32Array(0),
+    rowCount: 0,
+    metadata: [],
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function emptyParticleSizePackingTable() {
+  return {
+    schema: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA,
+    status: 'material-bank-particle-size-packing-empty',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: new Float32Array(0),
+    rowCount: 0,
+    metadata: [],
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function canonicalMaterialPropertyBankSymbol(symbol) {
@@ -127,5 +218,123 @@ export function materialPropertyBankWarmInput(record, {
       generatorFingerprint,
       entries: cloneRecord(record.provenance)
     }
+  };
+}
+
+export function buildMaterialPropertyBankGpuWarmInputTable(warmInputs) {
+  const entries = roleEntriesFromWarmInputs(warmInputs);
+  if (entries.length === 0) return emptyWarmInputTable();
+  const rows = [];
+  const metadata = [];
+  for (const [role, warmInput] of entries) {
+    const pbr = warmInput.pbr || {};
+    const color = Array.isArray(pbr.baseColorSrgb) ? pbr.baseColorSrgb : [0, 0, 0];
+    rows.push(
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.temperatureK),
+      finiteNumber(warmInput.pressurePa),
+      finiteNumber(warmInput.targetNeighborCount),
+      finiteNumber(warmInput.phaseCount),
+      finiteNumber(color[0]),
+      finiteNumber(color[1]),
+      finiteNumber(color[2]),
+      finiteNumber(pbr.metalness),
+      finiteNumber(pbr.roughness),
+      finiteNumber(pbr.ior, 1),
+      warmInput.strictSourceOfTruth === true ? 1 : 0,
+      MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
+      0,
+      0
+    );
+    metadata.push({
+      role,
+      material: warmInput.material,
+      requestedMaterial: warmInput.requestedMaterial ?? null,
+      materialId: warmInput.atomicNumber,
+      atomicNumber: warmInput.atomicNumber,
+      temperatureK: warmInput.temperatureK,
+      pressurePa: warmInput.pressurePa,
+      targetNeighborCount: warmInput.targetNeighborCount,
+      spacingPolicy: warmInput.spacingPolicy ?? null,
+      bankFamily: warmInput.bankFamily ?? null,
+      bankSchemaVersion: warmInput.bankSchemaVersion ?? null,
+      generatorFingerprint: warmInput.provenance?.generatorFingerprint ?? null,
+      strictSourceOfTruth: false,
+      status: 'ready'
+    });
+  }
+  return {
+    schema: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+    status: 'material-bank-gpu-warm-input-table-ready',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: Float32Array.from(rows),
+    rowCount: rows.length / MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length,
+    metadata,
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function buildMaterialPropertyBankParticleSizePackingTable(initialParticleSpacing) {
+  const warmInputs = initialParticleSpacing?.materialPropertyBankWarmInputs;
+  const entries = roleEntriesFromWarmInputs(warmInputs);
+  if (entries.length === 0) return emptyParticleSizePackingTable();
+  const rows = [];
+  const metadata = [];
+  for (const [role, warmInput] of entries) {
+    const rolePlan = initialParticleSpacing?.[role] || {};
+    rows.push(
+      MATERIAL_PROPERTY_BANK_ROLE_IDS[role] ?? 0,
+      finiteNumber(warmInput.atomicNumber),
+      finiteNumber(warmInput.temperatureK),
+      finiteNumber(warmInput.pressurePa),
+      finiteNumber(rolePlan.particlesPerEdge),
+      finiteNumber(rolePlan.spacingM),
+      finiteNumber(rolePlan.volumeEquivalentParticleRadiusM),
+      finiteNumber(rolePlan.restVolumeM3),
+      finiteNumber(rolePlan.densityKgPerM3),
+      finiteNumber(warmInput.targetNeighborCount),
+      finiteNumber(initialParticleSpacing?.smoothingLengthM),
+      warmInput.strictSourceOfTruth === true ? 1 : 0,
+      MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
+      0,
+      0,
+      0
+    );
+    metadata.push({
+      role,
+      roleId: MATERIAL_PROPERTY_BANK_ROLE_IDS[role] ?? 0,
+      material: warmInput.material,
+      requestedMaterial: warmInput.requestedMaterial ?? null,
+      materialId: warmInput.atomicNumber,
+      particlesPerEdge: finiteNumber(rolePlan.particlesPerEdge),
+      spacingM: finiteNumber(rolePlan.spacingM),
+      volumeEquivalentParticleRadiusM: finiteNumber(rolePlan.volumeEquivalentParticleRadiusM),
+      restVolumeM3: finiteNumber(rolePlan.restVolumeM3),
+      densityKgPerM3: finiteNumber(rolePlan.densityKgPerM3),
+      targetNeighborCount: warmInput.targetNeighborCount,
+      smoothingLengthM: finiteNumber(initialParticleSpacing?.smoothingLengthM),
+      strictSourceOfTruth: false,
+      status: 'ready'
+    });
+  }
+  return {
+    schema: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA,
+    status: 'material-bank-particle-size-packing-ready',
+    rowLayout: [...MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT],
+    rowStrideFloats: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
+    rowStrideBytes: MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    rows: Float32Array.from(rows),
+    rowCount: rows.length / MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT.length,
+    metadata,
+    strictSourceOfTruth: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
   };
 }

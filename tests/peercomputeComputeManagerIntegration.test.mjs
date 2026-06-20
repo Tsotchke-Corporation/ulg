@@ -4477,6 +4477,40 @@ test('ULG resident authority host auto-refreshes local hot buffers after admitte
   assert.equal(blockedDevice.createdBuffers.length, 0);
 });
 
+test('ULG remote seed graph preserves material-bank initial particle-size packing rows', async () => {
+  const demo = buildSphPhaseDemoState({
+    allowFixtureMaterialProperties: true,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const graphWithSpacing = buildUlgSphMlsMpmRemoteSeedTaskGraph({
+    state: demo.state,
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing,
+    seedTaskModulePath: ULG_PEERCOMPUTE_BROWSER_RESIDENT_HOST_MODULE_URL.href
+  });
+  const graphWithoutSpacing = buildUlgSphMlsMpmRemoteSeedTaskGraph({
+    state: demo.state,
+    materialProperties: demo.materialProperties,
+    seedTaskModulePath: ULG_PEERCOMPUTE_BROWSER_RESIDENT_HOST_MODULE_URL.href
+  });
+
+  assert.equal(
+    graphWithSpacing.stateSeedPayload.initialParticleSpacing.materialPropertyBankGpuWarmInputTable.rowCount,
+    1
+  );
+  assert.equal(
+    graphWithSpacing.stateSeedPayload.initialParticleSpacing.materialPropertyBankParticleSizePackingTable.rowCount,
+    1
+  );
+  assert.equal(
+    graphWithSpacing.nodes[0].task.data.stateSeedPayload.initialParticleSpacing
+      .materialPropertyBankParticleSizePackingTable.rowCount,
+    1
+  );
+  assert.notEqual(graphWithSpacing.cacheKey, graphWithoutSpacing.cacheKey);
+});
+
 test('ULG remote seed graph builder executes on a real responder ComputeManager and refreshes local hot buffers', async (t) => {
   const computeMod = await importPeerComputeManager(t);
   const nodeMod = await importPeerComputeNodeKernel(t);

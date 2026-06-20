@@ -8,6 +8,10 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import {
+  buildMaterialPropertyBankGpuWarmInputTable,
+  buildMaterialPropertyBankParticleSizePackingTable
+} from '../material/materialPropertyBank.js';
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 
 export {
@@ -278,7 +282,10 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
   };
 }
 
-export function buildSphGpuParticleBuffers(state, { materialProperties = {} } = {}) {
+export function buildSphGpuParticleBuffers(state, {
+  materialProperties = {},
+  initialParticleSpacing = null
+} = {}) {
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildSphGpuParticleBuffers requires a SPH state with particles');
   }
@@ -332,6 +339,13 @@ export function buildSphGpuParticleBuffers(state, { materialProperties = {} } = 
     });
   }
 
+  const materialPropertyBankWarmInputTable = buildMaterialPropertyBankGpuWarmInputTable(
+    initialParticleSpacing?.materialPropertyBankWarmInputs
+  );
+  const materialPropertyBankParticleSizeTable = buildMaterialPropertyBankParticleSizePackingTable(
+    initialParticleSpacing
+  );
+
   return {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
@@ -350,6 +364,8 @@ export function buildSphGpuParticleBuffers(state, { materialProperties = {} } = 
     state: stateValues,
     thermo: thermoValues,
     metadata,
+    materialPropertyBankWarmInputTable,
+    materialPropertyBankParticleSizeTable,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -368,6 +384,10 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
+function optionalStorageBuffer(device, label, data) {
+  return data?.byteLength > 0 ? writeStorageBuffer(device, label, data) : null;
+}
+
 export function uploadSphGpuParticleBuffers(device, packed) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a WebGPU-like device with queue.writeBuffer');
@@ -375,6 +395,16 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   if (packed?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a packed SPH GPU particle buffer');
   }
+  const materialPropertyBankWarmInputBuffer = optionalStorageBuffer(
+    device,
+    'ulg-sph-material-bank-warm-input-rows',
+    packed.materialPropertyBankWarmInputTable?.rows
+  );
+  const materialPropertyBankParticleSizeBuffer = optionalStorageBuffer(
+    device,
+    'ulg-sph-material-bank-particle-size-rows',
+    packed.materialPropertyBankParticleSizeTable?.rows
+  );
   return {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
@@ -384,8 +414,14 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     thermoStrideBytes: packed.thermoStrideBytes,
     stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state),
     thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo),
+    materialPropertyBankWarmInputBuffer,
+    materialPropertyBankParticleSizeBuffer,
+    materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
+    materialPropertyBankParticleSizeRowCount: packed.materialPropertyBankParticleSizeTable?.rowCount ?? 0,
     ownsStateBuffer: true,
     ownsThermoBuffer: true,
+    ownsMaterialPropertyBankWarmInputBuffer: Boolean(materialPropertyBankWarmInputBuffer),
+    ownsMaterialPropertyBankParticleSizeBuffer: Boolean(materialPropertyBankParticleSizeBuffer),
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -394,7 +430,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
 }
 
 export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
-  const { materialProperties = {} } = options;
+  const { materialProperties = {}, initialParticleSpacing = null } = options;
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildMlsMpmGpuParticleBuffers requires a SPH state with particles');
   }
@@ -450,6 +486,12 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       surfaceTensionNPerM: constitutive.surfaceTensionNPerM
     });
   }
+  const materialPropertyBankWarmInputTable = buildMaterialPropertyBankGpuWarmInputTable(
+    initialParticleSpacing?.materialPropertyBankWarmInputs
+  );
+  const materialPropertyBankParticleSizeTable = buildMaterialPropertyBankParticleSizePackingTable(
+    initialParticleSpacing
+  );
   return {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
@@ -474,6 +516,8 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       : [0, -9.80665, 0],
     mechanics,
     metadata,
+    materialPropertyBankWarmInputTable,
+    materialPropertyBankParticleSizeTable,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -488,6 +532,16 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
   if (packed?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadMlsMpmGpuParticleBuffers requires a packed MLS-MPM GPU particle buffer');
   }
+  const materialPropertyBankWarmInputBuffer = optionalStorageBuffer(
+    device,
+    'ulg-mls-mpm-material-bank-warm-input-rows',
+    packed.materialPropertyBankWarmInputTable?.rows
+  );
+  const materialPropertyBankParticleSizeBuffer = optionalStorageBuffer(
+    device,
+    'ulg-mls-mpm-material-bank-particle-size-rows',
+    packed.materialPropertyBankParticleSizeTable?.rows
+  );
   return {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
@@ -495,7 +549,13 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     particleCount: packed.particleCount,
     mechanicsStrideBytes: packed.mechanicsStrideBytes,
     mechanicsBuffer: writeStorageBuffer(device, 'ulg-mls-mpm-particle-mechanics', packed.mechanics),
+    materialPropertyBankWarmInputBuffer,
+    materialPropertyBankParticleSizeBuffer,
+    materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,
+    materialPropertyBankParticleSizeRowCount: packed.materialPropertyBankParticleSizeTable?.rowCount ?? 0,
     ownsMechanicsBuffer: true,
+    ownsMaterialPropertyBankWarmInputBuffer: Boolean(materialPropertyBankWarmInputBuffer),
+    ownsMaterialPropertyBankParticleSizeBuffer: Boolean(materialPropertyBankParticleSizeBuffer),
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -504,14 +564,26 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
 }
 
 export function destroyMlsMpmGpuParticleBuffers(buffers) {
-  if (!buffers || buffers.ownsMechanicsBuffer === false) return;
-  buffers.mechanicsBuffer?.destroy?.();
+  if (!buffers) return;
+  if (buffers.ownsMechanicsBuffer !== false) buffers.mechanicsBuffer?.destroy?.();
+  if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
+    buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
+  }
+  if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
+    buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
+  }
 }
 
 export function destroySphGpuParticleBuffers(buffers) {
   if (!buffers) return;
   if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
   if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
+  if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
+    buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
+  }
+  if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
+    buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
+  }
 }
 
 export function decodeSphGpuParticleRows(packed) {

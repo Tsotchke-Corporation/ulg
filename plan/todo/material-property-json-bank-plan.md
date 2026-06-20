@@ -56,6 +56,17 @@ builds now publish the warm-input metadata. The remaining integration gap is
 turning those attached rows into GPU material-table and particle-size packing
 buffers.
 
+Status update, 2026-06-19 AKDT: accepted material-bank warm inputs now pack
+into GPU-ready row tables. `materialPropertyBank.js` defines non-authoritative
+warm-input and particle-size packing table schemas, `buildSphPhaseDemoState()`
+attaches both tables to `initialParticleSpacing`, and SPH/MLS-MPM particle
+buffer builders/uploaders carry optional warm-row and particle-size storage
+buffers when the seed contains matching accepted element rows. Remote
+PeerCompute seed graphs now preserve optional `initialParticleSpacing` and
+include it in the graph cache hash. Remaining Phase 1 work is full selectable
+non-noble element coverage and shader-side consumers that actually bind these
+rows beyond descriptor/upload availability.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

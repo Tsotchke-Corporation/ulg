@@ -153,10 +153,32 @@ test('demo initial particle spacing carries default material bank warm inputs', 
     'material-bank-warm-inputs-attached'
   );
   assert.equal(demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankCoveredRoleCount, 1);
+  assert.equal(
+    demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankGpuWarmInputRowCount,
+    1
+  );
+  assert.equal(
+    demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankParticleSizePackingRowCount,
+    1
+  );
+  assert.equal(
+    demo.initialParticleSpacing.materialPropertyBankGpuWarmInputTable.schema,
+    'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0'
+  );
+  assert.equal(demo.initialParticleSpacing.materialPropertyBankGpuWarmInputTable.rowCount, 1);
+  assert.equal(
+    demo.initialParticleSpacing.materialPropertyBankParticleSizePackingTable.schema,
+    'peercompute.ulg.material-property-bank.particle-size-packing-table.v0'
+  );
+  assert.equal(demo.initialParticleSpacing.materialPropertyBankParticleSizePackingTable.rowCount, 1);
 
   const viewState = createSphPhaseViewState({ demo });
   assert.equal(viewState.initialParticleSpacing.materialPropertyBankWarmInputs.roles.drop.material, 'Fe');
   assert.equal(viewState.initialParticleSpacing.materialPropertyBankWarmInputs.roles.base, null);
+  assert.equal(viewState.sphGpuParticleState.materialPropertyBankWarmInputTable.rowCount, 1);
+  assert.equal(viewState.sphGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
+  assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankWarmInputTable.rowCount, 1);
+  assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
 });
 
 test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {

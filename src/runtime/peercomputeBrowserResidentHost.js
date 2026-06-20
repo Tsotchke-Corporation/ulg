@@ -173,6 +173,7 @@ function normalizeRemoteSeedPayload(payload = {}) {
     stateKey: normalizeString(payload.stateKey, null),
     state,
     materialProperties: payload.materialProperties || {},
+    initialParticleSpacing: payload.initialParticleSpacing || state.initialParticleSpacing || null,
     step: payload.step ?? state.step ?? 0,
     time: payload.time ?? state.time ?? 0
   };
@@ -310,10 +311,12 @@ function buildPostStageSeedState({ stateSeedPayload, residentStageResult } = {})
 function buildMechanicsStageSeedState({ stateSeedPayload, mechanicsG2pResult } = {}) {
   const initialPayload = normalizeRemoteSeedPayload(stateSeedPayload);
   const sourceSph = buildSphGpuParticleBuffers(initialPayload.state, {
-    materialProperties: initialPayload.materialProperties
+    materialProperties: initialPayload.materialProperties,
+    initialParticleSpacing: initialPayload.initialParticleSpacing
   });
   const sourceMlsMpm = buildMlsMpmGpuParticleBuffers(initialPayload.state, {
-    materialProperties: initialPayload.materialProperties
+    materialProperties: initialPayload.materialProperties,
+    initialParticleSpacing: initialPayload.initialParticleSpacing
   });
   const nextState = numericBufferView(mechanicsG2pResult?.state);
   const nextMechanics = numericBufferView(mechanicsG2pResult?.mechanics);
@@ -806,6 +809,7 @@ export function selectRemoteGraphRefreshSeedPayload(result = null, options = {})
 export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
   state,
   materialProperties = {},
+  initialParticleSpacing = null,
   graphId = null,
   cacheKey = null,
   stateKey = null,
@@ -847,6 +851,7 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
     schema: ULG_REMOTE_TASK_GRAPH_STATE_SEED_PAYLOAD_SCHEMA,
     state,
     materialProperties,
+    initialParticleSpacing,
     cacheKey,
     stateKey
   });
@@ -855,6 +860,7 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
     schema: ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_GRAPH_SCHEMA,
     state: seedInput.state,
     materialProperties: seedInput.materialProperties,
+    initialParticleSpacing: seedInput.initialParticleSpacing,
     stateFamilies: normalizedStateFamilies,
     step: seedInput.step,
     time: seedInput.time
@@ -901,10 +907,12 @@ export function buildUlgSphMlsMpmRemoteSeedTaskGraph({
   let mlsMpmParticleState = null;
   if (includeResidentComputeStage || includeMechanicsStageChain) {
     sphParticleState = buildSphGpuParticleBuffers(stateSeedPayload.state, {
-      materialProperties: stateSeedPayload.materialProperties
+      materialProperties: stateSeedPayload.materialProperties,
+      initialParticleSpacing: stateSeedPayload.initialParticleSpacing
     });
     mlsMpmParticleState = buildMlsMpmGpuParticleBuffers(stateSeedPayload.state, {
-      materialProperties: stateSeedPayload.materialProperties
+      materialProperties: stateSeedPayload.materialProperties,
+      initialParticleSpacing: stateSeedPayload.initialParticleSpacing
     });
   }
   if (includeMechanicsStageChain) {
@@ -1179,10 +1187,12 @@ export function refreshUlgSphMlsMpmHotBuffersFromRemoteSeed({
   });
 
   const sphPacked = buildSphGpuParticleBuffers(payload.state, {
-    materialProperties: resolvedMaterialProperties
+    materialProperties: resolvedMaterialProperties,
+    initialParticleSpacing: payload.initialParticleSpacing
   });
   const mlsMpmPacked = buildMlsMpmGpuParticleBuffers(payload.state, {
-    materialProperties: resolvedMaterialProperties
+    materialProperties: resolvedMaterialProperties,
+    initialParticleSpacing: payload.initialParticleSpacing
   });
   const sphUpload = uploadSphGpuParticleBuffers(device, sphPacked);
   const mlsMpmUpload = uploadMlsMpmGpuParticleBuffers(device, mlsMpmPacked);

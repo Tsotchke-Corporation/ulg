@@ -22,10 +22,12 @@ export function createSphPhaseViewState(driver) {
   const pressureSummary = gasPressureSummary(demo);
   const renderDescriptors = particleRenderDescriptors(demo, { gasPressure: pressureSummary });
   const sphGpuParticleState = buildSphGpuParticleBuffers(demo.state, {
-    materialProperties: demo.materialProperties
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing
   });
   const mlsMpmGpuParticleState = buildMlsMpmGpuParticleBuffers(demo.state, {
-    materialProperties: demo.materialProperties
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing
   });
   const n = demo.state.particles.length;
   const positionsM = new Float32Array(n * 3);

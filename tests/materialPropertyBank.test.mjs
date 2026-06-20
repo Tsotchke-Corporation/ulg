@@ -7,8 +7,12 @@ import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createFirstPrinciplesMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+  MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA,
   MATERIAL_PROPERTY_BANK_SCHEMA,
   MATERIAL_PROPERTY_BANK_SCHEMA_VERSION,
+  buildMaterialPropertyBankGpuWarmInputTable,
+  buildMaterialPropertyBankParticleSizePackingTable,
   materialPropertyBankRecordBySymbol,
   materialPropertyBankWarmInput,
   normalizeMaterialPropertyBank
@@ -107,6 +111,58 @@ test('material property bank warm input is explicitly non-authoritative', async 
   assert.equal(warm.targetNeighborCount, 64);
   assert.equal(warm.spacingPolicy, 'derive-from-rest-density-and-phase');
   assert.ok(warm.provenance.entries.some((entry) => entry.status === 'reference-fallback'));
+});
+
+test('material property bank packs accepted warm inputs into GPU-ready rows', async () => {
+  const bank = normalizeMaterialPropertyBank(await readJson('../data/material-properties/elements.json'));
+  const fe = materialPropertyBankRecordBySymbol(bank, 'Fe');
+  const warm = {
+    ...materialPropertyBankWarmInput(fe, {
+      temperatureK: 1800,
+      pressurePa: 101325,
+      bankFamily: bank.bankFamily,
+      bankSchemaVersion: bank.schemaVersion,
+      generatorFingerprint: bank.generatorFingerprint
+    }),
+    role: 'drop',
+    requestedMaterial: 'fe'
+  };
+  const warmInputs = {
+    schema: 'peercompute.ulg.sph-initial-particle-spacing-material-bank-warm-inputs.v0',
+    roles: { drop: warm, base: null }
+  };
+  const table = buildMaterialPropertyBankGpuWarmInputTable(warmInputs);
+
+  assert.equal(table.schema, MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA);
+  assert.equal(table.status, 'material-bank-gpu-warm-input-table-ready');
+  assert.equal(table.rowCount, 1);
+  assert.equal(table.strictSourceOfTruth, false);
+  assert.equal(table.rows[0], 26);
+  assert.equal(table.rows[1], 26);
+  assert.equal(table.rows[12], 0);
+  assert.equal(table.rows[13], 1);
+  assert.equal(table.metadata[0].role, 'drop');
+  assert.equal(table.metadata[0].requestedMaterial, 'fe');
+
+  const particleSize = buildMaterialPropertyBankParticleSizePackingTable({
+    smoothingLengthM: 0.2,
+    materialPropertyBankWarmInputs: warmInputs,
+    drop: {
+      particlesPerEdge: 3,
+      spacingM: 0.1,
+      volumeEquivalentParticleRadiusM: 0.05,
+      restVolumeM3: 0.001,
+      densityKgPerM3: 7000
+    }
+  });
+  assert.equal(particleSize.schema, MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_PACKING_TABLE_SCHEMA);
+  assert.equal(particleSize.status, 'material-bank-particle-size-packing-ready');
+  assert.equal(particleSize.rowCount, 1);
+  assert.equal(particleSize.rows[0], 1);
+  assert.equal(particleSize.rows[1], 26);
+  assert.equal(particleSize.rows[11], 0);
+  assert.equal(particleSize.rows[12], 1);
+  assert.equal(particleSize.metadata[0].spacingM, 0.1);
 });
 
 test('MaterialRegistry exposes bank warm inputs without overriding strict closure samples', async () => {

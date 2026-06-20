@@ -44,6 +44,8 @@ import {
   requireFirstPrinciplesMaterialProperties
 } from './material/propertyProvenance.js';
 import {
+  buildMaterialPropertyBankGpuWarmInputTable,
+  buildMaterialPropertyBankParticleSizePackingTable,
   materialPropertyBankRecordBySymbol,
   materialPropertyBankWarmInput,
   normalizeMaterialPropertyBank
@@ -1045,9 +1047,17 @@ export function buildSphPhaseDemoState({
   });
   if (materialBankWarmInputs) {
     initialParticleSpacing.materialPropertyBankWarmInputs = materialBankWarmInputs;
+    initialParticleSpacing.materialPropertyBankGpuWarmInputTable =
+      buildMaterialPropertyBankGpuWarmInputTable(materialBankWarmInputs);
+    initialParticleSpacing.materialPropertyBankParticleSizePackingTable =
+      buildMaterialPropertyBankParticleSizePackingTable(initialParticleSpacing);
     initialParticleSpacing.particleSizePolicy.materialPropertyBankWarmInputStatus = materialBankWarmInputs.status;
     initialParticleSpacing.particleSizePolicy.materialPropertyBankCoveredRoleCount =
       materialBankWarmInputs.coveredRoleCount;
+    initialParticleSpacing.particleSizePolicy.materialPropertyBankGpuWarmInputRowCount =
+      initialParticleSpacing.materialPropertyBankGpuWarmInputTable.rowCount;
+    initialParticleSpacing.particleSizePolicy.materialPropertyBankParticleSizePackingRowCount =
+      initialParticleSpacing.materialPropertyBankParticleSizePackingTable.rowCount;
   }
 
   const dropParticles = fillCube({

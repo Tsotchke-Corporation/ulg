@@ -561,6 +561,14 @@ the JSON import successfully. Explicit callers can still pass
 material-bank runtime work is GPU material-table and particle-size packing
 consumption, plus full selectable non-noble element coverage.
 
+Current routing note, 2026-06-19 AKDT: accepted element bank warm inputs now
+pack into explicit GPU-ready warm-input and particle-size tables. Demo
+initialization attaches those tables under `initialParticleSpacing`, SPH and
+MLS-MPM particle buffer builders/uploaders carry optional storage buffers for
+the rows, and remote PeerCompute seed graphs preserve/hash optional
+`initialParticleSpacing`. Continue with full selectable non-noble element
+coverage and actual shader-stage row consumers.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

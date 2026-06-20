@@ -30168,3 +30168,48 @@ Remaining:
   particle-size packing rows.
 - Expand from active-row coverage to the full selectable non-noble element
   list.
+
+## 2026-06-19 AKDT - Material Bank GPU Packing Rows
+
+Status:
+
+- Added explicit non-authoritative GPU warm-input and particle-size packing row
+  schemas in `materialPropertyBank.js`.
+- `buildSphPhaseDemoState()` now attaches accepted bank row tables to
+  `initialParticleSpacing` and reports row counts through the particle-size
+  policy.
+- SPH and MLS-MPM particle buffer builders now carry the optional packed row
+  tables, and uploaders create optional material-bank storage buffers when rows
+  are present.
+- Remote PeerCompute seed payloads preserve optional `initialParticleSpacing`,
+  include it in graph cache hashes, and pass it into SPH/MLS-MPM hot-buffer
+  packing.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/materialPropertyBank.js`.
+- PASS: `node --check src/runtime/sph/sphGpuBuffers.js`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check src/runtime/sphPhaseViewState.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/materialPropertyBank.test.mjs`.
+- PASS: `node --check tests/sphGpuBuffers.test.mjs`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` with `7/7`.
+- PASS: `node --test tests/sphGpuBuffers.test.mjs` with `10/10`.
+- PASS:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "material bank warm inputs|GPU uploads include material-bank|initial particle spacing carries default"` with `41/41`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "initial particle-size packing rows"` with `18/18`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=9`.
+- PASS: `npm run build` with the existing large chunk warning only.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Bind the packed material-bank rows in shader stages that need them, rather
+  than only descriptor/upload availability.
+- Expand from active-row coverage to the full selectable non-noble element
+  list.

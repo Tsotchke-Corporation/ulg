@@ -148,6 +148,74 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   assert.deepEqual(destroyed, ['ulg-sph-particle-state', 'ulg-sph-particle-thermo']);
 });
 
+test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size rows when supplied', () => {
+  const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  const sphPacked = buildSphGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing
+  });
+  const mlsPacked = buildMlsMpmGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties,
+    initialParticleSpacing: demo.initialParticleSpacing
+  });
+  const writes = [];
+  const destroyed = [];
+  const device = {
+    createBuffer(descriptor) {
+      return {
+        ...descriptor,
+        destroy() {
+          destroyed.push(descriptor.label);
+        }
+      };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength, usage: buffer.usage });
+      }
+    }
+  };
+
+  assert.equal(sphPacked.materialPropertyBankWarmInputTable.rowCount, 1);
+  assert.equal(sphPacked.materialPropertyBankParticleSizeTable.rowCount, 1);
+  assert.equal(mlsPacked.materialPropertyBankWarmInputTable.rowCount, 1);
+  assert.equal(mlsPacked.materialPropertyBankParticleSizeTable.rowCount, 1);
+
+  const sphBuffers = uploadSphGpuParticleBuffers(device, sphPacked);
+  const mlsBuffers = uploadMlsMpmGpuParticleBuffers(device, mlsPacked);
+  assert.deepEqual(
+    writes.map((write) => write.label),
+    [
+      'ulg-sph-material-bank-warm-input-rows',
+      'ulg-sph-material-bank-particle-size-rows',
+      'ulg-sph-particle-state',
+      'ulg-sph-particle-thermo',
+      'ulg-mls-mpm-material-bank-warm-input-rows',
+      'ulg-mls-mpm-material-bank-particle-size-rows',
+      'ulg-mls-mpm-particle-mechanics'
+    ]
+  );
+  assert.equal(sphBuffers.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(sphBuffers.materialPropertyBankParticleSizeRowCount, 1);
+  assert.equal(mlsBuffers.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(mlsBuffers.materialPropertyBankParticleSizeRowCount, 1);
+
+  destroySphGpuParticleBuffers(sphBuffers);
+  destroyMlsMpmGpuParticleBuffers(mlsBuffers);
+  assert.deepEqual(
+    destroyed,
+    [
+      'ulg-sph-particle-state',
+      'ulg-sph-particle-thermo',
+      'ulg-sph-material-bank-warm-input-rows',
+      'ulg-sph-material-bank-particle-size-rows',
+      'ulg-mls-mpm-particle-mechanics',
+      'ulg-mls-mpm-material-bank-warm-input-rows',
+      'ulg-mls-mpm-material-bank-particle-size-rows'
+    ]
+  );
+});
+
 test('SPH GPU particle buffer destroy honors ownership flags for borrowed buffers', () => {
   const destroyed = [];
   const stateBuffer = { destroy: () => destroyed.push('state') };

@@ -5409,7 +5409,7 @@ export const mlsMpmMechanicsRefreshWgsl = `
 struct MechanicsRefreshParams {
   particle_count: u32,
   phase_record_count: u32,
-  pad0: u32,
+  material_bank_warm_input_row_count: u32,
   pad1: u32,
 };
 
@@ -5432,6 +5432,14 @@ struct PhaseMechanics {
 @group(0) @binding(3) var<storage, read> material_phase_records: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> out_mechanics: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: MechanicsRefreshParams;
+@group(0) @binding(6) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
+
+fn material_bank_warm_input_anchor() -> f32 {
+  if (params.material_bank_warm_input_row_count == 0u) {
+    return 0.0;
+  }
+  return material_bank_warm_input_rows[0u].x * 0.0;
+}
 
 fn phase_record_row0(record_index: u32) -> vec4<f32> {
   return material_phase_records[record_index * 3u];
@@ -5497,6 +5505,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (rest_density > 0.0) {
     rest_volume = max(state0.w, 0.0) / rest_density;
   }
+  rest_volume = rest_volume + material_bank_warm_input_anchor();
 
   var row4 = out_mechanics[mechanics_base + 4u];
   let row5 = out_mechanics[mechanics_base + 5u];

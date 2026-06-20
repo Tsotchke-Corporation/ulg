@@ -1,9 +1,12 @@
 import {
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT
 } from '../../../ulg-gpu-abi/src/index.js';
+import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../material/materialPropertyBank.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-table.v0';
+export const ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA =
+  'peercompute.ulg.mls-mpm-mechanics-material-bank-warm-input-consumer.v0';
 export const MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS = SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length;
 
 const AVOGADRO_R = 8.314462618;
@@ -29,6 +32,44 @@ function sortedMaterialEntries(materialProperties) {
   return Object.entries(materialProperties || {})
     .filter(([, properties]) => properties?.phases?.length)
     .sort(([a], [b]) => String(a).localeCompare(String(b)));
+}
+
+function materialBankWarmInputsByMaterial(table = null) {
+  const rows = new Map();
+  if (table?.schema !== MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA) return rows;
+  for (const metadata of table.metadata || []) {
+    const material = String(metadata?.material || metadata?.requestedMaterial || '').toLowerCase();
+    if (!material) continue;
+    rows.set(material, { ...metadata });
+  }
+  return rows;
+}
+
+function materialBankWarmInputConsumerSummary({
+  table = null,
+  matchedMaterialCount = 0
+} = {}) {
+  const sourceRowCount = Math.max(0, Math.round(finiteNumber(table?.rowCount, 0)));
+  const matchedCount = Math.max(0, Math.round(finiteNumber(matchedMaterialCount, 0)));
+  return {
+    schema: ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
+    status: sourceRowCount <= 0
+      ? 'no-material-bank-warm-input-table'
+      : (matchedCount > 0
+        ? 'mechanics-material-table-annotated-with-material-bank-warm-inputs'
+        : 'material-bank-warm-inputs-not-matched-to-mechanics-materials'),
+    sourceSchema: table?.schema ?? null,
+    sourceRowCount,
+    matchedMaterialCount: matchedCount,
+    consumer: 'mls-mpm-mechanics-material-table',
+    consumedAs: 'non-authoritative-warm-input-metadata-before-closure-derived-mechanics-eos-tables',
+    strictSourceOfTruth: false,
+    shaderBound: false,
+    scientificValidation: false,
+    materialValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 function phaseTemperatureK(phase) {
@@ -118,10 +159,13 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
   viscosityEnabled = false,
   mlsMpmArtificialViscosityAlpha = DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA,
   viscosityLengthM = 0,
-  surfaceTensionEnabled = false
+  surfaceTensionEnabled = false,
+  materialPropertyBankGpuWarmInputTable = null
 } = {}) {
   const records = [];
   const metadata = [];
+  const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
+  let materialBankWarmInputMatchedMaterialCount = 0;
   const options = {
     soundSpeedScale,
     minGasSoundSpeedMPerS,
@@ -134,6 +178,8 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     const materialId = stableOpticalMaterialId(material);
     const offset = records.length / MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS;
     const phases = [];
+    const materialBankWarmInput = materialBankWarmInputs.get(String(material).toLowerCase()) || null;
+    if (materialBankWarmInput) materialBankWarmInputMatchedMaterialCount += 1;
     for (const phase of properties.phases || []) {
       records.push(...mechanicsMaterialPhaseRecord(material, properties, phase, options));
       phases.push(phase.name);
@@ -144,14 +190,26 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
       phaseOffset: offset,
       phaseCount: phases.length,
       phaseNames: phases,
+      materialPropertyBankWarmInput: materialBankWarmInput,
+      materialPropertyBankWarmInputStatus: materialBankWarmInput
+        ? 'material-bank-warm-input-attached'
+        : 'no-material-bank-warm-input',
       status: phases.length > 0
         ? MLS_MPM_MECHANICS_MATERIAL_STATUS.ready
         : MLS_MPM_MECHANICS_MATERIAL_STATUS.missingPhase
     });
   }
+  const materialPropertyBankWarmInputConsumer = materialBankWarmInputConsumerSummary({
+    table: materialPropertyBankGpuWarmInputTable,
+    matchedMaterialCount: materialBankWarmInputMatchedMaterialCount
+  });
   return {
     schema: ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA,
     status: records.length ? 'mechanics-material-table-ready' : 'mechanics-material-table-empty',
+    materialPropertyBankWarmInputConsumer,
+    materialPropertyBankWarmInputRowCount: materialPropertyBankWarmInputConsumer.sourceRowCount,
+    materialPropertyBankWarmInputMatchedMaterialCount:
+      materialPropertyBankWarmInputConsumer.matchedMaterialCount,
     phaseRecordCount: records.length / MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
     recordLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
     recordStrideFloats: MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,

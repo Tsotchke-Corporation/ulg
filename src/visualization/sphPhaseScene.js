@@ -15039,7 +15039,9 @@ export function createSphPhaseScene(container, {
           viscosityLengthM: nextMlsMpmGpuParticleState?.viscosityLengthM
             ?? nextMlsMpmGpuParticleState?.gridSpacingM
             ?? nextSphGpuParticleState?.smoothingLengthM,
-          surfaceTensionEnabled: currentPhysicalLawGroups.surfaceTension
+          surfaceTensionEnabled: currentPhysicalLawGroups.surfaceTension,
+          materialPropertyBankGpuWarmInputTable:
+            nextSphGpuParticleState?.materialPropertyBankWarmInputTable ?? null
         })
         : null
     ));

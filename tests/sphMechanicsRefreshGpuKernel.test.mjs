@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../src/runtime/material/materialPropertyBank.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
 import {
   buildMlsMpmMechanicsMaterialTable,
   findMechanicsMaterialPhaseRecord,
-  MLS_MPM_EOS_MODEL_IDS
+  MLS_MPM_EOS_MODEL_IDS,
+  ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
 } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   destroyMlsMpmMechanicsMaterialPhaseUpload,
@@ -49,6 +51,60 @@ test('MLS-MPM mechanics material table packs phase mechanics for condensed and g
   assert.equal(gas.effectiveBulkModulusPa, 0);
   assert.equal(gas.eosModelId, MLS_MPM_EOS_MODEL_IDS.gasLinearized);
   assert.ok(gas.soundSpeedMPerS >= 40);
+});
+
+test('MLS-MPM mechanics material table annotates material-bank warm inputs without making them authoritative', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    },
+    fe: {
+      molarMassKgPerMol: 0.055845,
+      phases: [
+        { name: 'solid', densityKgPerM3: 7874, bulkModulusPa: 1.7e11, shearModulusPa: 8.2e10, cpJPerKgK: 449, temperatureRange: [0, 1811] }
+      ]
+    }
+  }, {
+    materialPropertyBankGpuWarmInputTable: {
+      schema: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+      status: 'material-bank-gpu-warm-input-table-ready',
+      rowCount: 1,
+      rows: new Float32Array(16),
+      metadata: [{
+        material: 'Fe',
+        requestedMaterial: 'Fe',
+        atomicNumber: 26,
+        temperatureK: 300,
+        pressurePa: 101325,
+        strictSourceOfTruth: false,
+        status: 'ready'
+      }]
+    }
+  });
+
+  assert.equal(
+    table.materialPropertyBankWarmInputConsumer.schema,
+    ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    table.materialPropertyBankWarmInputConsumer.status,
+    'mechanics-material-table-annotated-with-material-bank-warm-inputs'
+  );
+  assert.equal(table.materialPropertyBankWarmInputConsumer.sourceRowCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.matchedMaterialCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.strictSourceOfTruth, false);
+  assert.equal(table.materialPropertyBankWarmInputConsumer.shaderBound, false);
+  assert.equal(table.materialPropertyBankWarmInputRowCount, 1);
+  assert.equal(table.materialPropertyBankWarmInputMatchedMaterialCount, 1);
+  const iron = table.metadata.find((entry) => entry.material === 'fe');
+  const water = table.metadata.find((entry) => entry.material === 'h2o');
+  assert.equal(iron.materialPropertyBankWarmInput.material, 'Fe');
+  assert.equal(iron.materialPropertyBankWarmInputStatus, 'material-bank-warm-input-attached');
+  assert.equal(water.materialPropertyBankWarmInput, null);
+  assert.equal(water.materialPropertyBankWarmInputStatus, 'no-material-bank-warm-input');
 });
 
 test('CPU mechanics refresh updates constitutive fields from current thermo phase', () => {
@@ -150,6 +206,8 @@ test('CPU mechanics refresh resets deformation history on large gas to condensed
 
 test('WGSL mechanics refresh updates rest volume and constitutive rows without state readback', () => {
   assert.match(mlsMpmMechanicsRefreshWgsl, /fn find_phase_mechanics/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /@binding\(6\) var<storage, read> material_bank_warm_input_rows/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /fn material_bank_warm_input_anchor/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /mechanics_refresh_should_reset/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /rest_ratio >= 2\.0/);
   assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ row\] = source_mechanics\[mechanics_base \+ row\]/);
@@ -168,6 +226,22 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
         { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
       ]
     }
+  }, {
+    materialPropertyBankGpuWarmInputTable: {
+      schema: MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA,
+      status: 'material-bank-gpu-warm-input-table-ready',
+      rowCount: 1,
+      rows: new Float32Array(16),
+      metadata: [{
+        material: 'h2o',
+        requestedMaterial: 'h2o',
+        atomicNumber: 8,
+        temperatureK: 300,
+        pressurePa: 101325,
+        strictSourceOfTruth: false,
+        status: 'ready'
+      }]
+    }
   });
   const state = new Float32Array([0, 0, 0, 9.97, 0, 0, 0, 300]);
   const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
@@ -179,6 +253,7 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
   mechanics[19] = 1;
 
   const queueWrites = [];
+  const bindGroups = [];
   const device = {
     queue: {
       writeBuffer(buffer, offset, data) {
@@ -212,7 +287,9 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
       };
     },
     createBindGroup({ layout, entries }) {
-      return { layout, entries };
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
     },
     createCommandEncoder() {
       return {
@@ -247,7 +324,9 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
     mechanicsMaterialTable: table,
     sphParticleUpload: {
       stateBuffer: { label: 'borrowed-state' },
-      thermoBuffer: { label: 'borrowed-thermo' }
+      thermoBuffer: { label: 'borrowed-thermo' },
+      materialPropertyBankWarmInputBuffer: { label: 'material-bank-warm-inputs' },
+      materialPropertyBankWarmInputRowCount: 1
     },
     mlsMpmParticleUpload: {
       mechanicsBuffer: { label: 'borrowed-mechanics' }
@@ -258,6 +337,23 @@ test('WebGPU mechanics refresh leaves output mechanics initialization to the sha
 
   assert.equal(result.status, 'mechanics-constitutive-refresh-executed');
   assert.equal(result.outputBufferInitializationMode, 'shader-copies-source-mechanics-rows');
+  assert.equal(
+    result.mechanicsMaterialBankWarmInputConsumer.schema,
+    ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    result.mechanicsMaterialBankWarmInputConsumer.status,
+    'mechanics-material-bank-warm-inputs-bound-in-shader'
+  );
+  assert.equal(result.mechanicsMaterialBankWarmInputConsumer.shaderBound, true);
+  assert.equal(result.mechanicsMaterialBankWarmInputConsumer.shaderBinding, 6);
+  assert.equal(result.mechanicsMaterialBankWarmInputConsumer.shaderRowCount, 1);
+  assert.equal(result.mechanicsMaterialBankWarmInputConsumer.bufferSource, 'sph-particle-upload');
+  assert.equal(result.mechanicsMaterialBankWarmInputRowCount, 1);
+  assert.equal(result.mechanicsMaterialBankWarmInputMatchedMaterialCount, 1);
+  assert.ok(bindGroups.at(-1).entries.some((entry) => (
+    entry.binding === 6 && entry.resource.buffer.label === 'material-bank-warm-inputs'
+  )));
   assert.equal(queueWrites.some((write) => write.label === 'ulg-mls-mpm-mechanics-refresh-output-mechanics'), false);
 });
 

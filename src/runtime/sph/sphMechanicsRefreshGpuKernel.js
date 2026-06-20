@@ -12,6 +12,7 @@ import {
 } from './sphGpuBuffers.js';
 import {
   findMechanicsMaterialPhaseRecord,
+  ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
   MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
   ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA
 } from './sphMechanicsMaterialTable.js';
@@ -95,6 +96,82 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
+  sphParticleState = null,
+  mlsMpmParticleState = null,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null
+} = {}) {
+  const uploadCandidates = [
+    {
+      buffer: sphParticleUpload?.materialPropertyBankWarmInputBuffer || null,
+      rowCount: sphParticleUpload?.materialPropertyBankWarmInputRowCount,
+      source: 'sph-particle-upload'
+    },
+    {
+      buffer: mlsMpmParticleUpload?.materialPropertyBankWarmInputBuffer || null,
+      rowCount: mlsMpmParticleUpload?.materialPropertyBankWarmInputRowCount,
+      source: 'mls-mpm-particle-upload'
+    }
+  ];
+  for (const candidate of uploadCandidates) {
+    const rowCount = Math.max(0, Math.round(finiteNumber(candidate.rowCount, 0)));
+    if (candidate.buffer && rowCount > 0) {
+      return {
+        buffer: candidate.buffer,
+        rowCount,
+        bufferSource: candidate.source,
+        borrowed: true,
+        destroy() {}
+      };
+    }
+  }
+  const packedCandidates = [
+    {
+      table: sphParticleState?.materialPropertyBankWarmInputTable,
+      source: 'sph-particle-state'
+    },
+    {
+      table: mlsMpmParticleState?.materialPropertyBankWarmInputTable,
+      source: 'mls-mpm-particle-state'
+    }
+  ];
+  for (const candidate of packedCandidates) {
+    const packedRows = candidate.table?.rows;
+    const packedRowCount = Math.max(0, Math.round(finiteNumber(candidate.table?.rowCount, 0)));
+    if (packedRows?.byteLength > 0 && packedRowCount > 0) {
+      const buffer = writeStorageBuffer(
+        device,
+        'ulg-mls-mpm-mechanics-material-bank-warm-input-rows',
+        packedRows
+      );
+      return {
+        buffer,
+        rowCount: packedRowCount,
+        bufferSource: candidate.source,
+        borrowed: false,
+        destroy() {
+          buffer.destroy?.();
+        }
+      };
+    }
+  }
+  const emptyBuffer = writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty',
+    new Float32Array(0)
+  );
+  return {
+    buffer: emptyBuffer,
+    rowCount: 0,
+    bufferSource: 'empty',
+    borrowed: false,
+    destroy() {
+      emptyBuffer.destroy?.();
+    }
+  };
+}
+
 function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
   return device.createBuffer({
     label,
@@ -160,14 +237,52 @@ function uploadedMechanicsMaterialPhaseRecordsMatch(upload, mechanicsMaterialTab
   );
 }
 
-function createParamsArray({ particleCount, phaseRecordCount }) {
+function createParamsArray({ particleCount, phaseRecordCount, materialBankWarmInputRowCount = 0 }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, phaseRecordCount, true);
-  view.setUint32(8, 0, true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(materialBankWarmInputRowCount, 0))), true);
   view.setUint32(12, 0, true);
   return buffer;
+}
+
+function materialBankWarmInputConsumerForOutput(mechanicsMaterialTable, {
+  shaderBound = false,
+  shaderBinding = null,
+  shaderRowCount = 0,
+  bufferSource = null
+} = {}) {
+  const consumer = mechanicsMaterialTable?.materialPropertyBankWarmInputConsumer ?? {
+    schema: ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA,
+    status: 'no-material-bank-warm-input-table',
+    sourceSchema: null,
+    sourceRowCount: 0,
+    matchedMaterialCount: 0,
+    consumer: 'mls-mpm-mechanics-material-table',
+    consumedAs: 'non-authoritative-warm-input-metadata-before-closure-derived-mechanics-eos-tables',
+    strictSourceOfTruth: false,
+    shaderBound: false,
+    scientificValidation: false,
+    materialValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  const boundRowCount = Math.max(0, Math.round(finiteNumber(shaderRowCount, 0)));
+  const bound = shaderBound === true && boundRowCount > 0;
+  return {
+    ...consumer,
+    status: bound
+      ? 'mechanics-material-bank-warm-inputs-bound-in-shader'
+      : consumer.status,
+    consumedAs: bound
+      ? 'non-authoritative-shader-bound-warm-input-metadata-before-closure-derived-mechanics-eos-tables'
+      : consumer.consumedAs,
+    shaderBound: bound,
+    shaderBinding: bound ? shaderBinding : null,
+    shaderRowCount: bound ? boundRowCount : 0,
+    bufferSource: bound ? bufferSource : null
+  };
 }
 
 async function readBuffer(device, sourceBuffer, byteLength) {
@@ -199,8 +314,13 @@ function outputEnvelope({
   retainedOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE,
   outputBufferInitializationMode = null,
-  destroyOutputParticleBuffers = null
+  destroyOutputParticleBuffers = null,
+  mechanicsMaterialBankWarmInputShaderBinding = null
 }) {
+  const mechanicsMaterialBankWarmInputConsumer = materialBankWarmInputConsumerForOutput(
+    mechanicsMaterialTable,
+    mechanicsMaterialBankWarmInputShaderBinding || {}
+  );
   return {
     schema: ULG_MLS_MPM_MECHANICS_REFRESH_SCHEMA,
     backend,
@@ -218,6 +338,15 @@ function outputEnvelope({
     mechanicsMaterialPhaseUploadReused: Boolean(mechanicsMaterialPhaseUploadReused),
     mechanicsMaterialPhaseRecordsByteLength: mechanicsMaterialPhaseUpload?.recordsByteLength
       ?? mechanicsMaterialTable.records.byteLength,
+    mechanicsMaterialBankWarmInputConsumer,
+    mechanicsMaterialBankWarmInputRowCount:
+      mechanicsMaterialBankWarmInputConsumer.sourceRowCount
+        ?? mechanicsMaterialTable.materialPropertyBankWarmInputRowCount
+        ?? 0,
+    mechanicsMaterialBankWarmInputMatchedMaterialCount:
+      mechanicsMaterialBankWarmInputConsumer.matchedMaterialCount
+        ?? mechanicsMaterialTable.materialPropertyBankWarmInputMatchedMaterialCount
+        ?? 0,
     retainedOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
@@ -322,6 +451,12 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     : uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable);
   const materialPhaseUpload = borrowedMaterialPhaseUpload || localMaterialPhaseUpload;
   const materialPhaseBuffer = materialPhaseUpload.recordsBuffer || materialPhaseUpload.materialPhaseBuffer;
+  const materialBankWarmInputBinding = resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload
+  });
   const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
   const outMechanicsBuffer = createOutputStorageBuffer(
     device,
@@ -336,10 +471,11 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
-    phaseRecordCount: mechanicsMaterialTable.phaseRecordCount
+    phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
+    materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
   }));
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v3',
+    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v4',
     label: 'ulg-mls-mpm-mechanics-refresh',
     code: mlsMpmMechanicsRefreshWgsl,
     entryPoint: 'main',
@@ -349,7 +485,8 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
       computeBufferBinding(2, 'read-only-storage'),
       computeBufferBinding(3, 'read-only-storage'),
       computeBufferBinding(4, 'storage'),
-      computeBufferBinding(5, 'uniform')
+      computeBufferBinding(5, 'uniform'),
+      computeBufferBinding(6, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -360,7 +497,8 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
       { binding: 2, resource: { buffer: mechanicsBuffer } },
       { binding: 3, resource: { buffer: materialPhaseBuffer } },
       { binding: 4, resource: { buffer: outMechanicsBuffer } },
-      { binding: 5, resource: { buffer: paramsBuffer } }
+      { binding: 5, resource: { buffer: paramsBuffer } },
+      { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -379,6 +517,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
     if (localMaterialPhaseUpload) destroyMlsMpmMechanicsMaterialPhaseUpload(localMaterialPhaseUpload);
+    materialBankWarmInputBinding.destroy?.();
     paramsBuffer.destroy?.();
     if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
   };
@@ -400,6 +539,12 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     readbackMode,
     outputBufferInitializationMode,
+    mechanicsMaterialBankWarmInputShaderBinding: {
+      shaderBound: materialBankWarmInputBinding.rowCount > 0,
+      shaderBinding: 6,
+      shaderRowCount: materialBankWarmInputBinding.rowCount,
+      bufferSource: materialBankWarmInputBinding.bufferSource
+    },
     destroyOutputParticleBuffers() {
       outMechanicsBuffer.destroy?.();
     }

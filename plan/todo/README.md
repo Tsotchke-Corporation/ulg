@@ -205,6 +205,23 @@ mechanics/EOS shader warm-start availability, optical shader-side binding
 beyond metadata annotations, reference-quality replacement rows, and Phase 2
 crystalline structure data.
 
+Current routing note, 2026-06-20 AKDT: the MLS-MPM mechanics refresh now has
+the matching shader-side material-bank warm-input consumer. Mechanics material
+tables annotate accepted warm rows as non-authoritative metadata, live scene
+construction passes the packed SPH warm-input table into
+`buildMlsMpmMechanicsMaterialTable()`, and `mlsMpmMechanicsRefreshWgsl` binds
+those rows at binding `6` with the row count in `MechanicsRefreshParams`.
+The shader currently reads a zeroed presence anchor only; closure-derived
+mechanics/EOS phase records still own rest density, bulk/shear/lambda, sound
+speed, EOS model, viscosity, and surface tension. Evidence:
+`node --test tests/sphMechanicsRefreshGpuKernel.test.mjs tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs`
+passed `27/27`; the mounted Fe/H2O MLS-MPM variable-sphere probe
+`/tmp/ulg-mechanics-bank-shader-binding-probe.json` completed `status=good`
+with browser console issue/warning counts `0/0`; `npm run build` passed with
+the existing large bundle warning. Remaining material-bank consumers: optical
+shader-side binding beyond PBR metadata, reference-quality replacement rows,
+and Phase 2 crystalline structure data.
+
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the
 retained GPU vertex counter into the surface-row translation pass. This

@@ -207,6 +207,23 @@ mechanics/EOS shader warm-start availability, optical shader-side binding
 beyond PBR metadata, reference-quality replacement rows, and Phase 2
 crystalline structures.
 
+Status update, 2026-06-20 AKDT: MLS-MPM mechanics/EOS warm-input rows are now
+shader-bound as a second closure-adjacent consumer. `buildMlsMpmMechanicsMaterialTable()`
+annotates accepted bank rows and exposes
+`peercompute.ulg.mls-mpm-mechanics-material-bank-warm-input-consumer.v0`, live
+scene construction passes the packed SPH warm-input table into that mechanics
+table, and `mlsMpmMechanicsRefreshWgsl` binds the rows at binding `6`.
+The row count occupies the third `MechanicsRefreshParams` u32, and the shader
+reads only a zeroed presence anchor so closure-derived phase records still
+own rest density, mechanics constants, EOS model, viscosity, and surface
+tension. Evidence:
+`node --test tests/sphMechanicsRefreshGpuKernel.test.mjs tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs`
+passed `27/27`; `/tmp/ulg-mechanics-bank-shader-binding-probe.json` completed
+`status=good` with browser console issue/warning counts `0/0`; `npm run build`
+passed with the existing large bundle warning. Remaining shader-side
+material-bank consumer work is optical binding beyond PBR metadata, plus
+reference-quality replacement rows and Phase 2 crystalline structures.
+
 Status update, 2026-06-19 AKDT: optical GPU/PBR tables now carry accepted
 material-bank PBR warm-input metadata through live table construction and
 static-table cache rehydration. The cached optical-table reuse path rejects old

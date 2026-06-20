@@ -29664,3 +29664,35 @@ Remaining:
 - Keep `plan/todo/drop-edge-large-size-respect-plan.md` active only for broader
   visual mode coverage above `dropn=7`; the primary same-material H2O/H2O
   `dropn=7, basen=5` path now has engine bounds and visible-merge diagnostics.
+
+## 2026-06-19 AKDT - Reaction Particle Scale Reset Guard
+
+Status:
+
+- Extended the mounted resident Na/H2O browser regression to cover the
+  variable particle scale reset failure class. The test now captures WebGPU
+  console errors, runs a no-full resident reaction/render pass, resets through
+  the mounted UI, then runs a second resident reaction/render pass.
+- The first pass asserts the retained GPU product-event buffer feeds the
+  spatial gas ledger producer and gas-cell EOS stage with compact readback,
+  without full product-event readback.
+- Both passes assert the resident G2P particle-scale policy, render-row
+  particle-scale policy, max radius growth `4`, max `J=64`, support/gas radius
+  caps, decoded gas-phase rows, and bounded gas visual radius. This gives the
+  reset/lockup todo a browser gate beyond "no console error".
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` with `37/37`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `53/53`.
+- PASS: `git diff --check`.
+- PASS:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"` with `1/1`.
+
+Remaining:
+
+- No-full resident pressure still reports
+  `gpu-resident-reaction-pressure-unavailable` /
+  `baseline-no-resident-reaction-ledger` until the retained spatial gas ledger
+  or gas-cell EOS output is promoted back into the sealed gas-pressure summary.

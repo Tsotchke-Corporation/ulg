@@ -237,3 +237,41 @@ Remaining:
 - Add a longer browser reaction sequence that proves gas/product ledgers still
   feed later gas pressure or field visualization without reintroducing giant
   visible gas particles.
+
+## Implementation Status - 2026-06-19 AKDT
+
+Added mounted browser reset/lockup coverage for the Na/H2O resident reaction
+path:
+
+- The existing mounted Na/H2O resident browser test now captures WebGPU console
+  issues, runs a no-full resident reaction step, renders with full parity
+  row/field readback, resets, then runs a second resident reaction/render pass.
+- The first pass asserts the retained product-event buffer feeds the spatial
+  gas ledger producer and gas-cell EOS stages without full product-event
+  readback. The retained producer reports positioned product-event rows rather
+  than the aggregate fallback.
+- Both passes assert G2P particle-scale policy
+  `gpu-g2p-cap-policy-applied-in-shader`, render-row particle-scale policy,
+  max radius growth `4`, max `J=64`, positive support/gas radius caps, decoded
+  gas-phase rows, and max decoded particle radius under the gas visual proxy
+  cap.
+- The reset pass proves the reaction/product/render path remains live after
+  `peercompute.ulg.sph-demo-reset-status.v0` reports
+  `particle-state-resynced-after-reset`.
+
+Validation:
+
+- `node --check tests/demo.e2e.mjs`
+- `git diff --check`
+- `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"` passed `1/1`.
+
+Remaining:
+
+- Promote the retained spatial gas ledger / gas-cell EOS result back into the
+  sealed gas-pressure summary. Current no-full resident runs still report
+  `gpu-resident-reaction-pressure-unavailable` and
+  `baseline-no-resident-reaction-ledger` even while the spatial gas producer
+  and render rows prove product gas exists.
+- Add a longer browser reaction sequence once pressure-summary promotion is
+  wired, so gas/product ledgers feed later gas pressure and field visualization
+  without reintroducing giant visible gas particles.

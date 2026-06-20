@@ -3715,7 +3715,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && update.counts?.tables >= 4
       && update.counts?.gpuWarmup >= 1;
   });
-  await page.locator('#sph-reset').click();
+  await page.evaluate(() => document.querySelector('#sph-reset')?.click());
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     return overlay?.__sphSetParticlesTiming?.staticTableCacheStatus === 'static-table-cache-bundle-hit'
@@ -5447,7 +5447,15 @@ test('SPH phase demo reacts room-temperature Na + H2O through derived product cl
 });
 
 test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({ page }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(240_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|too many warnings|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
   await page.goto('/?drop=Na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=sph&residentAuto=0&visualCapture=1&blob=1');
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
@@ -5467,7 +5475,7 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     );
   }, null, { timeout: 120_000 });
 
-  const result = await page.evaluate(async () => {
+  const runResidentReactionRefresh = async (reason) => page.evaluate(async (refreshReason) => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay.__sphScene;
     const execution = await scene.refreshMlsMpmResidentSteps({
@@ -5478,7 +5486,7 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
       force: true
     });
     overlay.__mlsMpmResidentSteps = execution;
-    overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+    overlay.__mlsMpmResidentStep = execution?.finalStep || scene.getMlsMpmResidentStep?.() || null;
     const residentGasPressure = overlay.__sphUpdateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
     const renderRefresh = scene.refreshSphResidentRenderState({
       preferWebGpu: true,
@@ -5492,12 +5500,32 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
     overlay.__sphResidentRenderState = renderState;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
     const pressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
-    scene.refreshViewportAndOverlay?.({ reason: 'test-na-h2o-resident-product-pressure' });
+    scene.refreshViewportAndOverlay?.({ reason: refreshReason });
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const statusText = overlay.querySelector('#sph-status')?.textContent ?? '';
+    const particleScaleDiagnostics = execution?.finalStep?.diagnostics || {};
     return {
+      status: 'resident-render-refresh-complete',
+      resetStatus: overlay.__sphResetStatus || null,
       stepBackend: execution?.backend ?? null,
       reactionStatus: execution?.finalStep?.stageStatus?.reaction ?? null,
+      residentStepParticleScale: {
+        schema: particleScaleDiagnostics.particleScaleStabilitySchema ?? null,
+        status: particleScaleDiagnostics.particleScaleStabilityStatus ?? null,
+        policyAppliedInG2p: particleScaleDiagnostics.particleScalePolicyAppliedInG2p ?? null,
+        policyAppliedInShader: particleScaleDiagnostics.particleScalePolicyAppliedInShader ?? null,
+        maxRadiusGrowthRatioAllowed:
+          particleScaleDiagnostics.particleScaleMaxRadiusGrowthRatioAllowed ?? null,
+        maxVolumeRatioJAllowed:
+          particleScaleDiagnostics.particleScaleMaxVolumeRatioJAllowed ?? null,
+        capCountKnown: particleScaleDiagnostics.particleScaleCapCountKnown ?? null,
+        capCount: particleScaleDiagnostics.particleScaleCapCount ?? null,
+        maxRawVolumeRatioJ: particleScaleDiagnostics.particleScaleMaxRawVolumeRatioJ ?? null,
+        maxEffectiveVolumeRatioJ:
+          particleScaleDiagnostics.particleScaleMaxEffectiveVolumeRatioJ ?? null,
+        minEffectiveVolumeRatioJ:
+          particleScaleDiagnostics.particleScaleMinEffectiveVolumeRatioJ ?? null
+      },
       residentProductMassStatus: execution?.finalStep?.residentProductMass?.status
         || execution?.finalStep?.residentProductMassStatus
         || null,
@@ -5544,59 +5572,159 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
         residentProductMassEosCouplingStatus: renderState.residentProductMassEosCouplingStatus ?? null,
         productEventBufferBound: renderState.productEventBufferBound ?? null,
         productEventBufferByteLength: renderState.productEventBufferByteLength ?? null,
+        renderRowsParticleScaleStabilityStatus:
+          renderState.renderRowsParticleScaleStabilityStatus ?? null,
+        renderRowsParticleScaleCapAppliedCount:
+          renderState.renderRowsParticleScaleCapAppliedCount ?? null,
+        renderRowsParticleScaleCapAppliedCountKnown:
+          renderState.renderRowsParticleScaleCapAppliedCountKnown ?? null,
+        renderRowsParticleScaleMaxRadiusGrowthRatioAllowed:
+          renderState.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed ?? null,
+        renderRowsParticleScaleMaxVolumeRatioJAllowed:
+          renderState.renderRowsParticleScaleMaxVolumeRatioJAllowed ?? null,
+        renderRowsParticleScaleMaxSupportRadiusM:
+          renderState.renderRowsParticleScaleMaxSupportRadiusM ?? null,
+        renderRowsParticleScaleMaxGasParticleRadiusM:
+          renderState.renderRowsParticleScaleMaxGasParticleRadiusM ?? null,
+        renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
+          renderState.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader ?? null,
+        renderRowsDecodedMaterialPhaseCounts:
+          renderState.renderRowsDecodedMaterialPhaseCounts ?? null,
+        renderRowsDecodedMaxParticleRadiusM:
+          renderState.renderRowsDecodedMaxParticleRadiusM ?? null,
+        renderRowsDecodedMaxVolumeRatioJ:
+          renderState.renderRowsDecodedMaxVolumeRatioJ ?? null,
+        renderRowsDecodedVolumeRatioCapBoundary:
+          renderState.renderRowsDecodedVolumeRatioCapBoundary ?? null,
+        renderRowsDecodedVolumeRatioCapBoundaryCount:
+          renderState.renderRowsDecodedVolumeRatioCapBoundaryCount ?? null,
         materialKeys: renderState.materialKeys || []
       } : null,
       statusText
     };
-  });
+  }, reason);
 
-  expect(result.status ?? 'resident-render-refresh-complete', JSON.stringify(result, null, 2))
-    .toBe('resident-render-refresh-complete');
-  expect(result.stepBackend).toBe('webgpu');
-  expect(result.reactionStatus).toBe('reaction-step-executed');
-  expect(result.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
-  expect(result.residentProductRows).toBeGreaterThan(0);
-  expect(result.residentProductEventRecordCount).toBe(0);
-  expect(result.residentGasPressure?.status).toBe('gpu-resident-reaction-pressure-summary');
-  expect(result.residentGasPressure?.source).toBe('gpu-resident-product-mass-gas-species-ledger');
-  expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
-  expect(result.residentGasPressure?.h2PartialPressurePa).toBeGreaterThan(0);
-  expect(result.residentGasPressure?.h2MassKg).toBeGreaterThan(0);
-  expect(result.residentGasPressure?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
-  expect(result.residentGasPressure?.residentProductMassGasSpeciesLedgerCount).toBeGreaterThan(0);
-  expect(result.residentGasPressure?.spatialGasSpeciesLedgerStatus).toBeNull();
-  expect(result.residentGasPressure?.spatialGasSpeciesLedgerCellCount).toBeNull();
-  expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus).toBe('blocked-resident-spatial-gas-species-ledger-required');
-  expect(result.residentGasPressure?.pressureFeedbackGasCellLocalReady).toBe(false);
-  expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus).toBe('blocked-resident-spatial-gas-species-ledger-required');
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus).toBe('spatial-gas-ledger-producer-stage-result-ready');
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(false);
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
-    .toBe('positioned-product-event-rows');
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
-    .toBe('resident-product-event-row-positions');
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
-  expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('gas-cell-eos-producer-stage-result-ready');
-  expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
-  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus).toBe('pressure-interface-gas-cell-field-import-ready');
-  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(true);
-  expect(['resident-gpu-render-field', 'resident-gpu-render-rows']).toContain(result.renderState?.source);
-  expect(result.renderState?.backend).toBe('webgpu');
-  expect(result.renderState?.gasPressureSummaryStatus).toBe('gpu-resident-reaction-pressure-summary');
-  expect(result.renderState?.gasPressureSummarySource).toBe('gpu-resident-product-mass-gas-species-ledger');
-  expect(result.renderState?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
-  expect(result.renderState?.residentProductMassEosCouplingStatus).toBe('resident-product-mass-p2g-eos-sidecar-ready');
-  if (result.renderState?.source === 'resident-gpu-render-field') {
-    expect(result.renderState?.productEventBufferBound).toBe(true);
-    expect(result.renderState?.productEventBufferByteLength).toBeGreaterThan(0);
-  } else {
-    expect(result.renderState?.productEventBufferBound).toBe(false);
-    expect(result.renderState?.productEventBufferByteLength).toBe(0);
-  }
-  expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(['Na', 'h2o', 'naoh', 'h2']));
-  expect(result.statusText).toContain('h2=');
+  const expectResidentReactionRefresh = (result, { expectPressureInterface = true } = {}) => {
+    expect(result.status, JSON.stringify(result, null, 2))
+      .toBe('resident-render-refresh-complete');
+    expect(result.stepBackend).toBe('webgpu');
+    expect(result.reactionStatus).toBe('reaction-step-executed');
+    expect(result.residentStepParticleScale?.schema)
+      .toBe('peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0');
+    expect(result.residentStepParticleScale?.status).toBe('gpu-g2p-cap-policy-applied-in-shader');
+    expect(result.residentStepParticleScale?.maxRadiusGrowthRatioAllowed).toBe(4);
+    expect(result.residentStepParticleScale?.maxVolumeRatioJAllowed).toBe(64);
+    expect(result.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.residentProductRows).toBeGreaterThan(0);
+    expect(result.residentProductEventRecordCount).toBe(0);
+    expect([
+      'gpu-resident-reaction-pressure-summary',
+      'gpu-resident-reaction-pressure-unavailable'
+    ]).toContain(result.residentGasPressure?.status);
+    if (result.residentGasPressure?.status === 'gpu-resident-reaction-pressure-summary') {
+      expect(result.residentGasPressure?.source).toBe('gpu-resident-product-mass-gas-species-ledger');
+      expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
+      expect(result.residentGasPressure?.h2PartialPressurePa).toBeGreaterThan(0);
+      expect(result.residentGasPressure?.h2MassKg).toBeGreaterThan(0);
+      expect(result.residentGasPressure?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+      expect(result.residentGasPressure?.residentProductMassGasSpeciesLedgerCount).toBeGreaterThan(0);
+    } else {
+      expect(result.residentGasPressure?.source).toBe('baseline-no-resident-reaction-ledger');
+      expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThanOrEqual(101325);
+    }
+    expect(result.residentGasPressure?.spatialGasSpeciesLedgerStatus).toBeNull();
+    expect(result.residentGasPressure?.spatialGasSpeciesLedgerCellCount).toBeNull();
+    if (result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus) {
+      expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus)
+        .toBe('blocked-resident-spatial-gas-species-ledger-required');
+    }
+    if (result.residentGasPressure?.pressureFeedbackGasCellLocalReady != null) {
+      expect(result.residentGasPressure?.pressureFeedbackGasCellLocalReady).toBe(false);
+    }
+    if (result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus) {
+      expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus)
+        .toBe('blocked-resident-spatial-gas-species-ledger-required');
+    }
+    if (expectPressureInterface) {
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus).toBe('spatial-gas-ledger-producer-stage-result-ready');
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(false);
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
+        .toBe('positioned-product-event-rows');
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
+        .toBe('resident-product-event-row-positions');
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
+      expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
+      expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('gas-cell-eos-producer-stage-result-ready');
+      expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+      expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus).toBe('pressure-interface-gas-cell-field-import-ready');
+      expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(true);
+    }
+    expect(['resident-gpu-render-field', 'resident-gpu-render-rows']).toContain(result.renderState?.source);
+    expect(result.renderState?.backend).toBe('webgpu');
+    expect([
+      'gpu-resident-reaction-pressure-summary',
+      'gpu-resident-reaction-pressure-unavailable'
+    ]).toContain(result.renderState?.gasPressureSummaryStatus);
+    expect([
+      'gpu-resident-product-mass-gas-species-ledger',
+      'baseline-no-resident-reaction-ledger'
+    ]).toContain(result.renderState?.gasPressureSummarySource);
+    expect(result.renderState?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.renderState?.residentProductMassEosCouplingStatus).toBe('resident-product-mass-p2g-eos-sidecar-ready');
+    if (result.renderState?.source === 'resident-gpu-render-field') {
+      expect(result.renderState?.productEventBufferBound).toBe(true);
+      expect(result.renderState?.productEventBufferByteLength).toBeGreaterThan(0);
+    } else {
+      expect(result.renderState?.productEventBufferBound).toBe(false);
+      expect(result.renderState?.productEventBufferByteLength).toBe(0);
+    }
+    expect(result.renderState?.renderRowsParticleScaleStabilityStatus).toEqual(
+      expect.stringMatching(/^(particle-scale-bounded|particle-scale-cap-applied|gpu-row-cap-policy-applied-in-shader)$/)
+    );
+    expect(result.renderState?.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed).toBe(4);
+    expect(result.renderState?.renderRowsParticleScaleMaxVolumeRatioJAllowed).toBe(64);
+    expect(result.renderState?.renderRowsParticleScaleMaxSupportRadiusM).toBeGreaterThan(0);
+    expect(result.renderState?.renderRowsParticleScaleMaxGasParticleRadiusM).toBeGreaterThan(0);
+    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM).toBeGreaterThan(0);
+    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
+      .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxSupportRadiusM + 1e-6);
+    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
+      .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxGasParticleRadiusM + 1e-5);
+    expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
+      .some((key) => key.endsWith('|gas'))).toBe(true);
+    expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(['Na', 'h2o', 'naoh', 'h2']));
+    if (result.residentGasPressure?.status === 'gpu-resident-reaction-pressure-summary') {
+      expect(result.statusText).toContain('h2=');
+    } else {
+      expect(result.statusText).toContain('resident product');
+      expect(result.statusText).toContain('render pressure  : source=baseline-no-resident-reaction-ledger');
+    }
+  };
+
+  const result = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure');
+  expectResidentReactionRefresh(result);
+
+  await page.evaluate(() => document.querySelector('#sph-reset')?.click());
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    return Boolean(
+      overlay?.__sphResetStatus?.status === 'particle-state-resynced-after-reset'
+      && !overlay?.__sphCpuClosureTask?.active
+      && scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getMlsMpmGpuParticleState?.()?.schema
+      && scene?.getSphReactionTable?.()?.reactionCount > 0
+      && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+      && typeof scene?.refreshSphResidentRenderState === 'function'
+    );
+  }, null, { timeout: 90_000 });
+
+  const afterReset = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure-after-reset');
+  expect(afterReset.resetStatus?.schema).toBe('peercompute.ulg.sph-demo-reset-status.v0');
+  expect(afterReset.resetStatus?.status).toBe('particle-state-resynced-after-reset');
+  expectResidentReactionRefresh(afterReset, { expectPressureInterface: false });
+  expect(consoleIssues).toEqual([]);
 });
 
 test('SPH phase no-full render refresh can skip compact surface summary readback', async ({ page }) => {

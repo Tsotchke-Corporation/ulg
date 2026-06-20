@@ -11421,3 +11421,33 @@ Drop edge >6 domain bounds guardrail, 2026-06-19 AKDT:
     `peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0`, proving
     that the H2O/H2O liquid role domains are intentionally merged for the
     continuous visible material surface rather than lost at initialization.
+
+Reaction variable particle scale reset guard, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs` passed.
+- Focused Node suites:
+  `node --test tests/sphPhaseDemo.test.mjs`
+  - Passed: `37/37`.
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `53/53`.
+- Whitespace:
+  `git diff --check` passed.
+- Mounted browser regression:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 npx playwright test --config tests/playwright.config.mjs --grep "resident Na/H2O promotes product gas pressure"`
+  - Passed: `1/1`.
+  - The first Na/H2O resident pass validates retained product-event buffer to
+    positioned spatial gas ledger and gas-cell EOS stages without full
+    product-event readback.
+  - The reset pass validates
+    `peercompute.ulg.sph-demo-reset-status.v0` with
+    `particle-state-resynced-after-reset`, then proves a second resident
+    reaction/render pass still emits product rows and bounded gas render rows.
+  - Both passes assert `gpu-g2p-cap-policy-applied-in-shader`, render-row
+    particle-scale policy diagnostics, max radius growth `4`, max `J=64`,
+    positive support/gas radius caps, decoded gas-phase rows, and max decoded
+    particle radius under the gas visual proxy cap.
+  - The test records the current pressure-summary gap: no-full resident gas can
+    still report `gpu-resident-reaction-pressure-unavailable` /
+    `baseline-no-resident-reaction-ledger` even though the retained spatial gas
+    producer and render rows prove product gas is present.

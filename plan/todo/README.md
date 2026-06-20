@@ -47,12 +47,17 @@ resident mechanics reports
 remaining work in `plan/todo/reaction-variable-particle-scale-stability-plan.md`:
 gas-routed products are now kept out of visible product slots, WebGPU reaction
 resolve mirrors the condensed-visible-product selection, and gas-phase render
-rows use a visual proxy cap of `0.5 * smoothingLengthM`. The mobile-shaped
-Na/H2O probe `/tmp/ulg-reaction-gas-radius-proxy-probe.json` completed
-`status=good` with console issues/warnings `0/0`, retained `naoh|gas` decoded
-rows, and max sphere radius bounded at `0.15508762001991272 m`. Fold
-reset/lockup regression coverage into the reset fix and add a longer gas-ledger
-visualization sequence. Do not treat these caps as the final physics model.
+rows use a visual proxy cap of `0.5 * smoothingLengthM`. The mounted Na/H2O
+resident browser regression now runs a no-full reaction/render pass, resets,
+then runs a second pass while asserting clean WebGPU console output, G2P and
+render-row scale policies, decoded gas-phase rows, and bounded gas visual
+radius. The first pass also proves the retained product-event buffer feeds the
+spatial gas ledger producer and gas-cell EOS stage without full product-event
+readback. Remaining gap: promote that retained spatial gas ledger / gas-cell
+EOS result back into the sealed gas-pressure summary; no-full resident runs can
+still report `gpu-resident-reaction-pressure-unavailable` while product gas is
+visibly and spatially present. Do not treat these caps as the final physics
+model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

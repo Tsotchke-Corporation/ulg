@@ -91,25 +91,33 @@ completed with zero browser console issues/warnings, native extraction status
 `extension-surface-ready-needs-ulg-row-translation`, ULG source vertex counter
 mode `extension-gpu-vertex-counter`, bridge status
 `native-webgpu-surface-consumer-ready`, and render status
-`native-webgpu-surface-consumer-rendered`. It still classified `bad` because
-runtime pixel readback is unavailable in this browser and direct canvas frame
-captures remain blank. The remaining P0 is therefore main-canvas native WebGPU
-visibility/presentation and mobile rendering, not extension counter readback,
-overlay fallback, or CPU mesh optimization.
+`native-webgpu-surface-consumer-rendered`. The native validation wait is now
+actually plumbed into the in-page probe, and local headless Chromium has been
+proven to screenshot a minimal WebGPU canvas clear as black while offscreen
+texture readback works. Current evidence
+`/tmp/ulg-native-validation-analysis-classified-probe.json` is console-clean,
+records `nativeSurfaceValidationWaitMs=2500`, classifies blank native canvas
+captures as `browserCanvasCaptureUnsupportedByNativeWebGpu=true`, and fails
+only on `resident-surface-visible-gpu-consumer-not-ready` because resident
+device readback/offscreen validation exhausts with `A valid external Instance
+reference no longer exists`. The remaining P0 is therefore resident-device
+validation/device lifetime and real mobile native rendering, not extension
+counter readback, blank headless screenshot chasing, overlay fallback, or CPU
+mesh optimization.
 
 Current routing note, 2026-06-19 AKDT: the native surface bridge now includes a
 diagnostic offscreen same-device validation pass. It draws the same retained
 compact vertex and indirect buffers into a 64x64 WebGPU texture and reports
 offscreen validation telemetry through the scene/probe state without creating
 an overlay or marking the visible consumer ready. Evidence:
-`/tmp/ulg-native-offscreen-validation-lifetime-probe.json` is console-clean and
-shows retained native MC surface draw buffers plus
-`native-webgpu-surface-consumer-rendered`, but the direct canvas PNGs are still
-transparent black and offscreen validation is `not-run` because this headless
-scene path still reports `A valid external Instance reference no longer
-exists` from `mapAsync`. Keep the next P0 on native main-canvas/mobile
-presentation and renderer/device lifetime; do not detour into overlays or CPU
-mesh fallback.
+`/tmp/ulg-native-validation-analysis-classified-probe.json` is console-clean
+and shows retained native MC surface draw buffers plus
+`native-webgpu-surface-consumer-rendered`. The wait now settles validation
+attempts instead of leaving them pending, but the resident-device readback
+smoke and offscreen validation both exhaust after three attempts with
+`external Instance` failures. Keep the next P0 on resident WebGPU device
+lifetime/validation and real mobile native rendering; do not detour into
+overlays or CPU mesh fallback.
 
 Current routing note, 2026-06-19 AKDT: resident MLS-MPM render-every
 continuation is now console-clean on the native WebGPU surface-consumer route
@@ -150,13 +158,14 @@ tightened against false positives. `resolveResidentSurfaceVisibleGpuConsumer()`
 no longer treats pending validation or texture-readback-unavailable errors as a
 ready visible consumer; only browser pixel validation or a same-device
 readback/offscreen pass can promote native no-readback rendering. Evidence:
-`/tmp/ulg-native-visible-consumer-tightened-probe.json` reaches retained
+`/tmp/ulg-native-validation-analysis-classified-probe.json` reaches retained
 surface draw buffers and
 `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered` with
 console issues/warnings `0/0`, but remains `bad` with
-`resident-surface-visible-gpu-consumer-blocked-pixel-validation` and
-`visual-canvas-frames-all-blank`. Next work remains actual native canvas
-presentation/pixel validation, not loosening the gate.
+`resident-surface-visible-gpu-consumer-blocked-pixel-validation`. Headless
+canvas captures are now marked capture-unsupported for this native path rather
+than counted as a visual-canvas failure. Next work remains actual native
+validation/mobile rendering, not loosening the gate.
 
 Superseded routing note, 2026-06-19 AKDT: the native
 `native-webgpu-surface-consumer` contract now exists as the next renderer

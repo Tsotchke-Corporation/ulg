@@ -1,5 +1,33 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native Validation Wait And Headless Capture Classification
+
+The native WebGPU probe now waits for browser-side validation when requested,
+and blank headless canvas captures are no longer treated as proof that the
+engine-owned native canvas did not render. The visible consumer still stays
+closed until same-device validation succeeds.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Minimal browser sanity:
+  a localhost WebGPU canvas clear executes in local headless Chromium, but the
+  screenshot remains black; a pure offscreen WebGPU texture readback returns
+  the expected nonzero sample. Native canvas screenshots are therefore a
+  capture limitation in this harness, not a sufficient render failure signal.
+- Browser probe:
+  `/tmp/ulg-native-validation-analysis-classified-probe.json` completed with
+  browser console issues/warnings `0/0`, recorded
+  `nativeSurfaceValidationWaitMs=2500`, native bridge render status
+  `native-webgpu-surface-consumer-rendered`, and
+  `browserCanvasCaptureUnsupportedByNativeWebGpu=true`. It remains `bad`
+  because the resident-device validation/readback path exhausts with
+  `A valid external Instance reference no longer exists`, leaving
+  `resident-surface-visible-gpu-consumer-not-ready` as the only current native
+  renderer analysis issue.
+
 ## Current Focused Result - 2026-06-19 Drop Edge Large Request Respect
 
 Initial particle edge requests above `6` now stay visible in the actual

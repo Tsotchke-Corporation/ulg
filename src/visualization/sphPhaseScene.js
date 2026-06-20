@@ -8205,7 +8205,8 @@ export function createSphPhaseScene(container, {
       return () => {
         const readbackBuffer = bridge.pixelValidationReadbackBuffer;
         const validationTextureForReadback = validationTexture;
-        readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
+        Promise.resolve(bridge.device?.queue?.onSubmittedWorkDone?.() ?? undefined)
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
           .then(() => {
             if (bridge.pixelValidationSerial !== serial || bridge.pixelValidationAbandoned) {
               readbackBuffer.unmap();
@@ -8449,7 +8450,8 @@ export function createSphPhaseScene(container, {
             reason: 'texture readback unavailable: native WebGPU same-device readback smoke validation timed out'
           });
         }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
-        readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
+        Promise.resolve(bridge.device?.queue?.onSubmittedWorkDone?.() ?? undefined)
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
           .then(() => {
             if (settled) return;
             settled = true;
@@ -8752,7 +8754,8 @@ export function createSphPhaseScene(container, {
             reason: 'native-webgpu-surface-offscreen-validation-timeout'
           });
         }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
-        readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
+        Promise.resolve(bridge.device?.queue?.onSubmittedWorkDone?.() ?? undefined)
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
           .then(() => {
             if (settled) return;
             settled = true;

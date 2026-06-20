@@ -3140,6 +3140,8 @@ async function runBrowserProbe({
       compactSummaryScope,
       thermalWallRate,
       measureGpuQueueFence,
+      nativeSurfaceDebugMode,
+      nativeSurfaceValidationWaitMs,
       captureFrames,
       captureFrameEvery,
       captureFrameMax,
@@ -3166,6 +3168,7 @@ async function runBrowserProbe({
 	          surfaceDrawDiagnosticMaxFieldCells,
 	          surfaceDrawDiagnosticMaxResolution,
 	          nativeSurfaceDebugMode,
+	          nativeSurfaceValidationWaitMs,
 	          pressureInterfaceDisabled: Boolean(disablePressureInterface),
           anomalyRowReadback: Boolean(anomalyRowReadback),
           residentBufferDebug: Boolean(residentBufferDebug),
@@ -4985,6 +4988,29 @@ function analyzeTimeline(timeline, {
     requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
     && residentSurfaceVisibleGpuConsumerAccepted
   );
+  const nativeWebGpuSurfaceConsumerRendered = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && metrics.some((metric) => (
+      metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+      || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-debug-clear-rendered'
+      || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+      || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-debug-clear-rendered'
+    ))
+  );
+  const nativeWebGpuSurfaceConsumerTextureReadbackUnavailable = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && metrics.some((metric) => (
+      metric?.renderState?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable === true
+      || metric?.surfaceDraw?.visibleGpuConsumerNativeTextureReadbackUnavailable === true
+      || /external Instance reference no longer exists|texture readback unavailable/i.test(String(
+        metric?.renderState?.surfaceDrawRenderBridgePixelValidationReason
+        ?? metric?.renderState?.surfaceDrawRenderBridgeOffscreenValidationReason
+        ?? metric?.surfaceDraw?.renderBridgePixelValidationReason
+        ?? metric?.surfaceDraw?.renderBridgeOffscreenValidationReason
+        ?? ''
+      ))
+    ))
+  );
   const residentNoReadbackRenderSourceEvidenceAvailable = Boolean(
     residentSurfaceBufferHandoffProbe
     && compactSummaryDisabled
@@ -5621,9 +5647,14 @@ function analyzeTimeline(timeline, {
     issues.push('visual-frames-all-blank');
   }
   const browserCanvasCaptureUnsupportedByNativeWebGpu = Boolean(
-    nativeWebGpuSurfaceConsumerAccepted
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeWebGpuSurfaceConsumerRendered
     && pngAnalyzedCanvasFrames.length > 0
     && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length
+    && (
+      nativeWebGpuSurfaceConsumerAccepted
+      || nativeWebGpuSurfaceConsumerTextureReadbackUnavailable
+    )
   );
   if (
     pngAnalyzedCanvasFrames.length > 0

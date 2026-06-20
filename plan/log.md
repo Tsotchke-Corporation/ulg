@@ -1,5 +1,40 @@
 # ULG Implementation Log
 
+## 2026-06-19 19:18 AKDT - Native Validation Wait And Headless Capture Classification
+
+Status:
+
+- Fixed the long-horizon probe plumbing so
+  `ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS` is actually passed into the
+  in-page browser probe and recorded in the timeline. Previous native validation
+  runs were returning immediately even when a wait was requested.
+- Added a queue-drain before native WebGPU validation `mapAsync()` calls so
+  pixel, readback-smoke, and offscreen validation map only after submitted
+  validation work has completed.
+- Verified with a minimal localhost WebGPU page that local headless Chromium
+  executes a WebGPU clear but screenshots the WebGPU canvas as black, while a
+  pure offscreen texture readback works. The probe now classifies blank native
+  WebGPU canvas captures as `browserCanvasCaptureUnsupportedByNativeWebGpu`
+  when the native bridge rendered and resident texture readback is unavailable.
+- The native visible consumer remains fail-closed. The current blocker is not a
+  screenshot artifact anymore; the resident-device validation path exhausts
+  with `A valid external Instance reference no longer exists`, so no same-device
+  readback/offscreen proof is available yet.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `/tmp/ulg-native-validation-analysis-classified-probe.json` completed
+  with browser console issues/warnings `0/0`, `nativeSurfaceValidationWaitMs=2500`,
+  bridge render status `native-webgpu-surface-consumer-rendered`,
+  `browserCanvasCaptureUnsupportedByNativeWebGpu=true`, and no
+  `visual-canvas-frames-all-blank` analysis issue. It remains `bad` only
+  because the native visible consumer is correctly blocked:
+  `resident-surface-visible-gpu-consumer-not-ready`,
+  readback smoke `error`, and offscreen validation `not-run` after three
+  resident-device `external Instance reference` failures.
+
 ## 2026-06-19 16:54 AKDT - Drop Edge Large Request Respect
 
 Status:

@@ -108,6 +108,16 @@ structure keys, and explicitly reports
 algorithm-row consumer is marching-cubes/surface extraction policy, followed by
 validated force-kernel consumption of the contact rows.
 
+Current routing note, 2026-06-20 AKDT: MLS-MPM packing now emits compact
+`algorithmMaterialSurfaceExtractionRows` for marching-cubes/surface policy.
+Rows carry isovalue policy, smoothing radius, voxel size, normal scale,
+particle radius, support radius, material/phase ids, and crystal packing
+metadata while explicitly reporting
+`rendererAuthority=not-renderer-authoritative-surface-policy-row`. The next
+work is to bind these rows into the actual marching-cubes/native surface
+extraction path and prove browser/pixel validation, not to tune visual
+threshold constants in renderer code.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

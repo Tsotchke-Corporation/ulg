@@ -10,6 +10,10 @@ export const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-rows.v0';
 export const ULG_ALGORITHM_CONTACT_MATERIAL_ROW_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-row.v0';
+export const ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA =
+  'peercompute.ulg.algorithm-material-surface-extraction-rows.v0';
+export const ULG_ALGORITHM_SURFACE_EXTRACTION_ROW_SCHEMA =
+  'peercompute.ulg.algorithm-material-surface-extraction-row.v0';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -305,5 +309,67 @@ export function buildAlgorithmMaterialContactRows({
     rows,
     strictSourceOfTruth: false,
     derivationAuthority: 'mls-mpm-mechanics-rows-contact-policy-view'
+  };
+}
+
+export function buildAlgorithmSurfaceExtractionRows({
+  particleInitializationRows = null,
+  mlsMpmMechanicsRows = null,
+  contactRows = null
+} = {}) {
+  const mechanicsRows = Array.isArray(mlsMpmMechanicsRows?.rows) ? mlsMpmMechanicsRows.rows : [];
+  const contactSupportByRole = new Map();
+  for (const row of contactRows?.rows || []) {
+    for (const role of row.roles || []) {
+      contactSupportByRole.set(role, Math.max(
+        finiteNumber(contactSupportByRole.get(role), 0),
+        finiteNumber(row.supportRadiusM, 0)
+      ));
+    }
+  }
+  const rows = (particleInitializationRows?.rows || []).map((init) => {
+    const mechanics = mechanicsRows.find((row) => row.role === init.role) || null;
+    const smoothingRadiusM = Math.max(
+      finiteNumber(init.targetSmoothingLengthM, 0),
+      finiteNumber(mechanics?.initializationTargetSmoothingLengthM, 0),
+      finiteNumber(contactSupportByRole.get(init.role), 0)
+    );
+    const voxelSizeM = smoothingRadiusM > 0 ? smoothingRadiusM / 2 : finiteNumber(init.spacingM, 0);
+    return {
+      schema: ULG_ALGORITHM_SURFACE_EXTRACTION_ROW_SCHEMA,
+      status: 'algorithm-derived-surface-extraction-row-ready',
+      role: init.role,
+      material: init.material,
+      materialId: finiteNumber(init.materialId, 0),
+      phase: mechanics?.phase ?? null,
+      isovalue: 0.5,
+      isovaluePolicy: 'density-kernel-half-occupancy',
+      smoothingRadiusM,
+      voxelSizeM,
+      normalScaleM: smoothingRadiusM,
+      supportRadiusM: finiteNumber(contactSupportByRole.get(init.role), smoothingRadiusM),
+      particleRadiusM: finiteNumber(init.appliedParticleRadiusM, 0),
+      crystalStructureKey: init.crystalStructureKey ?? null,
+      crystalPackingFraction: finiteNumber(init.crystalPackingFraction, 0),
+      drawPolicy: 'material-phase-surface-row',
+      strictSourceOfTruth: false,
+      rendererAuthority: 'not-renderer-authoritative-surface-policy-row',
+      provenance: {
+        source: 'algorithm-derived-surface-extraction-row',
+        particleInitializationRowSchema: init.schema ?? null,
+        mechanicsRowsSchema: mlsMpmMechanicsRows?.schema ?? null,
+        contactRowsSchema: contactRows?.schema ?? null
+      }
+    };
+  });
+  return {
+    schema: ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA,
+    status: rows.length > 0
+      ? 'algorithm-derived-surface-extraction-rows-ready'
+      : 'algorithm-derived-surface-extraction-rows-empty',
+    rowCount: rows.length,
+    rows,
+    strictSourceOfTruth: false,
+    derivationAuthority: 'particle-initialization-mechanics-contact-surface-policy-view'
   };
 }

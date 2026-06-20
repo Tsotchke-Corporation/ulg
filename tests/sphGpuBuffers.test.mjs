@@ -207,6 +207,22 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.ok(contactRow.supportRadiusM > 0);
   assert.equal(contactRow.forceMutationAuthority, 'not-authoritative-contact-policy-row');
   assert.equal(contactRow.impulsePolicy, 'bounded-by-softer-constituent-and-initial-support-radius');
+  assert.equal(
+    mlsPacked.algorithmMaterialSurfaceExtractionRows.schema,
+    'peercompute.ulg.algorithm-material-surface-extraction-rows.v0'
+  );
+  assert.equal(
+    mlsPacked.algorithmMaterialSurfaceExtractionRows.status,
+    'algorithm-derived-surface-extraction-rows-ready'
+  );
+  assert.equal(mlsPacked.algorithmMaterialSurfaceExtractionRows.rowCount, 2);
+  const dropSurfaceRow = mlsPacked.algorithmMaterialSurfaceExtractionRows.rows.find((row) => row.role === 'drop');
+  assert.equal(dropSurfaceRow.schema, 'peercompute.ulg.algorithm-material-surface-extraction-row.v0');
+  assert.equal(dropSurfaceRow.isovalue, 0.5);
+  assert.equal(dropSurfaceRow.isovaluePolicy, 'density-kernel-half-occupancy');
+  assert.ok(dropSurfaceRow.smoothingRadiusM > 0);
+  assert.ok(dropSurfaceRow.voxelSizeM > 0);
+  assert.equal(dropSurfaceRow.rendererAuthority, 'not-renderer-authoritative-surface-policy-row');
 
   const sodiumDemo = buildSphPhaseDemoState({
     dropMaterial: 'Na',
@@ -225,6 +241,9 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.equal(sodiumDropRow.crystalStructureKey, 'na-bcc-alpha');
   assert.equal(sodiumDropRow.crystalPackingFraction, 0.68);
   assert.equal(sodiumMlsPacked.algorithmMaterialContactRows.rows[0].crystalStructureKeys[0], 'na-bcc-alpha');
+  const sodiumSurfaceRow = sodiumMlsPacked.algorithmMaterialSurfaceExtractionRows.rows.find((row) => row.role === 'drop');
+  assert.equal(sodiumSurfaceRow.crystalStructureKey, 'na-bcc-alpha');
+  assert.equal(sodiumSurfaceRow.crystalPackingFraction, 0.68);
 
   const sphBuffers = uploadSphGpuParticleBuffers(device, sphPacked);
   const mlsBuffers = uploadMlsMpmGpuParticleBuffers(device, mlsPacked);

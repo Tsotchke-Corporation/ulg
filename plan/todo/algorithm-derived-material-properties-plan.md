@@ -110,6 +110,14 @@ non-authoritative for force mutation and carries stiffness, damping/support,
 and crystal-key metadata for the future force kernel. Marching-cubes/surface
 policy remains the next unimplemented row family.
 
+Surface policy status, 2026-06-20 AKDT:
+`peercompute.ulg.algorithm-material-surface-extraction-rows.v0` now derives
+marching-cubes/surface policy metadata from particle initialization, mechanics,
+and contact rows. It carries isovalue, smoothing radius, voxel size, normal
+scale, support radius, and crystal packing metadata while remaining
+non-authoritative for renderer behavior. The next task is binding these rows
+into the active marching-cubes/native surface extraction path.
+
 ## Completion Gates
 
 - Same material and temperature produce consistent drop/base particle mass,

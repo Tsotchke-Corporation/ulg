@@ -11814,6 +11814,25 @@ Default material bank loader, 2026-06-19 AKDT:
   - Passed. Vite reported only the existing large chunk-size warning.
 - Whitespace:
   `git diff --check` passed.
+
+Native surface browser-frame validation classifier, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check tests/sphPhaseRenderer.test.mjs`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- Focused renderer suite command:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "visible GPU surface consumer|native WebGPU surface validation cadence"`
+  - Passed: `68/68`.
+  - Covers the native visible-consumer blocker family
+    `browser-frame-validation-required` while keeping native acceptance
+    fail-closed until pixel or readback validation passes.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.
+- Whitespace:
+  `git diff --check` passed.
 - Whitespace:
   `git diff --check` passed.
 

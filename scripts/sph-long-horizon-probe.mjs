@@ -2325,6 +2325,8 @@ async function runBrowserProbe({
               renderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null,
             surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason:
               renderState.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null,
+            surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
+              renderState.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
             surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable:
               renderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             fullSurfaceDrawReadback: renderState.fullSurfaceDrawReadback ?? null,
@@ -2626,6 +2628,8 @@ async function runBrowserProbe({
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeStatus ?? null,
             visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason:
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason ?? null,
+            visibleGpuConsumerNativeValidationBlockerFamily:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
             visibleGpuConsumerNativeTextureReadbackUnavailable:
               surfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             gpuOnlyAggregateIndirectReady: surfaceDraw.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
@@ -4972,6 +4976,12 @@ function analyzeTimeline(timeline, {
     || metric?.surfaceDraw?.visibleGpuConsumerInputReady
     || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady
   );
+  const residentSurfaceVisibleGpuConsumerNativeValidationBlockerFamily = (metric) => (
+    metric?.renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+    ?? metric?.surfaceDraw?.visibleGpuConsumerNativeValidationBlockerFamily
+    ?? metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+    ?? null
+  );
   const residentOverlayH2oVisible = (metric) => residentOverlayVisible(metric)
     && Array.isArray(metric?.renderState?.materialKeys)
     && metric.renderState.materialKeys.some((key) => String(key || '').toLowerCase().includes('h2o'));
@@ -5050,6 +5060,13 @@ function analyzeTimeline(timeline, {
         ?? metric?.surfaceDraw?.visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
         ?? ''
       ))
+    ))
+  );
+  const nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && metrics.some((metric) => (
+      residentSurfaceVisibleGpuConsumerNativeValidationBlockerFamily(metric)
+        === 'browser-frame-validation-required'
     ))
   );
   const residentNoReadbackRenderSourceEvidenceAvailable = Boolean(
@@ -5838,6 +5855,7 @@ function analyzeTimeline(timeline, {
     nonblankCanvasFrameCount,
     browserCanvasPixelValidated,
     browserCanvasCaptureUnsupportedByNativeWebGpu,
+    nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired,
     visualFrameTimesS,
     visualFrameTimeSpanS,
     meanBatchMs,

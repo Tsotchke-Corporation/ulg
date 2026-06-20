@@ -1345,6 +1345,12 @@ function isNativeWebGpuTextureReadbackUnavailableReason(value) {
   );
 }
 
+function isNativeWebGpuBrowserFrameValidationRequiredReason(value) {
+  return /runtime pixel readback is disabled|browser harness composited-frame analysis owns visible-output validation/i.test(
+    String(value || '')
+  );
+}
+
 function nativeSurfaceConsumerValidationBlockerFamily({
   nativeWebGpuBridgeBound = false,
   consumerValidated = false,
@@ -1392,6 +1398,12 @@ function nativeSurfaceConsumerValidationBlockerFamily({
   }
   if (isNativeWebGpuTextureReadbackUnavailableReason(pixelValidationReason)) {
     return 'browser-pixel-validation-readback-lifetime';
+  }
+  if (
+    pixelValidationStatus === 'not-run'
+    && isNativeWebGpuBrowserFrameValidationRequiredReason(pixelValidationReason)
+  ) {
+    return 'browser-frame-validation-required';
   }
   if (
     readbackSmokeValidationStatus === 'error'

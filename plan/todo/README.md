@@ -2675,6 +2675,14 @@ transparent black because this headless Chromium WebGPU path also fails a
 standalone green-clear smoke with `A valid external Instance reference no longer
 exists`.
 
+2026-06-19 status update: native visible-output diagnostics now distinguish
+runtime-readback-disabled browser/phone frame validation from WebGPU readback
+lifetime failures. `resolveResidentSurfaceVisibleGpuConsumer()` reports
+`browser-frame-validation-required` as the native validation blocker family when
+the engine-owned native consumer rendered but runtime pixel readback is
+delegated to the browser harness, and the long-horizon/performance summaries
+surface that field without hiding blank real canvas frames.
+
 Updated immediate priority after native canvas sizing:
 
 1. Get a real browser/phone native WebGPU acceptance signal using the new

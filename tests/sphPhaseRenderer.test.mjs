@@ -2482,6 +2482,32 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativePixelBlocked.runtimeConsumerReady, true);
   assert.equal(nativePixelBlocked.renderBridgeBound, true);
 
+  const nativeBrowserFrameValidationRequired = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerPixelValidationReason:
+        'native WebGPU runtime pixel readback is disabled; browser harness composited-frame analysis owns visible-output validation'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativeBrowserFrameValidationRequired.ready, false);
+  assert.equal(
+    nativeBrowserFrameValidationRequired.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(
+    nativeBrowserFrameValidationRequired.nativeSurfaceConsumerValidationBlockerFamily,
+    'browser-frame-validation-required'
+  );
+  assert.equal(nativeBrowserFrameValidationRequired.nativeSurfaceConsumerTextureReadbackUnavailable, false);
+
   const nativePendingValidationWithFrame = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {

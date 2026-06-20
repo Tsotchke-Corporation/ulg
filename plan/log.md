@@ -30335,3 +30335,36 @@ Remaining:
   authoritative physics.
 - Replace reduced-estimate rows with reference-quality rows and Phase 2
   crystalline structure rows.
+
+## 2026-06-19 AKDT - Native Surface Browser-Frame Validation Classifier
+
+Status:
+
+- Native visible GPU surface consumer diagnostics now distinguish browser/phone
+  frame validation from same-device WebGPU readback lifetime failures.
+- `resolveResidentSurfaceVisibleGpuConsumer()` reports
+  `browser-frame-validation-required` when the native main-canvas consumer is
+  rendered but runtime pixel readback is intentionally disabled and validation
+  is delegated to the browser harness.
+- `scripts/sph-long-horizon-probe.mjs` and
+  `scripts/sph-performance-benchmark.mjs` now carry the native validation
+  blocker family through sampled metrics and summaries.
+- This does not add an overlay, CPU mesh fallback, or a looser native
+  acceptance rule; blank canvas captures still remain visible issues.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "visible GPU surface consumer|native WebGPU surface validation cadence"` with `68/68`.
+- PASS: `npm run build` with the existing large chunk warning only.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Run a non-headless browser or phone native WebGPU capture and use the
+  browser-frame/readback-lifetime blocker split to decide whether the next fix
+  is presentation/context/device-scale or local readback lifetime.

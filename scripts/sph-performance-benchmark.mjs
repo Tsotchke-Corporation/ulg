@@ -394,6 +394,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.visibleGpuConsumerNativeDeviceMapSmokeStatus
     ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus
     ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+    ?? surfaceDraw?.visibleGpuConsumerNativeValidationBlockerFamily
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+    ?? null;
   const surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
     renderState?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable
     ?? surfaceDraw?.visibleGpuConsumerNativeTextureReadbackUnavailable
@@ -808,6 +813,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus,
     surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus,
     surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus,
+    surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily,
     surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable,
     surfaceDrawRenderBridgeFrameCount,
     surfaceDrawRenderBridgeLastRenderStatus,

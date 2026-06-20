@@ -30648,3 +30648,57 @@ Remaining:
   readback/offscreen-validation lifetime blocker and real-device/mobile
   presentation evidence. This fix removes an indirect-buffer addressing bug;
   it does not promote unvalidated native pixels as visible output.
+
+## 2026-06-20 AKDT - Kinematics-Gated Material-Interface Contact Response
+
+Status:
+
+- Advanced the cubic-barrier contact integration from fixed contact pressure to
+  a per-interface-element dynamic response. The pressure-interface producer now
+  packs a contact policy row buffer and a parallel contact kinematics row buffer
+  (`gapM`, `normalVelocityMPerS`, representative mass, status).
+- The WGSL pressure/interface kernel binds the kinematics buffer and computes
+  contact pressure per interface element from support radius, gap, closing
+  velocity, damping, and effective mass, capped by the existing contact-row
+  pressure limit.
+- The CPU oracle uses the same shared helper, and pressure-stage evidence now
+  reports interface-kinematics row/ready counts in addition to policy rows,
+  applied contact rows, pair keys, and max contact pressure.
+- Contact policy rows alone no longer fabricate material/material force. A
+  matching interface element must carry ready kinematics before a force row gets
+  the contact pressure term.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- PASS:
+  `node --check src/runtime/sphPhaseDemo.js`
+- PASS:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS:
+  `node --check ulg-gpu-abi/src/wgsl.js`
+- PASS:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `112/112`.
+- PASS:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
+  with `47/47`.
+- PASS:
+  `git diff --check`
+- PASS:
+  `npm run build`
+  - Vite reported only the existing large chunk-size warning.
+- PASS:
+  `npm run test:physics-atomics`
+  - Passed `11/14` with the three expected opt-in long-horizon skips.
+- PASS:
+  `npm run icc:update`
+  - Indexed `354` files and `2072` memory chunks.
+
+Remaining:
+
+- Derive contact kinematics automatically from resident interface or
+  reaction-neighborhood state. The current slice accepts kinematics carried on
+  interface elements and proves the CPU/WebGPU force path; it does not yet
+  synthesize those fields from the resident particle/interface buffers.

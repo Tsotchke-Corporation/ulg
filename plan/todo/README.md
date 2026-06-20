@@ -36,16 +36,19 @@ physics loop is incoherent.
 ## Active Priority Order
 
 Current routing note, 2026-06-20 AKDT: compact
-`algorithmMaterialContactRows` now reach the material-interface mechanics path,
-not only wall barriers. The pressure-interface force-row producer packs bounded
-algorithm contact policy rows, the WGSL stage binds them in no-full WebGPU
-mode, and the CPU oracle uses the same policy to add a capped contact pressure
-term before grid update splats the resulting force rows into velocities. Stage
-task evidence reports contact policy row count, applied contact row count, pair
-keys, and max contact pressure. Continue contact work by deriving a true
-gap/relative-velocity cubic-barrier pair response from resident interface
-state; do not replace this with renderer overlays or post-hoc particle
-position clamps.
+`algorithmMaterialContactRows` now reach the material-interface mechanics path
+through a kinematics-gated cubic-barrier response. The pressure-interface
+force-row producer packs contact policy rows plus per-interface contact
+kinematics rows, the WGSL stage binds both buffers in no-full WebGPU mode, and
+the CPU oracle uses the same gap/normal-velocity/effective-mass pressure helper.
+Contact policy alone no longer fabricates material/material force: a matching
+interface element must carry gap evidence before the force row receives a
+bounded contact pressure. Stage task evidence reports policy rows, applied
+contact rows, pair keys, max contact pressure, and interface-kinematics
+ready/row counts. Continue contact work by deriving those per-interface
+kinematics automatically from resident interface/reaction-neighborhood state;
+do not replace this with renderer overlays or post-hoc particle position
+clamps.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

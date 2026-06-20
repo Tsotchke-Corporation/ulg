@@ -6929,6 +6929,9 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     algorithmContactForceRowCount: finiteNumber(solver?.algorithmContactForceRowCount, 0),
     algorithmContactPairKeys: Array.isArray(solver?.algorithmContactPairKeys) ? [...solver.algorithmContactPairKeys] : [],
     maxAlgorithmContactPressurePa: finiteNumber(solver?.maxAlgorithmContactPressurePa, 0),
+    interfaceContactKinematicsStatus: solver?.interfaceContactKinematicsStatus || null,
+    interfaceContactKinematicsRowCount: finiteNumber(solver?.interfaceContactKinematicsRowCount, 0),
+    interfaceContactKinematicsReadyCount: finiteNumber(solver?.interfaceContactKinematicsReadyCount, 0),
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -7275,7 +7278,10 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     algorithmContactPairKeys: Array.isArray(pressureInterfaceForceSolver?.algorithmContactPairKeys)
       ? [...pressureInterfaceForceSolver.algorithmContactPairKeys]
       : [],
-    maxAlgorithmContactPressurePa: finiteNumber(pressureInterfaceForceSolver?.maxAlgorithmContactPressurePa, 0)
+    maxAlgorithmContactPressurePa: finiteNumber(pressureInterfaceForceSolver?.maxAlgorithmContactPressurePa, 0),
+    interfaceContactKinematicsStatus: pressureInterfaceForceSolver?.interfaceContactKinematicsStatus || null,
+    interfaceContactKinematicsRowCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsRowCount, 0),
+    interfaceContactKinematicsReadyCount: finiteNumber(pressureInterfaceForceSolver?.interfaceContactKinematicsReadyCount, 0)
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);

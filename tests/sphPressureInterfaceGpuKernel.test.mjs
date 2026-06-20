@@ -9,9 +9,11 @@ import {
   normalizeAlgorithmContactPairResponsePolicy,
   packAlgorithmContactPolicyRows,
   packGasPressureCellRows,
+  packMaterialInterfaceContactKinematicsRows,
   packMaterialInterfaceElementRows,
   SPH_ALGORITHM_CONTACT_POLICY_FLOATS,
   SPH_GAS_PRESSURE_CELL_FLOATS,
+  SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
   runSphPressureInterfaceForceRowsWebGpu
 } from '../src/runtime/sph/sphPressureInterfaceGpuKernel.js';
 
@@ -36,7 +38,10 @@ function interfaceFieldFixture() {
         centroidM: [0.5, 1, 1],
         areaM2: 1,
         normal: [1, 0, 0],
-        normalAreaVectorM2: [1, 0, 0]
+        normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       },
       {
         status: 'interface-element-ready',
@@ -50,7 +55,10 @@ function interfaceFieldFixture() {
         centroidM: [1.5, 1, 1],
         areaM2: 1,
         normal: [-1, 0, 0],
-        normalAreaVectorM2: [-1, 0, 0]
+        normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       }
     ]
   };
@@ -207,6 +215,12 @@ test('pressure/interface WebGPU producer packs material interface element rows',
     1000, 0, 0, 1
   ]);
 
+  const contactKinematics = packMaterialInterfaceContactKinematicsRows(interfaceFieldFixture());
+  assert.equal(contactKinematics.rowCount, 2);
+  assert.equal(contactKinematics.readyCount, 2);
+  assert.equal(contactKinematics.rowStrideFloats, SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS);
+  assert.deepEqual([...contactKinematics.rows.slice(0, 4)], [0.20000000298023224, 0, 0, 1]);
+
   const params = createPressureInterfaceParamsArray({
     elementCount: 2,
     pressurePa: 120000,
@@ -298,8 +312,9 @@ test('pressure/interface WebGPU producer dispatches no-full retained force-row b
   assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-elements-in'));
   assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-gas-cells-in'));
   assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-force-params'));
-  assert.equal(device.bindGroups[0].entries.length, 5);
+  assert.equal(device.bindGroups[0].entries.length, 6);
   assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-contact-policy-rows'));
+  assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-contact-kinematics-rows'));
   assert.equal(result.pressureInterfaceForceSolver.conservationStatus, 'pairwise-equal-opposite-force-conservative');
 });
 
@@ -341,11 +356,57 @@ test('pressure/interface WebGPU producer applies algorithm contact-pair pressure
   assert.equal(result.pressureInterfaceForceSolver.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
   assert.equal(result.pressureInterfaceForceSolver.algorithmContactPolicyRowCount, 1);
   assert.equal(result.pressureInterfaceForceSolver.algorithmContactForceRowCount, 2);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsReadyCount, 2);
   assert.deepEqual(result.pressureInterfaceForceSolver.algorithmContactPairKeys, ['drop:Na|base:h2o']);
-  assert.deepEqual(result.pressureInterfaceForceSolver.algorithmContactPressureRangePa, [400000, 400000]);
+  assert.ok(Math.abs(result.pressureInterfaceForceSolver.algorithmContactPressureRangePa[0] - 125000) < 1e-6);
+  assert.ok(Math.abs(result.pressureInterfaceForceSolver.algorithmContactPressureRangePa[1] - 125000) < 1e-6);
   assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
-  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [520000, 520000]);
-  assert.equal(result.pressureInterfaceForceSolver.totalAbsMaterialForceN, 1040000);
+  assert.ok(Math.abs(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0] - 245000) < 1e-6);
+  assert.ok(Math.abs(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1] - 245000) < 1e-6);
+  assert.ok(Math.abs(result.pressureInterfaceForceSolver.totalAbsMaterialForceN - 490000) < 1e-6);
+});
+
+test('pressure/interface contact policy waits for interface kinematics', async () => {
+  const device = fakePressureDevice();
+  const fieldWithoutKinematics = interfaceFieldFixture();
+  for (const element of fieldWithoutKinematics.elements) {
+    delete element.gapM;
+    delete element.normalVelocityMPerS;
+    delete element.representativeMassKg;
+  }
+  const result = await runSphPressureInterfaceForceRowsWebGpu({
+    device,
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 120000,
+      gasCellField: {
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 120000,
+        pressureFieldMode: 'uniform-single-cell-sealed-gas',
+        pressureFieldResolution: 'lumped-sealed-box',
+        gradientStatus: 'uniform-sealed-gas-pressure-zero-gradient'
+      }
+    },
+    pressureInterfaceCoupling: {
+      schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
+      status: 'pressure-interface-coupling-ready-for-solver',
+      forceCouplingStatus: 'pressure-interface-coupling-ready'
+    },
+    materialInterfaceField: fieldWithoutKinematics,
+    algorithmMaterialContactRows: algorithmContactRowsFixture(),
+    algorithmContactPairResponseScale: 1e-4,
+    algorithmContactMaxPressurePa: 500000,
+    retainForceRowsBuffer: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(result.pressureInterfaceForceSolver.algorithmContactPolicyRowCount, 1);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsReadyCount, 0);
+  assert.equal(result.pressureInterfaceForceSolver.algorithmContactForceRowCount, 0);
+  assert.equal(result.pressureInterfaceForceSolver.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-policy-ready');
+  assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction');
+  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 120000]);
 });
 
 test('pressure/interface WebGPU producer accepts local gas-cell pressure rows', async () => {

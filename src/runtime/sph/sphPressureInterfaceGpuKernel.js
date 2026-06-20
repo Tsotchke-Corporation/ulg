@@ -11,8 +11,11 @@ export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEM
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const SPH_GAS_PRESSURE_CELL_FLOATS = 12;
 export const SPH_ALGORITHM_CONTACT_POLICY_FLOATS = 16;
+export const SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS = 4;
 export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-pair-response.v0';
+export const ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
+  'peercompute.ulg.sph-interface-contact-kinematics.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -50,6 +53,26 @@ function clampPositive(value, fallback = 0) {
   return Math.max(0, finiteNumber(value, fallback));
 }
 
+function finiteOptionalNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = finiteOptionalNumber(value);
+    if (number != null) return number;
+  }
+  return null;
+}
+
+function clamp01(value) {
+  const number = finiteNumber(value, 0);
+  if (number <= 0) return 0;
+  if (number >= 1) return 1;
+  return number;
+}
+
 function stableMaterialId(value) {
   const numeric = Number(value);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
@@ -84,6 +107,120 @@ function materialPhaseIdsForContactRow(row = {}) {
 function contactPressureCap({ algorithmContactMaxPressurePa = null } = {}) {
   const explicit = finiteNumber(algorithmContactMaxPressurePa, Number.NaN);
   return explicit > 0 ? explicit : DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA;
+}
+
+export function interfaceContactKinematicsForElement(element = {}) {
+  const contact = element?.contact && typeof element.contact === 'object' ? element.contact : {};
+  const gapM = firstFiniteNumber(
+    element?.gapM,
+    element?.contactGapM,
+    element?.interfaceGapM,
+    contact.gapM,
+    contact.contactGapM
+  );
+  const normalVelocityMPerS = firstFiniteNumber(
+    element?.normalVelocityMPerS,
+    element?.relativeNormalVelocityMPerS,
+    element?.contactNormalVelocityMPerS,
+    contact.normalVelocityMPerS,
+    contact.relativeNormalVelocityMPerS,
+    contact.contactNormalVelocityMPerS
+  ) ?? 0;
+  const representativeMassKg = firstFiniteNumber(
+    element?.representativeMassKg,
+    element?.effectiveContactMassKg,
+    element?.contactMassKg,
+    contact.representativeMassKg,
+    contact.effectiveContactMassKg,
+    contact.contactMassKg
+  ) ?? 0;
+  const ready = gapM != null;
+  return {
+    schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    status: ready
+      ? 'interface-contact-kinematics-ready'
+      : 'interface-contact-kinematics-unavailable',
+    gapM: Math.max(0, finiteNumber(gapM, 0)),
+    normalVelocityMPerS,
+    representativeMassKg: clampPositive(representativeMassKg, 0),
+    ready
+  };
+}
+
+export function algorithmContactPressureForKinematics({
+  row = null,
+  element = {},
+  kinematics = interfaceContactKinematicsForElement(element)
+} = {}) {
+  if (!row || row.status !== 'algorithm-contact-pair-response-row-ready') {
+    return {
+      status: 'algorithm-contact-pair-response-row-inactive',
+      contactPressurePa: 0,
+      kinematics
+    };
+  }
+  if (kinematics?.status !== 'interface-contact-kinematics-ready') {
+    return {
+      status: 'algorithm-contact-pair-response-kinematics-unavailable',
+      contactPressurePa: 0,
+      kinematics
+    };
+  }
+  const areaM2 = clampPositive(element?.areaM2, 0);
+  const areaSupportM = areaM2 > 0 ? Math.sqrt(areaM2) : 0;
+  const supportRadiusM = clampPositive(row.supportRadiusM, 0) || areaSupportM || 1e-6;
+  const gapM = Math.max(0, finiteNumber(kinematics.gapM, 0));
+  const normalVelocityMPerS = finiteNumber(kinematics.normalVelocityMPerS, 0);
+  const closingSpeedMPerS = Math.max(0, -normalVelocityMPerS);
+  const inContactWindow = gapM <= supportRadiusM
+    || (closingSpeedMPerS > 0 && gapM <= supportRadiusM * 2);
+  if (!inContactWindow) {
+    return {
+      status: 'algorithm-contact-pair-response-outside-support',
+      contactPressurePa: 0,
+      kinematics,
+      supportRadiusM,
+      gapM,
+      normalVelocityMPerS,
+      closingSpeedMPerS
+    };
+  }
+  const effectiveGapM = Math.max(gapM, supportRadiusM * 1e-3, 1e-9);
+  const proximity = clamp01((supportRadiusM - gapM) / supportRadiusM);
+  const barrierGain = proximity * Math.min((supportRadiusM / effectiveGapM) ** 2, 1e6);
+  const elasticPressurePa = clampPositive(row.normalStiffnessPa, 0)
+    * clampPositive(row.responseScale, 0)
+    * barrierGain;
+  const dampingPressurePa = clampPositive(row.dampingViscosityPaS, 0)
+    * closingSpeedMPerS
+    / supportRadiusM;
+  const inertialPressurePa = kinematics.representativeMassKg > 0 && closingSpeedMPerS > 0 && areaM2 > 0
+    ? (kinematics.representativeMassKg * closingSpeedMPerS * closingSpeedMPerS)
+      / Math.max(areaM2 * effectiveGapM, 1e-12)
+    : 0;
+  const cap = contactPressureCap({ algorithmContactMaxPressurePa: row.maxContactPressurePa });
+  const contactPressurePa = Math.min(
+    Math.max(0, elasticPressurePa + dampingPressurePa + inertialPressurePa),
+    cap
+  );
+  return {
+    status: contactPressurePa > 0
+      ? 'algorithm-contact-pair-response-applied-kinematic'
+      : 'algorithm-contact-pair-response-inactive-kinematic',
+    contactPressurePa,
+    kinematics,
+    supportRadiusM,
+    gapM,
+    effectiveGapM,
+    normalVelocityMPerS,
+    closingSpeedMPerS,
+    proximity,
+    barrierGain,
+    elasticPressurePa,
+    dampingPressurePa,
+    inertialPressurePa,
+    maxContactPressurePa: cap
+  };
 }
 
 export function normalizeAlgorithmContactPairResponsePolicy({
@@ -167,10 +304,13 @@ export function algorithmContactPairResponseForElement(element = {}, policy = nu
       : ((elementPhaseId > 0 && phaseIds.some((id) => Math.abs(id - elementPhaseId) < 0.5))
           || (elementPhase && phaseNames.includes(elementPhase)));
     if ((materialIdMatch || materialNameMatch) && phaseMatch) {
+      const dynamicPressure = algorithmContactPressureForKinematics({ row, element });
       return {
-        status: 'algorithm-contact-pair-response-applied',
-        contactPressurePa: row.contactPressurePa,
-        row
+        status: dynamicPressure.status,
+        contactPressurePa: dynamicPressure.contactPressurePa,
+        row,
+        kinematics: dynamicPressure.kinematics,
+        dynamicPressure
       };
     }
   }
@@ -216,6 +356,36 @@ export function packAlgorithmContactPolicyRows(policy = null) {
     rowCount: rows.length,
     rowStrideFloats: SPH_ALGORITHM_CONTACT_POLICY_FLOATS,
     rowByteLength: values.byteLength
+  };
+}
+
+export function packMaterialInterfaceContactKinematicsRows(materialInterfaceField = null) {
+  const elements = readyInterfaceElements(materialInterfaceField);
+  const rows = new Float32Array(elements.length * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS);
+  let readyCount = 0;
+  for (const [index, element] of elements.entries()) {
+    const kinematics = interfaceContactKinematicsForElement(element);
+    if (kinematics.status === 'interface-contact-kinematics-ready') readyCount += 1;
+    const offset = index * SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS;
+    rows.set([
+      kinematics.gapM,
+      kinematics.normalVelocityMPerS,
+      kinematics.representativeMassKg,
+      kinematics.ready ? 1 : 0
+    ], offset);
+  }
+  return {
+    schema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    status: readyCount > 0
+      ? 'interface-contact-kinematics-packed'
+      : (elements.length > 0
+          ? 'interface-contact-kinematics-unavailable'
+          : 'interface-contact-kinematics-empty'),
+    rows,
+    rowCount: elements.length,
+    readyCount,
+    rowStrideFloats: SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS,
+    rowByteLength: rows.byteLength
   };
 }
 
@@ -477,9 +647,14 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
   let minAlgorithmContactPressurePa = Number.POSITIVE_INFINITY;
   let maxAlgorithmContactPressurePa = 0;
   let algorithmContactForceRowCount = 0;
+  let interfaceContactKinematicsReadyCount = 0;
   const algorithmContactPairKeys = new Set();
   for (const element of elements) {
     const interfacePressurePa = pressureForElementFromCells(element, pressureCells, pressurePa);
+    const elementKinematics = interfaceContactKinematicsForElement(element);
+    if (elementKinematics.status === 'interface-contact-kinematics-ready') {
+      interfaceContactKinematicsReadyCount += 1;
+    }
     const contactResponse = algorithmContactPairResponseForElement(element, contactPolicy);
     const algorithmContactPressurePa = clampPositive(contactResponse.contactPressurePa, 0);
     const totalPressurePa = interfacePressurePa + algorithmContactPressurePa;
@@ -515,6 +690,10 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
       algorithmContactPressurePa,
       algorithmContactPairKey: contactResponse.row?.pairKey ?? null,
       algorithmContactPairResponseStatus: contactResponse.status,
+      interfaceContactKinematicsStatus: elementKinematics.status,
+      interfaceContactGapM: contactResponse.dynamicPressure?.gapM ?? null,
+      interfaceContactNormalVelocityMPerS: contactResponse.dynamicPressure?.normalVelocityMPerS ?? null,
+      interfaceContactPressureDerivation: contactResponse.dynamicPressure?.status ?? null,
       materialForceN,
       gasReactionForceN,
       pairResidualN,
@@ -564,6 +743,12 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
     algorithmContactPairResponseApplied,
     algorithmContactPolicyRowCount: contactPolicy?.rowCount ?? 0,
     algorithmContactForceRowCount,
+    interfaceContactKinematicsSchema: ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA,
+    interfaceContactKinematicsStatus: interfaceContactKinematicsReadyCount > 0
+      ? 'interface-contact-kinematics-ready'
+      : 'interface-contact-kinematics-unavailable',
+    interfaceContactKinematicsReadyCount,
+    interfaceContactKinematicsRowCount: elements.length,
     algorithmContactPairKeys: [...algorithmContactPairKeys],
     algorithmContactPressureRangePa: algorithmContactPairResponseApplied
       ? [minAlgorithmContactPressurePa, maxAlgorithmContactPressurePa]
@@ -593,6 +778,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   );
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
+  const packedContactKinematics = packMaterialInterfaceContactKinematicsRows(materialInterfaceField);
   const packedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
   const contactPolicy = normalizeAlgorithmContactPairResponsePolicy({
     algorithmMaterialContactRows,
@@ -645,6 +831,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         algorithmContactForceRowCount: 0,
         algorithmContactPressureRangePa: null,
         algorithmContactPairKeys: [],
+        interfaceContactKinematicsSchema: packedContactKinematics.schema,
+        interfaceContactKinematicsStatus: packedContactKinematics.status,
+        interfaceContactKinematicsRowCount: packedContactKinematics.rowCount,
+        interfaceContactKinematicsReadyCount: packedContactKinematics.readyCount,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -662,6 +852,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   const inputBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
   const gasPressureCellsBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
   const contactPolicyBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-contact-policy-rows', packedContactPolicy.rows);
+  const contactKinematicsBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-pressure-interface-contact-kinematics-rows',
+    packedContactKinematics.rows
+  );
   const forceRowsBuffer = device.createBuffer({
     label: 'ulg-sph-pressure-interface-force-rows-out',
     size: Math.max(4, outputByteLength),
@@ -696,7 +891,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-pressure-interface-force-rows.v2',
+      cacheKey: 'ulg-sph-pressure-interface-force-rows.v3',
       label: 'ulg-sph-pressure-interface-force-rows',
       code: sphPressureInterfaceForceRowsWgsl,
       entryPoint: 'main',
@@ -705,7 +900,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         computeBufferBinding(1, 'storage'),
         computeBufferBinding(2, 'uniform'),
         computeBufferBinding(3, 'read-only-storage'),
-        computeBufferBinding(4, 'read-only-storage')
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -715,7 +911,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         { binding: 1, resource: { buffer: forceRowsBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
         { binding: 3, resource: { buffer: gasPressureCellsBuffer } },
-        { binding: 4, resource: { buffer: contactPolicyBuffer } }
+        { binding: 4, resource: { buffer: contactPolicyBuffer } },
+        { binding: 5, resource: { buffer: contactKinematicsBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -786,6 +983,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       maxAlgorithmContactPressurePa: summary.maxAlgorithmContactPressurePa,
       algorithmContactPairResponseScale: contactPolicy.responseScale,
       algorithmContactMaxPressurePa: contactPolicy.maxContactPressurePa,
+      interfaceContactKinematicsSchema: summary.interfaceContactKinematicsSchema,
+      interfaceContactKinematicsStatus: summary.interfaceContactKinematicsStatus,
+      interfaceContactKinematicsRowCount: summary.interfaceContactKinematicsRowCount,
+      interfaceContactKinematicsReadyCount: summary.interfaceContactKinematicsReadyCount,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -839,6 +1040,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
       algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
       algorithmContactPolicyRowByteLength: packedContactPolicy.rowByteLength,
+      interfaceContactKinematicsRowCount: packedContactKinematics.rowCount,
+      interfaceContactKinematicsReadyCount: packedContactKinematics.readyCount,
+      interfaceContactKinematicsRowByteLength: packedContactKinematics.rowByteLength,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
@@ -860,6 +1064,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       inputBuffer.destroy?.();
       if (!returnedRetainedGasPressureCellsBuffer) gasPressureCellsBuffer.destroy?.();
       contactPolicyBuffer.destroy?.();
+      contactKinematicsBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
       if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();

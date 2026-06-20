@@ -12050,3 +12050,42 @@ Reset resident stage-order trace, 2026-06-19 AKDT:
   - Per-batch trace reached `resident-execution-complete-direct-probe` with
     WebGPU no-full-readback execution, authority ledger ready, and buffer
     lease ledger ready.
+
+Kinematics-gated material-interface contact response, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+  passed.
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js`
+  passed.
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  passed.
+- Syntax:
+  `node --check ulg-gpu-abi/src/wgsl.js`
+  passed.
+- Focused pressure/interface and stage tests:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `112/112`.
+  - Covers kinematics row packing, no-full WebGPU bind layout, kinematics-gated
+    dynamic contact pressure, no-force behavior when kinematics are absent, CPU
+    oracle parity, and pressure-stage evidence fields.
+- ABI/grid/buffer regression:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
+  - Passed: `47/47`.
+  - Re-covers WGSL ABI guards, the reserved identifier guard, particle-parallel
+    P2G shader guard, MLS-MPM wall-barrier contact, and GPU buffer packing.
+- Whitespace:
+  `git diff --check`
+  - Passed.
+- Browser bundle:
+  `npm run build`
+  - Passed. Vite reported only the existing large chunk-size warning.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/14`.
+  - Skipped: the three expected opt-in long-horizon liquid acceptance gates.
+- ICC:
+  `npm run icc:update`
+  - Passed with `indexedFiles=354`, `memoryChunks=2072`.

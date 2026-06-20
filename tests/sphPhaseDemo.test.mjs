@@ -1639,6 +1639,9 @@ test('gas pressure interface force preview computes tractions without applying t
         areaM2: 1,
         normal: [1, 0, 0],
         normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0,
         status: 'interface-element-ready'
       },
       {
@@ -1653,6 +1656,9 @@ test('gas pressure interface force preview computes tractions without applying t
         areaM2: 1,
         normal: [-1, 0, 0],
         normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0,
         status: 'interface-element-ready'
       }
     ]
@@ -1759,6 +1765,9 @@ test('gas pressure interface solver adds bounded algorithm contact pair response
         areaM2: 1,
         normal: [1, 0, 0],
         normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0,
         status: 'interface-element-ready'
       },
       {
@@ -1773,6 +1782,9 @@ test('gas pressure interface solver adds bounded algorithm contact pair response
         areaM2: 1,
         normal: [-1, 0, 0],
         normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0,
         status: 'interface-element-ready'
       }
     ]
@@ -1811,13 +1823,20 @@ test('gas pressure interface solver adds bounded algorithm contact pair response
   assert.equal(solver.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
   assert.equal(solver.algorithmContactPolicyRowCount, 1);
   assert.equal(solver.algorithmContactForceRowCount, 2);
+  assert.equal(solver.interfaceContactKinematicsReadyCount, 2);
   assert.deepEqual(solver.algorithmContactPairKeys, ['drop:Na|base:h2o']);
   assert.equal(solver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
-  assert.deepEqual(solver.gasInterfacePressureRangePa, [500000, 500000]);
-  assert.deepEqual(solver.forceRows.map((row) => row.algorithmContactPressurePa), [400000, 400000]);
-  assert.deepEqual(solver.forceRows[0].materialForceN, [-500000, 0, 0]);
-  assert.deepEqual(solver.forceRows[1].materialForceN, [500000, 0, 0]);
-  assert.deepEqual([...solver.forceRowValues.slice(8, 16)], [-500000, 0, 0, 500000, 0, 0, 500000, 1]);
+  near(solver.gasInterfacePressureRangePa[0], 225000);
+  near(solver.gasInterfacePressureRangePa[1], 225000);
+  near(solver.forceRows[0].algorithmContactPressurePa, 125000);
+  near(solver.forceRows[1].algorithmContactPressurePa, 125000);
+  near(solver.forceRows[0].materialForceN[0], -225000);
+  near(solver.forceRows[1].materialForceN[0], 225000);
+  const packed = [...solver.forceRowValues.slice(8, 16)];
+  near(packed[0], -225000);
+  assert.deepEqual(packed.slice(1, 6), [0, 0, 225000, 0, 0]);
+  near(packed[6], 225000);
+  assert.equal(packed[7], 1);
 });
 
 test('gas pressure interface solver samples local gas-cell pressure gradients', () => {

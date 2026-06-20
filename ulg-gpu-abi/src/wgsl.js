@@ -5079,6 +5079,7 @@ struct PressureInterfaceParams {
 @group(0) @binding(2) var<uniform> params: PressureInterfaceParams;
 @group(0) @binding(3) var<storage, read> gas_pressure_cells: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> contact_policy_rows: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> contact_kinematics_rows: array<vec4<f32>>;
 
 fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   if (params.pressure_model_id != 1u || params.gas_pressure_cell_count == 0u) {
@@ -5102,8 +5103,11 @@ fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   return best_pressure;
 }
 
-fn contact_pressure_for_element(material_id: f32, phase_id: f32) -> f32 {
+fn contact_pressure_for_element(material_id: f32, phase_id: f32, area_m2: f32, kinematics: vec4<f32>) -> f32 {
   if (params.contact_pair_response_enabled <= 0.0 || params.contact_policy_row_count == 0u) {
+    return 0.0;
+  }
+  if (kinematics.w <= 0.0) {
     return 0.0;
   }
   var selected_pressure = 0.0;
@@ -5119,7 +5123,31 @@ fn contact_pressure_for_element(material_id: f32, phase_id: f32) -> f32 {
       || abs(phase_id - phase_row_a) < 0.5
       || abs(phase_id - phase_row_b) < 0.5;
     if (status > 0.0 && material_match && phase_match) {
-      selected_pressure = max(selected_pressure, min(max(row2.w, 0.0), params.contact_max_pressure_pa));
+      let support_radius_m = max(row1.z, 1.0e-6);
+      let gap_m = max(kinematics.x, 0.0);
+      let normal_velocity_m_per_s = kinematics.y;
+      let closing_speed_m_per_s = max(-normal_velocity_m_per_s, 0.0);
+      if (gap_m > support_radius_m && (closing_speed_m_per_s <= 0.0 || gap_m > support_radius_m * 2.0)) {
+        continue;
+      }
+      let effective_gap_m = max(gap_m, max(support_radius_m * 0.001, 1.0e-9));
+      let proximity = clamp((support_radius_m - gap_m) / support_radius_m, 0.0, 1.0);
+      let barrier_gain = proximity * min((support_radius_m / effective_gap_m) * (support_radius_m / effective_gap_m), 1000000.0);
+      let elastic_pressure_pa = max(row1.x, 0.0) * max(row1.w, 0.0) * barrier_gain;
+      let damping_pressure_pa = max(row1.y, 0.0) * closing_speed_m_per_s / support_radius_m;
+      var inertial_pressure_pa = 0.0;
+      if (kinematics.z > 0.0 && area_m2 > 0.0 && closing_speed_m_per_s > 0.0) {
+        inertial_pressure_pa = kinematics.z * closing_speed_m_per_s * closing_speed_m_per_s / max(area_m2 * effective_gap_m, 1.0e-12);
+      }
+      var row_cap_pa = params.contact_max_pressure_pa;
+      if (row2.x > 0.0) {
+        row_cap_pa = min(row2.x, params.contact_max_pressure_pa);
+      }
+      let contact_pressure_pa = min(
+        max(elastic_pressure_pa + damping_pressure_pa + inertial_pressure_pa, 0.0),
+        row_cap_pa
+      );
+      selected_pressure = max(selected_pressure, contact_pressure_pa);
     }
   }
   return selected_pressure;
@@ -5140,7 +5168,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let area = row1.w;
   let status = row3.w;
   let gas_pressure_pa = pressure_for_centroid(centroid);
-  let contact_pressure_pa = contact_pressure_for_element(row0.y, row0.z);
+  let contact_pressure_pa = contact_pressure_for_element(row0.y, row0.z, area, contact_kinematics_rows[element_index]);
   let pressure_pa = gas_pressure_pa + contact_pressure_pa;
   var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
   if (dot(normal_area, normal_area) <= 1.0e-24) {

@@ -4,15 +4,30 @@ Date: 2026-06-18 AKDT
 
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` now also feed material-interface force-row
+production through an explicit kinematics-gated cubic-barrier response. The
+pressure-interface WebGPU producer packs contact policy rows from the compact
+algorithm contact rows and a parallel per-interface-element kinematics row
+buffer (`gapM`, `normalVelocityMPerS`, representative mass, status). The WGSL
+stage binds both buffers and computes bounded dynamic contact pressure from
+gap, support radius, closing velocity, damping, and effective mass before the
+existing force-row ABI reaches grid update. The CPU oracle uses the same helper.
+Policy rows alone no longer fabricate material/material pressure; contact
+application requires ready interface kinematics. Pressure-stage evidence now
+reports policy row count, applied contact force rows, pair keys, max contact
+pressure, and interface-kinematics ready/row counts. The next step is to derive
+those kinematics automatically from resident interface/reaction-neighborhood
+state instead of requiring element-provided fields in tests/options.
+
+Status update, 2026-06-20 AKDT: compact
+`algorithmMaterialContactRows` now also feed material-interface force-row
 production. The pressure-interface WebGPU producer packs contact policy rows
 from the compact algorithm contact rows, binds them as a fifth storage buffer,
 and adds a bounded contact pressure term to each matching material-interface
 element before the existing force-row ABI reaches grid update. The CPU oracle
 uses the same matching and cap logic, and pressure stage evidence reports
 policy row count, applied contact force rows, pair keys, and max contact
-pressure. This is still a bounded first pair-response slice; the next step is
-to replace the fixed response scale with true cubic-barrier gap and
-relative-velocity terms derived from resident interface state.
+pressure. This was the bounded first pair-response slice; it has been replaced
+by the kinematics-gated response above.
 
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` now feed the MLS-MPM wall-barrier grid-update

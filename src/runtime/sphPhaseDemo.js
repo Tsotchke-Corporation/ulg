@@ -59,6 +59,7 @@ import {
 import { buildAlgorithmMaterialParticleInitializationRows } from './material/algorithmMaterialRows.js';
 import {
   algorithmContactPairResponseForElement,
+  interfaceContactKinematicsForElement,
   normalizeAlgorithmContactPairResponsePolicy
 } from './sph/sphPressureInterfaceGpuKernel.js';
 
@@ -2088,6 +2089,7 @@ export function gasPressureInterfaceForcePreview({
   let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
   let algorithmContactForceRowCount = 0;
   let maxAlgorithmContactPressurePa = 0;
+  let interfaceContactKinematicsReadyCount = 0;
   const algorithmContactPairKeys = new Set();
   if (canPreview) {
     for (const element of materialInterfaceField.elements) {
@@ -2098,6 +2100,10 @@ export function gasPressureInterfaceForcePreview({
         centroidM,
         fallbackPressurePa
       });
+      const elementKinematics = interfaceContactKinematicsForElement(element);
+      if (elementKinematics.status === 'interface-contact-kinematics-ready') {
+        interfaceContactKinematicsReadyCount += 1;
+      }
       const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
       const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
       const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
@@ -2165,6 +2171,11 @@ export function gasPressureInterfaceForcePreview({
     algorithmContactForceRowCount,
     algorithmContactPairKeys: [...algorithmContactPairKeys],
     maxAlgorithmContactPressurePa,
+    interfaceContactKinematicsStatus: interfaceContactKinematicsReadyCount > 0
+      ? 'interface-contact-kinematics-ready'
+      : 'interface-contact-kinematics-unavailable',
+    interfaceContactKinematicsReadyCount,
+    interfaceContactKinematicsRowCount: previewedElementCount,
     surfaceForceCount: forceBySurface.size,
     totalInterfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
     totalAbsInterfaceForceN,
@@ -2220,6 +2231,7 @@ export function gasPressureInterfaceForceSolver({
   let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
   let algorithmContactForceRowCount = 0;
   let maxAlgorithmContactPressurePa = 0;
+  let interfaceContactKinematicsReadyCount = 0;
   const algorithmContactPairKeys = new Set();
   if (canSolve) {
     for (const element of materialInterfaceField.elements) {
@@ -2230,6 +2242,10 @@ export function gasPressureInterfaceForceSolver({
         centroidM,
         fallbackPressurePa
       });
+      const elementKinematics = interfaceContactKinematicsForElement(element);
+      if (elementKinematics.status === 'interface-contact-kinematics-ready') {
+        interfaceContactKinematicsReadyCount += 1;
+      }
       const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
       const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
       const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
@@ -2268,6 +2284,9 @@ export function gasPressureInterfaceForceSolver({
         algorithmContactPressurePa,
         algorithmContactPairKey: contactResponse.row?.pairKey ?? null,
         algorithmContactPairResponseStatus: contactResponse.status,
+        interfaceContactKinematicsStatus: elementKinematics.status,
+        interfaceContactGapM: contactResponse.dynamicPressure?.gapM ?? null,
+        interfaceContactNormalVelocityMPerS: contactResponse.dynamicPressure?.normalVelocityMPerS ?? null,
         pressureFieldMode: pressureFieldResolution.pressureFieldMode,
         pressureSource: pressureSample.pressureSource,
         pressureCellIndex: pressureSample.pressureCellIndex,
@@ -2350,6 +2369,11 @@ export function gasPressureInterfaceForceSolver({
     algorithmContactForceRowCount,
     algorithmContactPairKeys: [...algorithmContactPairKeys],
     maxAlgorithmContactPressurePa,
+    interfaceContactKinematicsStatus: interfaceContactKinematicsReadyCount > 0
+      ? 'interface-contact-kinematics-ready'
+      : 'interface-contact-kinematics-unavailable',
+    interfaceContactKinematicsReadyCount,
+    interfaceContactKinematicsRowCount: forceRows.length,
     forceRowCount: forceRows.length,
     forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
     forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,

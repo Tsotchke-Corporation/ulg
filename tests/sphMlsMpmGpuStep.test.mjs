@@ -2768,7 +2768,10 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
         axisId: 0,
         centroidM: [0.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [1, 0, 0]
+        normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       },
       {
         status: 'interface-element-ready',
@@ -2781,7 +2784,10 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
         axisId: 0,
         centroidM: [1.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [-1, 0, 0]
+        normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       }
     ]
   };
@@ -3005,7 +3011,10 @@ test('SPH pressure interface stage compute task declares retained force-row outp
         axisId: 0,
         centroidM: [0.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [1, 0, 0]
+        normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       },
       {
         status: 'interface-element-ready',
@@ -3018,7 +3027,10 @@ test('SPH pressure interface stage compute task declares retained force-row outp
         axisId: 0,
         centroidM: [1.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [-1, 0, 0]
+        normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       }
     ]
   };
@@ -3105,7 +3117,10 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
         axisId: 0,
         centroidM: [0.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [1, 0, 0]
+        normalAreaVectorM2: [1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       },
       {
         status: 'interface-element-ready',
@@ -3118,7 +3133,10 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
         axisId: 0,
         centroidM: [1.5, 1, 1],
         areaM2: 1,
-        normalAreaVectorM2: [-1, 0, 0]
+        normalAreaVectorM2: [-1, 0, 0],
+        gapM: 0.2,
+        normalVelocityMPerS: 0,
+        representativeMassKg: 0
       }
     ]
   };
@@ -3148,11 +3166,18 @@ test('SPH pressure interface stage carries algorithm contact pair response into 
   assert.equal(result.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
   assert.equal(result.algorithmContactPolicyRowCount, 1);
   assert.equal(result.algorithmContactForceRowCount, 2);
+  assert.equal(result.interfaceContactKinematicsReadyCount, 2);
   assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
-  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [520000, 520000]);
-  assert.deepEqual([...result.forceRowValues.slice(8, 16)], [-520000, 0, 0, 520000, 0, 0, 520000, 1]);
+  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0], 245000);
+  nearlyEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1], 245000);
+  const packedForceRow = [...result.forceRowValues.slice(8, 16)];
+  nearlyEqual(packedForceRow[0], -245000);
+  assert.deepEqual(packedForceRow.slice(1, 6), [0, 0, 245000, 0, 0]);
+  nearlyEqual(packedForceRow[6], 245000);
+  assert.equal(packedForceRow[7], 1);
   assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
   assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactForceRowCount, 2);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.interfaceContactKinematicsReadyCount, 2);
 });
 
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {

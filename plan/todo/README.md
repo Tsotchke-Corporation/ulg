@@ -131,7 +131,10 @@ generator-side intermediate caching because repeated dry-run/write passes are
 now taking about a minute per four rows. That first cache is now present:
 generator runs read/write ignored local records under
 `.cache/material-properties/element-records`, expose cache hit/write counts in
-the JSON summary, and support `--cache-dir` plus `--no-cache`.
+the JSON summary, and support `--cache-dir` plus `--no-cache`. The first
+cache-backed write added `Nd`, `Pm`, `Sm`, and `Eu`, moving the bank to 58 rows
+and leaving 53 selectable non-noble targets; the write pass reported
+`cache.hitCount=4`.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

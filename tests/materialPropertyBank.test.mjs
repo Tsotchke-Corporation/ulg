@@ -34,7 +34,7 @@ function clone(value) {
 }
 
 const ACTIVE_ELEMENT_BANK_SYMBOLS = Object.freeze(['H', 'O', 'Li', 'Na', 'K', 'Rb', 'Cs', 'Fe', 'Pd']);
-const GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL = 'Pr';
+const GENERATED_SELECTABLE_PREFIX_LAST_SYMBOL = 'Eu';
 
 function selectablePrefixThrough(symbol) {
   const symbols = condensedElementSymbols().map((entry) => entry.symbol);

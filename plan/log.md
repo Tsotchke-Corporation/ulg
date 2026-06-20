@@ -32,6 +32,9 @@ Status:
   `.cache/material-properties/element-records`, with `--cache-dir` override and
   `--no-cache` escape hatch. Generation summaries now report cache hit, miss,
   write, and stale counts.
+- Used the cache-backed loop to add `Nd`, `Pm`, `Sm`, and `Eu`. The bank now
+  contains 58 rows, leaves 53 selectable non-noble targets, and the write pass
+  reported `cache.hitCount=4`.
 
 Validation:
 
@@ -42,6 +45,9 @@ Validation:
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.
 - PASS: two `Nd` dry runs with `--cache-dir` default behavior showed first-run
   `writeCount=1` and second-run `hitCount=1`.
+- PASS: `node scripts/material-properties/generate-material-property-bank.mjs
+  --grid=80 --limit=4 --progress --write` reused the dry-run cache for
+  `Nd/Pm/Sm/Eu` with `hitCount=4`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

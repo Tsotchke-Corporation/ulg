@@ -120,6 +120,12 @@ This keeps dry-run/write review loops from recomputing expensive lanthanide and
 actinide rows. `.cache/` is ignored, so these intermediate closure artifacts
 stay local instead of becoming source-controlled material truth.
 
+Status update, 2026-06-19 AKDT: the first cache-backed lanthanide continuation
+adds `Nd`, `Pm`, `Sm`, and `Eu`. The checked-in bank now covers the selectable
+prefix through `Eu`, contains 58 element rows, and leaves 53 selectable
+non-noble target rows. The dry run wrote four local cache entries and the write
+pass reused all four with `cache.hitCount=4`.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

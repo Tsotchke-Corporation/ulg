@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `350`
-- total lines indexed: `238715`
+- total lines indexed: `239073`
 - languages: `{"markdown": 133, "javascript": 109, "text": 90, "json": 17, "c": 1}`
 
 ## Important Files
@@ -50,7 +50,7 @@
 - `tests`: 76 files, 46202 lines, symbols=0, tests=76, languages={"text": 76}
 - `src/runtime`: 31 files, 18793 lines, symbols=413, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 28 files, 39141 lines, symbols=861, tests=0, languages={"javascript": 28}
-- `plan/todo`: 24 files, 12844 lines, symbols=0, tests=0, languages={"markdown": 24}
+- `plan/todo`: 24 files, 12853 lines, symbols=0, tests=0, languages={"markdown": 24}
 - `src/runtime/material`: 20 files, 5227 lines, symbols=221, tests=0, languages={"javascript": 20}
 - `.`: 10 files, 2232 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
@@ -58,7 +58,7 @@
 - `scripts`: 6 files, 9212 lines, symbols=0, tests=0, languages={"text": 6}
 - `src/services`: 5 files, 2195 lines, symbols=57, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 51015 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 51024 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `plan/moot`: 5 files, 1771 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `src/visualization`: 4 files, 26158 lines, symbols=526, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8620 lines, symbols=53, tests=0, languages={"javascript": 4}
@@ -70,17 +70,17 @@
 - `tools/moonlab-microphysics`: 2 files, 98 lines, symbols=0, tests=0, languages={"markdown": 1, "c": 1}
 - `ulg-gpu-abi`: 2 files, 87 lines, symbols=0, tests=0, languages={"markdown": 1, "json": 1}
 - `src/runtime/materials`: 1 files, 158 lines, symbols=5, tests=0, languages={"javascript": 1}
-- `data/material-properties`: 1 files, 4570 lines, symbols=0, tests=0, languages={"json": 1}
+- `data/material-properties`: 1 files, 4910 lines, symbols=0, tests=0, languages={"json": 1}
 - `tests/fixtures`: 1 files, 79 lines, symbols=0, tests=1, languages={"text": 1}
 
 ## Largest source files (>=500 lines)
 
 | Lines | Path | Language |
 |---:|---|---|
-| 30262 | `plan/log.md` | markdown |
+| 30268 | `plan/log.md` | markdown |
 | 20145 | `src/visualization/sphPhaseScene.js` | javascript |
 | 13576 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
-| 11839 | `plan/tests.md` | markdown |
+| 11842 | `plan/tests.md` | markdown |
 | 8801 | `tests/demo.e2e.mjs` | text |
 | 6459 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
 | 6403 | `ulg-gpu-abi/src/wgsl.js` | javascript |
@@ -90,11 +90,11 @@
 | 5819 | `plan/implementation-status.md` | markdown |
 | 5660 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 5121 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
-| 4570 | `data/material-properties/elements.json` | json |
+| 4910 | `data/material-properties/elements.json` | json |
 | 3679 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 3651 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2955 | `plan/plan.md` | markdown |
-| 2657 | `plan/todo/README.md` | markdown |
+| 2660 | `plan/todo/README.md` | markdown |
 | 2551 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2173 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2091 | `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js` | javascript |

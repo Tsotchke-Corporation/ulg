@@ -124,7 +124,11 @@ selectable non-noble targets. The fifth tranche now reaches `I`, adding `Rh`,
 selectable non-noble targets remain. Continue
 `plan/todo/material-property-json-bank-plan.md` by adding selectable non-noble
 elements in reviewable batches and then binding the packed rows from the
-current upload buffers into shader-side consumers.
+current upload buffers into shader-side consumers. The sixth tranche reaches
+`Pr` with `Ba`, `La`, `Ce`, and `Pr`, bringing the bank to 54 rows and leaving
+57 targets; further lanthanide/actinide expansion should first add
+generator-side intermediate caching because repeated dry-run/write passes are
+now taking about a minute per four rows.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

@@ -24,11 +24,15 @@ Status:
   targets.
 - Added `Rh`, `Ag`, `Cd`, `In`, `Sn`, `Sb`, `Te`, and `I`, bringing the bank
   to 50 rows and leaving 61 selectable non-noble targets.
+- Added the first lanthanide-band tranche `Ba`, `La`, `Ce`, and `Pr`, bringing
+  the bank to 54 rows and leaving 57 selectable non-noble targets. This tranche
+  exposed enough generator cost that the next coverage step should add
+  generator-side intermediate caching before deeper lanthanide/actinide rows.
 
 Validation:
 
 - PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
-  reported `recordCount=50`.
+  reported `recordCount=54`.
 - PASS: `node --check scripts/material-properties/generate-material-property-bank.mjs`
   and `node --check tests/materialPropertyBank.test.mjs`.
 - PASS: `node --test tests/materialPropertyBank.test.mjs` reported `9/9`.

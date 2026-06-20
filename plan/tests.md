@@ -10,8 +10,9 @@ strict truth, while generated `Be`, `B`, `C`, `N`, `F`, `Mg`, `Al`, `Si`, `P`,
 `reduced-estimate` provenance and explicit `gridPointsN=80` closure metadata.
 The same generated-prefix coverage now extends through `I`, including `Rh`,
 `Ag`, `Cd`, `In`, `Sn`, `Sb`, `Te`, and `I`. The unit guard verifies the
-selectable prefix through `I` rather than a
-hand-maintained first-tranche-only list.
+selectable prefix through `Pr`, including the first lanthanide-band tranche
+`Ba`, `La`, `Ce`, and `Pr`, rather than a hand-maintained first-tranche-only
+list.
 
 Focused checks:
 
@@ -20,7 +21,7 @@ Focused checks:
   and `node --check tests/materialPropertyBank.test.mjs` passed.
 - Bank validation:
   `node scripts/material-properties/validate-material-property-bank.mjs`
-  passed with `recordCount=50`.
+  passed with `recordCount=54`.
 - Unit coverage:
   `node --test tests/materialPropertyBank.test.mjs` reported `9/9`, including
   the generated tranche and a bounded generator dry run.

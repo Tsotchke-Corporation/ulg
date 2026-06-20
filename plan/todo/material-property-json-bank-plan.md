@@ -104,6 +104,14 @@ covers the selectable prefix through `I`, contains 50 element rows, and leaves
 61 selectable non-noble target rows. The next tranche enters `Ba` plus
 lanthanides, so expect slower generation and prefer smaller write batches.
 
+Status update, 2026-06-19 AKDT: the sixth bounded selectable tranche adds
+`Ba`, `La`, `Ce`, and `Pr`. The checked-in bank now covers the selectable
+prefix through `Pr`, contains 54 element rows, and leaves 57 selectable
+non-noble target rows. These four rows took about a minute per dry-run/write
+pass, so the next implementation step should add a generator-side intermediate
+cache for closure/electronic-structure solves before pushing deep lanthanide,
+actinide, and superheavy coverage.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius
@@ -200,6 +208,9 @@ model, and element records have passed acceptance gates.
   inputs for CPU/WASM/WebGPU derivation and GPU table packing.
 - Keep generated large data separated from hand-authored schemas and import
   scripts so diffs stay reviewable.
+- Cache generator intermediate closure/electronic-structure solves before
+  expanding the remaining lanthanide, actinide, and superheavy rows; repeated
+  dry-run/write passes are now slow enough to waste development time.
 
 ## Proposed File Layout
 

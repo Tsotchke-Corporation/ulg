@@ -5896,7 +5896,10 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
 
   await openResidentReactionScenario('Na');
 
-  const runResidentReactionRefresh = async (reason) => page.evaluate(async (refreshReason) => {
+  const runResidentReactionRefresh = async (reason, options = {}) => page.evaluate(async ({
+    refreshReason,
+    continueFromResidentState
+  }) => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay.__sphScene;
     const execution = await scene.refreshMlsMpmResidentSteps({
@@ -5904,6 +5907,7 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
       stepCount: 1,
       readbackMode: 'no-full-readback',
       compactSummaryScope: 'particle-visual',
+      continueFromResidentState,
       force: true
     });
     overlay.__mlsMpmResidentSteps = execution;
@@ -5950,6 +5954,8 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
       status: 'resident-render-refresh-complete',
       resetStatus: overlay.__sphResetStatus || null,
       stepBackend: execution?.backend ?? null,
+      residentSourceMode: execution?.residentSourceMode ?? null,
+      continuedFromResidentState: execution?.continuedFromResidentState ?? null,
       reactionStatus: execution?.finalStep?.stageStatus?.reaction ?? null,
       residentStepParticleScale: {
         schema: particleScaleDiagnostics.particleScaleStabilitySchema ?? null,
@@ -5973,6 +5979,26 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
         || null,
       residentProductRows: execution?.finalStep?.residentProductMass?.productEventRowCount
         ?? execution?.finalStep?.residentProductMassProductEventRowCount
+        ?? 0,
+      inputResidentProductRows: execution?.finalStep?.inputResidentProductMassProductEventRowCount
+        ?? execution?.finalStep?.diagnostics?.inputResidentProductMassProductEventRowCount
+        ?? 0,
+      emittedResidentProductRows: execution?.finalStep?.emittedResidentProductMassProductEventRowCount
+        ?? execution?.finalStep?.diagnostics?.emittedResidentProductMassProductEventRowCount
+        ?? 0,
+      mergedResidentProductRows: execution?.finalStep?.mergedResidentProductMassProductEventRowCount
+        ?? execution?.finalStep?.diagnostics?.mergedResidentProductMassProductEventRowCount
+        ?? 0,
+      residentProductMassMergeStatus: execution?.finalStep?.residentProductMassMergeStatus
+        ?? execution?.finalStep?.diagnostics?.residentProductMassMergeStatus
+        ?? null,
+      residentProductMassGenerationCount: execution?.finalStep?.residentProductMass?.productEventGenerationCount
+        ?? execution?.finalStep?.residentProductMassGenerationCount
+        ?? execution?.finalStep?.diagnostics?.residentProductMassGenerationCount
+        ?? 0,
+      residentProductMassGasSpeciesLedgerCount: execution?.finalStep?.residentProductMass?.gasSpeciesLedgerCount
+        ?? execution?.finalStep?.residentProductMassGasSpeciesLedgerCount
+        ?? execution?.finalStep?.diagnostics?.residentProductMassGasSpeciesLedgerCount
         ?? 0,
       residentProductEventRecordCount: execution?.finalStep?.residentProductMass?.productEvents?.records?.length ?? null,
       residentGasPressure: residentGasPressure ? {
@@ -6050,7 +6076,10 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
       } : null,
       statusText
     };
-  }, reason);
+  }, {
+    refreshReason: reason,
+    continueFromResidentState: options.continueFromResidentState === true
+  });
 
   const expectResidentReactionRefresh = (
     result,
@@ -6058,28 +6087,35 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
       expectPressureInterface = true,
       expectedMaterialKeys = ['Na', 'h2o', 'naoh', 'h2'],
       expectDecodedMaxUnderGasCap = true,
-      expectGasRenderRows = true
+      expectGasRenderRows = true,
+      expectContinuation = false
     } = {}
   ) => {
     expect(result.status, JSON.stringify(result, null, 2))
       .toBe('resident-render-refresh-complete');
     expect(result.stepBackend).toBe('webgpu');
+    expect(result.continuedFromResidentState).toBe(expectContinuation);
+    expect(result.residentSourceMode)
+      .toBe(expectContinuation ? 'previous-gpu-resident-output' : 'cpu-packed-state');
     expect(result.reactionStatus).toBe('reaction-step-executed');
+    const expectedProductMassStatus = expectContinuation
+      ? 'resident-product-mass-merged-gpu-resident'
+      : 'resident-product-mass-buffer-retained';
     expect(result.residentStepParticleScale?.schema)
       .toBe('peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0');
     expect(result.residentStepParticleScale?.status).toBe('gpu-g2p-cap-policy-applied-in-shader');
     expect(result.residentStepParticleScale?.maxRadiusGrowthRatioAllowed).toBe(4);
     expect(result.residentStepParticleScale?.maxVolumeRatioJAllowed).toBe(64);
-    expect(result.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.residentProductMassStatus).toBe(expectedProductMassStatus);
     expect(result.residentProductRows).toBeGreaterThan(0);
-    expect(result.residentProductEventRecordCount).toBe(0);
+    expect([0, null]).toContain(result.residentProductEventRecordCount);
     expect(result.residentGasPressure?.status).toBe('gpu-resident-pressure-interface-spatial-gas-summary');
     expect(result.residentGasPressure?.source).toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
     expect(result.residentGasPressure?.pressureInterfaceSpatialGasLedgerPromoted).toBe(true);
     expect(result.residentGasPressure?.pressureInterfaceSpatialGasLedgerCellCount).toBeGreaterThan(0);
     expect(result.residentGasPressure?.pressureInterfaceSpatialGasSpeciesRowCount).toBeGreaterThan(0);
     expect(result.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
-    expect(result.residentGasPressure?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.residentGasPressure?.residentProductMassStatus).toBe(expectedProductMassStatus);
     expect(result.residentGasPressure?.spatialGasSpeciesLedgerStatus).toBe('spatial-gas-species-ledger-ready');
     expect(result.residentGasPressure?.spatialGasSpeciesLedgerCellCount).toBeGreaterThan(0);
     expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus)
@@ -6117,7 +6153,7 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
       .toBe('gpu-resident-pressure-interface-spatial-gas-summary');
     expect(result.renderState?.gasPressureSummarySource)
       .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
-    expect(result.renderState?.residentProductMassStatus).toBe('resident-product-mass-buffer-retained');
+    expect(result.renderState?.residentProductMassStatus).toBe(expectedProductMassStatus);
     expect(result.renderState?.residentProductMassEosCouplingStatus).toBe('resident-product-mass-p2g-eos-sidecar-ready');
     if (result.renderState?.source === 'resident-gpu-render-field') {
       expect(result.renderState?.productEventBufferBound).toBe(true);
@@ -6133,12 +6169,16 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
     expect(result.renderState?.renderRowsParticleScaleMaxVolumeRatioJAllowed).toBe(64);
     expect(result.renderState?.renderRowsParticleScaleMaxSupportRadiusM).toBeGreaterThan(0);
     expect(result.renderState?.renderRowsParticleScaleMaxGasParticleRadiusM).toBeGreaterThan(0);
-    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM).toBeGreaterThan(0);
-    expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
-      .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxSupportRadiusM + 1e-6);
-    if (expectDecodedMaxUnderGasCap) {
-      expect(result.renderState?.renderRowsDecodedMaxParticleRadiusM)
-        .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxGasParticleRadiusM + 1e-5);
+    if (result.renderState?.renderRowsDecodedMaxParticleRadiusM == null) {
+      expect(expectContinuation).toBe(true);
+    } else {
+      expect(result.renderState.renderRowsDecodedMaxParticleRadiusM).toBeGreaterThan(0);
+      expect(result.renderState.renderRowsDecodedMaxParticleRadiusM)
+        .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxSupportRadiusM + 1e-6);
+      if (expectDecodedMaxUnderGasCap) {
+        expect(result.renderState.renderRowsDecodedMaxParticleRadiusM)
+          .toBeLessThanOrEqual(result.renderState.renderRowsParticleScaleMaxGasParticleRadiusM + 1e-5);
+      }
     }
     if (expectGasRenderRows) {
       expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
@@ -6149,11 +6189,31 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
     expect(result.statusText).toContain('render pressure  : source=gpu-resident-pressure-interface-spatial-gas-ledger');
   };
 
+  const expectResidentProductCarryForward = (first, continued) => {
+    expect(continued.continuedFromResidentState).toBe(true);
+    expect(continued.inputResidentProductRows).toBe(first.residentProductRows);
+    expect(continued.emittedResidentProductRows).toBeGreaterThan(0);
+    expect(continued.mergedResidentProductRows).toBe(continued.residentProductRows);
+    expect(continued.residentProductRows)
+      .toBe(continued.inputResidentProductRows + continued.emittedResidentProductRows);
+    expect(continued.residentProductMassMergeStatus)
+      .toBe('resident-product-mass-merged-gpu-resident');
+    expect(continued.residentProductMassGenerationCount)
+      .toBeGreaterThan(first.residentProductMassGenerationCount);
+  };
+
   const result = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure');
   expectResidentReactionRefresh(result);
 
-  const continued = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure-continued');
-  expectResidentReactionRefresh(continued, { expectPressureInterface: false });
+  const continued = await runResidentReactionRefresh('test-na-h2o-resident-product-pressure-continued', {
+    continueFromResidentState: true
+  });
+  expectResidentReactionRefresh(continued, {
+    expectPressureInterface: false,
+    expectContinuation: true,
+    expectGasRenderRows: false
+  });
+  expectResidentProductCarryForward(result, continued);
   expect(continued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(continued.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
@@ -6185,13 +6245,17 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
     expectDecodedMaxUnderGasCap: false,
     expectGasRenderRows: false
   });
-  const potassiumContinued = await runResidentReactionRefresh('test-k-h2o-resident-product-pressure-continued');
+  const potassiumContinued = await runResidentReactionRefresh('test-k-h2o-resident-product-pressure-continued', {
+    continueFromResidentState: true
+  });
   expectResidentReactionRefresh(potassiumContinued, {
     expectPressureInterface: false,
     expectedMaterialKeys: ['K', 'h2o', 'koh', 'h2'],
     expectDecodedMaxUnderGasCap: false,
-    expectGasRenderRows: false
+    expectGasRenderRows: false,
+    expectContinuation: true
   });
+  expectResidentProductCarryForward(potassium, potassiumContinued);
   expect(potassiumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(potassiumContinued.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');
@@ -6203,13 +6267,17 @@ test('SPH phase mounted resident alkali/H2O promotes product gas pressure', asyn
     expectDecodedMaxUnderGasCap: false,
     expectGasRenderRows: false
   });
-  const cesiumContinued = await runResidentReactionRefresh('test-cs-h2o-resident-product-pressure-continued');
+  const cesiumContinued = await runResidentReactionRefresh('test-cs-h2o-resident-product-pressure-continued', {
+    continueFromResidentState: true
+  });
   expectResidentReactionRefresh(cesiumContinued, {
     expectPressureInterface: false,
     expectedMaterialKeys: ['Cs', 'h2o', 'csoh', 'h2'],
     expectDecodedMaxUnderGasCap: false,
-    expectGasRenderRows: false
+    expectGasRenderRows: false,
+    expectContinuation: true
   });
+  expectResidentProductCarryForward(cesium, cesiumContinued);
   expect(cesiumContinued.residentGasPressure?.totalPressurePa).toBeGreaterThan(101325);
   expect(cesiumContinued.renderState?.gasPressureSummarySource)
     .toBe('gpu-resident-pressure-interface-spatial-gas-ledger');

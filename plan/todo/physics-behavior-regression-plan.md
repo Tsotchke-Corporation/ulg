@@ -1050,7 +1050,12 @@ state that moves on screen is the state the laws actually mutated.
    - pressure rows are actually consumed by grid/resident mechanics: covered
      by the no-full render-summary skip regression follow-up resident step;
    - reaction/product/gas ledgers persist across repeated no-full-readback
-     steps;
+     steps: covered by the mounted alkali/H2O resident continuation regression;
+     the scene now carries prior resident product-mass buffers into the
+     continuation signature/options, asserts merged product row carry-forward
+     for Na/K/Cs + H2O, and defers retired resident artifact cleanup behind the
+     WebGPU queue fence so previous reaction/product buffers are not destroyed
+     while continuation work still references them;
    - thermal state, thermo rows, and refreshed mechanics constitutive fields
      advance together after a phase transition;
    - stale CPU mirrors cannot drive authoritative mutation;

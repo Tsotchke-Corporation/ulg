@@ -117,6 +117,7 @@ import {
 import {
   readResidentStepsCommittedWarmDelta
 } from '../runtime/peercomputeResidentCommitBridge.js';
+import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 export const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'no-full-readback';
@@ -6717,6 +6718,21 @@ export function createSphPhaseScene(container, {
     ].join('|');
   }
 
+  function residentProductMassSignature(residentProductMass = null) {
+    if (!residentProductMass?.schema) return 'no-resident-product-mass';
+    return [
+      residentProductMass.schema,
+      residentProductMass.status ?? null,
+      residentProductMass.source ?? null,
+      residentProductMass.productEventRowCount ?? 0,
+      residentProductMass.productEventBufferByteLength ?? 0,
+      residentProductMass.productEventGenerationCount ?? 0,
+      residentProductMass.gasSpeciesLedgerCount ?? 0,
+      ...(residentProductMass.retainedProductBufferRefs || []),
+      ...(residentProductMass.workerRetainedProductBufferRefs || [])
+    ].join('|');
+  }
+
   function borrowPressureInterfaceForceRowsForStage({
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = null,
@@ -7558,6 +7574,7 @@ export function createSphPhaseScene(container, {
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     pressureInterfaceForceSolver = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
+    residentProductMass = null,
     wallTemperaturesK = currentWallTemperaturesK,
     physicalLawGroups = currentPhysicalLawGroups,
     internalPressureScale = normalizePhysicalLawGroups(physicalLawGroups).eos ? 1 : 0,
@@ -7594,6 +7611,7 @@ export function createSphPhaseScene(container, {
       sphReactionTableSignature(),
       pressureInterfaceForceSolverSignature(pressureInterfaceForceSolver),
       pressureInterfaceGasCellFieldImportSignature(pressureInterfaceGasCellFieldImport),
+      residentProductMassSignature(residentProductMass),
       dims.join(','),
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid) ? 1 : 0}`,
@@ -7633,39 +7651,70 @@ export function createSphPhaseScene(container, {
       hint?.dispatchArgsBuffer,
       hint?.metadataBuffer
     ].filter(Boolean);
+    const residentProductMassBuffers = (handle = null) => [
+      handle?.productEventBuffer
+    ].filter(Boolean);
+    const residentProductMassBuffersFromStep = (step = null) => [
+      ...residentProductMassBuffers(step?.residentProductMass),
+      ...residentProductMassBuffers(step?.emittedResidentProductMass),
+      ...residentProductMassBuffers(step?.inputResidentProductMass),
+      ...residentProductMassBuffers(step?.nextParticleUploads?.residentProductMass),
+      ...residentProductMassBuffers(step?.reactionStep?.residentProductMass),
+      ...residentProductMassBuffers(step?.reactionStep?.result?.residentProductMass)
+    ];
     return [
       execution?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
       execution?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
       execution?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+      ...residentProductMassBuffers(execution?.nextParticleUploads?.residentProductMass),
+      ...residentProductMassBuffers(execution?.nextResidentProductMass),
       ...activeGridPlanBuffers(execution?.nextParticleUploads?.activeGridDispatchPlanHint),
       ...activeGridPlanBuffers(execution?.nextSphParticleState?.residentActiveGridDispatchPlanHint),
       execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
       execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
       execution?.finalStep?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+      ...residentProductMassBuffersFromStep(execution?.finalStep),
+      ...(execution?.retainedSteps || []).flatMap((step) => residentProductMassBuffersFromStep(step)),
       ...activeGridPlanBuffers(execution?.finalStep?.nextParticleUploads?.activeGridDispatchPlanHint),
       ...activeGridPlanBuffers(execution?.finalStep?.residentActiveGridDispatchPlanHint)
     ].filter(Boolean);
   }
 
-  function clearMlsMpmResidentExecutionArtifacts({ preserveBuffers = [] } = {}) {
-    if (mlsMpmResidentSteps) {
-      destroyMlsMpmResidentStepsBuffers(mlsMpmResidentSteps, { preserveBuffers });
+  function destroyCapturedMlsMpmResidentExecutionArtifacts({
+    residentSteps = null,
+    p2gGridProjection = null,
+    gridUpdate = null,
+    g2pReconstruction = null,
+    preserveBuffers = []
+  } = {}) {
+    if (residentSteps) {
+      destroyMlsMpmResidentStepsBuffers(residentSteps, { preserveBuffers });
     } else {
       const preserved = new Set((preserveBuffers || []).filter(Boolean));
       const destroyUnlessPreserved = (buffer) => {
         if (!buffer || preserved.has(buffer)) return;
         buffer.destroy?.();
       };
-      destroyUnlessPreserved(mlsMpmP2gGridProjection?.gpuResult?.gridBuffer);
-      destroyUnlessPreserved(mlsMpmP2gGridProjection?.gridBuffer);
-      destroyUnlessPreserved(mlsMpmGridUpdate?.gpuResult?.updatedGridBuffer);
-      destroyUnlessPreserved(mlsMpmGridUpdate?.updatedGridBuffer);
-      if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
-        mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
+      destroyUnlessPreserved(p2gGridProjection?.gpuResult?.gridBuffer);
+      destroyUnlessPreserved(p2gGridProjection?.gridBuffer);
+      destroyUnlessPreserved(gridUpdate?.gpuResult?.updatedGridBuffer);
+      destroyUnlessPreserved(gridUpdate?.updatedGridBuffer);
+      if (g2pReconstruction?.destroyOutputParticleBuffers) {
+        g2pReconstruction.destroyOutputParticleBuffers();
       } else {
-        mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
+        g2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
       }
     }
+  }
+
+  function clearMlsMpmResidentExecutionArtifacts({ preserveBuffers = [], deferDevice = null } = {}) {
+    const captured = {
+      residentSteps: mlsMpmResidentSteps,
+      p2gGridProjection: mlsMpmP2gGridProjection,
+      gridUpdate: mlsMpmGridUpdate,
+      g2pReconstruction: mlsMpmG2pReconstruction
+    };
+    const normalizedPreserveBuffers = (preserveBuffers || []).filter(Boolean);
     mlsMpmP2gGridProjection = null;
     mlsMpmP2gGridProjectionSignature = null;
     scene.userData.mlsMpmP2gGridProjection = null;
@@ -7681,6 +7730,15 @@ export function createSphPhaseScene(container, {
     mlsMpmResidentSteps = null;
     mlsMpmResidentStepsSignature = null;
     scene.userData.mlsMpmResidentSteps = null;
+    const cleanup = () => destroyCapturedMlsMpmResidentExecutionArtifacts({
+      ...captured,
+      preserveBuffers: normalizedPreserveBuffers
+    });
+    if (deferDevice?.queue?.onSubmittedWorkDone) {
+      deferSubmittedWorkCleanup(deferDevice, cleanup);
+    } else {
+      cleanup();
+    }
   }
 
   function advanceMlsMpmResidentExecutionGeneration(reason = 'resident-state-reset') {
@@ -12968,7 +13026,8 @@ export function createSphPhaseScene(container, {
           return markResidentExecutionStale(execution, executionGeneration);
         }
         clearMlsMpmResidentExecutionArtifacts({
-          preserveBuffers: residentContinuationBuffersFromExecution(execution)
+          preserveBuffers: residentContinuationBuffersFromExecution(execution),
+          deferDevice: device || resolvedDeviceResult?.device || null
         });
         publishMlsMpmResidentStepArtifacts(execution, signature);
         return execution;
@@ -13106,6 +13165,12 @@ export function createSphPhaseScene(container, {
       && continuationUploads?.sphParticleUpload?.status === 'webgpu-uploaded'
       && continuationUploads?.mlsMpmParticleUpload?.status === 'webgpu-uploaded'
     );
+    const continuationResidentProductMass = continuationAvailable
+      ? (continuationUploads?.residentProductMass
+          || mlsMpmResidentSteps?.nextResidentProductMass
+          || mlsMpmResidentSteps?.finalStep?.residentProductMass
+          || null)
+      : null;
     const sourceSphParticleState = continuationAvailable
       ? mlsMpmResidentSteps.nextSphParticleState
       : sphGpuParticleState;
@@ -13130,6 +13195,7 @@ export function createSphPhaseScene(container, {
       residentSourceMode,
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
       pressureInterfaceGasCellFieldImport,
+      residentProductMass: continuationResidentProductMass,
       internalPressureScale: effectiveInternalPressureScale,
       physicalLawGroups: lawGroups,
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
@@ -13290,6 +13356,7 @@ export function createSphPhaseScene(container, {
             ?? null,
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
+          residentProductMass: continuationResidentProductMass,
           pressureFeedback: pressureFeedback || pressureFeedbackFromGasPressureSummary(gasPressureSummary),
           gasPressureSummary,
           pressureInterfaceGasCellFieldImport,
@@ -13511,6 +13578,7 @@ export function createSphPhaseScene(container, {
             residentSourceMode,
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
             pressureInterfaceGasCellFieldImport,
+            residentProductMass: continuationResidentProductMass,
             internalPressureScale: effectiveInternalPressureScale,
             physicalLawGroups: lawGroups,
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
@@ -13636,7 +13704,8 @@ export function createSphPhaseScene(container, {
           }
         }
         clearMlsMpmResidentExecutionArtifacts({
-          preserveBuffers: residentContinuationBuffersFromExecution(execution)
+          preserveBuffers: residentContinuationBuffersFromExecution(execution),
+          deferDevice: device || resolvedDeviceResult?.device || null
         });
         markResidentStepsProgress('resident-steps-publishing-artifacts', {
           backend: execution?.backend ?? null,

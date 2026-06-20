@@ -67,10 +67,11 @@ browser validation warning found during the direct WebGPU smoke. Follow-up:
 adaptive capacity/headroom diagnostics are now wired into the bin-grid
 resolver and pressure-stage evidence. Dense bins scale capacity from average
 particle occupancy under a 128 MiB index-buffer budget and report average
-occupancy, estimated overflow risk, and index-buffer bytes. Remaining
-contact-performance work is exact GPU overflow metadata readback/debugging and,
-if fixed capacity still proves too lossy, a prefix-scan compact bin list; then
-broader visual acceptance.
+occupancy, estimated overflow risk, and index-buffer bytes. Follow-up: exact
+GPU overflow metadata readback is now available as an explicit debug opt-in,
+reporting overflow status/count without changing the default no-full hot path.
+Remaining contact-performance work is, if fixed capacity still proves too
+lossy, a prefix-scan compact bin list; then broader visual acceptance.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

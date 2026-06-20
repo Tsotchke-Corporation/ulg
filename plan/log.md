@@ -83,6 +83,32 @@ Remaining:
 - Prefix-scan compact bin lists remain the next escalation if fixed-capacity
   bins are still too lossy in dense reactions.
 
+## 2026-06-20 AKDT - Debug Contact-Bin Overflow Metadata Readback
+
+Status:
+
+- Added explicit debug-only overflow metadata readback to the
+  pressure-interface particle-bin producer. Default no-full runs still leave the
+  metadata unread.
+- The pressure solver and MLS-MPM pressure-stage evidence now carry overflow
+  status and count when the debug path is requested.
+- Focused fake-device coverage requests metadata readback, verifies the
+  metadata copy size/source/target, and asserts a zero overflow count.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs` reported `71/71`.
+
+Remaining:
+
+- Prefix-scan compact bin lists remain the next escalation if fixed-capacity
+  bins are lossy in real dense-reaction browser probes.
+
 ## 2026-06-20 06:11 AKDT - Algorithm Contact Pair Force Rows
 
 Status:

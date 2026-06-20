@@ -26,6 +26,13 @@ index-buffer byte length through the pressure solver and ComputeManager stage
 evidence. Exact GPU overflow metadata readback remains optional debug work
 because adding it to the no-full hot path would reintroduce queue stalls.
 
+Status update, 2026-06-20 AKDT: exact GPU overflow metadata readback is now
+implemented as an explicit debug opt-in on the pressure-interface bin producer.
+The normal no-full path leaves metadata unread; callers that request the debug
+path receive overflow status and count in the pressure solver and
+ComputeManager stage evidence. Remaining bin work is prefix-scan compaction if
+fixed-capacity rows prove too lossy under dense reactions.
+
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` can now use GPU-derived interface kinematics in
 the no-full pressure path. When interface elements lack explicit `gapM` /

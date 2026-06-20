@@ -928,7 +928,8 @@ function createDisabledContactParticleBinBuffers(device, particleBinGrid = null)
 export function runSphPressureInterfaceParticleBinsWebGpu({
   device,
   particleSource,
-  particleBinGrid
+  particleBinGrid,
+  readbackMetadata = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceParticleBinsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -996,12 +997,22 @@ export function runSphPressureInterfaceParticleBinsWebGpu({
       { binding: 4, resource: { buffer: paramsBuffer } }
     ]
   });
+  const metadataReadbackBuffer = readbackMetadata === true
+    ? tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-pressure-interface-particle-bin-metadata-readback',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      }), device)
+    : null;
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.max(1, Math.ceil(particleSource.particleCount / 64)));
   pass.end();
+  if (metadataReadbackBuffer) {
+    encoder.copyBufferToBuffer(metadataBuffer, 0, metadataReadbackBuffer, 0, 16);
+  }
   device.queue.submit([encoder.finish()]);
   return {
     schema: 'peercompute.ulg.sph-pressure-interface-particle-bin-grid.v0',
@@ -1012,15 +1023,20 @@ export function runSphPressureInterfaceParticleBinsWebGpu({
     countsBuffer,
     indicesBuffer,
     metadataBuffer,
+    metadataReadbackBuffer,
     paramsBuffer,
     cellCount,
     binCapacity,
     averageOccupancy: particleBinGrid.averageOccupancy || 0,
     estimatedOverflowRisk: particleBinGrid.estimatedOverflowRisk === true,
     indexBufferByteLength: indices.byteLength,
+    overflowMetadataStatus: metadataReadbackBuffer
+      ? 'particle-bin-overflow-readback-requested'
+      : 'particle-bin-overflow-metadata-unread',
+    overflowMetadataReadbackRequested: metadataReadbackBuffer != null,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
-    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer]
+    cleanupBuffers: [countsBuffer, indicesBuffer, metadataBuffer, paramsBuffer, metadataReadbackBuffer].filter(Boolean)
   };
 }
 
@@ -1272,6 +1288,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   contactKinematicsMaxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   contactKinematicsGapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
   contactKinematicsParticleBinCapacity = DEFAULT_CONTACT_PARTICLE_BIN_CAPACITY,
+  contactKinematicsParticleBinMetadataReadback = false,
   boxDimsM = null,
   retainForceRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE
@@ -1403,12 +1420,16 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   let contactKinematicsBuffer = null;
   let contactKinematicsGpuDerivation = null;
   let contactKinematicsGpuDerived = false;
+  let contactKinematicsParticleBins = null;
+  let particleBinOverflowStatus = null;
+  let particleBinOverflowCount = null;
   const contactKinematicsCleanupBuffers = [];
   if (contactKinematicsGpuDerivationEligible) {
-    const particleBins = runSphPressureInterfaceParticleBinsWebGpu({
+    contactKinematicsParticleBins = runSphPressureInterfaceParticleBinsWebGpu({
       device,
       particleSource,
-      particleBinGrid: contactKinematicsParticleBinGrid
+      particleBinGrid: contactKinematicsParticleBinGrid,
+      readbackMetadata: contactKinematicsParticleBinMetadataReadback
     });
     contactKinematicsGpuDerivation = runSphPressureInterfaceContactKinematicsWebGpu({
       device,
@@ -1418,7 +1439,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       contactPolicyBuffer,
       particleSource,
       particleBinGrid: contactKinematicsParticleBinGrid,
-      particleBins,
+      particleBins: contactKinematicsParticleBins,
       maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
       gapFloorM: contactKinematicsGapFloorM
     });
@@ -1512,11 +1533,20 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       readBuffer.unmap();
     } else {
       queueCompletionStatus = device.queue?.onSubmittedWorkDone
-        ? 'queue-submitted-cleanup-deferred'
-        : 'queue-submitted-no-explicit-completion';
+      ? 'queue-submitted-cleanup-deferred'
+      : 'queue-submitted-no-explicit-completion';
       queueCompletionMethod = device.queue?.onSubmittedWorkDone
         ? 'deferred queue.onSubmittedWorkDone cleanup'
         : null;
+    }
+    if (contactKinematicsParticleBins?.metadataReadbackBuffer) {
+      await contactKinematicsParticleBins.metadataReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+      const metadata = new Uint32Array(contactKinematicsParticleBins.metadataReadbackBuffer.getMappedRange()).slice(0, 4);
+      particleBinOverflowCount = metadata[0] || 0;
+      particleBinOverflowStatus = 'particle-bin-overflow-readback-completed';
+      contactKinematicsParticleBins.metadataReadbackBuffer.unmap();
+    } else {
+      particleBinOverflowStatus = contactKinematicsParticleBins?.overflowMetadataStatus || null;
     }
 
     const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null, contactPolicy);
@@ -1580,6 +1610,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
       interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+      interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
+      interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1651,6 +1683,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsGpuDerivation?.particleBinGridAverageOccupancy || contactKinematicsParticleBinGrid?.averageOccupancy || 0,
       interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsGpuDerivation?.particleBinGridEstimatedOverflowRisk === true || contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+      interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
+      interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

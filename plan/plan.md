@@ -25,11 +25,12 @@ runs before GPU contact-kinematics derivation, and the kinematics shader scans
 neighboring bin cells when grid bounds are available. Follow-up adaptive
 capacity/headroom diagnostics now scale fixed-cap bins from average occupancy
 under a 128 MiB index-buffer budget and expose estimated overflow risk through
-pressure-stage evidence. The remaining contact physics target is exact GPU
-overflow metadata readback/debugging, prefix-scan bin compaction if fixed-cap
-bins prove lossy, and broader browser visual acceptance. The next rendering
-target remains native WebGPU validation/presentation evidence, not an overlay
-or CPU mesh fallback.
+pressure-stage evidence. Exact overflow metadata readback is now debug-opt-in,
+so normal no-full contact stays readback-free while probes can request overflow
+status/count. The remaining contact physics target is prefix-scan bin
+compaction if fixed-cap bins prove lossy, and broader browser visual
+acceptance. The next rendering target remains native WebGPU
+validation/presentation evidence, not an overlay or CPU mesh fallback.
 
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
 now cached as a resident WebGPU upload instead of being rebuilt inside every

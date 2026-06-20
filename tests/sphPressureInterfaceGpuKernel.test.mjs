@@ -489,6 +489,7 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
       thermoBuffer
     },
     boxDimsM: [4, 4, 4],
+    contactKinematicsParticleBinMetadataReadback: true,
     retainForceRowsBuffer: true,
     readbackMode: 'no-full-readback'
   });
@@ -508,6 +509,8 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridAverageOccupancy > 0);
   assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk, false);
   assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridIndexBufferByteLength > 0);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinOverflowStatus, 'particle-bin-overflow-readback-completed');
+  assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinOverflowCount, 0);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(device.bindGroups.length, 3);
   assert.equal(device.bindGroups[0].entries.length, 5);
@@ -519,6 +522,10 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(device.bindGroups[1].entries[7].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-indices');
   assert.equal(device.bindGroups[2].entries[5].resource.buffer.label, 'ulg-sph-pressure-interface-contact-kinematics-derived');
   assert.deepEqual(device.dispatches, [1, 1, 1]);
+  assert.equal(device.copies.length, 1);
+  assert.equal(device.copies[0].source.label, 'ulg-sph-pressure-interface-particle-bin-metadata');
+  assert.equal(device.copies[0].target.label, 'ulg-sph-pressure-interface-particle-bin-metadata-readback');
+  assert.equal(device.copies[0].size, 16);
   assert.equal(device.submissions.length, 3);
 });
 

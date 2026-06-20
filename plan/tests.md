@@ -54,6 +54,10 @@ Follow-up focused check:
   `git diff --check` passed; `npm run build` passed with only the existing Vite
   large-chunk warning; `npm run icc:update` passed with `indexedFiles=354` and
   `memoryChunks=2086`.
+- Overflow metadata readback:
+  the same focused pressure/MLS-MPM suite passed `71/71` after adding the
+  debug-only particle-bin overflow metadata readback path and flattened
+  overflow status/count evidence.
 
 ## Previous Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
 

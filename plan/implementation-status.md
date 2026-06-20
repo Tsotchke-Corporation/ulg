@@ -32,9 +32,12 @@ particle-count-per-cell average occupancy under a 128 MiB index-buffer budget,
 and pressure solver/stage evidence exposes average occupancy, estimated
 overflow risk, and index-buffer byte length. Focused syntax and
 pressure/MLS-MPM stage tests still pass `71/71`. Exact GPU overflow metadata
-readback remains queued as debug-only work so the no-full contact path stays
-readback-free. `git diff --check`, `npm run build`, and `npm run icc:update`
-(`indexedFiles=354`, `memoryChunks=2086`) passed after this follow-up.
+readback is now implemented as an explicit debug opt-in so the default no-full
+contact path stays readback-free while probes can request overflow status/count.
+`git diff --check`, `npm run build`, and `npm run icc:update`
+(`indexedFiles=354`, `memoryChunks=2086`) passed after the adaptive follow-up.
+The remaining bin escalation is a prefix-scan compact list if fixed-capacity
+rows prove too lossy in dense reactions.
 
 Previous checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path can now
 derive per-interface contact kinematics from resident SPH particle state and

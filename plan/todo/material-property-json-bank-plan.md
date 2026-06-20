@@ -13,6 +13,16 @@ material resolver/cache path, expand to all selectable elements, add stale
 schema/provenance rejection tests, then add crystalline structures before
 starting the top-1000 compound import.
 
+Status update, 2026-06-19 AKDT: the bank is now threaded into
+`MaterialRegistry` as an optional warm-input side channel. Element lookup
+canonicalizes material keys such as `fe`, `Fe`, and `FE`; sampled properties
+still come from closure resolution and carry first-principles provenance, while
+bank rows are attached only as `strictSourceOfTruth: false` warm metadata with
+bank schema version and generator fingerprint. The resolver manifest now names
+`materialPropertyBank.js` in the cache/fingerprint policy. Next: expand element
+coverage, add stale schema/provenance rejection fixtures, and feed accepted
+rows into the GPU material-table/particle-size packing path.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

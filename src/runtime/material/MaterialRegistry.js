@@ -17,6 +17,11 @@ import {
   provenanceEntriesForPath,
   requireFirstPrinciplesMaterialProperties
 } from './propertyProvenance.js';
+import {
+  materialPropertyBankRecordBySymbol,
+  materialPropertyBankWarmInput,
+  normalizeMaterialPropertyBank
+} from './materialPropertyBank.js';
 
 function phaseRecordAt(properties, temperatureK) {
   const t = Number(temperatureK);
@@ -121,10 +126,11 @@ function evaluateProperty(closure, property, temperatureK, pressurePa) {
 }
 
 export class MaterialRegistry {
-  constructor({ closureRegistry, requireFirstPrinciples = true } = {}) {
+  constructor({ closureRegistry, requireFirstPrinciples = true, materialPropertyBank = null } = {}) {
     if (!closureRegistry) throw new Error('MaterialRegistry requires a closureRegistry');
     this.closureRegistry = closureRegistry;
     this.requireFirstPrinciples = requireFirstPrinciples;
+    this.materialPropertyBank = materialPropertyBank ? normalizeMaterialPropertyBank(materialPropertyBank) : null;
     this.entries = new Map();
   }
 
@@ -159,6 +165,26 @@ export class MaterialRegistry {
     return this.entries.get(this.#key(material, closureFamily))?.closure || null;
   }
 
+  getMaterialPropertyBankRecord(material) {
+    if (!this.materialPropertyBank) return null;
+    return materialPropertyBankRecordBySymbol(this.materialPropertyBank, material);
+  }
+
+  getMaterialPropertyBankWarmInput({ material, temperatureK, pressurePa } = {}) {
+    const record = this.getMaterialPropertyBankRecord(material);
+    if (!record) return null;
+    return {
+      ...materialPropertyBankWarmInput(record, {
+        temperatureK,
+        pressurePa,
+        bankFamily: this.materialPropertyBank.bankFamily,
+        bankSchemaVersion: this.materialPropertyBank.schemaVersion,
+        generatorFingerprint: this.materialPropertyBank.generatorFingerprint
+      }),
+      requestedMaterial: material
+    };
+  }
+
   /**
    * Sample a material property, gated by the closure's validity domain. A point outside the
    * domain returns `status: 'out-of-domain'` with a closure-refresh request (the same contract
@@ -166,8 +192,16 @@ export class MaterialRegistry {
    */
   async sampleProperty({ material, closureFamily = 'material', property, temperatureK, pressurePa = null, requireFirstPrinciples = this.requireFirstPrinciples }) {
     const entry = this.entries.get(this.#key(material, closureFamily));
+    const bankWarmInput = this.getMaterialPropertyBankWarmInput({ material, temperatureK, pressurePa });
     if (!entry) {
-      return { status: 'miss', reason: 'material-closure-not-registered', material, property, value: null };
+      return {
+        status: 'miss',
+        reason: 'material-closure-not-registered',
+        material,
+        property,
+        value: null,
+        ...(bankWarmInput ? { materialPropertyBankWarmInput: bankWarmInput } : {})
+      };
     }
     const closure = entry.closure;
     if (requireFirstPrinciples) {
@@ -192,6 +226,7 @@ export class MaterialRegistry {
         property,
         validity: resolved.validity,
         value: null,
+        ...(bankWarmInput ? { materialPropertyBankWarmInput: bankWarmInput } : {}),
         refreshRequest: createClosureDomainExitRefreshRequest({
           closureId: closure.closureId,
           closureKind: closure.closureKind,
@@ -212,6 +247,7 @@ export class MaterialRegistry {
       closureRef: entry.ref,
       validity: 'in-range',
       provenance: sampleProvenance(closure, property, temperatureK),
+      ...(bankWarmInput ? { materialPropertyBankWarmInput: bankWarmInput } : {}),
       scientificValidation: false,
       materialValidation: false
     };

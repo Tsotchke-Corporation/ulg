@@ -11670,3 +11670,26 @@ Native validation scope harness telemetry, 2026-06-19 AKDT:
   - Guards that long-horizon probe and performance benchmark artifacts expose
     native validation scope, offscreen eligibility, and offscreen skipped
     reason.
+
+Material property bank registry warm inputs, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/materialPropertyBank.js`,
+  `node --check src/runtime/material/MaterialRegistry.js`,
+  `node --check tests/materialPropertyBank.test.mjs`, and
+  `node --check src/runtime/material/materialResolverManifest.js` passed.
+- Focused Node suite:
+  `node --test tests/materialPropertyBank.test.mjs`
+  - Passed: `4/4`.
+  - Covers schema validation, canonical symbol lookup (`fe`/`Fe`/`FE`),
+    non-authoritative warm inputs, `MaterialRegistry` strict closure sampling
+    with attached bank metadata, and the no-bank path.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=5` and symbols `H`, `O`, `Na`, `Fe`, `Cs`.
+- Adjacent material suites:
+  `node --test tests/materialPropertyProvenance.test.mjs` passed `6/6`,
+  `node --test tests/materialThermo.test.mjs` passed `8/8`, and
+  `node --test tests/materialEos.test.mjs` passed `7/7`.
+- Whitespace:
+  `git diff --check` passed.

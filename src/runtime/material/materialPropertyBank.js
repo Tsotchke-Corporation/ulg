@@ -18,6 +18,13 @@ function cloneRecord(record) {
   return JSON.parse(JSON.stringify(record));
 }
 
+export function canonicalMaterialPropertyBankSymbol(symbol) {
+  if (typeof symbol !== 'string') return null;
+  const trimmed = symbol.trim();
+  if (!/^[A-Za-z]{1,3}$/.test(trimmed)) return trimmed || null;
+  return `${trimmed[0].toUpperCase()}${trimmed.slice(1).toLowerCase()}`;
+}
+
 export function assertMaterialPropertyBankRecord(record) {
   if (record?.schema !== MATERIAL_PROPERTY_BANK_RECORD_SCHEMA) {
     throw new TypeError('material property bank record has an unknown schema');
@@ -82,12 +89,17 @@ export function normalizeMaterialPropertyBank(bank) {
 
 export function materialPropertyBankRecordBySymbol(bank, symbol) {
   const normalized = bank?.bySymbol instanceof Map ? bank : normalizeMaterialPropertyBank(bank);
-  return normalized.bySymbol.get(symbol) || null;
+  return normalized.bySymbol.get(symbol)
+    || normalized.bySymbol.get(canonicalMaterialPropertyBankSymbol(symbol))
+    || null;
 }
 
 export function materialPropertyBankWarmInput(record, {
   temperatureK = record?.referenceState?.temperatureK,
-  pressurePa = record?.referenceState?.pressurePa
+  pressurePa = record?.referenceState?.pressurePa,
+  bankFamily = null,
+  bankSchemaVersion = null,
+  generatorFingerprint = null
 } = {}) {
   assertMaterialPropertyBankRecord(record);
   return {
@@ -97,6 +109,8 @@ export function materialPropertyBankWarmInput(record, {
     material: record.symbol,
     atomicNumber: record.atomicNumber,
     schemaVersion: 1,
+    bankFamily,
+    bankSchemaVersion,
     bankRecordSchema: record.schema,
     temperatureK: finiteNumber(temperatureK, record.referenceState.temperatureK),
     pressurePa: finiteNumber(pressurePa, record.referenceState.pressurePa),
@@ -106,7 +120,7 @@ export function materialPropertyBankWarmInput(record, {
     pbr: cloneRecord(record.opticalPbr),
     provenance: {
       source: 'precomputed-json-bank',
-      generatorFingerprint: null,
+      generatorFingerprint,
       entries: cloneRecord(record.provenance)
     }
   };

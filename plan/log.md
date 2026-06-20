@@ -30022,3 +30022,38 @@ Remaining:
 
 - Use these flattened fields in the next native/mobile probe run to separate
   debug current-texture smoke from real `native-surface-draw` evidence.
+
+## 2026-06-19 AKDT - Material Property Bank Registry Warm Inputs
+
+Status:
+
+- Threaded the precomputed element JSON bank into `MaterialRegistry` as an
+  optional warm-input side channel.
+- Element bank lookup now canonicalizes material keys such as `fe`, `Fe`, and
+  `FE` to the same element record.
+- Closure sampling remains authoritative: sampled values still come from
+  `ClosureRegistry` resolution and first-principles provenance checks, while
+  attached bank rows report `strictSourceOfTruth: false` with schema version
+  and generator fingerprint.
+- Updated the material resolver manifest cache/fingerprint policy to name the
+  bank helper and include bank schema/generator ingredients.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/materialPropertyBank.js`.
+- PASS: `node --check src/runtime/material/MaterialRegistry.js`.
+- PASS: `node --check tests/materialPropertyBank.test.mjs`.
+- PASS: `node --check src/runtime/material/materialResolverManifest.js`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` with `4/4`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=5`.
+- PASS: `node --test tests/materialPropertyProvenance.test.mjs` with `6/6`.
+- PASS: `node --test tests/materialThermo.test.mjs` with `8/8`.
+- PASS: `node --test tests/materialEos.test.mjs` with `7/7`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Expand the element bank beyond the first exercised rows.
+- Add stale schema/provenance rejection fixtures.
+- Feed accepted bank rows into GPU material-table and particle-size packing.

@@ -523,6 +523,15 @@ records as versioned, unit-bearing, provenance-rich warm inputs for
 initialization, PBR, table packing, and resolver caches, not as unvalidated
 source-of-truth constants.
 
+Current routing note, 2026-06-19 AKDT: the element JSON bank is now wired into
+`MaterialRegistry` as optional warm metadata, not as a sampled-property source.
+Lookup canonicalizes element symbols from material keys such as `fe`, strict
+closure sampling still owns returned property values and provenance, and warm
+inputs carry bank schema version plus generator fingerprint for cache
+fingerprinting. Continue by expanding element coverage, adding stale
+schema/provenance rejection fixtures, and consuming accepted rows in GPU
+material-table and particle-size packing.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

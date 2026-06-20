@@ -72,7 +72,8 @@ export function surfaceDescriptorsFromMaterials(materials = []) {
 }
 
 export function buildOpticalGpuTableForSurfaceDescriptors(descriptors = [], {
-  materialProperties = null
+  materialProperties = null,
+  materialPropertyBankGpuWarmInputTable = null
 } = {}) {
   return buildOpticalGpuTable(descriptors.map((descriptor) => ({
     material: descriptor.material,
@@ -80,7 +81,10 @@ export function buildOpticalGpuTableForSurfaceDescriptors(descriptors = [], {
     renderKey: descriptor.renderKey,
     opticalState: descriptor.opticalState || null,
     properties: materialPropertiesForSurfaceDescriptor(descriptor, materialProperties)
-  })), { materialProperties: materialProperties || {} });
+  })), {
+    materialProperties: materialProperties || {},
+    materialPropertyBankGpuWarmInputTable
+  });
 }
 
 export function sphStaticTableInputsFromViewState(viewState = {}) {
@@ -93,7 +97,11 @@ export function sphStaticTableInputsFromViewState(viewState = {}) {
   const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
   const opticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
     surfaceDescriptorsFromMaterials(viewState.materials || []),
-    { materialProperties }
+    {
+      materialProperties,
+      materialPropertyBankGpuWarmInputTable:
+        viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
+    }
   );
   const reactionTable = buildSphReactionTable(viewState.reactions || [], {
     materialProperties,

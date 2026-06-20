@@ -110,7 +110,24 @@ function fakeTableInputs() {
       recordLayout: { materialId: 0 },
       spectralSampleLayout: { wavelengthNm: 0 },
       materialMap: { h2o: 120001 },
-      recordMetadata: [{ material: 'h2o', phase: 'liquid' }],
+      recordMetadata: [{
+        material: 'h2o',
+        phase: 'liquid',
+        materialPropertyBankPbrWarmInputStatus: 'material-bank-pbr-warm-input-attached'
+      }],
+      materialPropertyBankPbrWarmInputConsumer: {
+        schema: 'peercompute.ulg.optical-material-bank-pbr-warm-input-consumer.v0',
+        status: 'optical-gpu-table-annotated-with-material-bank-pbr-warm-inputs',
+        sourceSchema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+        sourceRowCount: 1,
+        matchedRecordCount: 1,
+        consumer: 'optical-gpu-table',
+        consumedAs: 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
+        strictSourceOfTruth: false,
+        shaderBound: false
+      },
+      materialPropertyBankPbrWarmInputRowCount: 1,
+      materialPropertyBankPbrWarmInputMatchedRecordCount: 1,
       colorSpace: 'srgb'
     },
     reactionTable: {
@@ -238,6 +255,12 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
   assert.equal(bundle.thermalClosureGraphSet.graphs[0].nodeRows.length, 16);
   assert.equal(bundle.thermalPhaseResponseTable.records.length, 4);
   assert.equal(bundle.opticalGpuTable.recordCount, 1);
+  assert.equal(
+    bundle.opticalGpuTable.materialPropertyBankPbrWarmInputConsumer.status,
+    'optical-gpu-table-annotated-with-material-bank-pbr-warm-inputs'
+  );
+  assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRowCount, 1);
+  assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
   assert.equal(bundle.reactionTable.reactionClosureSchema, null);
   assert.equal(bundle.reactionTable.reactionHeaderCount, 1);
   assert.equal(bundle.reactionTable.reactantTermRecords.length, 24);

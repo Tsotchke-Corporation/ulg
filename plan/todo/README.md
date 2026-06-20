@@ -2697,3 +2697,9 @@ accepted material-bank warm-input metadata through table construction,
 static-table cache rehydration, and thermal WebGPU result envelopes. Treat this
 as a non-authoritative annotation path for later thermal/EOS shader warm-start
 work; closure-derived thermal graphs still own the physics.
+
+2026-06-19 material-bank/PBR routing note: optical GPU tables now preserve
+accepted material-bank PBR warm-input metadata through table construction and
+static-table cache rehydration. Treat this as diagnostics and future
+warm-start plumbing only; closure-derived optical rows still own packed PBR
+values.

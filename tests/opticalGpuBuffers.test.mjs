@@ -12,6 +12,7 @@ import {
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA,
   buildOpticalGpuTable,
   buildOpticalGpuLookupQueries,
   createOpticalGpuLookupParityReport,
@@ -70,6 +71,94 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   assert.ok(gold.renderModelId > 0);
   assert.equal(table.scientificValidation, false);
   assert.equal(table.fullPhysicsValidation, false);
+});
+
+test('optical GPU table carries non-authoritative material-bank PBR warm inputs', () => {
+  const warmInputTable = {
+    schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+    status: 'material-bank-gpu-warm-input-table-ready',
+    rowLayout: [
+      'materialId:f32',
+      'atomicNumber:f32',
+      'temperatureK:f32',
+      'pressurePa:f32',
+      'targetNeighborCount:f32',
+      'phaseCount:f32',
+      'baseColorSrgbR:f32',
+      'baseColorSrgbG:f32',
+      'baseColorSrgbB:f32',
+      'metalness:f32',
+      'roughness:f32',
+      'ior:f32',
+      'strictSourceOfTruth:f32',
+      'status:f32',
+      'pad0:f32',
+      'pad1:f32'
+    ],
+    rowStrideFloats: 16,
+    rowCount: 1,
+    rows: Float32Array.from([
+      stableOpticalMaterialId('Na'),
+      11,
+      290,
+      101325,
+      64,
+      1,
+      0.86,
+      0.82,
+      0.72,
+      1,
+      0.31,
+      1.1,
+      0,
+      1,
+      0,
+      0
+    ]),
+    metadata: [{
+      role: 'drop',
+      material: 'Na',
+      requestedMaterial: 'na',
+      materialId: stableOpticalMaterialId('Na'),
+      atomicNumber: 11,
+      temperatureK: 290,
+      pressurePa: 101325,
+      bankFamily: 'elements',
+      bankSchemaVersion: 1,
+      generatorFingerprint: 'test-bank'
+    }]
+  };
+  const table = buildOpticalGpuTable([
+    { material: 'Na', phase: 'solid' },
+    { material: 'h2o', phase: 'liquid' }
+  ], {
+    materialPropertyBankGpuWarmInputTable: warmInputTable
+  });
+  const sodium = table.recordMetadata.find((record) => record.material === 'Na');
+  const water = table.recordMetadata.find((record) => record.material === 'h2o');
+
+  assert.equal(
+    table.materialPropertyBankPbrWarmInputConsumer.schema,
+    ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA
+  );
+  assert.equal(
+    table.materialPropertyBankPbrWarmInputConsumer.status,
+    'optical-gpu-table-annotated-with-material-bank-pbr-warm-inputs'
+  );
+  assert.equal(table.materialPropertyBankPbrWarmInputConsumer.sourceRowCount, 1);
+  assert.equal(table.materialPropertyBankPbrWarmInputConsumer.matchedRecordCount, 1);
+  assert.equal(table.materialPropertyBankPbrWarmInputConsumer.strictSourceOfTruth, false);
+  assert.equal(table.materialPropertyBankPbrWarmInputConsumer.shaderBound, false);
+  assert.equal(table.materialPropertyBankPbrWarmInputRowCount, 1);
+  assert.equal(table.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
+  assert.equal(sodium.materialPropertyBankPbrWarmInput.material, 'Na');
+  assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[0] - 0.86) < 1e-6);
+  assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[1] - 0.82) < 1e-6);
+  assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[2] - 0.72) < 1e-6);
+  assert.equal(sodium.materialPropertyBankPbrWarmInput.strictSourceOfTruth, false);
+  assert.equal(sodium.materialPropertyBankPbrWarmInputStatus, 'material-bank-pbr-warm-input-attached');
+  assert.equal(water.materialPropertyBankPbrWarmInput, null);
+  assert.equal(water.materialPropertyBankPbrWarmInputStatus, 'no-material-bank-pbr-warm-input');
 });
 
 test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit when supported', async () => {

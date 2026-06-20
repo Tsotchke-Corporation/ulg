@@ -5347,14 +5347,20 @@ export function createProductEventSurfaceBatches({
   return batches;
 }
 
-export function createOpticalGpuTableForSurfaceBatches(batches, { materialProperties = null } = {}) {
+export function createOpticalGpuTableForSurfaceBatches(batches, {
+  materialProperties = null,
+  materialPropertyBankGpuWarmInputTable = null
+} = {}) {
   return buildOpticalGpuTable(batches.map((batch) => ({
     material: batch.material,
     phase: batch.phase ?? opticalQueryForDescriptor(batch.descriptor).phase,
     renderKey: batch.renderKey,
     opticalState: batch.descriptor?.opticalState || null,
     properties: materialPropertiesForSurfaceDescriptor(batch.descriptor, materialProperties)
-  })), { materialProperties: materialProperties || {} });
+  })), {
+    materialProperties: materialProperties || {},
+    materialPropertyBankGpuWarmInputTable
+  });
 }
 
 export function createOpticalGpuLookupForSurfaceBatches(table, batches) {
@@ -13882,8 +13888,14 @@ export function createSphPhaseScene(container, {
     return { status: mesh.userData.surfaceBoundsClipStatus, clampedVertexCount: 0 };
   }
 
-  function rebuildOpticalStateForSurfaceBatches(batches, { materialProperties = null } = {}) {
-    opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
+  function rebuildOpticalStateForSurfaceBatches(batches, {
+    materialProperties = null,
+    materialPropertyBankGpuWarmInputTable = null
+  } = {}) {
+    opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, {
+      materialProperties,
+      materialPropertyBankGpuWarmInputTable
+    });
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
     scene.userData.opticalGpuTable = opticalGpuTable;
@@ -13903,17 +13915,34 @@ export function createSphPhaseScene(container, {
     })));
   }
 
+  function opticalTableMatchesMaterialBankWarmInputs(table, materialPropertyBankGpuWarmInputTable = null) {
+    const sourceRowCount = Math.max(0, Math.round(Number(
+      materialPropertyBankGpuWarmInputTable?.rowCount ?? 0
+    ) || 0));
+    const tableSourceRowCount = Math.max(0, Math.round(Number(
+      table?.materialPropertyBankPbrWarmInputRowCount ?? 0
+    ) || 0));
+    return tableSourceRowCount === sourceRowCount;
+  }
+
   function rebuildOpticalStateForSurfaceBatchesWithCache(batches, {
     materialProperties = currentMaterialProperties,
-    cachedOpticalGpuTable = null
+    cachedOpticalGpuTable = null,
+    materialPropertyBankGpuWarmInputTable = null
   } = {}) {
-    if (opticalTableCoversSurfaceBatches(cachedOpticalGpuTable, batches)) {
+    if (
+      opticalTableCoversSurfaceBatches(cachedOpticalGpuTable, batches)
+      && opticalTableMatchesMaterialBankWarmInputs(cachedOpticalGpuTable, materialPropertyBankGpuWarmInputTable)
+    ) {
       opticalGpuTable = {
         ...cachedOpticalGpuTable,
         status: 'static-table-cache-hit'
       };
     } else {
-      opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
+      opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, {
+        materialProperties,
+        materialPropertyBankGpuWarmInputTable
+      });
     }
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
@@ -14966,7 +14995,9 @@ export function createSphPhaseScene(container, {
     const nextSurfaceBatchIdentitySignature = residentSurfaceBatchIdentitySignature(residentFieldBatches);
     measure('opticalState', () => rebuildOpticalStateForSurfaceBatchesWithCache(residentFieldBatches, {
       materialProperties,
-      cachedOpticalGpuTable: staticTableCache?.opticalGpuTable || null
+      cachedOpticalGpuTable: staticTableCache?.opticalGpuTable || null,
+      materialPropertyBankGpuWarmInputTable:
+        nextSphGpuParticleState?.materialPropertyBankWarmInputTable ?? null
     }));
     const residentSurfaceState = measure('residentSurfaceTable', () => (
       skipCpuSurfaceGeometry

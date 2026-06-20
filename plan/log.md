@@ -30394,3 +30394,29 @@ Remaining:
 
 - Bind safe material-bank warm starts into actual thermal/EOS/mechanics shader
   consumers. This slice only preserves and reports non-authoritative metadata.
+
+## 2026-06-19 AKDT - Optical Material Bank PBR Warm-Input Annotation
+
+Status:
+
+- `buildOpticalGpuTable()` now accepts the packed material-property bank
+  warm-input table and attaches matching PBR seed metadata to optical records.
+- The optical-table consumer reports row count, matched record count,
+  provenance, `strictSourceOfTruth: false`, and `shaderBound: false`.
+- Live scene optical-table rebuilds pass the current packed bank table, and
+  cached optical tables are reused only when their bank row count matches the
+  current seed.
+- Static-table cache serialization and rehydration preserve the optical bank
+  PBR consumer summary and matched record count.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/opticalGpuBuffers.js src/runtime/sph/sphStaticTableInputs.js src/visualization/sphPhaseScene.js src/runtime/sph/sphColdStartCache.js tests/opticalGpuBuffers.test.mjs tests/sphColdStartCache.test.mjs`.
+- PASS:
+  `node --test tests/opticalGpuBuffers.test.mjs --test-name-pattern "material-bank PBR|derived PBR|air"` with `20/20`.
+- PASS: `node --test tests/sphColdStartCache.test.mjs` with `4/4`.
+
+Remaining:
+
+- Use these annotations to drive renderer/diagnostic decisions only after
+  proving they do not override closure-derived optical physics.

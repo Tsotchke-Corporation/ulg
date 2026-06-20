@@ -11831,6 +11831,21 @@ Thermal material-bank warm-input annotation, 2026-06-19 AKDT:
   - Covers preserving the warm-input consumer summary through static-table
     cache rehydration.
 
+Optical material-bank PBR warm-input annotation, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/opticalGpuBuffers.js src/runtime/sph/sphStaticTableInputs.js src/visualization/sphPhaseScene.js src/runtime/sph/sphColdStartCache.js tests/opticalGpuBuffers.test.mjs tests/sphColdStartCache.test.mjs`
+  passed.
+- Optical GPU table suite command:
+  `node --test tests/opticalGpuBuffers.test.mjs --test-name-pattern "material-bank PBR|derived PBR|air"`
+  - Passed: `20/20`.
+  - Covers non-authoritative PBR warm-input attachment while preserving
+    closure-derived optical table values.
+- Cold-start cache suite:
+  `node --test tests/sphColdStartCache.test.mjs`
+  - Passed: `4/4`.
+  - Covers preserving optical bank PBR consumer metadata through rehydration.
+
 Native surface browser-frame validation classifier, 2026-06-19 AKDT:
 
 - Syntax:

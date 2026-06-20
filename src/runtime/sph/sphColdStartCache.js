@@ -321,6 +321,12 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         spectralSampleLayout: opticalGpuTable.spectralSampleLayout,
         materialMap: opticalGpuTable.materialMap,
         recordMetadata: opticalGpuTable.recordMetadata,
+        materialPropertyBankPbrWarmInputConsumer:
+          opticalGpuTable.materialPropertyBankPbrWarmInputConsumer ?? null,
+        materialPropertyBankPbrWarmInputRowCount:
+          opticalGpuTable.materialPropertyBankPbrWarmInputRowCount ?? 0,
+        materialPropertyBankPbrWarmInputMatchedRecordCount:
+          opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
         colorSpace: opticalGpuTable.colorSpace
       },
       generatorFingerprint,
@@ -775,6 +781,12 @@ function restoreOpticalGpuTable(record) {
     spectralSampleLayout: metadata.spectralSampleLayout || [],
     materialMap: metadata.materialMap || [],
     recordMetadata: metadata.recordMetadata || [],
+    materialPropertyBankPbrWarmInputConsumer:
+      metadata.materialPropertyBankPbrWarmInputConsumer ?? null,
+    materialPropertyBankPbrWarmInputRowCount:
+      metadata.materialPropertyBankPbrWarmInputRowCount ?? 0,
+    materialPropertyBankPbrWarmInputMatchedRecordCount:
+      metadata.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
     colorSpace: metadata.colorSpace || 'linear-rgb-from-srgb-closure-output',
     cache: cacheMetadata(record),
     scientificValidation: false,

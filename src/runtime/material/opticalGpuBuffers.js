@@ -16,6 +16,11 @@ import {
   residentSphWebGpuLimitsForAdapter,
   webGpuDeviceDescriptorForResidentSph
 } from '../webgpuDeviceLimits.js';
+import {
+  MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS,
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
+  MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
+} from './materialPropertyBank.js';
 import { opticalRenderParams } from './opticalClosure.js';
 
 export {
@@ -34,6 +39,8 @@ export const OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT = OPTICAL_GPU_SPECTRAL_SAMPLE_RO
 export const OPTICAL_GPU_LOOKUP_QUERY_LAYOUT = OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT;
 export const OPTICAL_GPU_LOOKUP_OUTPUT_LAYOUT = OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT;
 export { opticalLookupWgsl };
+export const ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA =
+  'peercompute.ulg.optical-material-bank-pbr-warm-input-consumer.v0';
 const EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS = new Float32Array(OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS);
 
 export const OPTICAL_GPU_WGSL_STRUCTS = `
@@ -217,9 +224,127 @@ function appendRecord(values, record) {
   values.push(...record);
 }
 
+function materialBankWarmInputFieldOffset(fieldName) {
+  return MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.findIndex((entry) => (
+    String(entry).split(':')[0] === fieldName
+  ));
+}
+
+const MATERIAL_BANK_WARM_INPUT_FIELDS = Object.freeze({
+  materialId: materialBankWarmInputFieldOffset('materialId'),
+  baseColorSrgbR: materialBankWarmInputFieldOffset('baseColorSrgbR'),
+  baseColorSrgbG: materialBankWarmInputFieldOffset('baseColorSrgbG'),
+  baseColorSrgbB: materialBankWarmInputFieldOffset('baseColorSrgbB'),
+  metalness: materialBankWarmInputFieldOffset('metalness'),
+  roughness: materialBankWarmInputFieldOffset('roughness'),
+  ior: materialBankWarmInputFieldOffset('ior'),
+  strictSourceOfTruth: materialBankWarmInputFieldOffset('strictSourceOfTruth'),
+  status: materialBankWarmInputFieldOffset('status')
+});
+
+function materialBankWarmInputRowValue(rows, offset, fieldName, fallback = 0) {
+  const fieldOffset = MATERIAL_BANK_WARM_INPUT_FIELDS[fieldName];
+  return fieldOffset >= 0 ? finiteNumber(rows[offset + fieldOffset], fallback) : fallback;
+}
+
+function materialBankPbrWarmInputsByMaterial(table = null) {
+  const byMaterialId = new Map();
+  const byMaterialKey = new Map();
+  if (table?.schema !== MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA) {
+    return { byMaterialId, byMaterialKey, sourceRowCount: 0 };
+  }
+  const rows = table.rows instanceof Float32Array ? table.rows : new Float32Array(0);
+  const stride = Math.max(1, Math.round(finiteNumber(
+    table.rowStrideFloats,
+    MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length
+  )));
+  const rowCount = Math.max(0, Math.min(
+    Math.round(finiteNumber(table.rowCount, 0)),
+    Math.floor(rows.length / stride)
+  ));
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const offset = rowIndex * stride;
+    const metadata = table.metadata?.[rowIndex] || {};
+    const statusValue = materialBankWarmInputRowValue(
+      rows,
+      offset,
+      'status',
+      metadata.status === 'ready' ? MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready : 0
+    );
+    if (Math.round(statusValue) !== MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready) continue;
+    const materialId = materialBankWarmInputRowValue(rows, offset, 'materialId', metadata.materialId);
+    const entry = {
+      schema: 'peercompute.ulg.optical-material-bank-pbr-warm-input-row.v0',
+      status: 'ready',
+      rowIndex,
+      role: metadata.role ?? null,
+      material: metadata.material ?? null,
+      requestedMaterial: metadata.requestedMaterial ?? null,
+      materialId,
+      atomicNumber: metadata.atomicNumber ?? materialId,
+      temperatureK: metadata.temperatureK ?? null,
+      pressurePa: metadata.pressurePa ?? null,
+      baseColorSrgb: [
+        materialBankWarmInputRowValue(rows, offset, 'baseColorSrgbR'),
+        materialBankWarmInputRowValue(rows, offset, 'baseColorSrgbG'),
+        materialBankWarmInputRowValue(rows, offset, 'baseColorSrgbB')
+      ],
+      metalness: materialBankWarmInputRowValue(rows, offset, 'metalness'),
+      roughness: materialBankWarmInputRowValue(rows, offset, 'roughness'),
+      ior: materialBankWarmInputRowValue(rows, offset, 'ior', 1),
+      strictSourceOfTruth:
+        materialBankWarmInputRowValue(rows, offset, 'strictSourceOfTruth') === 1,
+      bankFamily: metadata.bankFamily ?? null,
+      bankSchemaVersion: metadata.bankSchemaVersion ?? null,
+      generatorFingerprint: metadata.generatorFingerprint ?? null
+    };
+    if (Number.isFinite(materialId)) byMaterialId.set(materialId, entry);
+    for (const key of [metadata.material, metadata.requestedMaterial]) {
+      const normalized = String(key || '').toLowerCase();
+      if (normalized) byMaterialKey.set(normalized, entry);
+    }
+  }
+  return { byMaterialId, byMaterialKey, sourceRowCount: rowCount };
+}
+
+function materialBankPbrWarmInputForRecord({ material, materialId }, warmInputs) {
+  return warmInputs.byMaterialId.get(materialId)
+    || warmInputs.byMaterialKey.get(String(material || '').toLowerCase())
+    || null;
+}
+
+function materialBankPbrWarmInputConsumerSummary({
+  table = null,
+  matchedRecordCount = 0
+} = {}) {
+  const sourceRowCount = table?.schema === MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
+    ? Math.max(0, Math.round(finiteNumber(table.rowCount, 0)))
+    : 0;
+  const matchedCount = Math.max(0, Math.round(finiteNumber(matchedRecordCount, 0)));
+  return {
+    schema: ULG_OPTICAL_MATERIAL_BANK_PBR_WARM_INPUT_CONSUMER_SCHEMA,
+    status: sourceRowCount <= 0
+      ? 'no-material-bank-pbr-warm-input-table'
+      : (matchedCount > 0
+        ? 'optical-gpu-table-annotated-with-material-bank-pbr-warm-inputs'
+        : 'material-bank-pbr-warm-inputs-not-matched-to-optical-records'),
+    sourceSchema: table?.schema ?? null,
+    sourceRowCount,
+    matchedRecordCount: matchedCount,
+    consumer: 'optical-gpu-table',
+    consumedAs: 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
+    strictSourceOfTruth: false,
+    shaderBound: false,
+    scientificValidation: false,
+    materialValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 export function buildOpticalGpuTable(descriptors, {
   materialProperties = {},
-  pathLengthM = 0.25
+  pathLengthM = 0.25,
+  materialPropertyBankGpuWarmInputTable = null
 } = {}) {
   if (!Array.isArray(descriptors)) {
     throw new TypeError('buildOpticalGpuTable requires an array of material/phase descriptors');
@@ -229,6 +354,8 @@ export function buildOpticalGpuTable(descriptors, {
   const records = [];
   const materialIds = new Map();
   const seen = new Set();
+  const materialBankWarmInputs = materialBankPbrWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
+  let materialBankPbrWarmInputMatchedRecordCount = 0;
 
   const materialIdFor = (material) => {
     if (!materialIds.has(material)) materialIds.set(material, stableOpticalMaterialId(material));
@@ -251,6 +378,13 @@ export function buildOpticalGpuTable(descriptors, {
       : materialProperties[material];
     const params = opticalRenderParams({ material, phase, properties, pathLengthM, opticalState });
     const materialId = materialIdFor(material);
+    const materialPropertyBankPbrWarmInput = materialBankPbrWarmInputForRecord({
+      material,
+      materialId
+    }, materialBankWarmInputs);
+    if (materialPropertyBankPbrWarmInput) {
+      materialBankPbrWarmInputMatchedRecordCount += 1;
+    }
     const spectralOffset = sampleValues.length / OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS;
     for (const sample of params.spectralSamples || []) {
       sampleValues.push(...spectralSampleFloats(sample));
@@ -305,9 +439,17 @@ export function buildOpticalGpuTable(descriptors, {
       vertexColorPolicy: params.vertexColorPolicy,
       vertexColorPolicyId: stableEnumId(VERTEX_COLOR_POLICY_IDS, params.vertexColorPolicy),
       blocked: params.blocked === true,
-      provenance: params.provenance || null
+      provenance: params.provenance || null,
+      materialPropertyBankPbrWarmInput,
+      materialPropertyBankPbrWarmInputStatus: materialPropertyBankPbrWarmInput
+        ? 'material-bank-pbr-warm-input-attached'
+        : 'no-material-bank-pbr-warm-input'
     });
   }
+  const materialPropertyBankPbrWarmInputConsumer = materialBankPbrWarmInputConsumerSummary({
+    table: materialPropertyBankGpuWarmInputTable,
+    matchedRecordCount: materialBankPbrWarmInputMatchedRecordCount
+  });
 
   return {
     schema: ULG_OPTICAL_GPU_TABLE_SCHEMA,
@@ -323,6 +465,11 @@ export function buildOpticalGpuTable(descriptors, {
     spectralSamples: Float32Array.from(sampleValues),
     recordCount: records.length,
     spectralSampleCount: sampleValues.length / OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS,
+    materialPropertyBankPbrWarmInputConsumer,
+    materialPropertyBankPbrWarmInputRowCount:
+      materialPropertyBankPbrWarmInputConsumer.sourceRowCount,
+    materialPropertyBankPbrWarmInputMatchedRecordCount:
+      materialPropertyBankPbrWarmInputConsumer.matchedRecordCount,
     materialMap: [...materialIds.entries()].map(([material, materialId]) => ({ material, materialId })),
     recordMetadata: records,
     colorSpace: 'linear-rgb-from-srgb-closure-output',

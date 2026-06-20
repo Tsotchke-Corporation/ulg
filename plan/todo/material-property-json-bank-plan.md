@@ -190,6 +190,15 @@ override: closure-derived thermal graphs remain the source of physics truth
 and `shaderBound` remains `false` until a later thermal/EOS shader consumer
 can use rows safely as warm starts.
 
+Status update, 2026-06-19 AKDT: optical GPU/PBR tables now carry accepted
+material-bank PBR warm-input metadata through live table construction and
+static-table cache rehydration. The cached optical-table reuse path rejects old
+tables whose bank warm-input row count no longer matches the current seed, so
+black-particle/PBR diagnostics can see whether a closure-derived optical row
+had a matching bank seed. This remains metadata only: closure-derived optical
+rows still provide the packed GPU values, and the bank is not used as
+authoritative color truth.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

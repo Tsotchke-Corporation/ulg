@@ -114,3 +114,18 @@ material, phase, temperature, and pressure are known.
   `gas-rayleigh-transparent-pbr`, and direct black-source fallback on the Three
   WebGPU render-row sphere proxy path. Focused renderer coverage reports
   `68/68`.
+
+## Progress - 2026-06-19 AKDT, Material Bank PBR Warm Metadata
+
+- Optical GPU tables now attach matching material-bank PBR warm-input rows to
+  record metadata and report
+  `peercompute.ulg.optical-material-bank-pbr-warm-input-consumer.v0`
+  diagnostics.
+- This is not a color override: the packed optical row still comes from
+  closure-derived optical/PBR logic. The bank metadata records base color,
+  metalness, roughness, IOR, provenance, and `strictSourceOfTruth: false` so
+  black-particle diagnostics can distinguish missing PBR seeds from renderer
+  proxy or lighting failures.
+- Static-table cache rehydration preserves the optical bank consumer summary,
+  and live cache reuse rejects stale optical tables whose bank row count no
+  longer matches the current seed.

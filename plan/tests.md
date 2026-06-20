@@ -11076,3 +11076,35 @@ Active-grid plan-refresh cadence, 2026-06-19 16:30 AKDT:
     thermal `0.3 ms`, mechanics refresh `0.5 ms`, compact plan-only summary
     `3.2 ms`, native extraction `2.7 ms`, ULG translation `1.6 ms`, bridge
     reused, and visible native GPU consumer ready.
+
+Render-row particle scale guardrail, 2026-06-19 17:01 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphRenderGpuKernel.js`,
+  `node --check ulg-gpu-abi/src/wgsl.js`,
+  `node --check tests/sphRenderGpuKernel.test.mjs`,
+  `node --check src/visualization/sphPhaseScene.js`, and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Focused tests:
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `51/51`.
+  - New coverage asserts a runaway MLS-MPM `J=1e9` render row is capped to
+    radius-growth `4` and effective `J=64`, with cap diagnostics recording the
+    material, phase, raw/effective growth, and reason.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; the three long-horizon acceptance gates were skipped by
+    their opt-in environment guard.
+- Browser reaction/sphere probe:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ... ULG_PROBE_OUTPUT=/tmp/ulg-reaction-particle-scale-cap-probe-bridge.json ... npm run probe:sph-long-horizon`
+  - Passed with `status=good`, analysis `good`, and browser console issue
+    count `0`.
+  - Worker telemetry: `worker-capability-ready`, `workerCount=12`,
+    `effectiveEnableWorkers=true`.
+  - Rendering telemetry: `three-render-row-spheres`,
+    `renderBridgeSphereClosurePbr=true`, material keys included `h2o`, `Na`,
+    and `naoh`, min/max sphere radius `0.045373838394880295` /
+    `0.5263000726699829`.
+  - Scale telemetry: `renderRowsParticleScaleStabilityStatus =
+    gpu-row-cap-policy-applied-in-shader`, max radius growth allowed `4`, max
+    volume ratio `J=64`.

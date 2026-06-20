@@ -26,6 +26,8 @@ import {
   SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
   SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT,
   SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+  SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO,
+  SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_RENDER_SURFACE_ROW_FLOATS,
@@ -69,7 +71,8 @@ import {
   summarizeSphResidentParticleUploadWebGpu,
   summarizeSphRenderFieldSurfacesCpu,
   summarizeSphRenderFieldSurfacesWebGpu,
-  summarizeSphRenderFieldSurfacesWithOptionalWebGpu
+  summarizeSphRenderFieldSurfacesWithOptionalWebGpu,
+  sphRenderRowsWgsl
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 
 const GPU_BUFFER_USAGE_VERTEX = 32;
@@ -418,6 +421,57 @@ test('SPH render rows carry MLS-MPM current volume, radius, J, and pressure when
   assert.ok(Math.abs(result.renderRows[13] - expectedRadius) < 1e-7);
   assert.equal(result.renderRows[14], 8);
   assert.equal(result.renderRows[15], 125000);
+});
+
+test('SPH render rows cap runaway MLS-MPM particle scale growth with diagnostics', () => {
+  const packed = packedRenderParticles();
+  const mechanics = new Float32Array(3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
+  mechanics[18] = 1e9;
+  mechanics[19] = 0.001;
+  mechanics[28] = 125000;
+  const result = extractSphRenderRowsCpu({
+    sphParticleState: packed,
+    mlsMpmParticleState: {
+      particleCount: 3,
+      mechanics
+    }
+  });
+  const restVolumeM3 = mechanics[19];
+  const expectedVolume = restVolumeM3 * SPH_RENDER_ROW_MAX_VOLUME_RATIO_J;
+  const expectedRestRadius = Math.cbrt((3 * restVolumeM3) / (4 * Math.PI));
+  const expectedRadius = expectedRestRadius * SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO;
+
+  assert.ok(Math.abs(result.renderRows[12] - expectedVolume) < 1e-8);
+  assert.ok(Math.abs(result.renderRows[13] - expectedRadius) < 1e-7);
+  assert.equal(result.renderRows[14], SPH_RENDER_ROW_MAX_VOLUME_RATIO_J);
+  assert.equal(result.renderRows[15], 125000);
+  assert.equal(result.particleScaleStability.schema, 'peercompute.ulg.sph-render-row-particle-scale-stability.v0');
+  assert.equal(result.particleScaleStability.status, 'particle-scale-cap-applied');
+  assert.equal(result.particleScaleStability.capAppliedCount, 1);
+  assert.equal(result.particleScaleStability.maxRadiusGrowthRatioAllowed, SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO);
+  assert.equal(result.particleScaleStability.maxVolumeRatioJAllowed, SPH_RENDER_ROW_MAX_VOLUME_RATIO_J);
+  assert.ok(result.particleScaleStability.maxRawRadiusGrowthRatio > SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO);
+  assert.equal(result.particleScaleStability.maxEffectiveRadiusGrowthRatio, SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO);
+  assert.ok(result.particleScaleStability.maxRawVolumeRatioJ > SPH_RENDER_ROW_MAX_VOLUME_RATIO_J);
+  assert.equal(result.particleScaleStability.maxEffectiveVolumeRatioJ, SPH_RENDER_ROW_MAX_VOLUME_RATIO_J);
+  assert.deepEqual(result.particleScaleStability.sampleCappedRows.map((row) => ({
+    index: row.index,
+    materialId: row.materialId,
+    phaseId: row.phaseId,
+    reason: row.reason
+  })), [{
+    index: 0,
+    materialId: stableOpticalMaterialId('Au'),
+    phaseId: GPU_PHASE_IDS.solid,
+    reason: 'max-radius-growth-ratio'
+  }]);
+});
+
+test('SPH render row WGSL applies the same particle scale cap as the CPU contract', () => {
+  assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO:\s*f32\s*=\s*4\.0/);
+  assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
+  assert.match(sphRenderRowsWgsl, /raw_particle_radius_m\s*>\s*rest_particle_radius_m\s*\*\s*RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO/);
+  assert.match(sphRenderRowsWgsl, /effective_volume_ratio_j\s*=\s*RENDER_ROW_MAX_VOLUME_RATIO_J/);
 });
 
 test('SPH render rows encode base/drop render domains without changing material identity', () => {
@@ -811,6 +865,10 @@ test('SPH render row WebGPU extraction can retain resident rows without full rea
   assert.equal(result.queueCompletionStatus, 'queue-submitted-gpu-handoff-no-cpu-fence');
   assert.equal(result.queueCompletionMethod, 'queue.submit(in-order-gpu-copy-handoff)');
   assert.equal(result.renderRowsDeferredCleanup, true);
+  assert.equal(result.particleScaleStability.status, 'gpu-row-cap-policy-applied-in-shader');
+  assert.equal(result.particleScaleStability.capAppliedCountKnown, false);
+  assert.equal(result.particleScaleStability.maxRadiusGrowthRatioAllowed, SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO);
+  assert.equal(result.particleScaleStability.maxVolumeRatioJAllowed, SPH_RENDER_ROW_MAX_VOLUME_RATIO_J);
   assert.equal(submittedWorkDoneCount, 0);
   assert.equal(dispatches.length, 1);
   assert.equal(copies.length, 1);

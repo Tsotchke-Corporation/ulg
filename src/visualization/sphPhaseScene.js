@@ -17439,13 +17439,30 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderRowsReadbackRequestedMode = requestedRenderRowsReadbackModeFromCaller;
           nextResidentSurfaceDraw.renderRowsReadbackEffectiveMode = requestedRenderRowsReadbackMode;
           nextResidentSurfaceDraw.renderRowsReadbackCoercionReason = renderRowsReadbackModeCoercionReason;
-          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = Boolean(
-            shouldUseThreeRenderRowPointsBridge
-            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
-          );
-          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
-        } else if (
+	          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = Boolean(
+	            shouldUseThreeRenderRowPointsBridge
+	            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+	            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+	          );
+	          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
+	            renderRowsExecution.particleScaleStability ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleStabilityStatus =
+	            renderRowsExecution.particleScaleStability?.status ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCount =
+	            renderRowsExecution.particleScaleStability?.capAppliedCount ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCountKnown =
+	            renderRowsExecution.particleScaleStability?.capAppliedCountKnown
+	            ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null);
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed =
+	            renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed =
+	            renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio =
+	            renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio =
+	            renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null;
+	        } else if (
           !shouldBuildRetainedSurfaceDrawDiagnostics
           && !renderFieldExecution?.renderFieldReadback
           && (renderFieldSurfaceSummary || renderFieldSurfaceSummarySkipped)
@@ -18211,9 +18228,25 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackRetainedPreviousBridge: Boolean(
           sphResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
         ),
-        renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
-        renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
-        renderRowsDecodedSummary: decodedRenderRowsSummary,
+	        renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
+	        renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
+	        renderRowsParticleScaleStability: renderRowsExecution.particleScaleStability ?? null,
+	        renderRowsParticleScaleStabilityStatus:
+	          renderRowsExecution.particleScaleStability?.status ?? null,
+	        renderRowsParticleScaleCapAppliedCount:
+	          renderRowsExecution.particleScaleStability?.capAppliedCount ?? null,
+	        renderRowsParticleScaleCapAppliedCountKnown:
+	          renderRowsExecution.particleScaleStability?.capAppliedCountKnown
+	          ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null),
+	        renderRowsParticleScaleMaxRadiusGrowthRatioAllowed:
+	          renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null,
+	        renderRowsParticleScaleMaxVolumeRatioJAllowed:
+	          renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null,
+	        renderRowsParticleScaleMaxRawRadiusGrowthRatio:
+	          renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null,
+	        renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
+	          renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null,
+	        renderRowsDecodedSummary: decodedRenderRowsSummary,
         renderRowsDecodedMaterialPhaseCounts: decodedRenderRowsSummary?.materialPhaseCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainCounts: decodedRenderRowsSummary?.materialPhaseDomainCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainBounds: decodedRenderRowsSummary?.materialPhaseDomainBounds ?? null,

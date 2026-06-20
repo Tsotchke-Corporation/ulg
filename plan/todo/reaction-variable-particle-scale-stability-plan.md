@@ -64,3 +64,52 @@ diagnostics, and fail-closed reset behavior.
   material mass without a recorded residual or gas/pressure route.
 - The fix works for arbitrary materials/products, not a hard-coded reaction
   pair.
+
+## Implementation Status - 2026-06-19 17:01 AKDT
+
+Implemented the first fail-closed render-row bound for runaway variable
+particle scale:
+
+- CPU render-row extraction now reports
+  `peercompute.ulg.sph-render-row-particle-scale-stability.v0` diagnostics.
+  The diagnostic records raw/effective radius growth, raw/effective `J`, cap
+  count, sample capped rows, material id, phase id, and cap reason.
+- WebGPU render-row extraction applies the same policy in WGSL before rows
+  reach retained render buffers, particle points, particle spheres, or surface
+  extraction: max radius growth ratio `4`, max effective volume ratio `J=64`.
+- WebGPU retained/no-readback runs report
+  `gpu-row-cap-policy-applied-in-shader` without adding a CPU particle scan to
+  the hot path. Full cap counts remain a CPU-reference/readback diagnostic.
+- The scene and long-horizon probe now expose the cap policy on render-row
+  point/sphere bridges and generic surface draw summaries.
+- Focused tests cover an artificial runaway MLS-MPM `J=1e9` row and assert
+  that CPU rows clamp radius, volume, `J`, and diagnostics. A WGSL source guard
+  keeps the shader constants and branch wired.
+
+Validation:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check scripts/sph-long-horizon-probe.mjs`
+- `node --test tests/sphRenderGpuKernel.test.mjs` passed `51/51`.
+- `npm run test:physics-atomics` passed `11/11`; the three long-horizon
+  liquid acceptance gates remained opt-in/skipped.
+- Browser probe `/tmp/ulg-reaction-particle-scale-cap-probe-bridge.json`
+  completed `status=good`, analysis `good`, browser console issue count `0`,
+  worker capability `worker-capability-ready` with `12` workers, sphere bridge
+  `three-render-row-spheres`, closure-derived sphere PBR enabled, and
+  render-row particle-scale policy `gpu-row-cap-policy-applied-in-shader`
+  with max radius growth `4` and max `J=64`.
+
+Remaining:
+
+- Add a resident mechanics/active-grid invariant that catches the same runaway
+  before render extraction, especially for no-readback batches where only the
+  shader policy is visible.
+- Add a targeted reaction reproduction that actually trips the cap in browser
+  telemetry, not only the unit-level synthetic `J=1e9` fixture.
+- Split gas/foam product expansion from individual particle visual radius so
+  gas volume can be represented without huge per-particle spheres.
+- Add reset/lockup regression coverage after the reset functionality fix lands.

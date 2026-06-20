@@ -35,14 +35,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
-Current routing note, 2026-06-19 AKDT: variable scaled particles can explode
-in apparent size during some chemical reactions, then reset or lock up the sim
-without console errors. Track this in
-`plan/todo/reaction-variable-particle-scale-stability-plan.md`. Treat it as a
-physics/runtime stability issue: radius/support must be derived from
-mass-density-phase-temperature-pressure closures with bounded per-step growth,
-explicit cap diagnostics, and browser visual-sequence evidence. Do not paper
-over it with a renderer-only clamp.
+Current routing note, 2026-06-19 AKDT: variable scaled particle rendering now
+has a first fail-closed render-row bound in CPU and WGSL (`max radius growth =
+4`, `max J = 64`) plus `peercompute.ulg.sph-render-row-particle-scale-stability.v0`
+diagnostics. Track remaining work in
+`plan/todo/reaction-variable-particle-scale-stability-plan.md`: add the same
+runaway invariant before active-grid/mechanics planning, create a browser
+reaction case that actually trips the cap, split gas/foam expansion from
+individual particle radius, and fold reset/lockup regression coverage into the
+reset fix. Do not treat the render-row cap as the final physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes can lose
 material PBR and show sodium or most substances as black spheres. Track this in

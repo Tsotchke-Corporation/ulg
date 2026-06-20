@@ -2711,13 +2711,29 @@ async function runBrowserProbe({
             renderBridgeSphereCreatedMeshCount: surfaceDraw.renderBridgeSphereCreatedMeshCount ?? null,
             renderBridgeSphereDisposedMeshCount: surfaceDraw.renderBridgeSphereDisposedMeshCount ?? null,
             renderBridgeMinParticleRadiusM: surfaceDraw.renderBridgeMinParticleRadiusM ?? null,
-            renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null,
-            renderRowsReadbackRequestedMode: surfaceDraw.renderRowsReadbackRequestedMode ?? null,
-            renderRowsReadbackEffectiveMode: surfaceDraw.renderRowsReadbackEffectiveMode ?? null,
-            renderRowsReadbackCoercionReason: surfaceDraw.renderRowsReadbackCoercionReason ?? null,
-            renderRowsReadbackForcedForThreeBridge: surfaceDraw.renderRowsReadbackForcedForThreeBridge ?? null,
-            renderRowsReadbackRetainedPreviousBridge: surfaceDraw.renderRowsReadbackRetainedPreviousBridge ?? null
-          } : null,
+	            renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null,
+	            renderRowsReadbackRequestedMode: surfaceDraw.renderRowsReadbackRequestedMode ?? null,
+	            renderRowsReadbackEffectiveMode: surfaceDraw.renderRowsReadbackEffectiveMode ?? null,
+	            renderRowsReadbackCoercionReason: surfaceDraw.renderRowsReadbackCoercionReason ?? null,
+	            renderRowsReadbackForcedForThreeBridge: surfaceDraw.renderRowsReadbackForcedForThreeBridge ?? null,
+	            renderRowsReadbackRetainedPreviousBridge: surfaceDraw.renderRowsReadbackRetainedPreviousBridge ?? null,
+	            renderRowsParticleScaleStabilityStatus:
+	              surfaceDraw.renderRowsParticleScaleStabilityStatus ?? null,
+	            renderRowsParticleScaleCapAppliedCount:
+	              surfaceDraw.renderRowsParticleScaleCapAppliedCount ?? null,
+	            renderRowsParticleScaleCapAppliedCountKnown:
+	              surfaceDraw.renderRowsParticleScaleCapAppliedCountKnown ?? null,
+	            renderRowsParticleScaleMaxRadiusGrowthRatioAllowed:
+	              surfaceDraw.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed ?? null,
+	            renderRowsParticleScaleMaxVolumeRatioJAllowed:
+	              surfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed ?? null,
+	            renderRowsParticleScaleMaxRawRadiusGrowthRatio:
+	              surfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio ?? null,
+	            renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
+	              surfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio ?? null,
+	            renderRowsParticleScaleStability:
+	              surfaceDraw.renderRowsParticleScaleStability ?? null
+	          } : null,
           surfaces: surfaceSnapshot(sceneApi)
         };
       };

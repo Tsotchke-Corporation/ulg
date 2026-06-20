@@ -3011,6 +3011,8 @@ struct RenderRowsParams {
 @group(0) @binding(4) var<storage, read> mls_mpm_mechanics: array<vec4<f32>>;
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+const RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO: f32 = 4.0;
+const RENDER_ROW_MAX_VOLUME_RATIO_J: f32 = 64.0;
 
 fn radius_from_volume_m(volume_m3: f32) -> f32 {
   if (volume_m3 <= 0.0) {
@@ -3045,8 +3047,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     pressure_pa = max(mechanics7.x, 0.0);
   }
-  let current_volume_m3 = max(rest_volume_m3 * max(volume_ratio_j, 1.0e-9), 0.0);
-  let particle_radius_m = radius_from_volume_m(current_volume_m3);
+  let raw_volume_ratio_j = max(volume_ratio_j, 1.0e-9);
+  let raw_current_volume_m3 = max(rest_volume_m3 * raw_volume_ratio_j, 0.0);
+  let rest_particle_radius_m = radius_from_volume_m(rest_volume_m3);
+  let raw_particle_radius_m = radius_from_volume_m(raw_current_volume_m3);
+  var current_volume_m3 = raw_current_volume_m3;
+  var particle_radius_m = raw_particle_radius_m;
+  var effective_volume_ratio_j = raw_volume_ratio_j;
+  if (
+    rest_particle_radius_m > 0.0
+    && raw_particle_radius_m > rest_particle_radius_m * RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO
+  ) {
+    particle_radius_m = rest_particle_radius_m * RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO;
+    current_volume_m3 = rest_volume_m3 * RENDER_ROW_MAX_VOLUME_RATIO_J;
+    effective_volume_ratio_j = RENDER_ROW_MAX_VOLUME_RATIO_J;
+  }
   var render_domain_id: f32 = 0.0;
   if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {
     render_domain_id = 1.0;
@@ -3063,7 +3078,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   render_rows[render_row_base] = pos_mass;
   render_rows[render_row_base + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
   render_rows[render_row_base + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
-  render_rows[render_row_base + 3u] = vec4<f32>(current_volume_m3, particle_radius_m, volume_ratio_j, pressure_pa);
+  render_rows[render_row_base + 3u] = vec4<f32>(current_volume_m3, particle_radius_m, effective_volume_ratio_j, pressure_pa);
 }
 `;
 

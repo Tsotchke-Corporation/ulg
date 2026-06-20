@@ -29212,3 +29212,41 @@ Remaining:
 - Optimize or replace the sibling native marching-cubes extraction path. ULG's
   resident physics and translation stages are no longer the measured 10k scene
   bottleneck.
+
+## 2026-06-19 17:01 AKDT - Render-Row Particle Scale Guardrail
+
+Status:
+
+- Added `peercompute.ulg.sph-render-row-particle-scale-stability.v0`
+  diagnostics to CPU render-row extraction.
+- Bounded render-row particle scale before renderer consumption: max radius
+  growth ratio `4`, max effective volume ratio `J=64`.
+- Mirrored the same cap in `sphRenderRowsWgsl` so WebGPU retained rows, sphere
+  particles, point particles, and downstream surface extraction cannot consume
+  unbounded MLS-MPM `J` growth.
+- Exposed the policy through resident surface draw state and
+  `scripts/sph-long-horizon-probe.mjs`, including the render-row point/sphere
+  bridge path.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `51/51`.
+- PASS: `npm run test:physics-atomics` with `11/11`; three long-horizon gates
+  skipped by opt-in policy.
+- PASS: `/tmp/ulg-reaction-particle-scale-cap-probe-bridge.json` completed
+  `status=good`, analysis `good`, browser console issue count `0`, worker
+  capability `worker-capability-ready` with `12` workers, sphere bridge
+  `three-render-row-spheres`, closure-derived sphere PBR enabled, and
+  particle-scale policy `gpu-row-cap-policy-applied-in-shader` with max radius
+  growth `4` and max `J=64`.
+
+Remaining:
+
+- Add pre-render mechanics/active-grid invariants for the same runaway class.
+- Add a browser reaction repro that trips the cap count rather than only the
+  synthetic `J=1e9` unit fixture.

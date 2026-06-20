@@ -144,6 +144,12 @@ covers the selectable prefix through `Au`, contains 74 element rows, and leaves
 37 selectable non-noble target rows. The cache-backed write reused all eight
 dry-run records with `cache.hitCount=8`.
 
+Status update, 2026-06-19 AKDT: post-transition/heavy alkali coverage adds
+`Hg`, `Tl`, `Pb`, `Bi`, `Po`, `At`, `Fr`, and `Ra`. The checked-in bank now
+covers the selectable prefix through `Ra`, contains 82 element rows, and leaves
+29 selectable non-noble target rows. The cache-backed write reused all eight
+dry-run records with `cache.hitCount=8`.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

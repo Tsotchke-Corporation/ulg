@@ -44,6 +44,9 @@ Status:
 - Added post-lanthanide transition rows `Hf`, `Ta`, `W`, `Re`, `Os`, `Ir`,
   `Pt`, and `Au`. The bank now contains 74 rows, leaves 37 selectable
   non-noble targets, and the write pass reported `cache.hitCount=8`.
+- Added `Hg`, `Tl`, `Pb`, `Bi`, `Po`, `At`, `Fr`, and `Ra`. The bank now
+  contains 82 rows, leaves 29 selectable non-noble targets, and the write pass
+  reported `cache.hitCount=8`.
 
 Validation:
 
@@ -63,6 +66,8 @@ Validation:
   `Er/Tm/Yb/Lu` with `hitCount=4`.
 - PASS: the same cache-backed generator path reused dry-run cache for
   `Hf/Ta/W/Re/Os/Ir/Pt/Au` with `hitCount=8`.
+- PASS: the same cache-backed generator path reused dry-run cache for
+  `Hg/Tl/Pb/Bi/Po/At/Fr/Ra` with `hitCount=8`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

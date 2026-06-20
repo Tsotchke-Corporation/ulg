@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-20T08:23:59.517Z",
+  "generatedAt": "2026-06-20T08:26:29.790Z",
   "repo": "ulg",
   "status": {
     "ok": true,
@@ -26,10 +26,10 @@
       "context_pack_exists": false
     },
     "staleness": {
-      "index_git_sha": "e95c6486ce3a7c94a4b1cbdc98dcdd7f3d19fc6e",
-      "current_git_sha": "e95c6486ce3a7c94a4b1cbdc98dcdd7f3d19fc6e",
+      "index_git_sha": "bf75a7711ee1fd5035d410ec13123b1ffff7c368",
+      "current_git_sha": "bf75a7711ee1fd5035d410ec13123b1ffff7c368",
       "is_stale": false,
-      "index_age_seconds": 1
+      "index_age_seconds": 0
     }
   }
 }

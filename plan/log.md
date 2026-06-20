@@ -109,6 +109,39 @@ Remaining:
 - Prefix-scan compact bin lists remain the next escalation if fixed-capacity
   bins are lossy in real dense-reaction browser probes.
 
+## 2026-06-20 AKDT - Browser Contact-Bin Diagnostic Surfacing
+
+Status:
+
+- Surfaced pressure-interface contact-bin diagnostics through resident render
+  summaries: grid status, enablement, cell count, bin capacity, average
+  occupancy, estimated overflow risk, index-buffer bytes, overflow status, and
+  overflow count.
+- Added those fields to the mounted e2e `sphResidentRenderState` summary and
+  the long-horizon probe compact diagnostic snapshots.
+- Updated the mounted derived-material resident render-state test to separate
+  material-interface readback readiness from pressure-interface solver
+  readiness; the solver can be ready even when the material-interface field is
+  represented by a no-readback/pending status.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase demo runs derived material
+  properties by default"` reported `1/1`.
+
+Remaining:
+
+- Add a dense-reaction browser probe that actually requests overflow metadata
+  readback or proves fixed-capacity bins remain below risk thresholds.
+- Prefix-scan compact bin lists remain the fallback if dense browser probes
+  show real overflow.
+
 ## 2026-06-20 06:11 AKDT - Algorithm Contact Pair Force Rows
 
 Status:

@@ -71,7 +71,11 @@ occupancy, estimated overflow risk, and index-buffer bytes. Follow-up: exact
 GPU overflow metadata readback is now available as an explicit debug opt-in,
 reporting overflow status/count without changing the default no-full hot path.
 Remaining contact-performance work is, if fixed capacity still proves too
-lossy, a prefix-scan compact bin list; then broader visual acceptance.
+lossy, a prefix-scan compact bin list. Browser summary acceptance now exposes
+the contact-bin grid and overflow diagnostics through mounted
+`sphResidentRenderState` and the long-horizon probe compact diagnostics; the
+mounted derived-material resident render-state Playwright test is green after
+separating material-surface readback readiness from pressure-solver readiness.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by

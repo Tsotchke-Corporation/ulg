@@ -58,6 +58,12 @@ Follow-up focused check:
   the same focused pressure/MLS-MPM suite passed `71/71` after adding the
   debug-only particle-bin overflow metadata readback path and flattened
   overflow status/count evidence.
+- Browser resident summary:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase demo runs derived material
+  properties by default"` passed `1/1` after surfacing contact-bin diagnostics
+  through mounted `sphResidentRenderState` and the e2e summary.
 
 ## Previous Focused Result - 2026-06-20 GPU Interface Contact Kinematics and Console Gate
 

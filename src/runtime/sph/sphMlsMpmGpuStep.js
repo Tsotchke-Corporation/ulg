@@ -8335,6 +8335,39 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
     pressureInterfaceForceRowStrideFloats: finiteNumber(result?.forceRowStrideFloats ?? result?.pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     pressureInterfaceForceRowByteLength: finiteNumber(result?.forceRowByteLength ?? result?.pressureInterfaceForceSolver?.forceRowByteLength, 0),
+    pressureInterfaceContactBinGridStatus: result?.interfaceContactKinematicsParticleBinGridStatus
+      || result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridStatus
+      || null,
+    pressureInterfaceContactBinGridEnabled: result?.interfaceContactKinematicsParticleBinGridEnabled === true
+      || result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridEnabled === true,
+    pressureInterfaceContactBinGridCellCount: finiteNumber(
+      result?.interfaceContactKinematicsParticleBinGridCellCount
+        ?? result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridCellCount,
+      0
+    ),
+    pressureInterfaceContactBinGridBinCapacity: finiteNumber(
+      result?.interfaceContactKinematicsParticleBinGridBinCapacity
+        ?? result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridBinCapacity,
+      0
+    ),
+    pressureInterfaceContactBinGridAverageOccupancy: finiteNumber(
+      result?.interfaceContactKinematicsParticleBinGridAverageOccupancy
+        ?? result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridAverageOccupancy,
+      0
+    ),
+    pressureInterfaceContactBinGridEstimatedOverflowRisk: result?.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk === true
+      || result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk === true,
+    pressureInterfaceContactBinGridIndexBufferByteLength: finiteNumber(
+      result?.interfaceContactKinematicsParticleBinGridIndexBufferByteLength
+        ?? result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinGridIndexBufferByteLength,
+      0
+    ),
+    pressureInterfaceContactBinOverflowStatus: result?.interfaceContactKinematicsParticleBinOverflowStatus
+      || result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinOverflowStatus
+      || null,
+    pressureInterfaceContactBinOverflowCount: result?.interfaceContactKinematicsParticleBinOverflowCount
+      ?? result?.pressureInterfaceForceSolver?.interfaceContactKinematicsParticleBinOverflowCount
+      ?? null,
     pressureInterfaceForceRowsBufferByteLength: finiteNumber(
       result?.forceRowsBufferByteLength
         ?? result?.pressureInterfaceForceRowsBufferByteLength

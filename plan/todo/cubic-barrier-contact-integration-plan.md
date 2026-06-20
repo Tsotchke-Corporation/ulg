@@ -33,6 +33,15 @@ path receive overflow status and count in the pressure solver and
 ComputeManager stage evidence. Remaining bin work is prefix-scan compaction if
 fixed-capacity rows prove too lossy under dense reactions.
 
+Status update, 2026-06-20 AKDT: browser-facing diagnostics now include the
+contact-bin grid and overflow evidence. Mounted `sphResidentRenderState`
+summaries and the long-horizon probe compact diagnostics carry bin status,
+enablement, cell count, capacity, average occupancy, estimated overflow risk,
+index-buffer byte length, overflow status, and overflow count. The mounted
+derived-material resident render-state Playwright path passed after updating
+its readiness assertions to treat pressure-solver readiness separately from
+material-interface readback readiness.
+
 Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` can now use GPU-derived interface kinematics in
 the no-full pressure path. When interface elements lack explicit `gapM` /

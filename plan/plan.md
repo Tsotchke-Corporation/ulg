@@ -32,6 +32,12 @@ compaction if fixed-cap bins prove lossy, and broader browser visual
 acceptance. The next rendering target remains native WebGPU
 validation/presentation evidence, not an overlay or CPU mesh fallback.
 
+Follow-up browser instrumentation: contact-bin status/capacity/headroom and
+overflow fields now flow into mounted `sphResidentRenderState` and
+long-horizon compact diagnostics. The derived-material resident render-state
+Playwright path passes with solver-readiness assertions decoupled from
+material-interface readback readiness.
+
 Current checkpoint, 2026-06-19 AKDT: mechanics-refresh material phase rows are
 now cached as a resident WebGPU upload instead of being rebuilt inside every
 thermal mechanics-refresh substep. `runMlsMpmMechanicsRefreshWebGpu()` accepts

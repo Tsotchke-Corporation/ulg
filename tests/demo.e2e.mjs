@@ -4696,6 +4696,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         pressureInterfaceForceSolverStatus: sphResidentRenderState?.pressureInterfaceForceSolverStatus,
         pressureInterfaceSolverApplicationStatus: sphResidentRenderState?.pressureInterfaceSolverApplicationStatus,
         pressureInterfaceSolverForceRowCount: sphResidentRenderState?.pressureInterfaceSolverForceRowCount,
+        pressureInterfaceContactBinGridStatus: sphResidentRenderState?.pressureInterfaceContactBinGridStatus,
+        pressureInterfaceContactBinGridEnabled: sphResidentRenderState?.pressureInterfaceContactBinGridEnabled,
+        pressureInterfaceContactBinGridCellCount: sphResidentRenderState?.pressureInterfaceContactBinGridCellCount,
+        pressureInterfaceContactBinGridBinCapacity: sphResidentRenderState?.pressureInterfaceContactBinGridBinCapacity,
+        pressureInterfaceContactBinGridAverageOccupancy: sphResidentRenderState?.pressureInterfaceContactBinGridAverageOccupancy,
+        pressureInterfaceContactBinGridEstimatedOverflowRisk: sphResidentRenderState?.pressureInterfaceContactBinGridEstimatedOverflowRisk,
+        pressureInterfaceContactBinGridIndexBufferByteLength: sphResidentRenderState?.pressureInterfaceContactBinGridIndexBufferByteLength,
+        pressureInterfaceContactBinOverflowStatus: sphResidentRenderState?.pressureInterfaceContactBinOverflowStatus,
+        pressureInterfaceContactBinOverflowCount: sphResidentRenderState?.pressureInterfaceContactBinOverflowCount,
         pressureInterfaceSolverConservationStatus: sphResidentRenderState?.pressureInterfaceSolverConservationStatus,
         pressureInterfaceSolverConservationResidualMagnitudeN: sphResidentRenderState?.pressureInterfaceSolverConservationResidualMagnitudeN,
         pressureInterfaceForceRowsUploadStatus: sphResidentRenderState?.pressureInterfaceForceRowsUploadStatus,
@@ -5598,15 +5607,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       ] : [])
     ]).toContain(derivedSummary.sphResidentRenderState.materialInterfaceFieldStatus);
     const materialInterfaceReady = derivedSummary.sphResidentRenderState.materialInterfaceFieldStatus === 'material-interface-field-ready';
+    const pressureInterfaceReady = derivedSummary.sphResidentRenderState.pressureInterfaceForceSolverStatus
+      === 'pressure-interface-force-solver-ready';
     if (materialInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBeGreaterThan(0);
       expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBeGreaterThan(0);
+    } else {
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBe(0);
+    }
+    if (pressureInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBe(
         'pressure-force-solver-ready-not-applied'
       );
     } else {
-      expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBe(0);
-      expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBe(0);
       expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBe(
         'blocked-material-surface-normals-not-resolved'
       );
@@ -5615,21 +5629,21 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       'peercompute.ulg.sph-pressure-interface-coupling.v0'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceCouplingStatus).toBe(
-      materialInterfaceReady ? 'pressure-interface-coupling-ready-for-solver' : 'pressure-interface-coupling-blocked'
+      pressureInterfaceReady ? 'pressure-interface-coupling-ready-for-solver' : 'pressure-interface-coupling-blocked'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceCouplingStatus).toBe(
-      materialInterfaceReady ? 'pressure-force-solver-ready-not-applied' : 'blocked-material-surface-normals-not-resolved'
+      pressureInterfaceReady ? 'pressure-force-solver-ready-not-applied' : 'blocked-material-surface-normals-not-resolved'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceForcePreviewSchema).toBe(
       'peercompute.ulg.sph-pressure-interface-force-preview.v0'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceForcePreviewStatus).toBe(
-      materialInterfaceReady ? 'pressure-interface-force-preview-ready' : 'pressure-interface-force-preview-blocked'
+      pressureInterfaceReady ? 'pressure-interface-force-preview-ready' : 'pressure-interface-force-preview-blocked'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceApplicationStatus).toBe(
       'not-applied-diagnostic-preview'
     );
-    if (materialInterfaceReady) {
+    if (pressureInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.pressureInterfacePreviewedElementCount).toBeGreaterThan(0);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceTotalAbsForceN).toBeGreaterThan(0);
     } else {
@@ -5640,16 +5654,28 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       'peercompute.ulg.sph-pressure-interface-force-solver.v0'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceSolverStatus).toBe(
-      materialInterfaceReady ? 'pressure-interface-force-solver-ready' : 'pressure-interface-force-solver-blocked'
+      pressureInterfaceReady ? 'pressure-interface-force-solver-ready' : 'pressure-interface-force-solver-blocked'
     );
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverApplicationStatus).toBe(
-      materialInterfaceReady ? 'solver-ready-not-applied' : 'not-applied-solver-blocked'
+      pressureInterfaceReady ? 'solver-ready-not-applied' : 'not-applied-solver-blocked'
     );
-    if (materialInterfaceReady) {
+    if (pressureInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.residentPressureInterfaceStateStatus).toBe(
         'resident-pressure-interface-force-rows-admission-required'
       );
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBeGreaterThan(0);
+      if (derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridStatus != null) {
+        expect([
+          'interface-contact-particle-bin-grid-submitted',
+          'interface-contact-particle-bin-grid-ready',
+          'interface-contact-particle-bin-grid-unavailable',
+          'interface-contact-particle-bin-grid-disabled'
+        ]).toContain(derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridStatus);
+        expect(typeof derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridEnabled).toBe('boolean');
+        expect(derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridCellCount).toBeGreaterThanOrEqual(0);
+        expect(derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridBinCapacity).toBeGreaterThanOrEqual(0);
+        expect(derivedSummary.sphResidentRenderState.pressureInterfaceContactBinGridIndexBufferByteLength).toBeGreaterThanOrEqual(0);
+      }
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
         'pairwise-equal-opposite-force-conservative'
       );

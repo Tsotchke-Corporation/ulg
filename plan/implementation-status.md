@@ -39,6 +39,14 @@ contact path stays readback-free while probes can request overflow status/count.
 The remaining bin escalation is a prefix-scan compact list if fixed-capacity
 rows prove too lossy in dense reactions.
 
+Follow-up, 2026-06-20 AKDT: contact-bin diagnostics now reach browser-facing
+resident summaries. `sphResidentRenderState`, the mounted e2e summary, and
+long-horizon compact diagnostics carry bin-grid and overflow fields. The
+mounted `SPH phase demo runs derived material properties by default` Playwright
+test passed under `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1` after updating stale
+readiness assertions to distinguish material-interface readback readiness from
+pressure-solver readiness.
+
 Previous checkpoint, 2026-06-20 AKDT: the pressure-interface WebGPU path can now
 derive per-interface contact kinematics from resident SPH particle state and
 thermo buffers when interface elements do not already carry test/oracle gap

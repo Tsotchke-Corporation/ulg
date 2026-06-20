@@ -31,6 +31,15 @@ unknown provenance statuses, and missing provenance units fail before registry
 use. Remaining Phase 1 work is element coverage expansion and accepted-row
 consumption by GPU material tables and particle-size packing.
 
+Status update, 2026-06-19 AKDT: active element coverage expanded from five
+rows to nine rows. `Li`, `K`, `Rb`, and `Pd` now join `H`, `O`, `Na`, `Fe`,
+and `Cs` in `data/material-properties/elements.json`, covering the active
+alkali reaction set and the Palladium PBR/mobile probe path. The new rows are
+marked `reduced-estimate` warm seeds from `elementMaterialClosure`, not
+validated reference truth. Remaining Phase 1 coverage work is the full
+selectable non-noble element list and GPU material-table/particle-size
+consumption.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

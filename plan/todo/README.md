@@ -539,6 +539,13 @@ versions, and tests mutate records to require unknown provenance statuses and
 missing units to fail closed. The next material-bank work is element coverage
 expansion and GPU material-table/particle-size packing consumption.
 
+Current routing note, 2026-06-19 AKDT: active material-property bank coverage
+now includes `H`, `O`, `Li`, `Na`, `K`, `Rb`, `Cs`, `Fe`, and `Pd`. This covers
+the alkali reaction paths and Palladium PBR/mobile probe while keeping new rows
+as `reduced-estimate` warm seeds from `elementMaterialClosure`. Full selectable
+non-noble element coverage remains open, as does accepted-row consumption by
+GPU material-table and particle-size packing.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

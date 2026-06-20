@@ -11707,3 +11707,20 @@ Material property bank stale provenance guards, 2026-06-19 AKDT:
 - Material bank schema validator:
   `node scripts/material-properties/validate-material-property-bank.mjs`
   - Passed with `recordCount=5` and symbols `H`, `O`, `Na`, `Fe`, `Cs`.
+
+Active material bank element coverage, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check tests/materialPropertyBank.test.mjs` passed.
+- Focused Node suite:
+  `node --test tests/materialPropertyBank.test.mjs`
+  - Passed: `6/6`.
+  - Added active coverage assertions for `H`, `O`, `Li`, `Na`, `K`, `Rb`,
+    `Cs`, `Fe`, and `Pd`, including lowercase Palladium lookup and metallic PBR
+    seed presence.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=9` and symbols `H`, `Li`, `O`, `Na`, `K`, `Fe`,
+    `Rb`, `Pd`, `Cs`.
+- Whitespace:
+  `git diff --check` passed.

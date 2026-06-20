@@ -30082,3 +30082,30 @@ Remaining:
 
 - Expand the element bank beyond the first exercised rows.
 - Feed accepted bank rows into GPU material-table and particle-size packing.
+
+## 2026-06-19 AKDT - Active Material Bank Element Coverage
+
+Status:
+
+- Expanded `data/material-properties/elements.json` from five rows to nine
+  rows: `H`, `Li`, `O`, `Na`, `K`, `Fe`, `Rb`, `Pd`, and `Cs`.
+- Added `Li`, `K`, `Rb`, and `Pd` as reduced-estimate warm seeds generated from
+  the existing `elementMaterialClosure` path, preserving the non-authoritative
+  bank contract.
+- Added a focused test that guards the active alkali and PBR probe coverage set
+  (`H`, `O`, `Li`, `Na`, `K`, `Rb`, `Cs`, `Fe`, `Pd`) and verifies Palladium
+  remains reachable through canonicalized lowercase lookup.
+
+Validation:
+
+- PASS: `node --check tests/materialPropertyBank.test.mjs`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` with `6/6`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=9`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Expand from active-row coverage to the full selectable non-noble element
+  list.
+- Feed accepted bank rows into GPU material-table and particle-size packing.

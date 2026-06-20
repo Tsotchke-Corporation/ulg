@@ -15479,6 +15479,16 @@ export function createSphPhaseScene(container, {
       fieldOffset: descriptor.fieldOffset ?? null,
       fieldCellCount: descriptor.fieldCellCount ?? null,
       isovalue: descriptor.isovalue ?? null,
+      surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
+      surfaceExtractionPolicyRowsSchema: descriptor.surfaceExtractionPolicyRowsSchema ?? null,
+      surfaceExtractionPolicyRowSchema: descriptor.surfaceExtractionPolicyRowSchema ?? null,
+      surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
+      surfaceExtractionPolicyMaterial: descriptor.surfaceExtractionPolicyMaterial ?? null,
+      surfaceExtractionPolicyPhase: descriptor.surfaceExtractionPolicyPhase ?? null,
+      surfaceExtractionPolicyIsovaluePolicy: descriptor.surfaceExtractionPolicyIsovaluePolicy ?? null,
+      surfaceExtractionPolicySmoothingRadiusM: descriptor.surfaceExtractionPolicySmoothingRadiusM ?? null,
+      surfaceExtractionPolicyVoxelSizeM: descriptor.surfaceExtractionPolicyVoxelSizeM ?? null,
+      surfaceExtractionPolicyNormalScaleM: descriptor.surfaceExtractionPolicyNormalScaleM ?? null,
       fieldPadding: descriptor.fieldPadding ?? null,
       refEdgeM: descriptor.refEdgeM ?? null,
       positionTransformStatus: descriptor.positionTransformStatus ?? descriptor.positionTransform?.status ?? null,
@@ -15493,7 +15503,11 @@ export function createSphPhaseScene(container, {
     };
   }
 
-  function createRenderFieldBufferVolumeDescriptors({ device, renderFieldExecution } = {}) {
+  function createRenderFieldBufferVolumeDescriptors({
+    device,
+    renderFieldExecution,
+    algorithmMaterialSurfaceExtractionRows = mlsMpmGpuParticleState?.algorithmMaterialSurfaceExtractionRows ?? null
+  } = {}) {
     const surfaces = Array.isArray(renderFieldExecution?.surfaceTable?.metadata)
       ? renderFieldExecution.surfaceTable.metadata
       : [];
@@ -15501,7 +15515,8 @@ export function createSphPhaseScene(container, {
       device,
       renderField: renderFieldExecution,
       surface,
-      surfaceIndex
+      surfaceIndex,
+      algorithmMaterialSurfaceExtractionRows
     }));
   }
 
@@ -15528,9 +15543,17 @@ export function createSphPhaseScene(container, {
     };
   }
 
-  function createRenderFieldBufferVolumeDescriptorSummary({ device, renderFieldExecution } = {}) {
+  function createRenderFieldBufferVolumeDescriptorSummary({
+    device,
+    renderFieldExecution,
+    algorithmMaterialSurfaceExtractionRows = mlsMpmGpuParticleState?.algorithmMaterialSurfaceExtractionRows ?? null
+  } = {}) {
     return summarizeRenderFieldBufferVolumeDescriptors(
-      createRenderFieldBufferVolumeDescriptors({ device, renderFieldExecution })
+      createRenderFieldBufferVolumeDescriptors({
+        device,
+        renderFieldExecution,
+        algorithmMaterialSurfaceExtractionRows
+      })
     );
   }
 
@@ -15892,6 +15915,15 @@ export function createSphPhaseScene(container, {
       volumeSchema: volume.schema,
       volumeSourceType: volume.sourceType,
       volumeScalarLayoutName: volume.scalarLayoutName,
+      isovalue: isovalue ?? descriptor.isovalue ?? 0,
+      surfaceExtractionPolicyStatus: descriptor.surfaceExtractionPolicyStatus ?? null,
+      surfaceExtractionPolicyRole: descriptor.surfaceExtractionPolicyRole ?? null,
+      surfaceExtractionPolicyMaterial: descriptor.surfaceExtractionPolicyMaterial ?? null,
+      surfaceExtractionPolicyPhase: descriptor.surfaceExtractionPolicyPhase ?? null,
+      surfaceExtractionPolicyIsovaluePolicy: descriptor.surfaceExtractionPolicyIsovaluePolicy ?? null,
+      surfaceExtractionPolicySmoothingRadiusM: descriptor.surfaceExtractionPolicySmoothingRadiusM ?? null,
+      surfaceExtractionPolicyVoxelSizeM: descriptor.surfaceExtractionPolicyVoxelSizeM ?? null,
+      surfaceExtractionPolicyNormalScaleM: descriptor.surfaceExtractionPolicyNormalScaleM ?? null,
       elapsedMs: extractionElapsedMs,
       extensionExecutionElapsedMs: extractionElapsedMs,
       adapterCacheStatus: cacheStatus,
@@ -18428,7 +18460,11 @@ export function createSphPhaseScene(container, {
                   surfaceKey: nativeDescriptor.surfaceKey,
                   dims: nativeDescriptor.dims,
                   scalarLayoutName: nativeDescriptor.scalarLayoutName,
-                  isovalue: nativeDescriptor.isovalue
+                  isovalue: nativeDescriptor.isovalue,
+                  surfaceExtractionPolicyStatus: nativeDescriptor.surfaceExtractionPolicyStatus ?? null,
+                  surfaceExtractionPolicyRole: nativeDescriptor.surfaceExtractionPolicyRole ?? null,
+                  surfaceExtractionPolicyIsovaluePolicy:
+                    nativeDescriptor.surfaceExtractionPolicyIsovaluePolicy ?? null
                 });
                 const nativeExtraction = await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
                   device: resolvedDeviceResult.device,
@@ -18523,6 +18559,23 @@ export function createSphPhaseScene(container, {
                     nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
                     nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
                     nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName,
+                    nativeMarchingCubesExtractionIsovalue: nativeExtraction.isovalue ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyStatus:
+                      nativeExtraction.surfaceExtractionPolicyStatus ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyRole:
+                      nativeExtraction.surfaceExtractionPolicyRole ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyMaterial:
+                      nativeExtraction.surfaceExtractionPolicyMaterial ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyPhase:
+                      nativeExtraction.surfaceExtractionPolicyPhase ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyIsovaluePolicy:
+                      nativeExtraction.surfaceExtractionPolicyIsovaluePolicy ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicySmoothingRadiusM:
+                      nativeExtraction.surfaceExtractionPolicySmoothingRadiusM ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyVoxelSizeM:
+                      nativeExtraction.surfaceExtractionPolicyVoxelSizeM ?? null,
+                    nativeMarchingCubesSurfaceExtractionPolicyNormalScaleM:
+                      nativeExtraction.surfaceExtractionPolicyNormalScaleM ?? null,
                     nativeMarchingCubesAdapterCacheStatus: nativeExtraction.adapterCacheStatus ?? null,
                     nativeMarchingCubesAdapterCacheReason: nativeExtraction.adapterCacheReason ?? null,
                     nativeMarchingCubesAdapterCacheHit: Boolean(nativeExtraction.adapterCacheHit),

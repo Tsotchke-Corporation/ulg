@@ -355,9 +355,52 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
     -0.22 * 5 / (1 - 2 * 0.22)
   ]);
   assert.equal(descriptor.isovalue, 14);
+  assert.equal(descriptor.surfaceExtractionPolicyStatus, 'algorithm-surface-policy-rows-not-supplied');
   assert.equal(descriptor.sameDeviceStatus, 'same-device');
   assert.equal(descriptor.nativeConsumerKind, 'native-webgpu-marching-cubes-buffer-volume');
   assert.equal(descriptor.nativeRequiredAdapter, 'webgpu-marching-cubes.buffer-volume.v0');
+
+  const policyDescriptor = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField,
+    surfaceIndex: 1,
+    algorithmMaterialSurfaceExtractionRows: {
+      schema: 'peercompute.ulg.algorithm-material-surface-extraction-rows.v0',
+      status: 'algorithm-derived-surface-extraction-rows-ready',
+      rowCount: 2,
+      rows: [
+        {
+          schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+          role: 'base',
+          material: 'h2o',
+          phase: 'liquid',
+          isovalue: 0.65,
+          isovaluePolicy: 'density-kernel-half-occupancy',
+          smoothingRadiusM: 0.3,
+          voxelSizeM: 0.15,
+          normalScaleM: 0.3
+        },
+        {
+          schema: 'peercompute.ulg.algorithm-material-surface-extraction-row.v0',
+          role: 'drop',
+          material: 'h2o',
+          phase: 'liquid',
+          isovalue: 0.5,
+          isovaluePolicy: 'density-kernel-half-occupancy',
+          smoothingRadiusM: 0.2,
+          voxelSizeM: 0.1,
+          normalScaleM: 0.2
+        }
+      ]
+    }
+  });
+  assert.equal(policyDescriptor.ok, true);
+  assert.equal(policyDescriptor.isovalue, 0.5);
+  assert.equal(policyDescriptor.isolation, 0.5);
+  assert.equal(policyDescriptor.surfaceExtractionPolicyStatus, 'algorithm-surface-policy-row-selected');
+  assert.equal(policyDescriptor.surfaceExtractionPolicyRole, 'drop');
+  assert.equal(policyDescriptor.surfaceExtractionPolicyIsovaluePolicy, 'density-kernel-half-occupancy');
+  assert.equal(policyDescriptor.surfaceExtractionPolicySmoothingRadiusM, 0.2);
 
   const tooSmall = createUlgRenderFieldBufferVolumeDescriptor({
     device,

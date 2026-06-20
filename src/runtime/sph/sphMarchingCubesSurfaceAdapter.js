@@ -17,6 +17,7 @@ import {
   releaseResidentBufferLease,
   summarizeResidentBufferLeaseLedger
 } from '../residentBufferLease.js';
+import { ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA } from '../material/algorithmMaterialRows.js';
 
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-adapter.v0';
@@ -408,12 +409,52 @@ function renderFieldBufferVolumeBlocked(status, reason, extra = {}) {
   };
 }
 
+function surfacePolicyRole(surfaceRecord = null) {
+  const role = surfaceRecord?.role ?? surfaceRecord?.renderDomainRole ?? null;
+  if (role === 'drop' || role === 'base') return role;
+  const key = String(surfaceRecord?.renderDomainKey ?? surfaceRecord?.surfaceKey ?? '').toLowerCase();
+  if (key.includes('drop')) return 'drop';
+  if (key.includes('base')) return 'base';
+  const id = Math.round(finiteNumber(surfaceRecord?.renderDomainId, 0));
+  if (id === 1) return 'base';
+  if (id === 2) return 'drop';
+  return null;
+}
+
+function normalizeSurfacePolicyMaterial(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function resolveAlgorithmSurfaceExtractionPolicy(rows, surfaceRecord) {
+  if (!rows || rows.schema !== ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA) {
+    return {
+      status: 'algorithm-surface-policy-rows-not-supplied',
+      row: null
+    };
+  }
+  const policyRows = Array.isArray(rows.rows) ? rows.rows : [];
+  const role = surfacePolicyRole(surfaceRecord);
+  const material = normalizeSurfacePolicyMaterial(surfaceRecord?.material);
+  const phase = normalizeSurfacePolicyMaterial(surfaceRecord?.phase);
+  const row = policyRows.find((candidate) => role && candidate.role === role)
+    || policyRows.find((candidate) =>
+      normalizeSurfacePolicyMaterial(candidate.material) === material
+      && (!phase || normalizeSurfacePolicyMaterial(candidate.phase) === phase)
+    )
+    || null;
+  return {
+    status: row ? 'algorithm-surface-policy-row-selected' : 'algorithm-surface-policy-row-not-found',
+    row
+  };
+}
+
 export function createUlgRenderFieldBufferVolumeDescriptor({
   device = null,
   renderField = null,
   renderFieldExecution = null,
   surface = null,
   surfaceIndex = 0,
+  algorithmMaterialSurfaceExtractionRows = null,
   label = 'ulg-sph-render-field-density-volume',
   source = 'ulg-render-field-density-storage-buffer'
 } = {}) {
@@ -525,6 +566,12 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     fieldPadding: field.fieldPadding,
     refEdgeM: field.refEdgeM
   });
+  const surfacePolicy = resolveAlgorithmSurfaceExtractionPolicy(
+    algorithmMaterialSurfaceExtractionRows,
+    surfaceRecord
+  );
+  const surfacePolicyRow = surfacePolicy.row;
+  const resolvedIsovalue = surfacePolicyRow?.isovalue ?? surfaceRecord.isolation ?? null;
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
     ok: true,
@@ -561,8 +608,18 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     renderDomainKey: surfaceRecord.renderDomainKey ?? null,
     fieldOffset,
     fieldCellCount: surfaceRecord.fieldCellCount ?? resolution ** 3,
-    isolation: surfaceRecord.isolation ?? null,
-    isovalue: surfaceRecord.isolation ?? null,
+    isolation: resolvedIsovalue,
+    isovalue: resolvedIsovalue,
+    surfaceExtractionPolicyStatus: surfacePolicy.status,
+    surfaceExtractionPolicyRowsSchema: algorithmMaterialSurfaceExtractionRows?.schema ?? null,
+    surfaceExtractionPolicyRowSchema: surfacePolicyRow?.schema ?? null,
+    surfaceExtractionPolicyRole: surfacePolicyRow?.role ?? null,
+    surfaceExtractionPolicyMaterial: surfacePolicyRow?.material ?? null,
+    surfaceExtractionPolicyPhase: surfacePolicyRow?.phase ?? null,
+    surfaceExtractionPolicyIsovaluePolicy: surfacePolicyRow?.isovaluePolicy ?? null,
+    surfaceExtractionPolicySmoothingRadiusM: surfacePolicyRow?.smoothingRadiusM ?? null,
+    surfaceExtractionPolicyVoxelSizeM: surfacePolicyRow?.voxelSizeM ?? null,
+    surfaceExtractionPolicyNormalScaleM: surfacePolicyRow?.normalScaleM ?? null,
     fieldPadding: field.fieldPadding ?? null,
     refEdgeM: field.refEdgeM ?? null,
     positionTransform,

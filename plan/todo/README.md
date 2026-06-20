@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
+draw metadata now distinguishes material `surfaceIndex` from the compact
+extension's single retained indirect draw row. Extension surfaces publish
+`indirectRowIndex=0` / `indirectOffsetBytes=0`, and the native draw order uses
+those explicit offsets. Browser probe
+`/tmp/ulg-native-indirect-offset-probe-wait.json` is console-clean and reaches
+`native-webgpu-surface-consumer-rendered` with retained surface-buffer input
+ready, but still fails closed on the existing
+`native-surface-validation-readback-lifetime` blocker. Continue the native
+rendering lane by fixing validation/presentation evidence, not by adding an
+overlay or reviving CPU mesh fallback.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

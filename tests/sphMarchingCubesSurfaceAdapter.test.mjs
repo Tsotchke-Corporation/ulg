@@ -787,7 +787,9 @@ test('ULG translates extension compact position rows into native surface vertice
   assertApprox(drawRow[13], 0.5);
   assertApprox(drawRow[14], 0);
   assertApprox(drawRow[15], Math.hypot(0.5, 0.5, 0));
-  assert.deepEqual([...draw.drawIndirectRows], [3, 1, 0, 2]);
+  assert.deepEqual([...draw.drawIndirectRows], [3, 1, 0, 0]);
+  assert.equal(draw.surfaces[0].indirectRowIndex, 0);
+  assert.equal(draw.surfaces[0].indirectOffsetBytes, 0);
 });
 
 test('ULG maps extension grid-local compact positions into render-field world meters', () => {
@@ -931,6 +933,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceVertices.translationPipelineCacheStatus, 'pipeline-cache-miss');
   assert.equal(result.surfaceVertices.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
   assert.equal(result.surfaceVertices.surfaces[0].surfaceIndex, 5);
+  assert.equal(result.surfaceVertices.surfaces[0].indirectRowIndex, 0);
+  assert.equal(result.surfaceVertices.surfaces[0].indirectOffsetBytes, 0);
   assert.equal(result.surfaceVertices.surfaces[0].vertexOffset, 0);
   assert.equal(result.surfaceVertices.surfaces[0].vertexCount, 3);
   assert.deepEqual(result.surfaceVertices.surfaces[0].boundsCenterM, [2.5, 2.5, 2.5]);
@@ -956,6 +960,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceDraw.translationPipelineCacheStatus, 'pipeline-cache-miss');
   assert.equal(result.surfaceDraw.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
   assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-summary-not-read');
+  assert.equal(result.surfaceDraw.surfaces[0].indirectRowIndex, 0);
+  assert.equal(result.surfaceDraw.surfaces[0].indirectOffsetBytes, 0);
   assert.equal(result.surfaceDraw.surfaces[0].vertexOffset, 0);
   assert.equal(result.surfaceDraw.surfaces[0].vertexCount, 3);
 

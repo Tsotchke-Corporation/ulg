@@ -212,6 +212,19 @@ Tactical status, 2026-06-19 AKDT:
   not proven. The next simulator/rendering slice is therefore main-canvas
   native WebGPU visibility/presentation and mobile validation, not another
   CPU counter-readback workaround.
+- Native/extension surface draw metadata now keeps the compact extension's
+  single retained indirect row distinct from ULG material `surfaceIndex`.
+  Extension-translated surfaces publish `indirectRowIndex=0` /
+  `indirectOffsetBytes=0`, and the resident native draw order honors those
+  explicit offsets instead of deriving draw-indirect offsets from the original
+  surface index. This fixes the case where an extension surface with
+  `surfaceIndex > 0` could render with an out-of-range indirect offset into a
+  one-row indirect buffer. Current headless evidence at
+  `/tmp/ulg-native-indirect-offset-probe-wait.json` is console-clean with the
+  main-canvas native bridge rendered and input-ready retained surface buffers;
+  it remains fail-closed only because the existing same-device native
+  readback/offscreen validation path reports
+  `native-surface-validation-readback-lifetime`.
 - Native surface rendering now also has a diagnostic same-device offscreen
   validation path. It draws the retained compact vertex and indirect buffers
   into a 64x64 WebGPU texture and publishes offscreen validation telemetry

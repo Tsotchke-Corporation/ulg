@@ -30530,3 +30530,44 @@ Remaining:
 - Use this trace to pin post-reset repeated resident substeps with nonzero
   active-grid/motion evidence and to diagnose pressure/render refresh
   consumption order without relying on manual console inspection.
+
+## 2026-06-20 AKDT - Native Surface Indirect Row Metadata
+
+Status:
+
+- Fixed a native surface draw-order bug in the retained extension marching
+  cubes path. Extension-translated surfaces can preserve their material
+  `surfaceIndex`, but they only publish one retained indirect draw row. The
+  resident native draw order now honors explicit `indirectRowIndex` /
+  `indirectOffsetBytes` metadata instead of deriving the indirect offset from
+  `surfaceIndex`.
+- The extension-to-ULG adapter now writes `firstInstance=0` for the single
+  retained indirect row and publishes `indirectRowIndex=0` /
+  `indirectOffsetBytes=0` on both CPU and WebGPU translated surface metadata.
+- Conservative no-summary extension surfaces are no longer treated as exact
+  per-surface draw records merely because they carry an upper-bound
+  `vertexCount`; renderer metadata now keeps them in the conservative
+  aggregate/no-readback path unless exact draw rows were actually read.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js src/visualization/sphPhaseScene.js tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs tests/nativeSurfaceHarness.test.mjs` with `88/88`.
+- PARTIAL:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-native-indirect-offset-probe-wait.json ULG_PROBE_PORT=5645 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS=1500 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=native-webgpu-surface-consumer&renderer=native-webgpu&visualCapture=1&nativeSurfacePixelValidation=1' node scripts/sph-long-horizon-probe.mjs`
+  - Browser console issue count: `0`.
+  - Browser console warning count: `0`.
+  - Native bridge status: `native-webgpu-surface-consumer-ready`.
+  - Last native render status: `native-webgpu-surface-consumer-rendered`.
+  - Native retained surface-buffer input ready: `true`.
+  - Remaining blocker family:
+    `native-surface-validation-readback-lifetime`.
+
+Remaining:
+
+- Continue the native rendering roadmap at the same-device
+  readback/offscreen-validation lifetime blocker and real-device/mobile
+  presentation evidence. This fix removes an indirect-buffer addressing bug;
+  it does not promote unvalidated native pixels as visible output.

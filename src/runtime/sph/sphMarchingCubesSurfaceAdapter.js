@@ -215,7 +215,7 @@ fn write_draw_metadata(triangle_count: u32) {
   surface_draw_indirect_rows[0u] = triangle_count * 3u;
   surface_draw_indirect_rows[1u] = select(0u, 1u, triangle_count > 0u);
   surface_draw_indirect_rows[2u] = 0u;
-  surface_draw_indirect_rows[3u] = params.surface_index;
+  surface_draw_indirect_rows[3u] = 0u;
 }
 
 @compute @workgroup_size(64)
@@ -739,7 +739,9 @@ function extensionSurfaceMetadata({
   depthWriteFlag,
   status = 'surface-draw-summary-not-read',
   boundsCenterM = null,
-  boundsRadiusM = null
+  boundsRadiusM = null,
+  indirectRowIndex = 0,
+  indirectOffsetBytes = null
 }) {
   const resolvedBoundsCenterM = vector3(boundsCenterM, [0, 0, 0]);
   const resolvedBoundsRadiusM = finiteNumber(boundsRadiusM, 0);
@@ -749,6 +751,12 @@ function extensionSurfaceMetadata({
   const resolvedTriangleCount = Number.isFinite(Number(triangleCount))
     ? Math.max(0, Math.round(Number(triangleCount)))
     : null;
+  const resolvedIndirectRowIndex = Math.max(0, Math.round(finiteNumber(indirectRowIndex, 0)));
+  const indirectStrideBytes = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length
+    * Uint32Array.BYTES_PER_ELEMENT;
+  const resolvedIndirectOffsetBytes = Number.isFinite(Number(indirectOffsetBytes))
+    ? Math.max(0, Math.round(Number(indirectOffsetBytes)))
+    : resolvedIndirectRowIndex * indirectStrideBytes;
   const hasDrawableRange = (resolvedVertexCount ?? 0) >= 3;
   return {
     surfaceKey: surfaceKey || `extension-surface-${surfaceIndex}`,
@@ -759,6 +767,8 @@ function extensionSurfaceMetadata({
     materialId,
     phaseId,
     opticalStateId,
+    indirectRowIndex: resolvedIndirectRowIndex,
+    indirectOffsetBytes: resolvedIndirectOffsetBytes,
     vertexOffset: hasDrawableRange ? 0 : null,
     vertexCount: resolvedVertexCount,
     triangleOffset: hasDrawableRange ? 0 : null,
@@ -1375,6 +1385,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     materialId: resolvedMaterialId,
     phaseId: resolvedPhaseId,
     opticalStateId: resolvedOpticalStateId,
+    indirectRowIndex: 0,
+    indirectOffsetBytes: 0,
     vertexOffset: 0,
     vertexCount: alignedVertexCount,
     triangleOffset: 0,
@@ -1396,7 +1408,7 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     vertexCount: alignedVertexCount,
     instanceCount: alignedVertexCount > 0 ? 1 : 0,
     firstVertex: 0,
-    firstInstance: resolvedSurfaceIndex
+    firstInstance: 0
   });
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
@@ -1802,7 +1814,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     depthWriteFlag: resolvedDepthWriteFlag,
     status: surfaceStatus,
     boundsCenterM: resolvedSurfaceBounds?.centerM ?? null,
-    boundsRadiusM: resolvedSurfaceBounds?.radiusM ?? null
+    boundsRadiusM: resolvedSurfaceBounds?.radiusM ?? null,
+    indirectRowIndex: 0,
+    indirectOffsetBytes: 0
   });
   const sourceVertexCounterMode = extensionActualVertexCounterBuffer
     ? 'extension-gpu-vertex-counter'

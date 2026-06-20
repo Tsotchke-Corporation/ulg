@@ -1553,6 +1553,19 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.deepEqual(order.map((row) => row.surfaceIndex), [1, 2, 0]);
   assert.deepEqual(order.map((row) => row.indirectOffsetBytes), [16, 32, 0]);
   assert.deepEqual(order.map((row) => row.renderOrder), [100, 200, 300]);
+  const extensionOrder = residentSurfaceDrawOrder([
+    {
+      surfaceIndex: 5,
+      indirectRowIndex: 0,
+      indirectOffsetBytes: 0,
+      renderOrder: 100,
+      transparencyClassId: 0,
+      depthWriteFlag: 1
+    }
+  ], { indirectStrideBytes: 16 });
+  assert.deepEqual(extensionOrder.map((row) => row.surfaceIndex), [5]);
+  assert.deepEqual(extensionOrder.map((row) => row.indirectRowIndex), [0]);
+  assert.deepEqual(extensionOrder.map((row) => row.indirectOffsetBytes), [0]);
   assert.equal(residentSurfaceDrawPipelineKey(order[0]), 'opaque-depth-write');
   assert.equal(residentSurfaceDrawPipelineKey(order[1]), 'transparent-depth-test');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
@@ -2242,6 +2255,33 @@ test('SPH Three WebGPU surface buffers can use conservative aggregate draw recor
   assert.equal(records.records[0].triangleCount, 6);
   assert.equal(records.records[0].material, 'h2o');
   assert.equal(records.records[0].phase, 'liquid');
+
+  const summaryNotReadRecords = resolveThreeWebGpuSurfaceBufferDrawRecords({
+    surfaceDrawExecution: {
+      sourceVertexRowCount: 18,
+      compactedVertexRowsBufferByteLength: 18 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      surfaces: [{
+        surfaceKey: 'extension-surface-5',
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o-liquid',
+        materialId: stableOpticalMaterialId('h2o'),
+        phaseId: GPU_PHASE_IDS.liquid,
+        surfaceIndex: 5,
+        indirectRowIndex: 0,
+        indirectOffsetBytes: 0,
+        vertexOffset: 0,
+        vertexCount: 18,
+        triangleCount: 6,
+        status: 'surface-draw-summary-not-read'
+      }]
+    }
+  });
+  assert.equal(summaryNotReadRecords.status, 'conservative-no-readback-aggregate');
+  assert.equal(summaryNotReadRecords.conservativeNoReadbackDrawRange, true);
+  assert.equal(summaryNotReadRecords.records[0].surfaceIndex, 5);
+  assert.equal(summaryNotReadRecords.records[0].indirectRowIndex, 0);
+  assert.equal(summaryNotReadRecords.records[0].indirectOffsetBytes, 0);
 });
 
 test('SPH resident surface buffer handoff accepts retained no-readback draw or render-field buffers', () => {

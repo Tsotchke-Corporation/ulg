@@ -1687,6 +1687,13 @@ export function resolveThreeWebGpuSurfaceBufferDrawRecords({
     ? surfaceDrawExecution.surfaces
     : [];
   const hasExactDrawRows = sourceSurfaces.some((surface) => {
+    const status = String(surface?.status || '');
+    if (
+      status === 'surface-draw-summary-not-read'
+      || status === 'surface-draw-conservative-no-readback-range'
+    ) {
+      return false;
+    }
     const vertexCount = Math.max(0, Math.floor(Number(surface?.vertexCount) || 0));
     return vertexCount - (vertexCount % 3) >= 3;
   });
@@ -3995,13 +4002,22 @@ export function residentSurfaceDrawOrder(surfaces = [], {
       const renderOrder = Number.isFinite(Number(surface?.renderOrder))
         ? Number(surface.renderOrder)
         : (transparencyClassId * 1000 + surfaceIndex);
+      const explicitIndirectOffsetBytes = Number(surface?.indirectOffsetBytes);
+      const explicitIndirectRowIndex = Number(surface?.indirectRowIndex);
+      const indirectRowIndex = Number.isFinite(explicitIndirectRowIndex) && explicitIndirectRowIndex >= 0
+        ? Math.round(explicitIndirectRowIndex)
+        : surfaceIndex;
+      const indirectOffsetBytes = Number.isFinite(explicitIndirectOffsetBytes) && explicitIndirectOffsetBytes >= 0
+        ? Math.round(explicitIndirectOffsetBytes)
+        : indirectRowIndex * indirectStrideBytes;
       return {
         surfaceIndex,
         renderOrder,
         transparencyClassId,
         depthWriteFlag,
         renderLayer: surface?.renderLayer ?? null,
-        indirectOffsetBytes: surfaceIndex * indirectStrideBytes
+        indirectRowIndex,
+        indirectOffsetBytes
       };
     })
     .sort((a, b) => (

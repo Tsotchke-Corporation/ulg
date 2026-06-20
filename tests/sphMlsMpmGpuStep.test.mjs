@@ -217,7 +217,9 @@ function algorithmContactRowsFixture({
         pairKey,
         roles: ['drop', 'base'],
         materials: ['Na', 'h2o'],
+        materialIds: [2, 1],
         phases: ['solid', 'liquid'],
+        phaseIds: [1, 2],
         normalStiffnessPa,
         supportRadiusM: 0.25,
         forceMutationAuthority: 'not-authoritative-contact-policy-row'
@@ -3081,6 +3083,76 @@ test('SPH pressure interface stage compute task declares retained force-row outp
   assert.equal(result.pressureInterfaceStageTaskAuthority.authoritativeStateMutation, false);
   assert.equal(result.pressureInterfaceStageTaskAuthority.gridForceApplicationApproved, false);
   assert.equal(result.pressureInterfaceStageTaskAuthority.commitDeltaSuppressed, true);
+});
+
+test('SPH pressure interface stage carries algorithm contact pair response into force rows', async () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 120000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+  };
+  const result = await runSphPressureInterfaceStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    computeTaskId: 'ulg:test:pressure-interface-contact-stage',
+    gasPressureSummary,
+    materialInterfaceField,
+    algorithmMaterialContactRows: algorithmContactRowsFixture({ normalStiffnessPa: 4e9 }),
+    algorithmContactPairResponseScale: 1e-4,
+    algorithmContactMaxPressurePa: 500000,
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
+  assert.equal(result.algorithmContactPolicyRowCount, 1);
+  assert.equal(result.algorithmContactForceRowCount, 2);
+  assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
+  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [520000, 520000]);
+  assert.deepEqual([...result.forceRowValues.slice(8, 16)], [-520000, 0, 0, 520000, 0, 0, 520000, 1]);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
+  assert.equal(result.pressureInterfaceStageTaskEvidence.algorithmContactForceRowCount, 2);
 });
 
 test('SPH pressure interface stage requires admission before consuming local gas-cell pressure fields', async () => {

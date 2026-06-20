@@ -1731,6 +1731,95 @@ test('gas pressure interface force preview computes tractions without applying t
   assert.equal(blockedSolver.forceRowCount, 0);
 });
 
+test('gas pressure interface solver adds bounded algorithm contact pair response', () => {
+  const pressureSummary = {
+    schema: 'peercompute.ulg.sph-pressure-summary.v0',
+    status: 'resident-pressure-ready',
+    totalPressurePa: 100000,
+    boxDimsM: [2, 2, 2],
+    boxVolumeM3: 8
+  };
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normal: [1, 0, 0],
+        normalAreaVectorM2: [1, 0, 0],
+        status: 'interface-element-ready'
+      },
+      {
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normal: [-1, 0, 0],
+        normalAreaVectorM2: [-1, 0, 0],
+        status: 'interface-element-ready'
+      }
+    ]
+  };
+  const algorithmMaterialContactRows = {
+    schema: 'peercompute.ulg.algorithm-material-contact-rows.v0',
+    status: 'algorithm-derived-contact-rows-ready',
+    rowCount: 1,
+    rows: [
+      {
+        status: 'algorithm-derived-contact-row-ready',
+        pairKey: 'drop:Na|base:h2o',
+        roles: ['drop', 'base'],
+        materials: ['Na', 'h2o'],
+        materialIds: [2, 1],
+        phases: ['solid', 'liquid'],
+        phaseIds: [1, 2],
+        normalStiffnessPa: 4e9,
+        dampingViscosityPaS: 0.001,
+        supportRadiusM: 0.25,
+        forceMutationAuthority: 'not-authoritative-contact-policy-row'
+      }
+    ]
+  };
+  const pressureFeedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const solver = gasPressureInterfaceForceSolver({
+    pressureFeedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: pressureFeedback.pressureInterfaceCoupling,
+    algorithmMaterialContactRows,
+    algorithmContactPairResponseScale: 1e-4,
+    algorithmContactMaxPressurePa: 500000
+  });
+
+  assert.equal(solver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(solver.algorithmContactPairResponseStatus, 'algorithm-contact-pair-response-applied');
+  assert.equal(solver.algorithmContactPolicyRowCount, 1);
+  assert.equal(solver.algorithmContactForceRowCount, 2);
+  assert.deepEqual(solver.algorithmContactPairKeys, ['drop:Na|base:h2o']);
+  assert.equal(solver.forceResolution, 'uniform-interface-traction+algorithm-contact-pair-response');
+  assert.deepEqual(solver.gasInterfacePressureRangePa, [500000, 500000]);
+  assert.deepEqual(solver.forceRows.map((row) => row.algorithmContactPressurePa), [400000, 400000]);
+  assert.deepEqual(solver.forceRows[0].materialForceN, [-500000, 0, 0]);
+  assert.deepEqual(solver.forceRows[1].materialForceN, [500000, 0, 0]);
+  assert.deepEqual([...solver.forceRowValues.slice(8, 16)], [-500000, 0, 0, 500000, 0, 0, 500000, 1]);
+});
+
 test('gas pressure interface solver samples local gas-cell pressure gradients', () => {
   const pressureSummary = {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',

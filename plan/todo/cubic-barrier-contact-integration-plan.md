@@ -3,6 +3,18 @@
 Date: 2026-06-18 AKDT
 
 Status update, 2026-06-20 AKDT: compact
+`algorithmMaterialContactRows` now also feed material-interface force-row
+production. The pressure-interface WebGPU producer packs contact policy rows
+from the compact algorithm contact rows, binds them as a fifth storage buffer,
+and adds a bounded contact pressure term to each matching material-interface
+element before the existing force-row ABI reaches grid update. The CPU oracle
+uses the same matching and cap logic, and pressure stage evidence reports
+policy row count, applied contact force rows, pair keys, and max contact
+pressure. This is still a bounded first pair-response slice; the next step is
+to replace the fixed response scale with true cubic-barrier gap and
+relative-velocity terms derived from resident interface state.
+
+Status update, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` now feed the MLS-MPM wall-barrier grid-update
 path. When an explicit wall stiffness or bulk/shear override is absent,
 `resolveWallBarrierContactMaterialPolicy()` selects a representative contact

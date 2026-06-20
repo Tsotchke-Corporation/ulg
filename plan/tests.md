@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-20 Algorithm Contact Pair Force Rows
+
+`algorithmMaterialContactRows` now feed material-interface force-row production.
+The pressure-interface WebGPU producer packs bounded contact policy rows and
+binds them in WGSL; the CPU oracle and pressure-stage task path use the same
+matching/capping logic. Grid update continues to consume the unchanged
+16-float force-row ABI.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
+  `node --check ulg-gpu-abi/src/wgsl.js` passed.
+- Contact/pressure/stage coverage:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs` passed
+  `111/111`.
+- ABI/grid/buffer coverage:
+  `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
+  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs` passed
+  `47/47`.
+
 ## Current Focused Result - 2026-06-20 Algorithm Row Runtime Consumers
 
 Algorithm-derived rows now feed active runtime consumers. Surface extraction

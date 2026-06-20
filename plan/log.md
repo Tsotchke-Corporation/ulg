@@ -1,5 +1,42 @@
 # ULG Implementation Log
 
+## 2026-06-20 06:11 AKDT - Algorithm Contact Pair Force Rows
+
+Status:
+
+- Extended pressure-interface force-row production so compact
+  `algorithmMaterialContactRows` become bounded material-interface contact
+  policy rows.
+- Added contact policy packing and matching in
+  `sphPressureInterfaceGpuKernel.js`; the WGSL producer now binds those rows
+  as a fifth storage buffer and adds matching contact pressure to the existing
+  force-row ABI.
+- Updated the CPU pressure oracle and pressure-stage task runner to use the
+  same contact policy, including diagnostics for policy schema/status, row
+  count, applied force-row count, pair keys, and max contact pressure.
+- Threaded contact rows through the ComputeManager pressure-interface stage
+  path so same-frame pressure rows can carry the policy into grid update.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs
+  tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs` reported
+  `111/111`.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs
+  tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs`
+  reported `47/47`.
+
+Next:
+
+- Replace the bounded fixed response scale with a true cubic-barrier pair
+  response derived from resident interface gap and relative velocity.
+- Keep the force application in physics/grid update, not renderer overlays or
+  post-hoc position clamps.
+
 ## 2026-06-20 05:55 AKDT - Algorithm Row Runtime Consumers
 
 Status:

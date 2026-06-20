@@ -57,6 +57,10 @@ import {
   DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK
 } from './material/defaultMaterialPropertyBank.js';
 import { buildAlgorithmMaterialParticleInitializationRows } from './material/algorithmMaterialRows.js';
+import {
+  algorithmContactPairResponseForElement,
+  normalizeAlgorithmContactPairResponsePolicy
+} from './sph/sphPressureInterfaceGpuKernel.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -2055,7 +2059,10 @@ function cleanVector3(value, epsilon = 1e-12) {
 export function gasPressureInterfaceForcePreview({
   pressureFeedback = null,
   materialInterfaceField = null,
-  pressureInterfaceCoupling = null
+  pressureInterfaceCoupling = null,
+  algorithmMaterialContactRows = null,
+  algorithmContactPairResponseScale = undefined,
+  algorithmContactMaxPressurePa = undefined
 } = {}) {
   const coupling = pressureInterfaceCoupling || gasPressureInterfaceCouplingSummary({
     pressureFeedback,
@@ -2063,6 +2070,11 @@ export function gasPressureInterfaceForcePreview({
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const algorithmContactPolicy = normalizeAlgorithmContactPairResponsePolicy({
+    algorithmMaterialContactRows,
+    algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa
+  });
   const canPreview = coupling.status === 'pressure-interface-coupling-ready-for-solver'
     && Number.isFinite(fallbackPressurePa)
     && fallbackPressurePa >= 0
@@ -2074,6 +2086,9 @@ export function gasPressureInterfaceForcePreview({
   let previewedElementCount = 0;
   let minInterfacePressurePa = Number.POSITIVE_INFINITY;
   let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
+  let algorithmContactForceRowCount = 0;
+  let maxAlgorithmContactPressurePa = 0;
+  const algorithmContactPairKeys = new Set();
   if (canPreview) {
     for (const element of materialInterfaceField.elements) {
       if (element?.status !== 'interface-element-ready' || !(element.areaM2 > 0)) continue;
@@ -2083,7 +2098,14 @@ export function gasPressureInterfaceForcePreview({
         centroidM,
         fallbackPressurePa
       });
-      const pressurePa = pressureSample.pressurePa;
+      const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
+      const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
+      const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
+      if (algorithmContactPressurePa > 0) {
+        algorithmContactForceRowCount += 1;
+        maxAlgorithmContactPressurePa = Math.max(maxAlgorithmContactPressurePa, algorithmContactPressurePa);
+        if (contactResponse.row?.pairKey) algorithmContactPairKeys.add(contactResponse.row.pairKey);
+      }
       minInterfacePressurePa = Math.min(minInterfacePressurePa, pressurePa);
       maxInterfacePressurePa = Math.max(maxInterfacePressurePa, pressurePa);
       const normalArea = Array.isArray(element.normalAreaVectorM2)
@@ -2133,17 +2155,27 @@ export function gasPressureInterfaceForcePreview({
     localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
     sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
     previewedElementCount,
+    algorithmContactPairResponseSchema: algorithmContactPolicy.schema,
+    algorithmContactPairResponseStatus: algorithmContactForceRowCount > 0
+      ? 'algorithm-contact-pair-response-applied'
+      : algorithmContactPolicy.status,
+    algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+    algorithmContactPolicyRowsStatus: algorithmMaterialContactRows?.status ?? null,
+    algorithmContactPolicyRowCount: algorithmContactPolicy.rowCount,
+    algorithmContactForceRowCount,
+    algorithmContactPairKeys: [...algorithmContactPairKeys],
+    maxAlgorithmContactPressurePa,
     surfaceForceCount: forceBySurface.size,
     totalInterfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
     totalAbsInterfaceForceN,
     netForceN,
     surfaceForces: [...forceBySurface.values()],
     forceDerivation: pressureFieldResolution.localPressureGradientReady
-      ? 'local-gas-cell-pressure-gradient-times-interface-normal-area-vector'
-      : 'uniform-gas-pressure-times-interface-normal-area-vector',
+      ? `local-gas-cell-pressure-gradient-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
+      : `uniform-gas-pressure-times-interface-normal-area-vector${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
     forceResolution: pressureFieldResolution.localPressureGradientReady
-      ? 'local-gradient-interface-traction'
-      : 'uniform-interface-traction',
+      ? `local-gradient-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`
+      : `uniform-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`,
     localPressureGradientValidation: pressureFieldResolution.localPressureGradientReady,
     forceCouplingValidation: false,
     scientificValidation: false,
@@ -2156,7 +2188,10 @@ export function gasPressureInterfaceForcePreview({
 export function gasPressureInterfaceForceSolver({
   pressureFeedback = null,
   materialInterfaceField = null,
-  pressureInterfaceCoupling = null
+  pressureInterfaceCoupling = null,
+  algorithmMaterialContactRows = null,
+  algorithmContactPairResponseScale = undefined,
+  algorithmContactMaxPressurePa = undefined
 } = {}) {
   const coupling = pressureInterfaceCoupling || gasPressureInterfaceCouplingSummary({
     pressureFeedback,
@@ -2164,6 +2199,11 @@ export function gasPressureInterfaceForceSolver({
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const algorithmContactPolicy = normalizeAlgorithmContactPairResponsePolicy({
+    algorithmMaterialContactRows,
+    algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa
+  });
   const canSolve = coupling.status === 'pressure-interface-coupling-ready-for-solver'
     && Number.isFinite(fallbackPressurePa)
     && fallbackPressurePa >= 0
@@ -2178,6 +2218,9 @@ export function gasPressureInterfaceForceSolver({
   let maxPairResidualN = 0;
   let minInterfacePressurePa = Number.POSITIVE_INFINITY;
   let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
+  let algorithmContactForceRowCount = 0;
+  let maxAlgorithmContactPressurePa = 0;
+  const algorithmContactPairKeys = new Set();
   if (canSolve) {
     for (const element of materialInterfaceField.elements) {
       if (element?.status !== 'interface-element-ready' || !(element.areaM2 > 0)) continue;
@@ -2187,7 +2230,14 @@ export function gasPressureInterfaceForceSolver({
         centroidM,
         fallbackPressurePa
       });
-      const pressurePa = pressureSample.pressurePa;
+      const contactResponse = algorithmContactPairResponseForElement(element, algorithmContactPolicy);
+      const algorithmContactPressurePa = Math.max(0, Number(contactResponse.contactPressurePa) || 0);
+      const pressurePa = pressureSample.pressurePa + algorithmContactPressurePa;
+      if (algorithmContactPressurePa > 0) {
+        algorithmContactForceRowCount += 1;
+        maxAlgorithmContactPressurePa = Math.max(maxAlgorithmContactPressurePa, algorithmContactPressurePa);
+        if (contactResponse.row?.pairKey) algorithmContactPairKeys.add(contactResponse.row.pairKey);
+      }
       minInterfacePressurePa = Math.min(minInterfacePressurePa, pressurePa);
       maxInterfacePressurePa = Math.max(maxInterfacePressurePa, pressurePa);
       const normalArea = Array.isArray(element.normalAreaVectorM2)
@@ -2214,6 +2264,10 @@ export function gasPressureInterfaceForceSolver({
         centroidM: [...centroidM],
         areaM2: element.areaM2,
         pressurePa,
+        gasInterfacePressurePa: pressureSample.pressurePa,
+        algorithmContactPressurePa,
+        algorithmContactPairKey: contactResponse.row?.pairKey ?? null,
+        algorithmContactPairResponseStatus: contactResponse.status,
         pressureFieldMode: pressureFieldResolution.pressureFieldMode,
         pressureSource: pressureSample.pressureSource,
         pressureCellIndex: pressureSample.pressureCellIndex,
@@ -2286,6 +2340,16 @@ export function gasPressureInterfaceForceSolver({
     localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
     localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
     sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
+    algorithmContactPairResponseSchema: algorithmContactPolicy.schema,
+    algorithmContactPairResponseStatus: algorithmContactForceRowCount > 0
+      ? 'algorithm-contact-pair-response-applied'
+      : algorithmContactPolicy.status,
+    algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+    algorithmContactPolicyRowsStatus: algorithmMaterialContactRows?.status ?? null,
+    algorithmContactPolicyRowCount: algorithmContactPolicy.rowCount,
+    algorithmContactForceRowCount,
+    algorithmContactPairKeys: [...algorithmContactPairKeys],
+    maxAlgorithmContactPressurePa,
     forceRowCount: forceRows.length,
     forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
     forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length,
@@ -2304,11 +2368,11 @@ export function gasPressureInterfaceForceSolver({
       ? 'pairwise-equal-opposite-force-conservative'
       : (ready ? 'pairwise-force-residual-nonzero' : 'not-evaluated'),
     forceDerivation: pressureFieldResolution.localPressureGradientReady
-      ? 'local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction'
-      : 'uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
+      ? `local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`
+      : `uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction${algorithmContactForceRowCount > 0 ? '-plus-algorithm-contact-pair-response' : ''}`,
     forceResolution: pressureFieldResolution.localPressureGradientReady
-      ? 'local-gradient-interface-traction'
-      : 'uniform-interface-traction',
+      ? `local-gradient-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`
+      : `uniform-interface-traction${algorithmContactForceRowCount > 0 ? '+algorithm-contact-pair-response' : ''}`,
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
     localPressureGradientValidation: pressureFieldResolution.localPressureGradientReady,
     forceCouplingValidation: false,

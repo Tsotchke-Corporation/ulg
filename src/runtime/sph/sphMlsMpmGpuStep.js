@@ -6921,6 +6921,14 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     pressureInterfaceForcePreviewStatus: preview?.status || null,
     pressureInterfaceForceSolverSchema: solver?.schema || null,
     pressureInterfaceForceSolverStatus: solver?.status || null,
+    algorithmContactPairResponseSchema: solver?.algorithmContactPairResponseSchema || null,
+    algorithmContactPairResponseStatus: solver?.algorithmContactPairResponseStatus || null,
+    algorithmContactPolicyRowsSchema: solver?.algorithmContactPolicyRowsSchema || null,
+    algorithmContactPolicyRowsStatus: solver?.algorithmContactPolicyRowsStatus || null,
+    algorithmContactPolicyRowCount: finiteNumber(solver?.algorithmContactPolicyRowCount, 0),
+    algorithmContactForceRowCount: finiteNumber(solver?.algorithmContactForceRowCount, 0),
+    algorithmContactPairKeys: Array.isArray(solver?.algorithmContactPairKeys) ? [...solver.algorithmContactPairKeys] : [],
+    maxAlgorithmContactPressurePa: finiteNumber(solver?.maxAlgorithmContactPressurePa, 0),
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -7143,7 +7151,10 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
   const pressureInterfaceForcePreview = stageOptions.pressureInterfaceForcePreview || gasPressureInterfaceForcePreview({
     pressureFeedback,
     materialInterfaceField: stageOptions.materialInterfaceField || null,
-    pressureInterfaceCoupling
+    pressureInterfaceCoupling,
+    algorithmMaterialContactRows: stageOptions.algorithmMaterialContactRows || null,
+    algorithmContactPairResponseScale: stageOptions.algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa: stageOptions.algorithmContactMaxPressurePa
   });
   const pressureInterfaceGasCellFieldAdmission = stageOptions.pressureInterfaceGasCellFieldAdmission
     || stageOptions.gasPressureCellFieldAdmission
@@ -7183,6 +7194,9 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           pressureInterfaceCoupling,
           pressureInterfaceForcePreview,
           materialInterfaceField: stageOptions.materialInterfaceField || null,
+          algorithmMaterialContactRows: stageOptions.algorithmMaterialContactRows || null,
+          algorithmContactPairResponseScale: stageOptions.algorithmContactPairResponseScale,
+          algorithmContactMaxPressurePa: stageOptions.algorithmContactMaxPressurePa,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
         });
@@ -7210,7 +7224,10 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
   const pressureInterfaceForceSolver = pressureResult?.pressureInterfaceForceSolver || await pressureInterfaceForceSolverRunner({
     pressureFeedback,
     materialInterfaceField: stageOptions.materialInterfaceField || null,
-    pressureInterfaceCoupling
+    pressureInterfaceCoupling,
+    algorithmMaterialContactRows: stageOptions.algorithmMaterialContactRows || null,
+    algorithmContactPairResponseScale: stageOptions.algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa: stageOptions.algorithmContactMaxPressurePa
   });
   const forceRowValues = pressureInterfaceForceSolver?.forceRowValues instanceof Float32Array
     ? pressureInterfaceForceSolver.forceRowValues
@@ -7248,7 +7265,17 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     pressureInterfaceForceRowsRetained: pressureResult?.pressureInterfaceForceRowsRetained === true || forceRowValues.byteLength > 0,
     pressureInterfaceForceRowsBufferByteLength: pressureResult?.forceRowsBufferByteLength ?? pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
     pressureInterfaceForceRowsBufferRetained: Boolean(pressureResult?.forceRowsBuffer || pressureResult?.pressureInterfaceForceRowsBuffer)
-      || pressureInterfaceForceSolver?.forceRowsBufferRetained === true
+      || pressureInterfaceForceSolver?.forceRowsBufferRetained === true,
+    algorithmContactPairResponseSchema: pressureInterfaceForceSolver?.algorithmContactPairResponseSchema || null,
+    algorithmContactPairResponseStatus: pressureInterfaceForceSolver?.algorithmContactPairResponseStatus || null,
+    algorithmContactPolicyRowsSchema: pressureInterfaceForceSolver?.algorithmContactPolicyRowsSchema || null,
+    algorithmContactPolicyRowsStatus: pressureInterfaceForceSolver?.algorithmContactPolicyRowsStatus || null,
+    algorithmContactPolicyRowCount: finiteNumber(pressureInterfaceForceSolver?.algorithmContactPolicyRowCount, 0),
+    algorithmContactForceRowCount: finiteNumber(pressureInterfaceForceSolver?.algorithmContactForceRowCount, 0),
+    algorithmContactPairKeys: Array.isArray(pressureInterfaceForceSolver?.algorithmContactPairKeys)
+      ? [...pressureInterfaceForceSolver.algorithmContactPairKeys]
+      : [],
+    maxAlgorithmContactPressurePa: finiteNumber(pressureInterfaceForceSolver?.maxAlgorithmContactPressurePa, 0)
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);
@@ -9505,6 +9532,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         pressureSummary: stepOptions.pressureSummary || null,
         gasPressureSummary: pressureInputs.gasPressureSummary,
         materialInterfaceField: stepOptions.materialInterfaceField || null,
+        algorithmMaterialContactRows: stepOptions.algorithmMaterialContactRows
+          || mlsMpmParticleState?.algorithmMaterialContactRows
+          || null,
+        algorithmContactPairResponseScale: stepOptions.algorithmContactPairResponseScale,
+        algorithmContactMaxPressurePa: stepOptions.algorithmContactMaxPressurePa,
         pressureInterfaceCoupling: stepOptions.pressureInterfaceCoupling || null,
         pressureInterfaceForcePreview: stepOptions.pressureInterfaceForcePreview || null,
         pressureInterfaceGasCellFieldImport: pressureInputs.pressureInterfaceGasCellFieldImport,
@@ -9916,6 +9948,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 pressureSummary: stepOptions.pressureSummary || null,
                 gasPressureSummary: stepOptions.gasPressureSummary || null,
                 materialInterfaceField: stepOptions.materialInterfaceField || null,
+                algorithmMaterialContactRows: stepOptions.algorithmMaterialContactRows
+                  || mlsMpmParticleState?.algorithmMaterialContactRows
+                  || null,
+                algorithmContactPairResponseScale: stepOptions.algorithmContactPairResponseScale,
+                algorithmContactMaxPressurePa: stepOptions.algorithmContactMaxPressurePa,
                 pressureInterfaceCoupling: stepOptions.pressureInterfaceCoupling || null,
                 pressureInterfaceForcePreview: stepOptions.pressureInterfaceForcePreview || null,
                 pressureInterfaceGasCellFieldImport: stepOptions.pressureInterfaceGasCellFieldImport || null,

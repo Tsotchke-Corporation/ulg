@@ -4,19 +4,26 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphPressureInterfaceForceRowsWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const SPH_GAS_PRESSURE_CELL_FLOATS = 12;
+export const SPH_ALGORITHM_CONTACT_POLICY_FLOATS = 16;
+export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
+  'peercompute.ulg.algorithm-material-contact-pair-response.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA = 'peercompute.ulg.sph-local-pressure-gradient-field.v0';
+const ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA = 'peercompute.ulg.algorithm-material-contact-rows.v0';
 const UNIFORM_GAS_PRESSURE_FIELD_MODE = 'uniform-single-cell-sealed-gas';
 const UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION = 'lumped-sealed-box';
 const LOCAL_GAS_CELL_PRESSURE_FIELD_MODE = 'local-gas-cell-pressure-gradient';
 const LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION = 'structured-gas-cell-grid';
+const DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE = 1e-4;
+const DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA = 5e5;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -37,6 +44,179 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function clampPositive(value, fallback = 0) {
+  return Math.max(0, finiteNumber(value, fallback));
+}
+
+function stableMaterialId(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  if (typeof value !== 'string' || value.trim() === '') return 0;
+  return stableOpticalMaterialId(value);
+}
+
+function stablePhaseId(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  if (typeof value !== 'string' || value.trim() === '') return 0;
+  return gpuPhaseId(value);
+}
+
+function normalizedKey(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function materialPhaseIdsForContactRow(row = {}) {
+  const materialIds = Array.isArray(row.materialIds)
+    ? row.materialIds.map(stableMaterialId)
+    : (Array.isArray(row.materials) ? row.materials.map(stableMaterialId) : []);
+  const phaseIds = Array.isArray(row.phaseIds)
+    ? row.phaseIds.map(stablePhaseId)
+    : (Array.isArray(row.phases) ? row.phases.map(stablePhaseId) : []);
+  return {
+    materialIds: [finiteNumber(materialIds[0], 0), finiteNumber(materialIds[1], 0)],
+    phaseIds: [finiteNumber(phaseIds[0], 0), finiteNumber(phaseIds[1], 0)]
+  };
+}
+
+function contactPressureCap({ algorithmContactMaxPressurePa = null } = {}) {
+  const explicit = finiteNumber(algorithmContactMaxPressurePa, Number.NaN);
+  return explicit > 0 ? explicit : DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA;
+}
+
+export function normalizeAlgorithmContactPairResponsePolicy({
+  algorithmMaterialContactRows = null,
+  algorithmContactPairResponseScale = DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE,
+  algorithmContactMaxPressurePa = DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA
+} = {}) {
+  const rowSourceReady = algorithmMaterialContactRows?.schema === ULG_ALGORITHM_CONTACT_MATERIAL_ROWS_SCHEMA;
+  const scale = clampPositive(algorithmContactPairResponseScale, DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE);
+  const maxContactPressurePa = contactPressureCap({ algorithmContactMaxPressurePa });
+  const rows = rowSourceReady && Array.isArray(algorithmMaterialContactRows.rows)
+    ? algorithmMaterialContactRows.rows
+      .map((row, index) => {
+        const normalStiffnessPa = clampPositive(row?.normalStiffnessPa, 0);
+        const rowScale = clampPositive(row?.contactPairResponseScale, scale);
+        const rowMaxPressurePa = contactPressureCap({
+          algorithmContactMaxPressurePa: row?.maxContactPressurePa ?? maxContactPressurePa
+        });
+        const contactPressurePa = Math.min(normalStiffnessPa * rowScale, rowMaxPressurePa);
+        const { materialIds, phaseIds } = materialPhaseIdsForContactRow(row);
+        return {
+          index,
+          pairKey: row?.pairKey ?? null,
+          roles: Array.isArray(row?.roles) ? [...row.roles] : [],
+          materials: Array.isArray(row?.materials) ? [...row.materials] : [],
+          materialIds,
+          phases: Array.isArray(row?.phases) ? [...row.phases] : [],
+          phaseIds,
+          normalStiffnessPa,
+          dampingViscosityPaS: clampPositive(row?.dampingViscosityPaS, 0),
+          supportRadiusM: clampPositive(row?.supportRadiusM, 0),
+          responseScale: rowScale,
+          maxContactPressurePa: rowMaxPressurePa,
+          contactPressurePa,
+          status: normalStiffnessPa > 0 && rowScale > 0 && contactPressurePa > 0
+            ? 'algorithm-contact-pair-response-row-ready'
+            : 'algorithm-contact-pair-response-row-inactive',
+          sourceStatus: row?.status ?? null,
+          forceMutationAuthority: row?.forceMutationAuthority ?? null
+        };
+      })
+      .filter((row) => row.status === 'algorithm-contact-pair-response-row-ready')
+    : [];
+  return {
+    schema: ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA,
+    status: rows.length > 0
+      ? 'algorithm-contact-pair-response-policy-ready'
+      : (rowSourceReady
+          ? 'algorithm-contact-pair-response-policy-empty'
+          : 'algorithm-contact-pair-response-policy-unavailable'),
+    sourceRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+    sourceRowsStatus: algorithmMaterialContactRows?.status ?? null,
+    rowCount: rows.length,
+    rows,
+    responseScale: scale,
+    maxContactPressurePa,
+    forceMutationAuthority: 'non-authoritative-force-row-policy-consumed-by-pressure-interface-stage',
+    strictSourceOfTruth: false
+  };
+}
+
+export function algorithmContactPairResponseForElement(element = {}, policy = null) {
+  if (policy?.schema !== ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA || !Array.isArray(policy.rows)) {
+    return {
+      status: 'algorithm-contact-pair-response-policy-unavailable',
+      contactPressurePa: 0,
+      row: null
+    };
+  }
+  const elementMaterialId = stableMaterialId(element.materialId ?? element.material);
+  const elementPhaseId = stablePhaseId(element.phaseId ?? element.phase);
+  const elementMaterial = normalizedKey(element.material);
+  const elementPhase = normalizedKey(element.phase);
+  for (const row of policy.rows) {
+    const materialIdMatch = elementMaterialId > 0 && row.materialIds.some((id) => Math.abs(id - elementMaterialId) < 0.5);
+    const materialNameMatch = elementMaterial && row.materials.map(normalizedKey).includes(elementMaterial);
+    const phaseIds = row.phaseIds.filter((id) => id > 0);
+    const phaseNames = row.phases.map(normalizedKey).filter(Boolean);
+    const phaseMatch = phaseIds.length === 0 && phaseNames.length === 0
+      ? true
+      : ((elementPhaseId > 0 && phaseIds.some((id) => Math.abs(id - elementPhaseId) < 0.5))
+          || (elementPhase && phaseNames.includes(elementPhase)));
+    if ((materialIdMatch || materialNameMatch) && phaseMatch) {
+      return {
+        status: 'algorithm-contact-pair-response-applied',
+        contactPressurePa: row.contactPressurePa,
+        row
+      };
+    }
+  }
+  return {
+    status: 'algorithm-contact-pair-response-no-matching-row',
+    contactPressurePa: 0,
+    row: null
+  };
+}
+
+export function packAlgorithmContactPolicyRows(policy = null) {
+  const rows = policy?.schema === ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA && Array.isArray(policy.rows)
+    ? policy.rows
+    : [];
+  const values = new Float32Array(rows.length * SPH_ALGORITHM_CONTACT_POLICY_FLOATS);
+  for (const [index, row] of rows.entries()) {
+    const offset = index * SPH_ALGORITHM_CONTACT_POLICY_FLOATS;
+    values.set([
+      finiteNumber(row.materialIds?.[0], 0),
+      finiteNumber(row.materialIds?.[1], 0),
+      finiteNumber(row.phaseIds?.[0], 0),
+      finiteNumber(row.phaseIds?.[1], 0),
+      finiteNumber(row.normalStiffnessPa, 0),
+      finiteNumber(row.dampingViscosityPaS, 0),
+      finiteNumber(row.supportRadiusM, 0),
+      finiteNumber(row.responseScale, 0),
+      finiteNumber(row.maxContactPressurePa, 0),
+      1,
+      finiteNumber(row.index, index),
+      finiteNumber(row.contactPressurePa, 0),
+      0,
+      0,
+      0,
+      0
+    ], offset);
+  }
+  return {
+    schema: ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA,
+    status: rows.length > 0
+      ? 'algorithm-contact-policy-rows-packed'
+      : 'algorithm-contact-policy-rows-empty',
+    rows: values,
+    rowCount: rows.length,
+    rowStrideFloats: SPH_ALGORITHM_CONTACT_POLICY_FLOATS,
+    rowByteLength: values.byteLength
+  };
 }
 
 function vectorMagnitude3(value = [0, 0, 0]) {
@@ -254,7 +434,11 @@ export function createPressureInterfaceParamsArray({
   elementCount = 0,
   pressurePa = 0,
   gasPressureCellCount = 0,
-  pressureModelId = 0
+  pressureModelId = 0,
+  contactPolicyRowCount = 0,
+  algorithmContactPairResponseScale = DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE,
+  algorithmContactMaxPressurePa = DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA,
+  algorithmContactPairResponseEnabled = false
 } = {}) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
@@ -262,6 +446,10 @@ export function createPressureInterfaceParamsArray({
   view.setFloat32(4, finiteNumber(pressurePa, 0), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(gasPressureCellCount, 0))), true);
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(pressureModelId, 0))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(contactPolicyRowCount, 0))), true);
+  view.setFloat32(20, clampPositive(algorithmContactPairResponseScale, DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE), true);
+  view.setFloat32(24, contactPressureCap({ algorithmContactMaxPressurePa }), true);
+  view.setFloat32(28, algorithmContactPairResponseEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -276,7 +464,7 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellField = null) {
+function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellField = null, contactPolicy = null) {
   const pressureCells = normalizedGasPressureCells(gasCellField);
   const forceRows = [];
   const forceBySurface = new Map();
@@ -286,12 +474,25 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
   let maxPairResidualN = 0;
   let minInterfacePressurePa = Number.POSITIVE_INFINITY;
   let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
+  let minAlgorithmContactPressurePa = Number.POSITIVE_INFINITY;
+  let maxAlgorithmContactPressurePa = 0;
+  let algorithmContactForceRowCount = 0;
+  const algorithmContactPairKeys = new Set();
   for (const element of elements) {
     const interfacePressurePa = pressureForElementFromCells(element, pressureCells, pressurePa);
-    minInterfacePressurePa = Math.min(minInterfacePressurePa, interfacePressurePa);
-    maxInterfacePressurePa = Math.max(maxInterfacePressurePa, interfacePressurePa);
+    const contactResponse = algorithmContactPairResponseForElement(element, contactPolicy);
+    const algorithmContactPressurePa = clampPositive(contactResponse.contactPressurePa, 0);
+    const totalPressurePa = interfacePressurePa + algorithmContactPressurePa;
+    minInterfacePressurePa = Math.min(minInterfacePressurePa, totalPressurePa);
+    maxInterfacePressurePa = Math.max(maxInterfacePressurePa, totalPressurePa);
+    if (algorithmContactPressurePa > 0) {
+      algorithmContactForceRowCount += 1;
+      minAlgorithmContactPressurePa = Math.min(minAlgorithmContactPressurePa, algorithmContactPressurePa);
+      maxAlgorithmContactPressurePa = Math.max(maxAlgorithmContactPressurePa, algorithmContactPressurePa);
+      if (contactResponse.row?.pairKey) algorithmContactPairKeys.add(contactResponse.row.pairKey);
+    }
     const normalArea = normalAreaVectorForElement(element);
-    const materialForceN = cleanVector3(normalArea.map((component) => -interfacePressurePa * component));
+    const materialForceN = cleanVector3(normalArea.map((component) => -totalPressurePa * component));
     const gasReactionForceN = cleanVector3(materialForceN.map((component) => -component));
     const pairResidualN = cleanVector3(addVector3(materialForceN, gasReactionForceN));
     maxPairResidualN = Math.max(maxPairResidualN, vectorMagnitude3(pairResidualN));
@@ -309,7 +510,11 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
       axisId: finiteNumber(element.axisId, 0),
       centroidM: Array.isArray(element.centroidM) ? [...element.centroidM] : [0, 0, 0],
       areaM2: finiteNumber(element.areaM2, 0),
-      pressurePa: interfacePressurePa,
+      pressurePa: totalPressurePa,
+      gasInterfacePressurePa: interfacePressurePa,
+      algorithmContactPressurePa,
+      algorithmContactPairKey: contactResponse.row?.pairKey ?? null,
+      algorithmContactPairResponseStatus: contactResponse.status,
       materialForceN,
       gasReactionForceN,
       pairResidualN,
@@ -337,6 +542,7 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
   netGasReactionForceN = cleanVector3(netGasReactionForceN);
   const conservationResidualN = cleanVector3(addVector3(netMaterialForceN, netGasReactionForceN));
   const conservationResidualMagnitudeN = vectorMagnitude3(conservationResidualN);
+  const algorithmContactPairResponseApplied = algorithmContactForceRowCount > 0;
   return {
     forceRows,
     surfaceForceCount: forceBySurface.size,
@@ -350,7 +556,19 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellFi
     maxPairResidualN,
     gasInterfacePressureRangePa: forceRows.length > 0
       ? [minInterfacePressurePa, maxInterfacePressurePa]
-      : null
+      : null,
+    algorithmContactPairResponseSchema: contactPolicy?.schema ?? ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA,
+    algorithmContactPairResponseStatus: algorithmContactPairResponseApplied
+      ? 'algorithm-contact-pair-response-applied'
+      : (contactPolicy?.status ?? 'algorithm-contact-pair-response-policy-unavailable'),
+    algorithmContactPairResponseApplied,
+    algorithmContactPolicyRowCount: contactPolicy?.rowCount ?? 0,
+    algorithmContactForceRowCount,
+    algorithmContactPairKeys: [...algorithmContactPairKeys],
+    algorithmContactPressureRangePa: algorithmContactPairResponseApplied
+      ? [minAlgorithmContactPressurePa, maxAlgorithmContactPressurePa]
+      : null,
+    maxAlgorithmContactPressurePa
   };
 }
 
@@ -360,6 +578,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   pressureInterfaceCoupling = null,
   pressureInterfaceForcePreview = null,
   materialInterfaceField = null,
+  algorithmMaterialContactRows = null,
+  algorithmContactPairResponseScale = DEFAULT_ALGORITHM_CONTACT_PAIR_RESPONSE_SCALE,
+  algorithmContactMaxPressurePa = DEFAULT_ALGORITHM_CONTACT_PAIR_MAX_PRESSURE_PA,
   retainForceRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -373,6 +594,12 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
   const packedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
+  const contactPolicy = normalizeAlgorithmContactPairResponsePolicy({
+    algorithmMaterialContactRows,
+    algorithmContactPairResponseScale,
+    algorithmContactMaxPressurePa
+  });
+  const packedContactPolicy = packAlgorithmContactPolicyRows(contactPolicy);
   const pressureModelId = packedGasPressureCells.rowCount > 0 && pressureFieldResolution.localPressureGradientReady
     ? 1
     : 0;
@@ -411,6 +638,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         gasPressureCellRowCount: packedGasPressureCells.rowCount,
         gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
         pressureModelId,
+        algorithmContactPairResponseSchema: contactPolicy.schema,
+        algorithmContactPairResponseStatus: contactPolicy.status,
+        algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+        algorithmContactPolicyRowCount: contactPolicy.rowCount,
+        algorithmContactForceRowCount: 0,
+        algorithmContactPressureRangePa: null,
+        algorithmContactPairKeys: [],
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -427,6 +661,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   const outputByteLength = packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const inputBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
   const gasPressureCellsBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
+  const contactPolicyBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-contact-policy-rows', packedContactPolicy.rows);
   const forceRowsBuffer = device.createBuffer({
     label: 'ulg-sph-pressure-interface-force-rows-out',
     size: Math.max(4, outputByteLength),
@@ -454,10 +689,14 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       elementCount: packed.rowCount,
       pressurePa,
       gasPressureCellCount: packedGasPressureCells.rowCount,
-      pressureModelId
+      pressureModelId,
+      contactPolicyRowCount: packedContactPolicy.rowCount,
+      algorithmContactPairResponseScale: contactPolicy.responseScale,
+      algorithmContactMaxPressurePa: contactPolicy.maxContactPressurePa,
+      algorithmContactPairResponseEnabled: packedContactPolicy.rowCount > 0
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-pressure-interface-force-rows.v1',
+      cacheKey: 'ulg-sph-pressure-interface-force-rows.v2',
       label: 'ulg-sph-pressure-interface-force-rows',
       code: sphPressureInterfaceForceRowsWgsl,
       entryPoint: 'main',
@@ -465,7 +704,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
         computeBufferBinding(2, 'uniform'),
-        computeBufferBinding(3, 'read-only-storage')
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -474,7 +714,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         { binding: 0, resource: { buffer: inputBuffer } },
         { binding: 1, resource: { buffer: forceRowsBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
-        { binding: 3, resource: { buffer: gasPressureCellsBuffer } }
+        { binding: 3, resource: { buffer: gasPressureCellsBuffer } },
+        { binding: 4, resource: { buffer: contactPolicyBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -506,7 +747,13 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         : null;
     }
 
-    const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null);
+    const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null, contactPolicy);
+    const forceDerivationSuffix = summary.algorithmContactPairResponseApplied
+      ? '-plus-algorithm-contact-pair-response'
+      : '';
+    const forceResolutionSuffix = summary.algorithmContactPairResponseApplied
+      ? '+algorithm-contact-pair-response'
+      : '';
     const solver = {
       schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
       status: 'pressure-interface-force-solver-ready',
@@ -528,6 +775,17 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
       pressureModelId,
+      algorithmContactPairResponseSchema: summary.algorithmContactPairResponseSchema,
+      algorithmContactPairResponseStatus: summary.algorithmContactPairResponseStatus,
+      algorithmContactPolicyRowsSchema: algorithmMaterialContactRows?.schema ?? null,
+      algorithmContactPolicyRowsStatus: algorithmMaterialContactRows?.status ?? null,
+      algorithmContactPolicyRowCount: summary.algorithmContactPolicyRowCount,
+      algorithmContactForceRowCount: summary.algorithmContactForceRowCount,
+      algorithmContactPairKeys: summary.algorithmContactPairKeys,
+      algorithmContactPressureRangePa: summary.algorithmContactPressureRangePa,
+      maxAlgorithmContactPressurePa: summary.maxAlgorithmContactPressurePa,
+      algorithmContactPairResponseScale: contactPolicy.responseScale,
+      algorithmContactMaxPressurePa: contactPolicy.maxContactPressurePa,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -548,9 +806,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         ? 'pairwise-equal-opposite-force-conservative'
         : 'pairwise-force-residual-nonzero',
       forceDerivation: pressureModelId === 1
-        ? 'webgpu-local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction'
-        : 'webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
-      forceResolution: pressureModelId === 1 ? 'local-gradient-interface-traction' : 'uniform-interface-traction',
+        ? `webgpu-local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`
+        : `webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction${forceDerivationSuffix}`,
+      forceResolution: pressureModelId === 1
+        ? `local-gradient-interface-traction${forceResolutionSuffix}`
+        : `uniform-interface-traction${forceResolutionSuffix}`,
       forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
       localPressureGradientValidation: pressureModelId === 1,
       forceCouplingValidation: false,
@@ -577,6 +837,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
       gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
+      algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
+      algorithmContactPolicyRowByteLength: packedContactPolicy.rowByteLength,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
@@ -597,6 +859,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     const cleanup = () => {
       inputBuffer.destroy?.();
       if (!returnedRetainedGasPressureCellsBuffer) gasPressureCellsBuffer.destroy?.();
+      contactPolicyBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
       if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();

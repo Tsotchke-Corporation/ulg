@@ -5068,16 +5068,17 @@ struct PressureInterfaceParams {
   pressure_pa: f32,
   gas_pressure_cell_count: u32,
   pressure_model_id: u32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
-  pad3: f32,
+  contact_policy_row_count: u32,
+  contact_response_scale: f32,
+  contact_max_pressure_pa: f32,
+  contact_pair_response_enabled: f32,
 };
 
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> pressure_force_rows: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: PressureInterfaceParams;
 @group(0) @binding(3) var<storage, read> gas_pressure_cells: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> contact_policy_rows: array<vec4<f32>>;
 
 fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   if (params.pressure_model_id != 1u || params.gas_pressure_cell_count == 0u) {
@@ -5101,6 +5102,29 @@ fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
   return best_pressure;
 }
 
+fn contact_pressure_for_element(material_id: f32, phase_id: f32) -> f32 {
+  if (params.contact_pair_response_enabled <= 0.0 || params.contact_policy_row_count == 0u) {
+    return 0.0;
+  }
+  var selected_pressure = 0.0;
+  for (var row_index = 0u; row_index < params.contact_policy_row_count; row_index = row_index + 1u) {
+    let row0 = contact_policy_rows[row_index * 4u];
+    let row1 = contact_policy_rows[row_index * 4u + 1u];
+    let row2 = contact_policy_rows[row_index * 4u + 2u];
+    let status = row2.y;
+    let material_match = abs(material_id - row0.x) < 0.5 || abs(material_id - row0.y) < 0.5;
+    let phase_row_a = row0.z;
+    let phase_row_b = row0.w;
+    let phase_match = (phase_row_a <= 0.5 && phase_row_b <= 0.5)
+      || abs(phase_id - phase_row_a) < 0.5
+      || abs(phase_id - phase_row_b) < 0.5;
+    if (status > 0.0 && material_match && phase_match) {
+      selected_pressure = max(selected_pressure, min(max(row2.w, 0.0), params.contact_max_pressure_pa));
+    }
+  }
+  return selected_pressure;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let element_index = global_id.x;
@@ -5115,7 +5139,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let centroid = row1.xyz;
   let area = row1.w;
   let status = row3.w;
-  let pressure_pa = pressure_for_centroid(centroid);
+  let gas_pressure_pa = pressure_for_centroid(centroid);
+  let contact_pressure_pa = contact_pressure_for_element(row0.y, row0.z);
+  let pressure_pa = gas_pressure_pa + contact_pressure_pa;
   var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
   if (dot(normal_area, normal_area) <= 1.0e-24) {
     normal_area = row2.xyz * area;

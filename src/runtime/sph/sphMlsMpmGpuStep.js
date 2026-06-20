@@ -4102,6 +4102,9 @@ function compactResidentStepSummaryForStateDelta(summary = null) {
     normalHotLoopReadbackFree: summary.normalHotLoopReadbackFree === true,
     gpuAuthoritativeState: summary.gpuAuthoritativeState === true,
     renderStateReadbackAvailable: summary.renderStateReadbackAvailable === true,
+    compactSummaryAuthority: summary.compactSummaryAuthority ?? null,
+    compactSummaryAdmissionStatus: summary.compactSummaryAdmissionStatus ?? null,
+    compactSummaryAuthoritativeMutation: summary.compactSummaryAuthoritativeMutation === true,
     diagnostics: summary.diagnostics && typeof summary.diagnostics === 'object'
       ? {
           particleCount: summary.diagnostics.particleCount ?? null,
@@ -12979,6 +12982,11 @@ function compactResidentAuthorityFamilyOwners(familyOwners = {}) {
 }
 
 function summarizeResidentStepForSequence(step, index) {
+  const compactSummaryPresent = Boolean(
+    step.compactGpuSummary
+    || step.diagnostics?.compactGpuSummaryStatus
+    || step.diagnostics?.compactGpuSummaryAvailable
+  );
   return {
     index,
     backend: step.backend,
@@ -13027,6 +13035,9 @@ function summarizeResidentStepForSequence(step, index) {
     reactionStepRetained: Boolean(step.reactionStep?.retainedOutputParticleBuffers || step.reactionStep?.result?.retainedOutputParticleBuffers),
     mechanicsRefreshStepRetained: Boolean(step.mechanicsRefreshStep?.retainedOutputParticleBuffers || step.mechanicsRefreshStep?.result?.retainedOutputParticleBuffers),
     thermalMechanicsRefreshStatus: step.thermalMechanicsRefreshStatus ?? null,
+    compactSummaryAuthority: compactSummaryPresent ? 'diagnostic-only-unless-state-manager-admitted' : null,
+    compactSummaryAdmissionStatus: compactSummaryPresent ? 'not-admitted-diagnostic-only' : null,
+    compactSummaryAuthoritativeMutation: false,
     residentProductMassStatus: step.residentProductMassStatus ?? null,
     residentProductMassBufferRetained: step.residentProductMassBufferRetained ?? false,
     residentProductMassBufferByteLength: step.residentProductMassBufferByteLength ?? 0,

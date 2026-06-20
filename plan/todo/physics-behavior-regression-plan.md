@@ -1063,8 +1063,18 @@ state that moves on screen is the state the laws actually mutated.
      the thermal state buffer, thermal thermo buffer, and refreshed mechanics
      buffer together with `phase-transition-thermal-thermo-mechanics-advanced`
      diagnostics;
-   - stale CPU mirrors cannot drive authoritative mutation;
-   - compact summaries report diagnostics only unless admitted.
+   - stale CPU mirrors cannot drive authoritative mutation: covered by the
+     resident CPU-mirror guard regressions, which reject stale SPH/MLS-MPM CPU
+     mirrors unless the run is explicit no-full WebGPU with retained uploaded
+     buffers, and assert P2G consumes those retained GPU buffers on the accepted
+     path;
+   - compact summaries report diagnostics only unless admitted: covered by the
+     resident commit-delta regression, which now labels compact summaries as
+     `diagnostic-only-unless-state-manager-admitted`, excludes
+     `resident-compact-summary` from output families, and keeps
+     `compactSummaryAuthoritativeMutation=false`; pressure/gas summary-snapshot
+     imports remain blocked until their explicit admission gates publish
+     retained-buffer evidence.
 7. Fix the highest-impact broken path first, even if the implementation stays
    local temporarily.
 8. Only after behavior is coherent, route the same pass sequence through the

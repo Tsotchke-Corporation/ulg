@@ -3856,6 +3856,7 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
   assert.equal(result.commitDelta.payload.residentSequenceLaneContract.schema, 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0');
   assert.equal(result.commitDelta.payload.residentSequenceLaneContract.sequenceMode, 'per-step-resident-pass-dag');
   assert.deepEqual(result.commitDelta.payload.outputFamilies, task.expectedOutputFamilies);
+  assert.equal(result.commitDelta.payload.outputFamilies.includes('resident-compact-summary'), false);
   assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
   assert.deepEqual(result.commitDelta.payload.retainedBufferRefs, [
     'p2g-grid-buffer',
@@ -3865,7 +3866,12 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
     'mls-mpm-mechanics-buffer'
   ]);
   assert.equal(result.commitDelta.payload.finalStep.normalHotLoopReadbackFree, true);
+  assert.equal(result.commitDelta.payload.finalStep.compactSummaryAuthority, 'diagnostic-only-unless-state-manager-admitted');
+  assert.equal(result.commitDelta.payload.finalStep.compactSummaryAdmissionStatus, 'not-admitted-diagnostic-only');
+  assert.equal(result.commitDelta.payload.finalStep.compactSummaryAuthoritativeMutation, false);
   assert.equal(result.commitDelta.payload.stepSummaries.length, 2);
+  assert.equal(result.commitDelta.payload.stepSummaries[1].compactSummaryAuthority, 'diagnostic-only-unless-state-manager-admitted');
+  assert.equal(result.commitDelta.payload.stepSummaries[1].compactSummaryAuthoritativeMutation, false);
   assert.equal(result.commitDelta.payload.finalStep.diagnostics.gpuResidentLaneFenceSatisfied, false);
   assert.equal(result.gpuResidentLaneStatus, undefined);
   assert.equal(ignoredLaneManager.calls.acquire.length, 0);

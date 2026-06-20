@@ -318,6 +318,14 @@ structure key. It is still a warm-input seed; the open work is consuming these
 crystal/packing hints through algorithm-derived initialization, contact,
 MLS-MPM, and marching-cubes row schemas.
 
+Runtime integration note, 2026-06-20 AKDT: `buildSphPhaseDemoState()` now loads
+the default element crystal bank, attaches only state-valid solid crystal warm
+inputs, and packs crystal packing fraction, coordination number, and atoms per
+conventional cell into the material-bank particle-size GPU row. The render-row
+WGSL status check was corrected to read the same status slot the JavaScript
+packer writes. The remaining work is broader algorithm-row derivation, not
+additional renderer constants.
+
 ### Phase 3 - Common Compound Bank
 
 Create `data/material-properties/common-compounds.json` for the top 1000 common

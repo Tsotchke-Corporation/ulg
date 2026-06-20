@@ -46,11 +46,16 @@ import {
 import {
   buildMaterialPropertyBankGpuWarmInputTable,
   buildMaterialPropertyBankParticleSizePackingTable,
+  materialPropertyCrystalStructuresForSymbol,
   materialPropertyBankRecordBySymbol,
   materialPropertyBankWarmInput,
-  normalizeMaterialPropertyBank
+  normalizeMaterialPropertyBank,
+  normalizeMaterialPropertyCrystalStructureBank
 } from './material/materialPropertyBank.js';
-import { DEFAULT_MATERIAL_PROPERTY_BANK } from './material/defaultMaterialPropertyBank.js';
+import {
+  DEFAULT_MATERIAL_PROPERTY_BANK,
+  DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK
+} from './material/defaultMaterialPropertyBank.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -106,6 +111,10 @@ function bucketFinite(value, quantum) {
 function positiveOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
 function lawGroupEnabled(value, fallback = true) {
@@ -937,6 +946,103 @@ function resolveInitialParticleSpacingMaterialBankWarmInputs({
   };
 }
 
+function stateInCrystalStructureValidity(record, { temperatureK, pressurePa }) {
+  const inRange = (range, value) => {
+    if (!Array.isArray(range) || range.length !== 2) return false;
+    const min = Number(range[0]);
+    const max = Number(range[1]);
+    const candidate = Number(value);
+    return Number.isFinite(min)
+      && Number.isFinite(max)
+      && Number.isFinite(candidate)
+      && candidate >= min
+      && candidate <= max;
+  };
+  return inRange(record?.validity?.temperatureRangeK, temperatureK)
+    && inRange(record?.validity?.pressureRangePa, pressurePa);
+}
+
+function resolveInitialParticleSpacingMaterialCrystalStructureWarmInputs({
+  materialPropertyCrystalStructureBank,
+  dropMaterial,
+  baseMaterial,
+  dropTemperatureK,
+  baseTemperatureK,
+  pressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa
+} = {}) {
+  if (!materialPropertyCrystalStructureBank) return null;
+  const bank = normalizeMaterialPropertyCrystalStructureBank(materialPropertyCrystalStructureBank);
+  const missingRoles = [];
+  const warmInputForRole = (role, material, temperatureK) => {
+    const records = materialPropertyCrystalStructuresForSymbol(bank, material, { phase: 'solid' });
+    if (records.length === 0) {
+      missingRoles.push({ role, material, reason: 'material-crystal-structure-row-not-found' });
+      return null;
+    }
+    const record = records.find((candidate) => stateInCrystalStructureValidity(candidate, {
+      temperatureK,
+      pressurePa
+    }));
+    if (!record) {
+      missingRoles.push({
+        role,
+        material,
+        reason: 'material-crystal-structure-row-not-valid-for-state',
+        temperatureK,
+        pressurePa,
+        structureKeys: records.map((candidate) => candidate.structureKey)
+      });
+      return null;
+    }
+    return {
+      schema: 'peercompute.ulg.sph-initial-particle-spacing-material-crystal-structure-warm-input.v0',
+      status: 'material-crystal-structure-warm-input-ready',
+      strictSourceOfTruth: false,
+      role,
+      requestedMaterial: material,
+      material: record.symbol,
+      phase: record.phase,
+      structureKey: record.structureKey,
+      structureName: record.structureName,
+      strukturbericht: record.strukturbericht ?? null,
+      crystalSystem: record.crystalSystem,
+      spaceGroup: cloneJson(record.spaceGroup),
+      latticeConstants: cloneJson(record.latticeConstants),
+      unitCell: cloneJson(record.unitCell),
+      validity: cloneJson(record.validity),
+      fallbackPolicy: cloneJson(record.fallbackPolicy),
+      temperatureK,
+      pressurePa,
+      bankFamily: bank.bankFamily,
+      bankSchemaVersion: bank.schemaVersion,
+      generatorFingerprint: bank.generatorFingerprint,
+      provenance: {
+        source: 'precomputed-json-bank-crystal-structure',
+        generatorFingerprint: bank.generatorFingerprint,
+        entries: cloneJson(record.provenance)
+      }
+    };
+  };
+  const roles = {
+    drop: warmInputForRole('drop', dropMaterial, dropTemperatureK),
+    base: warmInputForRole('base', baseMaterial, baseTemperatureK)
+  };
+  const coveredRoleCount = Object.values(roles).filter(Boolean).length;
+  return {
+    schema: 'peercompute.ulg.sph-initial-particle-spacing-material-crystal-structure-warm-inputs.v0',
+    status: coveredRoleCount > 0
+      ? 'material-crystal-structure-warm-inputs-attached'
+      : 'material-crystal-structure-warm-inputs-no-valid-rows',
+    strictSourceOfTruth: false,
+    bankFamily: bank.bankFamily,
+    bankSchemaVersion: bank.schemaVersion,
+    generatorFingerprint: bank.generatorFingerprint,
+    coveredRoleCount,
+    missingRoles,
+    roles
+  };
+}
+
 /**
  * Build the demo's initial SPH state: a `baseMaterial` block resting on the box floor (cold) and a
  * `dropMaterial` block above it (hot, so it starts molten/liquid) that falls onto it. The two
@@ -958,6 +1064,7 @@ export function buildSphPhaseDemoState({
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
+  materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
@@ -1045,6 +1152,20 @@ export function buildSphPhaseDemoState({
     dropTemperatureK: dropTempK,
     baseTemperatureK: baseTempK
   });
+  const materialCrystalStructureWarmInputs = resolveInitialParticleSpacingMaterialCrystalStructureWarmInputs({
+    materialPropertyCrystalStructureBank,
+    dropMaterial,
+    baseMaterial,
+    dropTemperatureK: dropTempK,
+    baseTemperatureK: baseTempK
+  });
+  if (materialCrystalStructureWarmInputs) {
+    initialParticleSpacing.materialPropertyCrystalStructureWarmInputs = materialCrystalStructureWarmInputs;
+    initialParticleSpacing.particleSizePolicy.materialCrystalStructureWarmInputStatus =
+      materialCrystalStructureWarmInputs.status;
+    initialParticleSpacing.particleSizePolicy.materialCrystalStructureCoveredRoleCount =
+      materialCrystalStructureWarmInputs.coveredRoleCount;
+  }
   if (materialBankWarmInputs) {
     initialParticleSpacing.materialPropertyBankWarmInputs = materialBankWarmInputs;
     initialParticleSpacing.materialPropertyBankGpuWarmInputTable =

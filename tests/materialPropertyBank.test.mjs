@@ -313,7 +313,11 @@ test('material property bank packs accepted warm inputs into GPU-ready rows', as
   assert.equal(particleSize.rows[1], 26);
   assert.equal(particleSize.rows[11], 0);
   assert.equal(particleSize.rows[12], 1);
+  assert.equal(particleSize.rows[13], 0);
+  assert.equal(particleSize.rows[14], 0);
+  assert.equal(particleSize.rows[15], 0);
   assert.equal(particleSize.metadata[0].spacingM, 0.1);
+  assert.equal(particleSize.metadata[0].crystalStructureKey, null);
 });
 
 test('MaterialRegistry exposes bank warm inputs without overriding strict closure samples', async () => {

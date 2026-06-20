@@ -148,6 +148,21 @@ test('demo initial particle spacing carries default material bank warm inputs', 
   assert.deepEqual(warmInputs.missingRoles, [
     { role: 'base', material: 'h2o', reason: 'material-bank-row-not-found' }
   ]);
+  const crystalWarmInputs = demo.initialParticleSpacing.materialPropertyCrystalStructureWarmInputs;
+  assert.equal(
+    crystalWarmInputs.schema,
+    'peercompute.ulg.sph-initial-particle-spacing-material-crystal-structure-warm-inputs.v0'
+  );
+  assert.equal(crystalWarmInputs.status, 'material-crystal-structure-warm-inputs-no-valid-rows');
+  assert.equal(crystalWarmInputs.coveredRoleCount, 0);
+  assert.equal(crystalWarmInputs.roles.drop, null);
+  assert.equal(crystalWarmInputs.roles.base, null);
+  assert.equal(crystalWarmInputs.missingRoles[0].role, 'drop');
+  assert.equal(crystalWarmInputs.missingRoles[0].material, 'fe');
+  assert.equal(crystalWarmInputs.missingRoles[0].reason, 'material-crystal-structure-row-not-valid-for-state');
+  assert.deepEqual(crystalWarmInputs.missingRoles[0].structureKeys, ['fe-bcc-alpha']);
+  assert.equal(crystalWarmInputs.missingRoles[1].role, 'base');
+  assert.equal(crystalWarmInputs.missingRoles[1].reason, 'material-crystal-structure-row-not-found');
   assert.equal(
     demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankWarmInputStatus,
     'material-bank-warm-inputs-attached'
@@ -179,6 +194,44 @@ test('demo initial particle spacing carries default material bank warm inputs', 
   assert.equal(viewState.sphGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
   assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankWarmInputTable.rowCount, 1);
   assert.equal(viewState.mlsMpmGpuParticleState.materialPropertyBankParticleSizeTable.rowCount, 1);
+});
+
+test('demo initial particle spacing carries crystal packing rows for valid solid elements', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'Na',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const crystalWarmInputs = demo.initialParticleSpacing.materialPropertyCrystalStructureWarmInputs;
+  assert.equal(crystalWarmInputs.status, 'material-crystal-structure-warm-inputs-attached');
+  assert.equal(crystalWarmInputs.coveredRoleCount, 1);
+  assert.equal(crystalWarmInputs.roles.drop.structureKey, 'na-bcc-alpha');
+  assert.equal(crystalWarmInputs.roles.drop.unitCell.packingFraction, 0.68);
+  assert.equal(crystalWarmInputs.roles.drop.unitCell.coordinationNumber, 8);
+  assert.equal(crystalWarmInputs.roles.drop.unitCell.atomsPerConventionalCell, 2);
+  assert.equal(crystalWarmInputs.roles.drop.strictSourceOfTruth, false);
+  assert.equal(crystalWarmInputs.roles.base, null);
+  assert.equal(
+    demo.initialParticleSpacing.particleSizePolicy.materialCrystalStructureWarmInputStatus,
+    'material-crystal-structure-warm-inputs-attached'
+  );
+  assert.equal(demo.initialParticleSpacing.particleSizePolicy.materialCrystalStructureCoveredRoleCount, 1);
+
+  const particleSizeTable = demo.initialParticleSpacing.materialPropertyBankParticleSizePackingTable;
+  assert.equal(particleSizeTable.rowCount, 1);
+  assert.equal(particleSizeTable.metadata[0].material, 'Na');
+  assert.equal(particleSizeTable.metadata[0].crystalStructureKey, 'na-bcc-alpha');
+  assert.equal(particleSizeTable.metadata[0].crystalStructureStatus, 'material-crystal-structure-warm-input-ready');
+  assert.equal(particleSizeTable.metadata[0].crystalPackingFraction, 0.68);
+  assert.equal(particleSizeTable.metadata[0].crystalCoordinationNumber, 8);
+  assert.equal(particleSizeTable.metadata[0].crystalAtomsPerConventionalCell, 2);
+  assert.equal(particleSizeTable.rows[12], 1);
+  near(particleSizeTable.rows[13], 0.68);
+  assert.equal(particleSizeTable.rows[14], 8);
+  assert.equal(particleSizeTable.rows[15], 2);
 });
 
 test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {

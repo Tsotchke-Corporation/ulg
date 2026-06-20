@@ -3090,7 +3090,7 @@ fn material_bank_rest_volume_for_role(role_id: f32) -> f32 {
     let row0 = material_bank_particle_size_rows[base];
     let row1 = material_bank_particle_size_rows[base + 1u];
     let row3 = material_bank_particle_size_rows[base + 3u];
-    let row_status = u32(row3.y + 0.5);
+    let row_status = u32(row3.x + 0.5);
     if (abs(row0.x - role_id) < 0.5 && row_status == MATERIAL_BANK_GPU_ROW_STATUS_READY) {
       if (row1.w > 0.0) {
         return row1.w;

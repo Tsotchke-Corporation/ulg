@@ -519,6 +519,7 @@ test('SPH render row WGSL applies the same particle scale cap as the CPU contrac
   assert.match(sphRenderRowsWgsl, /material_bank_particle_size_row_count:\s*u32/);
   assert.match(sphRenderRowsWgsl, /@group\(0\)\s+@binding\(5\)\s+var<storage,\s*read>\s+material_bank_particle_size_rows/);
   assert.match(sphRenderRowsWgsl, /fn material_bank_rest_volume_for_role\(role_id:\s*f32\)\s*->\s*f32/);
+  assert.match(sphRenderRowsWgsl, /let row_status\s*=\s*u32\(row3\.x\s*\+\s*0\.5\)/);
   assert.match(sphRenderRowsWgsl, /let bank_rest_volume_m3\s*=\s*material_bank_rest_volume_for_role\(render_domain_id\)/);
   assert.match(sphRenderRowsWgsl, /raw_particle_radius_m\s*>\s*rest_particle_radius_m\s*\*\s*RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO/);
   assert.match(sphRenderRowsWgsl, /effective_volume_ratio_j\s*=\s*RENDER_ROW_MAX_VOLUME_RATIO_J/);
@@ -537,7 +538,7 @@ test('SPH render row WebGPU extraction binds material-bank particle-size rows fo
     1, 79, 293.15, 101325,
     1, 0.1, 0.05, 0.0005235988,
     19300, 64, 0.1, 0,
-    0, 1, 0, 0
+    1, 0, 0, 0
   ]);
   packed.materialPropertyBankParticleSizeTable = {
     rowCount: 1,

@@ -71,6 +71,16 @@ these crystal/packing hints into the algorithm-derived particle initialization,
 MLS-MPM/contact, and marching-cubes row contracts rather than treating them as
 renderer constants.
 
+Current routing note, 2026-06-20 AKDT: particle initialization now attaches
+state-valid element crystal warm inputs beside the element material-bank warm
+rows. Solid Na at room temperature carries `na-bcc-alpha` packing metadata into
+the material-bank particle-size GPU row, while the default hot Fe drop rejects
+the solid `fe-bcc-alpha` row as outside its temperature validity domain. The
+particle-size row ABI now matches the WGSL consumer: row status is read from
+`row3.x`, and the existing padding carries crystal packing fraction,
+coordination number, and atoms per conventional cell. Continue by deriving
+MLS-MPM/contact/marching-cubes algorithm rows from these accepted warm inputs.
+
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
 sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.

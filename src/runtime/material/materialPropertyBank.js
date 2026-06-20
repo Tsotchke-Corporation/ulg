@@ -43,9 +43,9 @@ export const MATERIAL_PROPERTY_BANK_PARTICLE_SIZE_ROW_LAYOUT = Object.freeze([
   'smoothingLengthM:f32',
   'strictSourceOfTruth:f32',
   'status:f32',
-  'pad0:f32',
-  'pad1:f32',
-  'pad2:f32'
+  'crystalPackingFraction:f32',
+  'crystalCoordinationNumber:f32',
+  'crystalAtomsPerConventionalCell:f32'
 ]);
 
 export const MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS = Object.freeze({
@@ -403,8 +403,11 @@ export function buildMaterialPropertyBankParticleSizePackingTable(initialParticl
   if (entries.length === 0) return emptyParticleSizePackingTable();
   const rows = [];
   const metadata = [];
+  const crystalRoles = initialParticleSpacing?.materialPropertyCrystalStructureWarmInputs?.roles || {};
   for (const [role, warmInput] of entries) {
     const rolePlan = initialParticleSpacing?.[role] || {};
+    const crystalWarmInput = crystalRoles[role] || null;
+    const crystalUnitCell = crystalWarmInput?.unitCell || {};
     rows.push(
       MATERIAL_PROPERTY_BANK_ROLE_IDS[role] ?? 0,
       finiteNumber(warmInput.atomicNumber),
@@ -419,9 +422,9 @@ export function buildMaterialPropertyBankParticleSizePackingTable(initialParticl
       finiteNumber(initialParticleSpacing?.smoothingLengthM),
       warmInput.strictSourceOfTruth === true ? 1 : 0,
       MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
-      0,
-      0,
-      0
+      finiteNumber(crystalUnitCell.packingFraction),
+      finiteNumber(crystalUnitCell.coordinationNumber),
+      finiteNumber(crystalUnitCell.atomsPerConventionalCell)
     );
     metadata.push({
       role,
@@ -436,6 +439,11 @@ export function buildMaterialPropertyBankParticleSizePackingTable(initialParticl
       densityKgPerM3: finiteNumber(rolePlan.densityKgPerM3),
       targetNeighborCount: warmInput.targetNeighborCount,
       smoothingLengthM: finiteNumber(initialParticleSpacing?.smoothingLengthM),
+      crystalStructureKey: crystalWarmInput?.structureKey ?? null,
+      crystalStructureStatus: crystalWarmInput?.status ?? null,
+      crystalPackingFraction: finiteNumber(crystalUnitCell.packingFraction),
+      crystalCoordinationNumber: finiteNumber(crystalUnitCell.coordinationNumber),
+      crystalAtomsPerConventionalCell: finiteNumber(crystalUnitCell.atomsPerConventionalCell),
       strictSourceOfTruth: false,
       status: 'ready'
     });

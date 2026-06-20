@@ -14568,6 +14568,7 @@ export function createSphPhaseScene(container, {
       totalMs: Math.max(0, nowMs() - timingStartMs),
       stageMs,
       particleCount: positionsM?.length ? positionsM.length / 3 : 0,
+      renderDomainCounts: currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null,
       surfaceBatchCount: batches.length,
       cpuSurfaceBatchCount: cpuSurfaceBatches.length,
       residentSurfaceBatchCount: residentFieldBatches.length,

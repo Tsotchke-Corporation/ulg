@@ -66,11 +66,14 @@ scenario.
 
 Current routing note, 2026-06-19 AKDT: the drop edge setting's silent
 coarsening above `6` is fixed in the initializer and now reports
-`peercompute.ulg.sph-initial-particle-edge-diagnostics.v0`. Track remaining
-work in `plan/todo/drop-edge-large-size-respect-plan.md`: mounted browser
-reset/rebuild verification still needs to prove requested/effective drop
-dimensions, particle counts, render domains, and resident uploads agree after a
-scene reset.
+`peercompute.ulg.sph-initial-particle-edge-diagnostics.v0`. Mounted
+mobile-shaped reset/rebuild coverage now proves a `dropn=7, basen=7` scene
+preserves requested/effective high edges after Reset, keeps particle/render
+domain counts aligned, and uploads the same count to SPH and MLS-MPM GPU
+particle buffers after an explicit Step. Remaining work in
+`plan/todo/drop-edge-large-size-respect-plan.md` is performance-roadmap
+coverage for the intentionally expanded same-material `dropn=7, basen=5`
+`14^3` base case, not the high-edge contract itself.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

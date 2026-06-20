@@ -30,6 +30,16 @@ Focused checks:
   browser console issues `0`, initial edge diagnostics reporting effective
   drop edge `7`, effective base edge `14`, total generated particles `3087`,
   and final render-row vertex count `3087`.
+- Mounted reset/rebuild browser regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173
+  PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs tests/demo.e2e.mjs --grep "drop edge above six"`
+  passed `1/1`. The mobile-shaped `dropn=7, basen=7` MLS-MPM scene clicked
+  Reset, reached `particle-state-resynced-after-reset`, preserved effective
+  drop/base edge `7/7`, kept generated/render-domain counts at `686`, forced a
+  Step, and verified SPH plus MLS-MPM GPU upload counts both matched `686`
+  with no captured WebGPU console issues.
 
 ## Current Focused Result - 2026-06-19 Mechanics Material Phase Upload Cache
 

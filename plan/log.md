@@ -29365,3 +29365,33 @@ Remaining:
 
 - Add a browser reaction repro that actually trips the G2P/render cap telemetry.
 - Split gas/foam expansion from individual particle radius.
+
+## 2026-06-19 18:55 AKDT - Drop Edge Reset/Rebuild Browser Gate
+
+Status:
+
+- Added mounted browser regression coverage for high requested particle edges
+  after Reset.
+- Exposed normalized `renderDomainCounts` on
+  `peercompute.ulg.sph-scene-set-particles-timing.v0` so reset/rebuild tests
+  can verify the render-facing domain partition directly.
+- The focused browser case uses a mobile-shaped `dropn=7, basen=7` MLS-MPM
+  scene. It preserves effective drop/base edges at `7/7`, keeps generated and
+  render-domain counts at `686`, then explicitly steps once to force SPH and
+  MLS-MPM GPU particle uploads with matching particle counts.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "drop edge above six"`
+  with `1/1` passing against the live HTTPS Vite server and no captured WebGPU
+  console issues.
+
+Remaining:
+
+- The same-material `dropn=7, basen=5` path intentionally preserves drop edge
+  by expanding the paired base edge to `14`; full resident stepping at that
+  higher count remains part of the broader performance roadmap rather than a
+  drop-edge reset blocker.

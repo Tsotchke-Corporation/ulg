@@ -60,8 +60,22 @@ resident GPU uploads, and reset/rebuild flows.
   non-matching adaptive spacing, and `dropn=basen=7` benchmark-count
   preservation.
 
+2026-06-19 AKDT:
+
+- Added mounted reset/rebuild coverage for a mobile-shaped `dropn=7,
+  basen=7` MLS-MPM scene. The scene now exposes normalized
+  `renderDomainCounts` on `peercompute.ulg.sph-scene-set-particles-timing.v0`,
+  so tests can verify the render-facing domain partition after rebuild instead
+  of inferring it from particle arrays.
+- The mounted regression clicks Reset, waits for
+  `particle-state-resynced-after-reset`, verifies requested/effective high
+  drop/base edges, generated particle counts, render-domain counts, and then
+  explicitly steps once to force SPH/MLS-MPM GPU particle uploads. Both uploads
+  report the same total particle count as the high-edge diagnostics.
+
 Remaining:
 
-- Add a mounted browser visual-sequence check that exercises reset/rebuild with
-  `dropn>6` and confirms resident upload/render-domain counts match the new
-  diagnostics after scene reset.
+- `dropn=7, basen=5` still expands same-material base spacing to `14^3`
+  particles by design. That higher-count case is covered by initializer/probe
+  diagnostics, but full resident stepping at that count remains performance
+  roadmap work rather than a drop-edge contract blocker.

@@ -94,10 +94,15 @@ batching now derives role domains from `renderDomainCounts`, count-only
 resident seed batches can merge by domain, and
 `peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0` explicitly
 reports when same-material same-phase role domains are intentionally merged for
-a continuous visible surface. Keep
+a continuous visible surface. Fe/H2O now has a non-H2O mounted mobile-shaped
+regression for `dropn=8, basen=5`: the Fe drop preserves edge `8`, H2O adapts
+to edge `7`, counts/domain bounds stay aligned at `855`, GPU uploads match, and
+the variable-size sphere render mode remains selected with clean browser
+console output. Keep
 `plan/todo/drop-edge-large-size-respect-plan.md` active only for broader visual
-mode coverage above `dropn=7`; do not hide this behind a visual scale or loosen
-the initialized edge contract.
+mode coverage above `dropn=7` or a new live repro outside these covered URL
+paths; do not hide this behind a visual scale or loosen the initialized edge
+contract.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

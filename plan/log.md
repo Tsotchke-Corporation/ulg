@@ -27,6 +27,39 @@ Validation:
   tests/playwright.config.mjs --grep "resident alkali/H2O promotes product gas
   pressure"` passed `1/1` with the WebGPU console issue guard active.
 
+## 2026-06-19 22:39 AKDT - Non-H2O Drop Edge Browser Coverage
+
+Status:
+
+- Added a non-H2O high-drop-edge unit guard for Fe/H2O with
+  `dropn=8, basen=5`. The initializer preserves the requested Fe drop edge at
+  `8`, lets the H2O base adapt to edge `7`, reports
+  `requested-large-edge-preserved` for the drop, and keeps generated/view
+  counts aligned at `512 + 343 = 855`.
+- Added a mounted mobile-shaped MLS-MPM browser regression for the same Fe/H2O
+  URL path with `surfaceDraw=three-render-row-spheres`. It verifies reset
+  resync, requested/effective edge diagnostics, render-domain counts, domain
+  position bounds, SPH and MLS-MPM GPU upload counts, selected variable-size
+  sphere render mode, and clean WebGPU console output.
+- Kept resident render-state bridge details optional for this Fe/H2O path
+  because the diagnostic probe showed uploads and reset/domain state are ready
+  while no resident render batch is produced after the single manual Step.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS: `git diff --check -- tests/demo.e2e.mjs
+  tests/sphPhaseDemo.test.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern
+  "large non-H2O drop edge|large requested drop edge remains preserved beyond
+  seven|same material high drop edge"` reported `40/40`.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "non-H2O drop edge above six"` passed
+  `1/1` with the browser console guard active.
+
 ## 2026-06-19 22:29 AKDT - Three WebGPU Particle PBR Proxy Audit
 
 Status:

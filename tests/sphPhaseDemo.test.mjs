@@ -297,6 +297,40 @@ test('large requested drop edge remains preserved beyond seven', () => {
   assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
 });
 
+test('large non-H2O drop edge preserves requested edge while base adapts', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'fe',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 8,
+    baseParticleEdge: 5
+  });
+  const spacing = demo.initialParticleSpacing;
+  const diagnostics = demo.initialParticleEdgeDiagnostics;
+  const viewState = createSphPhaseViewState({ demo });
+
+  assert.equal(spacing.matchingMaterialState, false);
+  assert.equal(spacing.drop.requestedParticlesPerEdge, 8);
+  assert.equal(spacing.drop.particlesPerEdge, 8);
+  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-large-edge-preserved');
+  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(spacing.base.requestedParticlesPerEdge, 5);
+  assert.equal(spacing.base.particlesPerEdge, 7);
+  assert.equal(spacing.base.effectiveParticleEdgeStatus, 'adaptive-density-target');
+  assert.equal(demo.counts.drop, 8 ** 3);
+  assert.equal(demo.counts.base, 7 ** 3);
+  assert.equal(diagnostics.requestedDropParticlesPerEdge, 8);
+  assert.equal(diagnostics.requestedBaseParticlesPerEdge, 5);
+  assert.equal(diagnostics.effectiveDropParticlesPerEdge, 8);
+  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 7);
+  assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
+  assert.equal(viewState.counts.drop, 8 ** 3);
+  assert.equal(viewState.counts.base, 7 ** 3);
+});
+
 test('matching material preserves equal high explicit role edges without inflating benchmark counts', () => {
   const demo = buildSphPhaseDemoState({
     dropMaterial: 'h2o',

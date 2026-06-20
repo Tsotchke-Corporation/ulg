@@ -59,6 +59,23 @@ resident GPU uploads, and reset/rebuild flows.
   six through mounted render diagnostics"` passed `1/1` with the console issue
   guard active.
 
+2026-06-19 AKDT update:
+
+- Added non-H2O coverage for Fe/H2O with `dropn=8, basen=5`. Unit coverage
+  proves the material spacing resolver preserves the requested Fe drop edge at
+  `8`, adapts the H2O base edge to `7`, reports
+  `requested-large-edge-preserved` for the drop, and keeps generated/view
+  counts aligned at `512 + 343 = 855`.
+- Added a mounted mobile-shaped MLS-MPM browser regression for the same URL
+  path with `surfaceDraw=three-render-row-spheres`. It verifies reset resync,
+  requested/effective edge diagnostics, render-domain counts, domain position
+  bounds, SPH and MLS-MPM GPU uploads, selected variable-size sphere render
+  mode, and clean WebGPU console output.
+- A diagnostic probe showed this Fe/H2O single-step path does not produce a
+  resident render-state bridge object, so the browser regression keeps resident
+  bridge internals optional and treats them as renderer-roadmap evidence rather
+  than a drop-edge contract requirement.
+
 2026-06-19 AKDT live report update:
 
 - User still reports that drop edge is not respected for anything larger than
@@ -142,9 +159,9 @@ resident GPU uploads, and reset/rebuild flows.
 
 Remaining:
 
-- Keep this active only for broader visual-mode coverage above `dropn=7` and
-  for non-H2O material pairs where domain visibility still has not been
-  sampled.
+- Keep this active only for broader visual-mode coverage above `dropn=7`, a
+  true live repro outside the covered H2O/H2O and Fe/H2O URL paths, and render
+  bridge batches that actually publish resident render-state diagnostics.
 - Full resident stepping at the expanded `dropn=7, basen=5` total remains
   performance-roadmap work rather than an initialization/drop-edge contract
   blocker.

@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Non-H2O Drop Edge Browser Coverage
+
+Drop-edge coverage now includes a non-H2O material pair above six. Fe/H2O with
+`dropn=8, basen=5` preserves the requested Fe drop edge, adapts the H2O base
+edge through the material spacing resolver, and keeps mounted reset,
+render-domain, and GPU upload diagnostics aligned under the variable-size
+sphere render mode.
+
+Focused checks:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs` and
+  `node --check tests/sphPhaseDemo.test.mjs` passed.
+- Unit coverage:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern
+  "large non-H2O drop edge|large requested drop edge remains preserved beyond
+  seven|same material high drop edge"` reported `40/40`.
+- Browser regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1
+  PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "non-H2O drop edge above six"` passed
+  `1/1` with the WebGPU console guard active.
+
 ## Current Focused Result - 2026-06-19 Three WebGPU Particle PBR Proxy Audit
 
 The Three WebGPU render-row sphere bridge now has focused particle-PBR proxy

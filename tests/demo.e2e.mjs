@@ -3511,6 +3511,157 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase reset preserves non-H2O drop edge above six through mounted sphere diagnostics', async ({ page }) => {
+  test.setTimeout(120_000);
+  const requestedDropEdge = 8;
+  const requestedBaseEdge = 5;
+  const expectedBaseEdge = 7;
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|too many warnings|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/?drop=fe&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedDropEdge}&basen=${requestedBaseEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(({ requestedDropEdge, expectedBaseEdge }) => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
+      || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
+    const bounds = overlay?.__sphSetParticlesTiming?.renderDomainPositionBounds;
+    return diagnostics?.effectiveDropParticlesPerEdge === requestedDropEdge
+      && diagnostics?.effectiveBaseParticlesPerEdge === expectedBaseEdge
+      && diagnostics?.requestedEdgePreservationStatus === 'preserved'
+      && bounds?.drop?.count === requestedDropEdge ** 3
+      && bounds?.base?.count === expectedBaseEdge ** 3
+      && overlay?.__sphSetParticlesTiming?.particleCount === diagnostics.totalGeneratedParticleCount;
+  }, { requestedDropEdge, expectedBaseEdge }, { timeout: 60_000 });
+
+  await page.evaluate(() => document.querySelector('#sph-reset')?.click());
+  await page.waitForFunction(({ requestedDropEdge, expectedBaseEdge }) => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
+      || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics;
+    const bounds = overlay?.__sphSetParticlesTiming?.renderDomainPositionBounds;
+    return overlay?.__sphResetStatus?.status === 'particle-state-resynced-after-reset'
+      && diagnostics?.effectiveDropParticlesPerEdge === requestedDropEdge
+      && diagnostics?.effectiveBaseParticlesPerEdge === expectedBaseEdge
+      && bounds?.status === 'render-domain-position-bounds-ready'
+      && bounds?.drop?.count === requestedDropEdge ** 3
+      && bounds?.base?.count === expectedBaseEdge ** 3;
+  }, { requestedDropEdge, expectedBaseEdge }, { timeout: 60_000 });
+  await page.evaluate(() => document.querySelector('#sph-step')?.click());
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const total = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics?.totalGeneratedParticleCount;
+    const scene = overlay?.__sphScene;
+    return Number.isFinite(total)
+      && scene?.getSphGpuParticleUpload?.()?.particleCount === total
+      && scene?.getMlsMpmGpuParticleUpload?.()?.particleCount === total;
+  }, null, { timeout: 30_000 });
+
+  const summary = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
+      || overlay?.__sphDriver?.demo?.initialParticleEdgeDiagnostics
+      || null;
+    const counts = overlay?.__sphPhaseViewState?.counts || overlay?.__sphDriver?.demo?.counts || null;
+    const setParticlesTiming = overlay?.__sphSetParticlesTiming || null;
+    const sphUpload = scene?.getSphGpuParticleUpload?.() || null;
+    const mlsUpload = scene?.getMlsMpmGpuParticleUpload?.() || null;
+    const renderState = scene?.getSphResidentRenderState?.() || overlay?.__sphResidentRenderState || null;
+    return {
+      resetStatus: overlay?.__sphResetStatus || null,
+      diagnostics,
+      counts,
+      setParticlesTiming: {
+        schema: setParticlesTiming?.schema,
+        particleCount: setParticlesTiming?.particleCount ?? null,
+        renderDomainCounts: setParticlesTiming?.renderDomainCounts ?? null,
+        renderDomainPositionBounds: setParticlesTiming?.renderDomainPositionBounds ?? null,
+        sameMaterialDomainMergeDiagnostics:
+          setParticlesTiming?.sameMaterialDomainMergeDiagnostics
+          || overlay?.__sphSameMaterialDomainMergeDiagnostics
+          || null
+      },
+      sphUpload: {
+        schema: sphUpload?.schema,
+        status: sphUpload?.status,
+        particleCount: sphUpload?.particleCount ?? null
+      },
+      mlsUpload: {
+        schema: mlsUpload?.schema,
+        status: mlsUpload?.status,
+        particleCount: mlsUpload?.particleCount ?? null
+      },
+      renderState: {
+        schema: renderState?.schema,
+        status: renderState?.status,
+        particleCount: renderState?.particleCount ?? null,
+        visibleRendererBridge: renderState?.visibleRendererBridge ?? null,
+        renderBridgeStatus: renderState?.renderBridgeStatus ?? null,
+        renderBridgeSphereMaterialKeys: renderState?.renderBridgeSphereMaterialKeys ?? [],
+        renderBridgeSphereVariableSize: renderState?.renderBridgeSphereVariableSize ?? null,
+        renderBridgeSpherePbrMaterialSource: renderState?.renderBridgeSpherePbrMaterialSource ?? null
+      },
+      renderModeValue: overlay?.querySelector('#sph-render-mode select')?.value ?? null
+    };
+  });
+
+  const expectedDropCount = requestedDropEdge ** 3;
+  const expectedBaseCount = expectedBaseEdge ** 3;
+  const expectedTotalCount = expectedDropCount + expectedBaseCount;
+  expect(summary.resetStatus?.schema).toBe('peercompute.ulg.sph-demo-reset-status.v0');
+  expect(summary.resetStatus?.status).toBe('particle-state-resynced-after-reset');
+  expect(summary.diagnostics?.schema).toBe('peercompute.ulg.sph-initial-particle-edge-diagnostics.v0');
+  expect(summary.diagnostics?.requestedDropParticlesPerEdge).toBe(requestedDropEdge);
+  expect(summary.diagnostics?.requestedBaseParticlesPerEdge).toBe(requestedBaseEdge);
+  expect(summary.diagnostics?.effectiveDropParticlesPerEdge).toBe(requestedDropEdge);
+  expect(summary.diagnostics?.effectiveBaseParticlesPerEdge).toBe(expectedBaseEdge);
+  expect(summary.diagnostics?.drop?.effectiveParticleEdgeStatus).toBe('requested-large-edge-preserved');
+  expect(summary.diagnostics?.drop?.requestedParticleEdgeLowerBoundApplied).toBe(true);
+  expect(summary.diagnostics?.matchingMaterialState).toBe(false);
+  expect(summary.diagnostics?.requestedEdgePreservationStatus).toBe('preserved');
+  expect(summary.counts).toEqual({ drop: expectedDropCount, base: expectedBaseCount, total: expectedTotalCount });
+  expect(summary.setParticlesTiming.schema).toBe('peercompute.ulg.sph-scene-set-particles-timing.v0');
+  expect(summary.setParticlesTiming.particleCount).toBe(expectedTotalCount);
+  expect(summary.setParticlesTiming.renderDomainCounts).toEqual(summary.counts);
+  const bounds = summary.setParticlesTiming.renderDomainPositionBounds;
+  expect(bounds?.schema).toBe('peercompute.ulg.sph-render-domain-position-bounds.v0');
+  expect(bounds?.status).toBe('render-domain-position-bounds-ready');
+  expect(bounds?.drop?.count).toBe(expectedDropCount);
+  expect(bounds?.drop?.finitePositionCount).toBe(expectedDropCount);
+  expect(bounds?.base?.count).toBe(expectedBaseCount);
+  expect(bounds?.base?.finitePositionCount).toBe(expectedBaseCount);
+  expect(bounds?.drop?.center?.[1]).toBeCloseTo(1.75, 6);
+  expect(bounds?.base?.center?.[1]).toBeCloseTo(0.5, 6);
+  expect(summary.sphUpload.status).toBe('webgpu-uploaded');
+  expect(summary.sphUpload.particleCount).toBe(expectedTotalCount);
+  expect(summary.mlsUpload.status).toBe('webgpu-uploaded');
+  expect(summary.mlsUpload.particleCount).toBe(expectedTotalCount);
+  expect(summary.renderModeValue).toBe('three-render-row-spheres');
+  if (summary.renderState.schema) {
+    expect(summary.renderState.particleCount).toBe(expectedTotalCount);
+    expect(summary.renderState.visibleRendererBridge).toBe('three-render-row-spheres');
+    expect(summary.renderState.renderBridgeSphereVariableSize).toBe(true);
+    expect(summary.renderState.renderBridgeSpherePbrMaterialSource).toMatch(/closure-derived-pbr/);
+    expect(summary.renderState.renderBridgeSphereMaterialKeys.map((key) => String(key).toLowerCase()))
+      .toEqual(expect.arrayContaining(['fe', 'h2o']));
+  }
+  if (summary.setParticlesTiming.sameMaterialDomainMergeDiagnostics?.schema) {
+    expect(summary.setParticlesTiming.sameMaterialDomainMergeDiagnostics.status)
+      .toBe('no-same-material-domain-surface-merge');
+  }
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase reset preserves large drop edge when same-material base spacing expands', async ({ page }) => {
   test.setTimeout(120_000);
   const consoleIssues = [];

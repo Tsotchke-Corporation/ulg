@@ -7,13 +7,17 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL,
+  MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   MLS_MPM_GPU_GRID_NODE_FLOATS,
+  ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
   createMlsMpmGridSpec,
   createMlsMpmP2gGridProjectionParityReport,
   projectMlsMpmP2gGridCpu,
+  resolveMlsMpmP2gBackendPolicy,
   runMlsMpmP2gGridProjectionWebGpu,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   runMlsMpmP2gGridProjectionWithOptionalWebGpu
@@ -296,6 +300,28 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
 
+test('MLS-MPM P2G backend policy keeps Ocean-tiled replacement explicit and fail-closed', () => {
+  const current = resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: 'particle-parallel-scatter'
+  });
+  assert.equal(current.schema, ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA);
+  assert.equal(current.status, 'resident-scatter-backend-selected');
+  assert.equal(current.effectiveBackend, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
+  assert.equal(current.particleLoopInHotPath, false);
+
+  const experimental = resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL
+  });
+  assert.equal(experimental.schema, ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA);
+  assert.equal(experimental.status, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(experimental.requestedBackend, MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL);
+  assert.equal(experimental.effectiveBackend, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
+  assert.equal(experimental.fallbackReason, 'ocean-tiled-p2g-kernel-not-available');
+  assert.equal(experimental.experimentalBackendRequested, true);
+  assert.equal(experimental.oceanTiledKernelAvailable, false);
+  assert.equal(experimental.particleLoopInHotPath, false);
+});
+
 test('CPU MLS-MPM P2G grid projection conserves mass and linear momentum without affine C', () => {
   const { sphParticleState, mlsMpmParticleState } = manualBuffers();
   const projection = projectMlsMpmP2gGridCpu({
@@ -383,12 +409,38 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
 
   assert.equal(projection.backend, 'webgpu');
   assert.equal(projection.readbackMode, 'no-full-readback');
+  assert.equal(projection.p2gBackendPolicyStatus, 'resident-scatter-backend-selected');
+  assert.equal(projection.p2gBackendEffective, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
   assert.equal(projection.residentProductMassInputProductEventCount, 0);
   assert.ok(productEventBuffer);
   assert.equal(
     productEventBuffer.size,
     SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
+});
+
+test('WebGPU MLS-MPM P2G reports Ocean-tiled fallback before the replacement kernel exists', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const device = fakeP2gDevice();
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    readbackMode: 'no-full-readback',
+    p2gBackend: MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL
+  });
+
+  assert.equal(projection.backend, 'webgpu');
+  assert.equal(projection.readbackMode, 'no-full-readback');
+  assert.equal(projection.p2gBackendPolicy.schema, ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA);
+  assert.equal(projection.p2gBackendPolicyStatus, 'ocean-tiled-backend-fallback-resident-scatter');
+  assert.equal(projection.p2gBackendRequested, MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL);
+  assert.equal(projection.p2gBackendEffective, MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER);
+  assert.equal(projection.p2gBackendFallbackReason, 'ocean-tiled-p2g-kernel-not-available');
+  assert.equal(projection.p2gBackendPolicy.particleLoopInHotPath, false);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [6, 1, 1]]);
 });
 
 test('CPU MLS-MPM P2G grid projection deposits unplaced resident product mass generically', () => {

@@ -2718,6 +2718,9 @@ physics work:
   WebGPU-Ocean-style high-performance MLS-MPM simulator path with
   fixed-point/tiled P2G where appropriate, GPU cell/neighbor structures,
   resident gas/product/phase dynamics, and GPU-resident continuous surfaces.
+  Current slice: `peercompute.ulg.mls-mpm-p2g-backend-policy.v0` exposes the
+  resident-scatter backend and fails `ocean-tiled-experimental` requests closed
+  to resident scatter until the tiled kernel and parity benchmarks land.
 - [ ] Replace provisional candidate energetics and heavy product-closure
   derivations with cached worker/WebGPU-resident lower-level solvers for the
   full element/compound reaction space.

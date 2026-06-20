@@ -1,5 +1,22 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 WebGPU-Ocean P2G Backend Policy Switch
+
+The P2G projection contract now exposes an explicit backend policy for the
+Ocean-style migration. The current WebGPU runner reports `resident-scatter`,
+while `ocean-tiled-experimental` requests fail closed to resident scatter until
+the tiled/local-accumulator kernel exists.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphGridGpuKernel.js` and
+  `node --check tests/sphGridGpuKernel.test.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphGridGpuKernel.test.mjs` passed `21/21`, including the
+  policy normalization regression and the fake-device no-full WebGPU P2G
+  fallback assertion for `ocean-tiled-experimental`.
+
 ## Current Focused Result - 2026-06-19 Immediate Todo Guardrails And Hot-Loop Budget Telemetry
 
 The immediate MLS-MPM/rendering todo lanes now have focused coverage for

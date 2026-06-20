@@ -30,6 +30,10 @@ export {
 
 export const MLS_MPM_GPU_GRID_NODE_FLOATS = MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
+export const ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-p2g-backend-policy.v0';
+export const MLS_MPM_P2G_BACKEND_CPU_REFERENCE = 'cpu-reference';
+export const MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER = 'resident-scatter';
+export const MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL = 'ocean-tiled-experimental';
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -56,6 +60,91 @@ const EOS_MODEL_IDS = Object.freeze({
   taitCondensed: 1,
   gasLinearized: 2
 });
+
+export function resolveMlsMpmP2gBackendPolicy({
+  requestedBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  supportsOceanTiledKernel = false
+} = {}) {
+  const normalizedRequestedBackend = typeof requestedBackend === 'string' && requestedBackend.trim()
+    ? requestedBackend.trim()
+    : MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER;
+  if (normalizedRequestedBackend === MLS_MPM_P2G_BACKEND_CPU_REFERENCE) {
+    return {
+      schema: ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
+      status: 'cpu-reference-backend-selected',
+      requestedBackend: normalizedRequestedBackend,
+      effectiveBackend: MLS_MPM_P2G_BACKEND_CPU_REFERENCE,
+      fallbackBackend: null,
+      fallbackReason: null,
+      experimentalBackendRequested: false,
+      oceanTiledKernelAvailable: false,
+      kernelScope: 'cpu-reference-p2g-stress-momentum-projection',
+      dispatchTopology: 'cpu-reference-particle-loop',
+      particleLoopInHotPath: true,
+      gridWriteMode: 'cpu-grid-accumulate'
+    };
+  }
+  const aliases = new Set([
+    MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+    'current',
+    'current-resident',
+    'webgpu-scatter',
+    'particle-parallel-scatter'
+  ]);
+  if (aliases.has(normalizedRequestedBackend)) {
+    return {
+      schema: ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
+      status: 'resident-scatter-backend-selected',
+      requestedBackend: normalizedRequestedBackend,
+      effectiveBackend: MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+      fallbackBackend: null,
+      fallbackReason: null,
+      experimentalBackendRequested: false,
+      oceanTiledKernelAvailable: false,
+      kernelScope: GRID_SCOPE,
+      dispatchTopology: 'particle-parallel-scatter',
+      particleLoopInHotPath: false,
+      gridWriteMode: 'atomic-grid-accumulator-scatter'
+    };
+  }
+  if (normalizedRequestedBackend === MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL) {
+    const effectiveBackend = supportsOceanTiledKernel
+      ? MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL
+      : MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER;
+    return {
+      schema: ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
+      status: supportsOceanTiledKernel
+        ? 'ocean-tiled-backend-selected'
+        : 'ocean-tiled-backend-fallback-resident-scatter',
+      requestedBackend: normalizedRequestedBackend,
+      effectiveBackend,
+      fallbackBackend: supportsOceanTiledKernel ? null : MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+      fallbackReason: supportsOceanTiledKernel ? null : 'ocean-tiled-p2g-kernel-not-available',
+      experimentalBackendRequested: true,
+      oceanTiledKernelAvailable: supportsOceanTiledKernel,
+      kernelScope: supportsOceanTiledKernel ? 'ocean-tiled-p2g-stress-momentum-projection' : GRID_SCOPE,
+      dispatchTopology: supportsOceanTiledKernel ? 'tile-parallel-scatter' : 'particle-parallel-scatter',
+      particleLoopInHotPath: false,
+      gridWriteMode: supportsOceanTiledKernel
+        ? 'tile-local-accumulator-flush'
+        : 'atomic-grid-accumulator-scatter'
+    };
+  }
+  return {
+    schema: ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA,
+    status: 'unknown-backend-fallback-resident-scatter',
+    requestedBackend: normalizedRequestedBackend,
+    effectiveBackend: MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+    fallbackBackend: MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+    fallbackReason: 'unknown-p2g-backend',
+    experimentalBackendRequested: false,
+    oceanTiledKernelAvailable: false,
+    kernelScope: GRID_SCOPE,
+    dispatchTopology: 'particle-parallel-scatter',
+    particleLoopInHotPath: false,
+    gridWriteMode: 'atomic-grid-accumulator-scatter'
+  };
+}
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -479,6 +568,7 @@ function outputEnvelope({
   dt = 0,
   internalPressureScale = 1,
   readbackMode = FULL_READBACK_MODE,
+  p2gBackendPolicy = null,
   residentProductMass = null,
   residentProductMassProductEventCount = 0,
   residentProductMassCoupledEventCount = null,
@@ -488,11 +578,21 @@ function outputEnvelope({
   residentProductMassProductEventBufferConsumerDeviceId = null
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const resolvedP2gBackendPolicy = p2gBackendPolicy || resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: backend === MLS_MPM_P2G_BACKEND_CPU_REFERENCE
+      ? MLS_MPM_P2G_BACKEND_CPU_REFERENCE
+      : MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
+  });
   return {
     schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
     backend,
     status: 'projected',
     kernelScope: GRID_SCOPE,
+    p2gBackendPolicy: resolvedP2gBackendPolicy,
+    p2gBackendPolicyStatus: resolvedP2gBackendPolicy.status,
+    p2gBackendRequested: resolvedP2gBackendPolicy.requestedBackend,
+    p2gBackendEffective: resolvedP2gBackendPolicy.effectiveBackend,
+    p2gBackendFallbackReason: resolvedP2gBackendPolicy.fallbackReason,
     particleCount: sphParticleState.particleCount,
     sourceSchemas: {
       sphParticleState: sphParticleState.schema,
@@ -548,11 +648,17 @@ export function projectMlsMpmP2gGridCpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
-  internalPressureScale = 1
+  internalPressureScale = 1,
+  p2gBackend = MLS_MPM_P2G_BACKEND_CPU_REFERENCE
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
   const dtSeconds = finiteNumber(dt, 0);
+  const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: p2gBackend === MLS_MPM_P2G_BACKEND_CPU_REFERENCE
+      ? MLS_MPM_P2G_BACKEND_CPU_REFERENCE
+      : p2gBackend
+  });
   const gridNodes = new Float32Array(gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS);
   const activeNodeIndices = [];
 
@@ -672,6 +778,7 @@ export function projectMlsMpmP2gGridCpu({
     gridNodes,
     dt: dtSeconds,
     internalPressureScale,
+    p2gBackendPolicy,
     residentProductMass,
     residentProductMassProductEventCount: productMassContribution.productEventCount,
     residentProductMassCoupledEventCount: productMassContribution.coupledEventCount,
@@ -719,13 +826,18 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   residentProductMass = null,
   internalPressureScale = 1,
   retainGridBuffer = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmP2gGridProjectionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
+  const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
+    requestedBackend: p2gBackend,
+    supportsOceanTiledKernel: false
+  });
   const outputByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const accumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
   const accumulatorByteLength = accumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
@@ -878,6 +990,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       dt,
       internalPressureScale,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+      p2gBackendPolicy,
       residentProductMass,
       residentProductMassProductEventCount: productEventCount,
       residentProductMassCoupledEventCount: productEventCount > 0
@@ -1013,6 +1126,11 @@ function executionFromProjection(projection, {
     readbackMode: projection?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: projection?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: projection?.normalHotLoopReadbackFree ?? false,
+    p2gBackendPolicy: projection?.p2gBackendPolicy ?? null,
+    p2gBackendPolicyStatus: projection?.p2gBackendPolicyStatus ?? null,
+    p2gBackendRequested: projection?.p2gBackendRequested ?? null,
+    p2gBackendEffective: projection?.p2gBackendEffective ?? null,
+    p2gBackendFallbackReason: projection?.p2gBackendFallbackReason ?? null,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -1063,7 +1181,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   retainGridBuffer = false,
   onDeviceLost = null,
   webGpuRunner = runMlsMpmP2gGridProjectionWebGpu,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   let cpuReference = null;
@@ -1076,7 +1195,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         boxDimsM,
         dt,
         residentProductMass,
-        internalPressureScale
+        internalPressureScale,
+        p2gBackend: MLS_MPM_P2G_BACKEND_CPU_REFERENCE
       });
     }
     return cpuReference;
@@ -1142,7 +1262,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       residentProductMass,
       internalPressureScale,
       retainGridBuffer,
-      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+      p2gBackend
     });
     await Promise.resolve();
     if (lostInfo) {

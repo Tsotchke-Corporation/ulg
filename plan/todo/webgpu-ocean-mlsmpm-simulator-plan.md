@@ -40,7 +40,9 @@ ULG already has pieces of a resident MLS-MPM pipeline:
 
 The system is still not Ocean-style fast because:
 
-- the current P2G path is still too gather-heavy for large particle counts;
+- the current P2G path is particle-parallel scatter, but it is still the
+  resident baseline rather than a selectable tiled/local-accumulator Ocean
+  backend with benchmarked replacement gates;
 - many paths still keep CPU parity/readback or CPU mesh extraction close to the
   live loop;
 - CPU `MarchingCubes` remains the visible fallback;
@@ -52,6 +54,12 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- `peercompute.ulg.mls-mpm-p2g-backend-policy.v0` now makes the P2G backend
+  explicit. The current WebGPU path reports `resident-scatter`, and requests
+  for `ocean-tiled-experimental` fail closed to resident scatter with
+  `ocean-tiled-p2g-kernel-not-available` until the tiled kernel exists. Focused
+  fake-device coverage proves the no-full WebGPU P2G path does not silently
+  claim the Ocean replacement is live.
 - Resident MLS-MPM task envelopes now expose
   `peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0`. The helper
   normalizes no-full/no-summary readback budgets, compact-summary step counts,
@@ -909,7 +917,12 @@ Interim status, 2026-06-18 AKDT:
 
 1. Audit WebGPU-Ocean source locally and record kernel/layout decisions.
 2. Build a ULG scatter/tiled P2G experimental backend behind an explicit option.
+   Current slice: the explicit `ocean-tiled-experimental` option exists and
+   falls back to `resident-scatter` with contract telemetry until the tiled
+   kernel lands.
 3. Add CPU parity tests for the new backend on small cases.
-4. Add a benchmark comparing current gather P2G vs scatter/tiled P2G.
+   Current slice: policy and no-full fake-device tests prove the replacement
+   backend is not falsely advertised. Real tiled-kernel parity remains open.
+4. Add a benchmark comparing resident scatter vs tiled/local-accumulator P2G.
 5. Keep the current resident pipeline as fallback until the new backend passes
    parity and performance gates.

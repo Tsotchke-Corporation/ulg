@@ -1,5 +1,30 @@
 # ULG Implementation Log
 
+## 2026-06-19 22:10 AKDT - WebGPU-Ocean P2G Backend Policy Switch
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-p2g-backend-policy.v0` to the P2G projection
+  contract. The direct CPU reference, direct WebGPU runner, and optional
+  WebGPU runner now carry `p2gBackendPolicy`, requested/effective backend,
+  policy status, and fallback reason.
+- Kept the existing resident P2G path honest: it reports
+  `resident-scatter`, `particleLoopInHotPath=false`, and
+  `atomic-grid-accumulator-scatter`.
+- Added the first explicit WebGPU-Ocean replacement switch:
+  `ocean-tiled-experimental`. Until a tiled/local-accumulator kernel exists,
+  the policy fails closed to `resident-scatter` with
+  `ocean-tiled-p2g-kernel-not-available` instead of claiming a speedup.
+- Corrected the WebGPU-Ocean todo wording so the remaining bottleneck is the
+  missing selectable tiled replacement and benchmarks, not a hidden
+  grid-gather particle loop.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphGridGpuKernel.js && node --check
+  tests/sphGridGpuKernel.test.mjs`.
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs` reported `21/21`.
+
 ## 2026-06-19 21:40 AKDT - Immediate Todo Guardrails And Hot-Loop Budget Telemetry
 
 Status:

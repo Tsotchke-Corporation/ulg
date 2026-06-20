@@ -132,6 +132,12 @@ prefix through `Ho`, contains 62 element rows, and leaves 49 selectable
 non-noble target rows. The write pass again reused all four dry-run cache
 entries with `cache.hitCount=4`.
 
+Status update, 2026-06-19 AKDT: the third cache-backed lanthanide continuation
+adds `Er`, `Tm`, `Yb`, and `Lu`, completing the selectable lanthanide prefix.
+The checked-in bank now covers the selectable prefix through `Lu`, contains 66
+element rows, and leaves 45 selectable non-noble target rows. The write pass
+again reused all four dry-run cache entries with `cache.hitCount=4`.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

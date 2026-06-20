@@ -38,6 +38,9 @@ Status:
 - Added `Gd`, `Tb`, `Dy`, and `Ho` through the same cache-backed loop. The
   bank now contains 62 rows, leaves 49 selectable non-noble targets, and the
   write pass again reported `cache.hitCount=4`.
+- Added `Er`, `Tm`, `Yb`, and `Lu`, completing the selectable lanthanide prefix.
+  The bank now contains 66 rows, leaves 45 selectable non-noble targets, and
+  the write pass again reported `cache.hitCount=4`.
 
 Validation:
 
@@ -53,6 +56,8 @@ Validation:
   `Nd/Pm/Sm/Eu` with `hitCount=4`.
 - PASS: the same cache-backed generator path reused dry-run cache for
   `Gd/Tb/Dy/Ho` with `hitCount=4`.
+- PASS: the same cache-backed generator path reused dry-run cache for
+  `Er/Tm/Yb/Lu` with `hitCount=4`.
 - PASS: `npm run build` completed with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: `npm run icc:update`.

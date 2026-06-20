@@ -136,6 +136,9 @@ cache-backed write added `Nd`, `Pm`, `Sm`, and `Eu`, moving the bank to 58 rows
 and leaving 53 selectable non-noble targets; the write pass reported
 `cache.hitCount=4`. The next cache-backed write added `Gd`, `Tb`, `Dy`, and
 `Ho`, moving the bank to 62 rows and leaving 49 selectable non-noble targets.
+The final lanthanide continuation added `Er`, `Tm`, `Yb`, and `Lu`, so the
+bank now covers the selectable prefix through `Lu` with 66 rows and 45 targets
+remaining.
 
 Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
 extension now has a conservative no-readback extraction mode and ULG binds the

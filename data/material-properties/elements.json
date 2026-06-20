@@ -5244,6 +5244,346 @@
           "inputHash": "ulg:81ad14a3"
         }
       ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Er",
+      "name": "Erbium",
+      "atomicNumber": 68,
+      "atomicMassU": 167.26,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            4743.56636368
+          ],
+          "densityKgPerM3": 3247.58576817,
+          "heatCapacityJPerKgK": 142.31384889,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 60486012101.7,
+          "shearModulusPa": 27916620970,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            4743.56636368,
+            1000000
+          ],
+          "densityKgPerM3": 3223.22887491,
+          "heatCapacityJPerKgK": 149.429541335,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 60032367010.9,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 4743.56636368,
+          "latentHeatJPerKg": 235801.776997
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "lanthanide-metal",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "lanthanide-metal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.946128618557,
+          0.92586725806
+        ],
+        "metalness": 1,
+        "roughness": 0.32,
+        "ior": null,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:2da4e924"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Tm",
+      "name": "Thulium",
+      "atomicNumber": 69,
+      "atomicMassU": 168.93,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            5875.98842646
+          ],
+          "densityKgPerM3": 3280.01114324,
+          "heatCapacityJPerKgK": 139.440088502,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 74925716185.4,
+          "shearModulusPa": 34581099777.9,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            5875.98842646,
+            1000000
+          ],
+          "densityKgPerM3": 3255.41105966,
+          "heatCapacityJPerKgK": 146.412092927,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 74363773314,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 5875.98842646,
+          "latentHeatJPerKg": 289206.689945
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "lanthanide-metal",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "lanthanide-metal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.946124949172,
+          0.925855397615
+        ],
+        "metalness": 1,
+        "roughness": 0.32,
+        "ior": null,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:b36ccf77"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Yb",
+      "name": "Ytterbium",
+      "atomicNumber": 70,
+      "atomicMassU": 173.05,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            23611.886858
+          ],
+          "densityKgPerM3": 452.093992683,
+          "heatCapacityJPerKgK": 139.843437993,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 20668701296.6,
+          "shearModulusPa": 9539400598.41,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            23611.886858,
+            1000000
+          ],
+          "densityKgPerM3": 445.448210991,
+          "heatCapacityJPerKgK": 149.632478652,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 20364871387.5,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 23611.886858,
+          "latentHeatJPerKg": 1134470.6772
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "lanthanide-metal",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "lanthanide-metal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          1,
+          0.477045465873,
+          0.0946241007681
+        ],
+        "metalness": 1,
+        "roughness": 0.32,
+        "ior": null,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:72dc509f"
+        }
+      ]
+    },
+    {
+      "schema": "peercompute.ulg.material-property-bank.element.v0",
+      "symbol": "Lu",
+      "name": "Lutetium",
+      "atomicNumber": 71,
+      "atomicMassU": 174.97,
+      "referenceState": {
+        "temperatureK": 293.15,
+        "pressurePa": 101325
+      },
+      "phases": [
+        {
+          "name": "solid",
+          "temperatureRangeK": [
+            0,
+            2756.5246987
+          ],
+          "densityKgPerM3": 36.5930904801,
+          "heatCapacityJPerKgK": 142.375217001,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 378598439.801,
+          "shearModulusPa": 174737741.446,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        },
+        {
+          "name": "liquid",
+          "temperatureRangeK": [
+            2756.5246987,
+            1000000
+          ],
+          "densityKgPerM3": 36.3186423015,
+          "heatCapacityJPerKgK": 149.493977851,
+          "thermalConductivityWPerMK": 0,
+          "bulkModulusPa": 375758951.502,
+          "shearModulusPa": 0,
+          "dynamicViscosityPaS": null,
+          "surfaceTensionNPerM": null
+        }
+      ],
+      "transitions": [
+        {
+          "name": "melting",
+          "temperatureK": 2756.5246987,
+          "latentHeatJPerKg": 130988.292684
+        }
+      ],
+      "mechanics": {
+        "mlsMpmMaterialClass": "lanthanide-metal",
+        "targetNeighborCount": 64,
+        "initialPackingHint": "lanthanide-metal-solid-estimate",
+        "spacingPolicy": "derive-from-rest-density-and-phase"
+      },
+      "opticalPbr": {
+        "baseColorSrgb": [
+          0.00862871582066,
+          0.00368941334781,
+          0.00136105711422
+        ],
+        "metalness": 1,
+        "roughness": 0.32,
+        "ior": null,
+        "emissiveHint": "blackbody-coupled"
+      },
+      "provenance": [
+        {
+          "family": "identity",
+          "source": "periodic-table-standard-atomic-weight",
+          "method": "checked-in-precomputed-seed",
+          "status": "exact-constant",
+          "units": "u",
+          "referenceState": "neutral atom"
+        },
+        {
+          "family": "phase-mechanics-optical",
+          "source": "elementMaterialClosure",
+          "method": "atomic lower-level closure reduced estimate, gridPointsN=80",
+          "status": "reduced-estimate",
+          "units": "SI",
+          "referenceState": "293.15 K, 101325 Pa",
+          "quality": "bootstrap-only",
+          "inputHash": "ulg:72b01cf2"
+        }
+      ]
     }
   ]
 }

@@ -546,6 +546,14 @@ as `reduced-estimate` warm seeds from `elementMaterialClosure`. Full selectable
 non-noble element coverage remains open, as does accepted-row consumption by
 GPU material-table and particle-size packing.
 
+Current routing note, 2026-06-19 AKDT: the initial particle-spacing path now
+has an accepted-row hook. `buildSphPhaseDemoState({ materialPropertyBank })`
+normalizes the bank, attaches matching role warm inputs under
+`initialParticleSpacing.materialPropertyBankWarmInputs`, and reports missing
+roles such as `h2o` instead of inventing compound rows. The remaining runtime
+work is default browser bank loading and actual GPU material-table /
+particle-size packing consumption.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

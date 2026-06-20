@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import {
   buildSphPhaseDemoState,
@@ -27,6 +28,10 @@ function near(actual, expected, tolerance = 1e-6) {
     Math.abs(actual - expected) <= tolerance,
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+async function readJson(path) {
+  return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'));
 }
 
 test('demo default builds with fully derived material closures', () => {
@@ -120,6 +125,39 @@ test('demo initial particle spacing adapts to material density at role temperatu
   assert.equal(demo.counts.drop, spacing.drop.particlesPerEdge ** 3);
   assert.equal(demo.counts.base, spacing.base.particlesPerEdge ** 3);
   near(demo.state.smoothingLengthM, spacing.smoothingLengthM);
+});
+
+test('demo initial particle spacing carries accepted material bank warm inputs when supplied', async () => {
+  const materialPropertyBank = await readJson('../data/material-properties/elements.json');
+  const demo = buildSphPhaseDemoState({
+    materialPropertyBank,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const warmInputs = demo.initialParticleSpacing.materialPropertyBankWarmInputs;
+
+  assert.equal(warmInputs.schema, 'peercompute.ulg.sph-initial-particle-spacing-material-bank-warm-inputs.v0');
+  assert.equal(warmInputs.status, 'material-bank-warm-inputs-attached');
+  assert.equal(warmInputs.strictSourceOfTruth, false);
+  assert.equal(warmInputs.coveredRoleCount, 1);
+  assert.equal(warmInputs.roles.drop.material, 'Fe');
+  assert.equal(warmInputs.roles.drop.requestedMaterial, 'fe');
+  assert.equal(warmInputs.roles.drop.strictSourceOfTruth, false);
+  assert.equal(warmInputs.roles.drop.spacingPolicy, 'derive-from-rest-density-and-phase');
+  assert.equal(warmInputs.roles.drop.provenance.generatorFingerprint, materialPropertyBank.generatorFingerprint);
+  assert.equal(warmInputs.roles.base, null);
+  assert.deepEqual(warmInputs.missingRoles, [
+    { role: 'base', material: 'h2o', reason: 'material-bank-row-not-found' }
+  ]);
+  assert.equal(
+    demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankWarmInputStatus,
+    'material-bank-warm-inputs-attached'
+  );
+  assert.equal(demo.initialParticleSpacing.particleSizePolicy.materialPropertyBankCoveredRoleCount, 1);
+
+  const viewState = createSphPhaseViewState({ demo });
+  assert.equal(viewState.initialParticleSpacing.materialPropertyBankWarmInputs.roles.drop.material, 'Fe');
+  assert.equal(viewState.initialParticleSpacing.materialPropertyBankWarmInputs.roles.base, null);
 });
 
 test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {

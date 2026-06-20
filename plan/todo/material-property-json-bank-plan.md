@@ -40,6 +40,14 @@ validated reference truth. Remaining Phase 1 coverage work is the full
 selectable non-noble element list and GPU material-table/particle-size
 consumption.
 
+Status update, 2026-06-19 AKDT: `buildSphPhaseDemoState()` can now accept a
+validated `materialPropertyBank` and attach matching warm inputs to
+`initialParticleSpacing.materialPropertyBankWarmInputs`. The particle-size
+policy reports bank warm-input status and covered role count, while missing
+compound roles such as `h2o` are reported as absent instead of fabricated.
+This is the first particle-size packing hook; default browser loading of the
+JSON bank and GPU material-table packing are still open.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

@@ -43,6 +43,11 @@ import {
   requireFirstPrinciplesMaterialMap,
   requireFirstPrinciplesMaterialProperties
 } from './material/propertyProvenance.js';
+import {
+  materialPropertyBankRecordBySymbol,
+  materialPropertyBankWarmInput,
+  normalizeMaterialPropertyBank
+} from './material/materialPropertyBank.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
@@ -882,6 +887,53 @@ function resolveSingleMaterialClosure(key, { allowFixtureMaterialProperties = fa
   return createDerivedMaterialClosure(key);
 }
 
+function resolveInitialParticleSpacingMaterialBankWarmInputs({
+  materialPropertyBank,
+  dropMaterial,
+  baseMaterial,
+  dropTemperatureK,
+  baseTemperatureK
+} = {}) {
+  if (!materialPropertyBank) return null;
+  const bank = normalizeMaterialPropertyBank(materialPropertyBank);
+  const missingRoles = [];
+  const warmInputForRole = (role, material, temperatureK) => {
+    const record = materialPropertyBankRecordBySymbol(bank, material);
+    if (!record) {
+      missingRoles.push({ role, material, reason: 'material-bank-row-not-found' });
+      return null;
+    }
+    return {
+      ...materialPropertyBankWarmInput(record, {
+        temperatureK,
+        bankFamily: bank.bankFamily,
+        bankSchemaVersion: bank.schemaVersion,
+        generatorFingerprint: bank.generatorFingerprint
+      }),
+      role,
+      requestedMaterial: material
+    };
+  };
+  const roles = {
+    drop: warmInputForRole('drop', dropMaterial, dropTemperatureK),
+    base: warmInputForRole('base', baseMaterial, baseTemperatureK)
+  };
+  const coveredRoleCount = Object.values(roles).filter(Boolean).length;
+  return {
+    schema: 'peercompute.ulg.sph-initial-particle-spacing-material-bank-warm-inputs.v0',
+    status: coveredRoleCount > 0
+      ? 'material-bank-warm-inputs-attached'
+      : 'material-bank-warm-inputs-no-matching-rows',
+    strictSourceOfTruth: false,
+    bankFamily: bank.bankFamily,
+    bankSchemaVersion: bank.schemaVersion,
+    generatorFingerprint: bank.generatorFingerprint,
+    coveredRoleCount,
+    missingRoles,
+    roles
+  };
+}
+
 /**
  * Build the demo's initial SPH state: a `baseMaterial` block resting on the box floor (cold) and a
  * `dropMaterial` block above it (hot, so it starts molten/liquid) that falls onto it. The two
@@ -902,6 +954,7 @@ export function buildSphPhaseDemoState({
   adaptiveParticleSpacing = true,
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
+  materialPropertyBank = null,
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
@@ -982,6 +1035,19 @@ export function buildSphPhaseDemoState({
     targetNeighborCount: initialTargetNeighborCount,
     maxSmoothingLengthRatio: initialMaxSmoothingLengthRatio
   });
+  const materialBankWarmInputs = resolveInitialParticleSpacingMaterialBankWarmInputs({
+    materialPropertyBank,
+    dropMaterial,
+    baseMaterial,
+    dropTemperatureK: dropTempK,
+    baseTemperatureK: baseTempK
+  });
+  if (materialBankWarmInputs) {
+    initialParticleSpacing.materialPropertyBankWarmInputs = materialBankWarmInputs;
+    initialParticleSpacing.particleSizePolicy.materialPropertyBankWarmInputStatus = materialBankWarmInputs.status;
+    initialParticleSpacing.particleSizePolicy.materialPropertyBankCoveredRoleCount =
+      materialBankWarmInputs.coveredRoleCount;
+  }
 
   const dropParticles = fillCube({
     material: dropMaterial,

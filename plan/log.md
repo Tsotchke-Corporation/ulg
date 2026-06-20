@@ -30109,3 +30109,31 @@ Remaining:
 - Expand from active-row coverage to the full selectable non-noble element
   list.
 - Feed accepted bank rows into GPU material-table and particle-size packing.
+
+## 2026-06-19 AKDT - Material Bank Particle-Spacing Warm Input Hook
+
+Status:
+
+- `buildSphPhaseDemoState()` now accepts a `materialPropertyBank` option and
+  normalizes it through the material bank validator.
+- Matching element rows are attached to
+  `initialParticleSpacing.materialPropertyBankWarmInputs` with
+  `strictSourceOfTruth: false`; missing roles such as compound `h2o` are
+  explicitly reported instead of fabricated.
+- The particle-size policy now reports bank warm-input status and covered role
+  count, giving GPU material-table and particle-size packing a stable handoff
+  point.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "material bank warm inputs|initial particle spacing adapts"` with `41/41`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- Load/pass the JSON bank by default in the browser/demo path.
+- Convert attached warm inputs into accepted GPU material-table and
+  particle-size packing rows.

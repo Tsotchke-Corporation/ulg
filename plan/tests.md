@@ -11724,3 +11724,17 @@ Active material bank element coverage, 2026-06-19 AKDT:
     `Rb`, `Pd`, `Cs`.
 - Whitespace:
   `git diff --check` passed.
+
+Material bank particle-spacing warm input hook, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js` and
+  `node --check tests/sphPhaseDemo.test.mjs` passed.
+- Focused SPH demo suite command:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "material bank warm inputs|initial particle spacing adapts"`
+  - Passed: `41/41`.
+  - The new assertion supplies `data/material-properties/elements.json`, checks
+    Fe role warm-input attachment, verifies `h2o` is reported as a missing
+    compound row, and confirms the view-state handoff carries the metadata.
+- Whitespace:
+  `git diff --check` passed.

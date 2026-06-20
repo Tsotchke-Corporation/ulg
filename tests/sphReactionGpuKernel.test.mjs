@@ -24,6 +24,7 @@ import {
   runSphReactionStepCpu,
   runSphReactionStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
+import { sphReactionStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const materialProperties = {
   a: {
@@ -307,16 +308,24 @@ test('SPH reaction CPU reference consumes balanced product term rows for gas byp
   });
 
   assert.equal(result.eventCount, 1);
-  assert.equal(result.conversionCount, 2);
+  assert.equal(result.conversionCount, 1);
   assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
-  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('c2'));
-  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1], GPU_PHASE_IDS.gas);
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('b'));
   assert.ok(Math.abs(result.state[3] - 5.625) < 1e-6);
-  assert.ok(Math.abs(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] - 0.375) < 1e-6);
+  assert.equal(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3], 0);
   assert.equal(result.mechanics[20], 0);
-  assert.ok(Math.abs(result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19] - 3.75) < 1e-6);
+  assert.equal(result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19], 0);
   assert.ok(Math.abs(result.reactionLedger.gasMassKgByMaterial.c2 - 0.375) < 1e-6);
-  assert.equal(result.reactionLedger.unplacedProductMassKg, 0);
+  assert.ok(Math.abs(result.reactionLedger.unplacedProductMassKg - 0.375) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.unplacedProductMassKgByMaterial.c2 - 0.375) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.visibleProductMassKgByMaterial.ab - 5.625) < 1e-6);
+  assert.equal(result.reactionLedger.visibleProductMassKgByMaterial.c2 ?? 0, 0);
+});
+
+test('SPH reaction WGSL routes gas products out of visible particle slots', () => {
+  assert.match(sphReactionStepWgsl, /fn\s+product_term_for_visible_slot/);
+  assert.match(sphReactionStepWgsl, /let\s+condensed\s*=\s*term1\.y\s*<\s*0\.5/);
+  assert.match(sphReactionStepWgsl, /product_term_for_visible_slot\(reaction_index,\s*local_product_slot\)/);
 });
 
 test('SPH reaction CPU reference preserves excess reactant and ledgers unplaced gas products', () => {

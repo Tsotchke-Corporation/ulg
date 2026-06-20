@@ -29432,3 +29432,45 @@ Remaining:
 - Add a browser reaction fixture that actually trips the support-radius cap.
 - Split gas/foam/product expansion from individual visual particle radius so
   reaction volume is not represented by giant per-particle spheres.
+
+## 2026-06-19 AKDT - Gas Product Radius Proxy
+
+Status:
+
+- Kept explicitly gas-routed reaction products out of visible product slots in
+  CPU reaction planning.
+- Added a WGSL helper so WebGPU reaction resolve writes only condensed product
+  terms into visible particle slots; gas terms remain in unplaced/gas ledger
+  accounting.
+- Added a gas-phase render-row visual-radius proxy. Gas rows remain decoded and
+  material/phase-counted, but individual gas spheres are capped at
+  `0.5 * smoothingLengthM` before the row reaches retained buffers, Three
+  particle spheres, or downstream surface extraction.
+- Exposed `renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed` and
+  `renderRowsParticleScaleMaxGasParticleRadiusM` through resident scene state
+  and the long-horizon browser probe.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphReactionGpuKernel.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --check tests/sphReactionGpuKernel.test.mjs`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` with `53/53`.
+- PASS: `node --test tests/sphReactionGpuKernel.test.mjs` with `11/11`.
+- PASS: `npm run test:physics-atomics` with `11/11`; three long-horizon gates
+  skipped by opt-in policy.
+- PASS: `/tmp/ulg-reaction-gas-radius-proxy-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`, and
+  four nonblank visual frames. Final retained sphere max radius dropped to
+  `0.15508762001991272 m`, matching
+  `renderRowsParticleScaleMaxGasParticleRadiusM=0.15508762272485`, while
+  decoded material/phase counts still included `naoh|gas`.
+
+Remaining:
+
+- Add longer gas-ledger/gas-pressure visualization coverage so this visual proxy
+  does not become the final gas-volume representation.

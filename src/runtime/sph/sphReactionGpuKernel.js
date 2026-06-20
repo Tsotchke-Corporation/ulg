@@ -1012,7 +1012,8 @@ function planStoichiometricFixedBufferEvent({
     visibleMassKg: 0,
     unplacedMassKg: product.massKg
   }));
-  if (productVisibility.length === 1) {
+  const visibleProductCandidates = productVisibility.filter((product) => product.routing !== 'gas');
+  if (productVisibility.length === 1 && visibleProductCandidates.length === 1) {
     for (const source of freeSlots) {
       const massKg = freeSlots.length === 1
         ? consumedMassKg
@@ -1028,8 +1029,8 @@ function planStoichiometricFixedBufferEvent({
       productVisibility[0].unplacedMassKg = Math.max(0, productVisibility[0].unplacedMassKg - massKg);
     }
   } else {
-    for (let slot = 0; slot < freeSlots.length && slot < productVisibility.length; slot += 1) {
-      const product = productVisibility[slot];
+    for (let slot = 0; slot < freeSlots.length && slot < visibleProductCandidates.length; slot += 1) {
+      const product = visibleProductCandidates[slot];
       visibleByIndex.set(freeSlots[slot].index, {
         kind: 'product',
         productIndex: slot,

@@ -188,7 +188,52 @@ Remaining:
 - Add a targeted browser reaction or harness fixture that actually trips the
   support-radius cap in browser telemetry, not only the unit-level synthetic
   aggregate radius fixture.
-- Split gas/foam product expansion from individual particle visual radius so
-  reaction volume can route through product/gas fields instead of giant
-  per-particle spheres.
 - Add reset/lockup regression coverage after the reset functionality fix lands.
+
+## Implementation Status - 2026-06-19 AKDT
+
+Split gas-product routing and gas-phase visual radius from individual visible
+particle scale:
+
+- Reaction planning no longer assigns explicitly gas-routed product terms to
+  visible product slots. CPU reaction events keep those terms in unplaced
+  product/gas accounting instead of creating a second visible gas particle row.
+- The WebGPU reaction resolve shader now picks visible product terms through a
+  condensed-product helper, so gas-routed terms remain ledgered instead of
+  being written into visible particle rows.
+- Render-row extraction now applies a separate gas-phase visual-radius proxy:
+  gas rows remain present in decoded material/phase counts, but individual gas
+  spheres are capped to `0.5 * smoothingLengthM`. This keeps gas/product volume
+  from rendering as huge per-particle spheres while preserving the gas phase and
+  product ledger for later pressure/field work.
+- Scene and long-horizon probe diagnostics expose
+  `renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed` and
+  `renderRowsParticleScaleMaxGasParticleRadiusM` for retained WebGPU rows.
+
+Validation:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- `node --check src/runtime/sph/sphReactionGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check scripts/sph-long-horizon-probe.mjs`
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+- `node --check tests/sphReactionGpuKernel.test.mjs`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/sphRenderGpuKernel.test.mjs` passed `53/53`.
+- `node --test tests/sphReactionGpuKernel.test.mjs` passed `11/11`.
+- `npm run test:physics-atomics` passed `11/11`; the three long-horizon
+  liquid acceptance gates remained opt-in/skipped.
+- Browser probe `/tmp/ulg-reaction-gas-radius-proxy-probe.json` completed
+  `status=good`, analysis `good`, browser console issues/warnings `0/0`, four
+  nonblank captured visual frames, material/phase counts still included
+  `naoh|gas`, and the final sphere max radius dropped from the earlier
+  `0.5263000726699829 m` hot `naoh|gas` sphere to
+  `0.15508762001991272 m`, matching the reported gas cap
+  `0.15508762272485 m`.
+
+Remaining:
+
+- Add reset/lockup regression coverage after the reset functionality fix lands.
+- Add a longer browser reaction sequence that proves gas/product ledgers still
+  feed later gas pressure or field visualization without reintroducing giant
+  visible gas particles.

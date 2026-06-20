@@ -45,11 +45,14 @@ resident mechanics reports
 `peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0`, including
 `gpu-g2p-cap-policy-applied-in-shader` for no-full/fused batches. Track
 remaining work in `plan/todo/reaction-variable-particle-scale-stability-plan.md`:
-create a browser reaction case that actually trips the support-radius cap, split
-gas/foam expansion from individual particle radius, add any active-grid /
-support-radius admission checks needed by product expansion, and fold
-reset/lockup regression coverage into the reset fix. Do not treat these caps as
-the final physics model.
+gas-routed products are now kept out of visible product slots, WebGPU reaction
+resolve mirrors the condensed-visible-product selection, and gas-phase render
+rows use a visual proxy cap of `0.5 * smoothingLengthM`. The mobile-shaped
+Na/H2O probe `/tmp/ulg-reaction-gas-radius-proxy-probe.json` completed
+`status=good` with console issues/warnings `0/0`, retained `naoh|gas` decoded
+rows, and max sphere radius bounded at `0.15508762001991272 m`. Fold
+reset/lockup regression coverage into the reset fix and add a longer gas-ledger
+visualization sequence. Do not treat these caps as the final physics model.
 
 Current routing note, 2026-06-19 AKDT: particle/sphere render modes now apply a
 bridge-local metallic visibility proxy for closure-derived conductor PBR rows,

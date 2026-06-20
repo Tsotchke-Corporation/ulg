@@ -2159,6 +2159,10 @@ async function runBrowserProbe({
               renderState.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed ?? null,
             renderRowsParticleScaleMaxSupportRadiusM:
               finiteOrNull(renderState.renderRowsParticleScaleMaxSupportRadiusM),
+            renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed:
+              renderState.renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed ?? null,
+            renderRowsParticleScaleMaxGasParticleRadiusM:
+              finiteOrNull(renderState.renderRowsParticleScaleMaxGasParticleRadiusM),
             renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
               renderState.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader ?? null,
             renderRowsDecodedSampleRows: renderState.renderRowsDecodedSampleRows ?? null,
@@ -2763,6 +2767,10 @@ async function runBrowserProbe({
 	              surfaceDraw.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed ?? null,
 	            renderRowsParticleScaleMaxSupportRadiusM:
 	              finiteOrNull(surfaceDraw.renderRowsParticleScaleMaxSupportRadiusM),
+	            renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed:
+	              surfaceDraw.renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed ?? null,
+	            renderRowsParticleScaleMaxGasParticleRadiusM:
+	              finiteOrNull(surfaceDraw.renderRowsParticleScaleMaxGasParticleRadiusM),
 	            renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
 	              surfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader ?? null,
 	            renderRowsParticleScaleMaxRawRadiusGrowthRatio:

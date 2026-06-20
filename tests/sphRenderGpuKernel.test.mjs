@@ -26,6 +26,7 @@ import {
   SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
   SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT,
   SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+  SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO,
   SPH_RENDER_ROW_MAX_RADIUS_GROWTH_RATIO,
   SPH_RENDER_ROW_MAX_SUPPORT_RADIUS_SMOOTHING_RATIO,
   SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
@@ -427,6 +428,7 @@ test('SPH render rows carry MLS-MPM current volume, radius, J, and pressure when
 test('SPH render rows cap runaway MLS-MPM particle scale growth with diagnostics', () => {
   const packed = packedRenderParticles();
   packed.smoothingLengthM = 1;
+  packed.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] = 1e-6;
   const mechanics = new Float32Array(3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
   mechanics[18] = 1e9;
   mechanics[19] = 0.001;
@@ -488,6 +490,29 @@ test('SPH render rows cap aggregate product support radius without requiring J g
   assert.ok(result.particleScaleStability.maxParticleRadiusM <= expectedRadius + 1e-7);
 });
 
+test('SPH render rows proxy gas-phase particle radius at kernel scale', () => {
+  const packed = packedRenderParticles();
+  packed.smoothingLengthM = 1.1;
+  const result = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const gasRowOffset = SPH_GPU_RENDER_ROW_FLOATS;
+  const expectedRadius = packed.smoothingLengthM * SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO;
+  const expectedVolume = (4 * Math.PI * expectedRadius ** 3) / 3;
+
+  assert.ok(result.renderRows[gasRowOffset + 13] <= expectedRadius + 1e-7);
+  assert.ok(Math.abs(result.renderRows[gasRowOffset + 12] - expectedVolume) < 1e-7);
+  assert.equal(result.renderRows[gasRowOffset + 14] > 0, true);
+  assert.equal(result.particleScaleStability.status, 'particle-scale-cap-applied');
+  assert.equal(result.particleScaleStability.capAppliedCount, 1);
+  assert.equal(result.particleScaleStability.maxGasParticleRadiusM, expectedRadius);
+  assert.equal(
+    result.particleScaleStability.sampleCappedRows[0].reason,
+    'gas-phase-visual-radius-proxy'
+  );
+  assert.equal(result.particleScaleStability.sampleCappedRows[0].phaseId, GPU_PHASE_IDS.gas);
+  assert.ok(result.particleScaleStability.maxRawParticleRadiusM > expectedRadius);
+  assert.ok(result.particleScaleStability.maxParticleRadiusM <= expectedRadius + 1e-7);
+});
+
 test('SPH render row WGSL applies the same particle scale cap as the CPU contract', () => {
   assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO:\s*f32\s*=\s*4\.0/);
   assert.match(sphRenderRowsWgsl, /RENDER_ROW_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
@@ -496,6 +521,10 @@ test('SPH render row WGSL applies the same particle scale cap as the CPU contrac
   assert.match(sphRenderRowsWgsl, /max_support_radius_m:\s*f32/);
   assert.match(sphRenderRowsWgsl, /particle_radius_m\s*>\s*params\.max_support_radius_m/);
   assert.match(sphRenderRowsWgsl, /current_volume_m3\s*=\s*volume_from_radius_m\(params\.max_support_radius_m\)/);
+  assert.match(sphRenderRowsWgsl, /max_gas_radius_m:\s*f32/);
+  assert.match(sphRenderRowsWgsl, /u32\(thermo0\.y\s*\+\s*0\.5\)\s*==\s*3u/);
+  assert.match(sphRenderRowsWgsl, /particle_radius_m\s*>\s*params\.max_gas_radius_m/);
+  assert.match(sphRenderRowsWgsl, /current_volume_m3\s*=\s*volume_from_radius_m\(params\.max_gas_radius_m\)/);
 });
 
 test('SPH render rows encode base/drop render domains without changing material identity', () => {

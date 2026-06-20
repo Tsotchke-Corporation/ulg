@@ -1283,6 +1283,27 @@ fn product_term_for_local_slot(reaction_index: u32, local_slot: u32) -> ProductT
   return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
 }
 
+fn product_term_for_visible_slot(reaction_index: u32, visible_slot: u32) -> ProductTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_count = u32(max(header1.x, 0.0));
+  let product_term_offset = u32(max(header0.w, 0.0));
+  var visible_index = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term_index = product_term_offset + local;
+    let term0 = product_term_row0(term_index);
+    let term1 = product_term_row1(term_index);
+    let condensed = term1.y < 0.5;
+    if (term1.w == 1.0 && condensed) {
+      if (visible_index == visible_slot) {
+        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+      }
+      visible_index = visible_index + 1u;
+    }
+  }
+  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
 fn product_raw_mass_sum(reaction_index: u32, extent_mol: f32) -> f32 {
   let header0 = reaction_header_row0(reaction_index);
   let header1 = reaction_header_row1(reaction_index);
@@ -1511,13 +1532,13 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       local_product_slot = select(0u, 1u, source0_free);
     }
     if (emits_product && local_product_slot < product_term_count) {
-      let product_term = product_term_for_local_slot(reaction_index, local_product_slot);
+      let product_term = product_term_for_visible_slot(reaction_index, local_product_slot);
       emitted_product_mass = extent_mol * product_term.coefficient * product_term.molar_mass * product_mass_scale;
     }
   }
 
   if (emits_product) {
-    let product_term = product_term_for_local_slot(reaction_index, local_product_slot);
+    let product_term = product_term_for_visible_slot(reaction_index, local_product_slot);
     if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
       write_product_particle(particle_index, product_term.material_id, emitted_product_mass, product_u);
       return;
@@ -3003,9 +3024,9 @@ struct RenderRowsParams {
   render_domain_drop_count: u32,
   has_mechanics: u32,
   max_support_radius_m: f32,
+  max_gas_radius_m: f32,
   _pad0: f32,
   _pad1: f32,
-  _pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -3076,6 +3097,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (params.max_support_radius_m > 0.0 && particle_radius_m > params.max_support_radius_m) {
     particle_radius_m = params.max_support_radius_m;
     current_volume_m3 = volume_from_radius_m(params.max_support_radius_m);
+    if (rest_volume_m3 > 0.0) {
+      effective_volume_ratio_j = max(current_volume_m3 / rest_volume_m3, 1.0e-9);
+    }
+  }
+  if (
+    u32(thermo0.y + 0.5) == 3u
+    && params.max_gas_radius_m > 0.0
+    && particle_radius_m > params.max_gas_radius_m
+  ) {
+    particle_radius_m = params.max_gas_radius_m;
+    current_volume_m3 = volume_from_radius_m(params.max_gas_radius_m);
     if (rest_volume_m3 > 0.0) {
       effective_volume_ratio_j = max(current_volume_m3 / rest_volume_m3, 1.0e-9);
     }

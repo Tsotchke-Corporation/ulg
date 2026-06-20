@@ -11245,3 +11245,36 @@ Render-row support-radius particle-scale guard, 2026-06-19 AKDT:
     resident sphere max radius `0.5263000726699829 m`, decoded max
     `J=1.0000579357147217`, no decoded `J=64` cap-boundary rows, and retained
     shader support policy `maxSupportRadiusM=0.6203504908994 m`.
+
+Gas product routing and gas-radius render proxy, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphRenderGpuKernel.js`,
+  `node --check src/runtime/sph/sphReactionGpuKernel.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check tests/sphRenderGpuKernel.test.mjs`,
+  `node --check tests/sphReactionGpuKernel.test.mjs`, and
+  `node --check ulg-gpu-abi/src/wgsl.js` passed.
+- Focused tests:
+  `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `53/53`.
+  - New coverage proves gas-phase render rows proxy individual sphere radius to
+    `0.5 * smoothingLengthM`, records
+    `gas-phase-visual-radius-proxy`, and keeps the WGSL gas branch wired.
+  `node --test tests/sphReactionGpuKernel.test.mjs`
+  - Passed: `11/11`.
+  - New coverage proves gas-routed product terms remain unplaced/ledgered
+    instead of taking visible particle slots, and the WebGPU reaction shader
+    selects only condensed product terms for visible slots.
+- Physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; the three long-horizon acceptance gates were skipped by
+    their opt-in environment guard.
+- Browser mobile-shaped reaction/sphere probe:
+  `/tmp/ulg-reaction-gas-radius-proxy-probe.json`
+  - Passed with `status=good`, analysis `good`, browser console
+    issues/warnings `0/0`, and four nonblank captured visual frames.
+  - The final retained sphere bridge still decoded `naoh|gas` rows, but max
+    sphere radius was bounded to `0.15508762001991272 m`, matching the reported
+    `renderRowsParticleScaleMaxGasParticleRadiusM=0.15508762272485`.

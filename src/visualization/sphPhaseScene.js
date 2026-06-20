@@ -17556,6 +17556,10 @@ export function createSphPhaseScene(container, {
 	            renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusM =
 	            renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed =
+	            renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null;
+	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasParticleRadiusM =
+	            renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader =
 	            renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio =
@@ -18354,6 +18358,10 @@ export function createSphPhaseScene(container, {
 	          renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null,
 	        renderRowsParticleScaleMaxSupportRadiusM:
 	          renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null,
+	        renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed:
+	          renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null,
+	        renderRowsParticleScaleMaxGasParticleRadiusM:
+	          renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null,
 	        renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
 	          renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null,
 	        renderRowsParticleScaleMaxRawRadiusGrowthRatio:

@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `350`
-- total lines indexed: `246116`
+- total lines indexed: `246130`
 - languages: `{"markdown": 133, "javascript": 109, "text": 90, "json": 17, "c": 1}`
 
 ## Important Files
@@ -50,7 +50,7 @@
 - `tests`: 76 files, 47013 lines, symbols=0, tests=76, languages={"text": 76}
 - `src/runtime`: 31 files, 18796 lines, symbols=413, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 28 files, 39359 lines, symbols=865, tests=0, languages={"javascript": 28}
-- `plan/todo`: 24 files, 13149 lines, symbols=0, tests=0, languages={"markdown": 24}
+- `plan/todo`: 24 files, 13163 lines, symbols=0, tests=0, languages={"markdown": 24}
 - `src/runtime/material`: 20 files, 5374 lines, symbols=226, tests=0, languages={"javascript": 20}
 - `.`: 10 files, 2232 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}

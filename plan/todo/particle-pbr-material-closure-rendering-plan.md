@@ -129,3 +129,17 @@ material, phase, temperature, and pressure are known.
 - Static-table cache rehydration preserves the optical bank consumer summary,
   and live cache reuse rejects stale optical tables whose bank row count no
   longer matches the current seed.
+
+## Status - 2026-06-20 AKDT, Mounted Air Probe Still Blocked
+
+Rechecked the cheap mobile-shaped mounted air/air variable-sphere probe after
+the material-bank and renderer proxy work:
+
+- Command:
+  `ULG_PROBE_URL='/?drop=air&base=air&dropt=293.15&baset=293.15&iceh=0&ironh=0.2&dropn=1&basen=1&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1' ULG_PROBE_OUTPUT=/tmp/ulg-air-particle-pbr-mounted-probe.json ULG_PROBE_PORT=5638 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_MAX=2 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FAIL_ON_BAD=0 node scripts/sph-long-horizon-probe.mjs`
+- Result: `page.waitForFunction: Timeout 180000ms exceeded` while waiting for
+  mounted probe readiness; no output JSON was written.
+
+Keep mounted air-particle browser coverage blocked until there is a cheap valid
+gas-particle scenario or the mounted readiness path is fixed for all-air
+material selections.

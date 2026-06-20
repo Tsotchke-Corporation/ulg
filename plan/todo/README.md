@@ -532,6 +532,13 @@ fingerprinting. Continue by expanding element coverage, adding stale
 schema/provenance rejection fixtures, and consuming accepted rows in GPU
 material-table and particle-size packing.
 
+Current routing note, 2026-06-19 AKDT: stale/provenance rejection fixtures are
+now covered for the element material-property bank. The JSON schema requires
+supported `schemaVersion: 1`, the runtime normalizer rejects stale/future
+versions, and tests mutate records to require unknown provenance statuses and
+missing units to fail closed. The next material-bank work is element coverage
+expansion and GPU material-table/particle-size packing consumption.
+
 Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
 WebGPU marching-cubes implementation lands, adapt material-property derivation
 for the algorithms that consume those rows. Track this in

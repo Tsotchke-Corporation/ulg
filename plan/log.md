@@ -30057,3 +30057,28 @@ Remaining:
 - Expand the element bank beyond the first exercised rows.
 - Add stale schema/provenance rejection fixtures.
 - Feed accepted bank rows into GPU material-table and particle-size packing.
+
+## 2026-06-19 AKDT - Material Property Bank Stale Provenance Guards
+
+Status:
+
+- Tightened the material-property bank schema/version contract to supported
+  `schemaVersion: 1`.
+- `normalizeMaterialPropertyBank()` now rejects stale or future schema
+  versions instead of accepting any positive integer.
+- Added tests that mutate the checked-in bank to prove unsupported versions,
+  unknown provenance statuses, and missing provenance units fail closed before
+  registry use.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/materialPropertyBank.js`.
+- PASS: `node --check tests/materialPropertyBank.test.mjs`.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` with `5/5`.
+- PASS: `node scripts/material-properties/validate-material-property-bank.mjs`
+  with `recordCount=5`.
+
+Remaining:
+
+- Expand the element bank beyond the first exercised rows.
+- Feed accepted bank rows into GPU material-table and particle-size packing.

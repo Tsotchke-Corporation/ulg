@@ -1,4 +1,5 @@
 export const MATERIAL_PROPERTY_BANK_SCHEMA = 'peercompute.ulg.material-property-bank.elements.v0';
+export const MATERIAL_PROPERTY_BANK_SCHEMA_VERSION = 1;
 export const MATERIAL_PROPERTY_BANK_RECORD_SCHEMA = 'peercompute.ulg.material-property-bank.element.v0';
 export const MATERIAL_PROPERTY_BANK_WARM_INPUT_SCHEMA = 'peercompute.ulg.material-property-bank.warm-input.v0';
 
@@ -55,8 +56,11 @@ export function normalizeMaterialPropertyBank(bank) {
   if (bank?.schema !== MATERIAL_PROPERTY_BANK_SCHEMA) {
     throw new TypeError('material property bank has an unknown schema');
   }
-  if (!Number.isInteger(bank.schemaVersion) || bank.schemaVersion < 1) {
-    throw new RangeError('material property bank schemaVersion must be a positive integer');
+  if (!Number.isInteger(bank.schemaVersion)) {
+    throw new RangeError('material property bank schemaVersion must be an integer');
+  }
+  if (bank.schemaVersion !== MATERIAL_PROPERTY_BANK_SCHEMA_VERSION) {
+    throw new RangeError(`unsupported material property bank schemaVersion: ${bank.schemaVersion}`);
   }
   const records = (bank.records || []).map((record) => {
     assertMaterialPropertyBankRecord(record);

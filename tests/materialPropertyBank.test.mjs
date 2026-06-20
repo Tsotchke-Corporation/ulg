@@ -8,6 +8,7 @@ import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createFirstPrinciplesMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
   MATERIAL_PROPERTY_BANK_SCHEMA,
+  MATERIAL_PROPERTY_BANK_SCHEMA_VERSION,
   materialPropertyBankRecordBySymbol,
   materialPropertyBankWarmInput,
   normalizeMaterialPropertyBank
@@ -15,6 +16,10 @@ import {
 
 async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'));
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 test('element material property bank validates against schema and normalizes lookup keys', async () => {
@@ -28,11 +33,44 @@ test('element material property bank validates against schema and normalizes loo
   assert.equal(validate(bank), true, ajv.errorsText(validate.errors));
   const normalized = normalizeMaterialPropertyBank(bank);
   assert.equal(normalized.schema, MATERIAL_PROPERTY_BANK_SCHEMA);
+  assert.equal(normalized.schemaVersion, MATERIAL_PROPERTY_BANK_SCHEMA_VERSION);
   assert.ok(normalized.recordCount >= 5);
   assert.equal(materialPropertyBankRecordBySymbol(normalized, 'Fe')?.atomicNumber, 26);
   assert.equal(materialPropertyBankRecordBySymbol(normalized, 'fe')?.atomicNumber, 26);
   assert.equal(materialPropertyBankRecordBySymbol(normalized, 'FE')?.atomicNumber, 26);
   assert.equal(materialPropertyBankRecordBySymbol(normalized, 'Na')?.mechanics.spacingPolicy, 'derive-from-rest-density-and-phase');
+});
+
+test('material property bank rejects stale schema and invalid provenance rows', async () => {
+  const bank = await readJson('../data/material-properties/elements.json');
+
+  const stale = clone(bank);
+  stale.schemaVersion = 0;
+  assert.throws(
+    () => normalizeMaterialPropertyBank(stale),
+    /unsupported material property bank schemaVersion: 0/
+  );
+
+  const future = clone(bank);
+  future.schemaVersion = MATERIAL_PROPERTY_BANK_SCHEMA_VERSION + 1;
+  assert.throws(
+    () => normalizeMaterialPropertyBank(future),
+    /unsupported material property bank schemaVersion: 2/
+  );
+
+  const unknownProvenance = clone(bank);
+  unknownProvenance.records[0].provenance[0].status = 'unreviewed-table';
+  assert.throws(
+    () => normalizeMaterialPropertyBank(unknownProvenance),
+    /material property bank provenance has unknown status: unreviewed-table/
+  );
+
+  const missingUnits = clone(bank);
+  delete missingUnits.records[0].provenance[0].units;
+  assert.throws(
+    () => normalizeMaterialPropertyBank(missingUnits),
+    /material property bank provenance missing units/
+  );
 });
 
 test('material property bank warm input is explicitly non-authoritative', async () => {

@@ -11693,3 +11693,17 @@ Material property bank registry warm inputs, 2026-06-19 AKDT:
   `node --test tests/materialEos.test.mjs` passed `7/7`.
 - Whitespace:
   `git diff --check` passed.
+
+Material property bank stale provenance guards, 2026-06-19 AKDT:
+
+- Syntax:
+  `node --check src/runtime/material/materialPropertyBank.js` and
+  `node --check tests/materialPropertyBank.test.mjs` passed.
+- Focused Node suite:
+  `node --test tests/materialPropertyBank.test.mjs`
+  - Passed: `5/5`.
+  - Added mutated-bank guards for stale schema version, future schema version,
+    unknown provenance status, and missing provenance units.
+- Material bank schema validator:
+  `node scripts/material-properties/validate-material-property-bank.mjs`
+  - Passed with `recordCount=5` and symbols `H`, `O`, `Na`, `Fe`, `Cs`.

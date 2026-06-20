@@ -23,6 +23,14 @@ bank schema version and generator fingerprint. The resolver manifest now names
 coverage, add stale schema/provenance rejection fixtures, and feed accepted
 rows into the GPU material-table/particle-size packing path.
 
+Status update, 2026-06-19 AKDT: stale schema/provenance rejection is now a
+checked runtime and test contract. The bank schema requires supported
+`schemaVersion: 1`, `normalizeMaterialPropertyBank()` rejects stale or future
+schema versions, and tests mutate the bank to prove unsupported versions,
+unknown provenance statuses, and missing provenance units fail before registry
+use. Remaining Phase 1 work is element coverage expansion and accepted-row
+consumption by GPU material tables and particle-size packing.
+
 Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
 now reaches the renderer as `particleRadiiM` and descriptor fields, so
 same-material/same-temperature domains use the same physical particle radius

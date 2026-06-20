@@ -76,6 +76,19 @@ resident GPU uploads, and reset/rebuild flows.
   bridge internals optional and treats them as renderer-roadmap evidence rather
   than a drop-edge contract requirement.
 
+2026-06-19 AKDT update:
+
+- Added broader visual-mode coverage for the same non-H2O Fe/H2O high-edge URL
+  path with `surfaceDraw=three-render-row-points`.
+- The mounted mobile-shaped regression verifies reset resync, requested/effective
+  edge diagnostics, render-domain counts, render-domain position bounds, SPH and
+  MLS-MPM GPU uploads, selected points render mode, optional resident render-state
+  bridge alignment when published, and clean WebGPU console output.
+- Focused evidence:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "mounted points diagnostics"` passed `1/1`.
+
 2026-06-19 AKDT live report update:
 
 - User still reports that drop edge is not respected for anything larger than
@@ -159,9 +172,9 @@ resident GPU uploads, and reset/rebuild flows.
 
 Remaining:
 
-- Keep this active only for broader visual-mode coverage above `dropn=7`, a
-  true live repro outside the covered H2O/H2O and Fe/H2O URL paths, and render
-  bridge batches that actually publish resident render-state diagnostics.
+- Keep this active only for a true live repro outside the covered H2O/H2O and
+  Fe/H2O URL paths, and render bridge batches that actually publish resident
+  render-state diagnostics.
 - Full resident stepping at the expanded `dropn=7, basen=5` total remains
   performance-roadmap work rather than an initialization/drop-edge contract
   blocker.

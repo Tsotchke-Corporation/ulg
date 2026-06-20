@@ -29972,3 +29972,28 @@ Remaining:
 
 - Add non-alkali or multivalent reaction pairs once their retained pressure and
   product expectations are stable enough for mounted browser assertions.
+
+## 2026-06-19 AKDT - High Drop-Edge Points Render Coverage
+
+Status:
+
+- Added a mounted mobile-shaped Fe/H2O `dropn=8, basen=5` regression for
+  `surfaceDraw=three-render-row-points`.
+- The test verifies reset resync, requested/effective edge diagnostics,
+  render-domain counts, render-domain position bounds, SPH and MLS-MPM GPU
+  uploads, selected points render mode, optional resident render-state bridge
+  alignment when present, and clean WebGPU console output.
+- This broadens the drop-edge coverage beyond the existing sphere-mode path
+  without loosening initialization or visual-scale contracts.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted points diagnostics"` with `1/1`.
+
+Remaining:
+
+- Keep drop-edge open only for a new live repro outside the covered H2O/H2O
+  and Fe/H2O URL paths, or for resident render-state batches that publish
+  additional bridge diagnostics.

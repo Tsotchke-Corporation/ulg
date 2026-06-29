@@ -115,6 +115,7 @@ import {
   summarizeResidentBufferLeaseLedger
 } from '../runtime/residentBufferLease.js';
 import {
+  ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA,
   readResidentStepsCommittedWarmDelta
 } from '../runtime/peercomputeResidentCommitBridge.js';
 import {
@@ -127,6 +128,12 @@ import {
 } from './offscreenPresentationBridge.js';
 
 export const SPH_SCENE_BACKGROUND_COLOR_DEFAULT = '#87ceeb';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_READY_STATUS =
+  'presentation-worker-retained-state-promotion-candidate-ready';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_PENDING_ADMISSION_STATUS =
+  'pending-state-manager-admission-worker-local-retained-refs';
 
 function normalizeHexColor(value) {
   const raw = String(value ?? '').trim();
@@ -6388,6 +6395,9 @@ export function createSphPhaseScene(container, {
       || null;
     scene.userData.sphWorkerOffscreenResidentStage = nextStatus;
     renderer.userData.sphWorkerOffscreenResidentStage = nextStatus;
+    refreshWorkerOffscreenRetainedStatePromotionCandidate({
+      reason: 'worker-offscreen-resident-stage-status'
+    });
     return nextStatus;
   }
   function publishWorkerOffscreenRenderRowsStatus(status = null) {
@@ -6397,7 +6407,15 @@ export function createSphPhaseScene(container, {
       || null;
     scene.userData.sphWorkerOffscreenRenderRows = nextStatus;
     renderer.userData.sphWorkerOffscreenRenderRows = nextStatus;
+    refreshWorkerOffscreenRetainedStatePromotionCandidate({
+      reason: 'worker-offscreen-render-rows-status'
+    });
     return nextStatus;
+  }
+  function publishWorkerOffscreenRetainedStatePromotionCandidate(candidate = null) {
+    scene.userData.sphWorkerOffscreenRetainedStatePromotionCandidate = candidate;
+    renderer.userData.sphWorkerOffscreenRetainedStatePromotionCandidate = candidate;
+    return candidate;
   }
   function publishWorkerOffscreenPresentationStatus(status = null) {
     const nextStatus = status || workerOffscreenPresentationBridge?.status || null;
@@ -6500,6 +6518,106 @@ export function createSphPhaseScene(container, {
     }
     const step = sphParticleState?.step ?? 'unknown';
     return String(status?.sourceCacheKey || '').includes(`sphStep:${step}`);
+  }
+  function currentWorkerOffscreenRetainedStatePromotionCandidate() {
+    return scene.userData.sphWorkerOffscreenRetainedStatePromotionCandidate
+      || renderer.userData.sphWorkerOffscreenRetainedStatePromotionCandidate
+      || null;
+  }
+  function refreshWorkerOffscreenRetainedStatePromotionCandidate({
+    reason = 'worker-offscreen-retained-state-promotion-refresh',
+    chainAutoStatus = scene.userData.sphWorkerOffscreenResidentStageChainAuto || null,
+    chainStatus = chainAutoStatus?.chain || scene.userData.sphWorkerOffscreenResidentStageChain || null
+  } = {}) {
+    const autoStatus = chainAutoStatus || scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    const chain = chainStatus || autoStatus?.chain || scene.userData.sphWorkerOffscreenResidentStageChain || null;
+    const chainCompleted = (
+      autoStatus?.status === 'presentation-worker-mechanics-stage-chain-auto-completed'
+      || chain?.status === 'worker-offscreen-mechanics-stage-chain-completed'
+    );
+    if (!chainCompleted) {
+      return publishWorkerOffscreenRetainedStatePromotionCandidate(null);
+    }
+    const renderRows = currentWorkerOffscreenRenderRowsStatus();
+    const residentStage = currentWorkerOffscreenResidentStageStatus();
+    const retainedBufferRefs = Array.isArray(residentStage?.residentStageRetainedBufferRefs)
+      ? [...residentStage.residentStageRetainedBufferRefs]
+      : [];
+    const retainedOutputReady = Boolean(
+      renderRows?.producerSourceKind === 'worker-retained-resident-stage-output'
+      && renderRows?.producerSourceTransport === 'worker-retained-resident-stage-output'
+      && renderRows?.sourceStageId === 'g2p'
+      && renderRows?.retainedParticleStateStatus === 'worker-retained-particle-state-ready'
+    );
+    const fenceSatisfied = residentStage?.residentStageGpuFence?.fenceSatisfied === true;
+    const sameWorkerGpuHandoff = (
+      autoStatus?.sameWorkerGpuHandoff
+      ?? chain?.sameWorkerGpuHandoff
+      ?? residentStage?.residentStageGpuFence?.sameWorkerGpuHandoff
+      ?? null
+    );
+    const ready = Boolean(
+      retainedOutputReady
+      && fenceSatisfied
+      && sameWorkerGpuHandoff === true
+    );
+    const status = ready
+      ? ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_READY_STATUS
+      : 'presentation-worker-retained-state-promotion-candidate-blocked';
+    const blocker = ready
+      ? null
+      : (!retainedOutputReady
+        ? 'worker-retained-g2p-render-output-required'
+        : (!fenceSatisfied
+          ? 'worker-resident-stage-gpu-fence-required'
+          : 'same-worker-gpu-handoff-required'));
+    return publishWorkerOffscreenRetainedStatePromotionCandidate({
+      schema: ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA,
+      status,
+      reason,
+      blocker,
+      admissionStatus: ready
+        ? 'pending-state-manager-admission'
+        : `blocked-${blocker || 'unknown'}`,
+      admissionBridgeSchema: ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA,
+      stateManagerAdmissionRequired: true,
+      authoritativeStateMutation: false,
+      statePromotionStatus: ready
+        ? ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_PENDING_ADMISSION_STATUS
+        : 'not-promoted-worker-local-output-awaiting-promotion-prerequisites',
+      statePromotionReason:
+        'presentation-worker retained output renders locally; authoritative state mutation waits for StateManager admission of worker-local retained refs',
+      laneId: chain?.laneId ?? residentStage?.laneId ?? null,
+      stateKey: chain?.stateKey ?? residentStage?.stateKey ?? null,
+      sourceSignature: autoStatus?.sourceSignature ?? chain?.sourceSignature ?? null,
+      sourceMode: autoStatus?.sourceMode ?? chain?.sourceMode ?? null,
+      sourceStep: autoStatus?.sourceStep ?? chain?.sourceStep ?? null,
+      sourceTime: autoStatus?.sourceTime ?? chain?.sourceTime ?? null,
+      sourceStageId: renderRows?.sourceStageId ?? residentStage?.stageId ?? null,
+      chainStatus: chain?.status ?? autoStatus?.chainStatus ?? null,
+      chainAutoStatus: autoStatus?.status ?? null,
+      renderRowsStatus: renderRows?.status ?? null,
+      renderRowsParticleCount: renderRows?.particleCount ?? null,
+      retainedParticleStateStatus: renderRows?.retainedParticleStateStatus ?? null,
+      producerSourceKind: renderRows?.producerSourceKind ?? null,
+      producerSourceTransport: renderRows?.producerSourceTransport ?? null,
+      sourceTransferBytes: renderRows?.sourceTransferBytes ?? null,
+      sourceStateTransferBytes: renderRows?.sourceStateTransferBytes ?? null,
+      residentStageStatus: residentStage?.status ?? null,
+      gpuFenceSatisfied: fenceSatisfied,
+      gpuFenceStatus: residentStage?.residentStageGpuFence?.status ?? null,
+      queueCompletionStatus: residentStage?.residentStageGpuFence?.queueCompletionStatus ?? null,
+      queueCompletionMethod: residentStage?.residentStageGpuFence?.queueCompletionMethod ?? null,
+      sameWorkerGpuHandoff,
+      retainedBufferRefs,
+      retainedBufferRefCount: retainedBufferRefs.length,
+      workerPrivateGpuBufferHandles: retainedBufferRefs.length > 0,
+      mainThreadGpuBufferImportAvailable: false,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    });
   }
   function workerOffscreenRenderRowsRenderStateFields() {
     const status = currentWorkerOffscreenRenderRowsStatus();
@@ -6615,6 +6733,7 @@ export function createSphPhaseScene(container, {
     const status = currentWorkerOffscreenResidentStageStatus();
     const chainStatus = scene.userData.sphWorkerOffscreenResidentStageChain || null;
     const chainAutoStatus = scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    const promotionCandidate = currentWorkerOffscreenRetainedStatePromotionCandidate();
     return {
       workerOffscreenResidentStage: status || null,
       workerOffscreenResidentStageStatus: status?.status ?? null,
@@ -6695,7 +6814,32 @@ export function createSphPhaseScene(container, {
       workerOffscreenResidentStageChainAutoSequence:
         chainAutoStatus?.sequence ?? null,
       workerOffscreenResidentStageChainAutoRetryIndex:
-        chainAutoStatus?.retryIndex ?? null
+        chainAutoStatus?.retryIndex ?? null,
+      workerOffscreenRetainedStatePromotionCandidate: promotionCandidate,
+      workerOffscreenRetainedStatePromotionCandidateStatus:
+        promotionCandidate?.status ?? null,
+      workerOffscreenRetainedStatePromotionCandidateAdmissionStatus:
+        promotionCandidate?.admissionStatus ?? null,
+      workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus:
+        promotionCandidate?.statePromotionStatus ?? null,
+      workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation:
+        promotionCandidate?.authoritativeStateMutation ?? null,
+      workerOffscreenRetainedStatePromotionCandidateStateManagerAdmissionRequired:
+        promotionCandidate?.stateManagerAdmissionRequired ?? null,
+      workerOffscreenRetainedStatePromotionCandidateSameWorkerGpuHandoff:
+        promotionCandidate?.sameWorkerGpuHandoff ?? null,
+      workerOffscreenRetainedStatePromotionCandidateSourceStageId:
+        promotionCandidate?.sourceStageId ?? null,
+      workerOffscreenRetainedStatePromotionCandidateRetainedBufferRefCount:
+        promotionCandidate?.retainedBufferRefCount ?? null,
+      workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied:
+        promotionCandidate?.gpuFenceSatisfied ?? null,
+      workerOffscreenRetainedStatePromotionCandidateRenderRowsStatus:
+        promotionCandidate?.renderRowsStatus ?? null,
+      workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes:
+        promotionCandidate?.sourceStateTransferBytes ?? null,
+      workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes:
+        promotionCandidate?.sourceTransferBytes ?? null
     };
   }
   function refreshWorkerOffscreenRetainedGpuBufferHandoff({
@@ -22410,6 +22554,10 @@ export function createSphPhaseScene(container, {
     const nextStatus = status || scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
     scene.userData.sphWorkerOffscreenResidentStageChainAuto = nextStatus;
     renderer.userData.sphWorkerOffscreenResidentStageChainAuto = nextStatus;
+    refreshWorkerOffscreenRetainedStatePromotionCandidate({
+      reason: 'worker-offscreen-resident-stage-chain-auto-status',
+      chainAutoStatus: nextStatus
+    });
     return nextStatus;
   }
 
@@ -22506,9 +22654,9 @@ export function createSphPhaseScene(container, {
       latestResidentOutputUsed:
         source?.latestResidentOutputUsed ?? null,
       authoritativeStateMutation: false,
-      statePromotionStatus: 'not-promoted-worker-local-output-not-connected-to-visible-render-state',
+      statePromotionStatus: 'not-promoted-worker-local-output-awaiting-state-manager-admission',
       statePromotionReason:
-        'presentation-worker stage-chain output remains evidence-only until the worker-local render producer consumes the same worker-owned buffers',
+        'presentation-worker retained output can render locally; authoritative state mutation waits for StateManager admission of worker-local retained refs',
       sequence,
       retryIndex,
       updatedAtMs: nowMs(),
@@ -22957,7 +23105,9 @@ export function createSphPhaseScene(container, {
       latestResidentOutputCpuStateStale:
         latestResidentOutputCpuStateStale ?? null,
       authoritativeStateMutation: false,
-      statePromotionStatus: 'not-promoted-worker-local-output-not-connected-to-visible-render-state',
+      statePromotionStatus: 'not-promoted-worker-local-output-awaiting-state-manager-admission',
+      statePromotionReason:
+        'presentation-worker retained output can render locally; authoritative state mutation waits for StateManager admission of worker-local retained refs',
       updatedAtMs: nowMs(),
       scientificValidation: false,
       sphValidation: false,
@@ -23043,6 +23193,9 @@ export function createSphPhaseScene(container, {
     },
     getWorkerOffscreenResidentStageChainAutoStatus() {
       return scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    },
+    getWorkerOffscreenRetainedStatePromotionCandidate() {
+      return currentWorkerOffscreenRetainedStatePromotionCandidate();
     },
     refreshViewportAndOverlay,
     dispose,

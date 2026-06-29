@@ -832,6 +832,55 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenResidentStageChainAuto?.sameWorkerGpuHandoff
     ?? renderState?.workerOffscreenResidentStageChainAutoSameWorkerGpuHandoff
     ?? null;
+  const workerOffscreenRetainedStatePromotionCandidate =
+    metric?.workerOffscreenRetainedStatePromotionCandidate
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidate
+    ?? metric?.rendererInit?.workerOffscreenRetainedStatePromotionCandidate
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateStatus =
+    workerOffscreenRetainedStatePromotionCandidate?.status
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateAdmissionStatus =
+    workerOffscreenRetainedStatePromotionCandidate?.admissionStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateAdmissionStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus =
+    workerOffscreenRetainedStatePromotionCandidate?.statePromotionStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation =
+    workerOffscreenRetainedStatePromotionCandidate?.authoritativeStateMutation
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateStateManagerAdmissionRequired =
+    workerOffscreenRetainedStatePromotionCandidate?.stateManagerAdmissionRequired
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateStateManagerAdmissionRequired
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateSameWorkerGpuHandoff =
+    workerOffscreenRetainedStatePromotionCandidate?.sameWorkerGpuHandoff
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSameWorkerGpuHandoff
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateSourceStageId =
+    workerOffscreenRetainedStatePromotionCandidate?.sourceStageId
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSourceStageId
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateRetainedBufferRefCount = numberOrNull(
+    workerOffscreenRetainedStatePromotionCandidate?.retainedBufferRefCount
+      ?? renderState?.workerOffscreenRetainedStatePromotionCandidateRetainedBufferRefCount
+  );
+  const workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied =
+    workerOffscreenRetainedStatePromotionCandidate?.gpuFenceSatisfied
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes = numberOrNull(
+    workerOffscreenRetainedStatePromotionCandidate?.sourceStateTransferBytes
+      ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes
+  );
+  const workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes = numberOrNull(
+    workerOffscreenRetainedStatePromotionCandidate?.sourceTransferBytes
+      ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes
+  );
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
   const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
@@ -1629,6 +1678,18 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenResidentStageChainAutoStatePromotionStatus,
 		    workerOffscreenResidentStageChainAutoChainStatus,
 		    workerOffscreenResidentStageChainAutoSameWorkerGpuHandoff,
+		    workerOffscreenRetainedStatePromotionCandidate,
+		    workerOffscreenRetainedStatePromotionCandidateStatus,
+		    workerOffscreenRetainedStatePromotionCandidateAdmissionStatus,
+		    workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus,
+		    workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation,
+		    workerOffscreenRetainedStatePromotionCandidateStateManagerAdmissionRequired,
+		    workerOffscreenRetainedStatePromotionCandidateSameWorkerGpuHandoff,
+		    workerOffscreenRetainedStatePromotionCandidateSourceStageId,
+		    workerOffscreenRetainedStatePromotionCandidateRetainedBufferRefCount,
+		    workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied,
+		    workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes,
+		    workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes,
 		    copyBudget: {
 	      schema: 'peercompute.ulg.sph-performance-benchmark-copy-budget.v0',
 	      renderRowsReadbackByteLength,

@@ -69,14 +69,18 @@ Tactical status, 2026-06-28 AKDT:
   presentation-worker device are ready. Telemetry is
   `peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` and
   reports
-  `statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+  `statePromotionStatus=not-promoted-worker-local-output-awaiting-state-manager-admission`.
   Follow-up now directly consumes the retained presentation-worker G2P output
   for worker-local presentation: the offscreen worker resolves the retained
   state/thermo buffers in-module, binds them in the resident particle-state
   producer, and reports `worker-retained-resident-stage-output` with
-  `sourceStateTransferBytes=0` and copied display bytes `0`. The next task is
-  authoritative worker-local state promotion/admission, or an explicit
-  presentation-only PeerCompute mode.
+  `sourceStateTransferBytes=0` and copied display bytes `0`. Follow-up now
+  publishes a non-mutating
+  `peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`
+  contract with
+  `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
+  The next task is StateManager admission for worker-private retained refs, or
+  an explicit presentation-only PeerCompute mode.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

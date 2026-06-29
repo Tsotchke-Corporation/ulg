@@ -72,16 +72,20 @@ path with `presentationWorkerResidentStages=1`, and the scene now automatically
 runs the P2G/grid-update/G2P chain once cloneable resident state and the
 presentation-worker device are ready. The auto status is evidence-only and
 explicitly reports
-`statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+`statePromotionStatus=not-promoted-worker-local-output-awaiting-state-manager-admission`.
 Follow-up now directly consumes the presentation-worker retained G2P output in
 the worker-local render path: the offscreen worker resolves the retained G2P
 state buffer plus lane-retained thermo buffer, binds them in the resident
 particle-state producer, renders on the transferred canvas, and reports
 `producerSourceKind=worker-retained-resident-stage-output` with
-`sourceStateTransferBytes=0` and copied display bytes `0`. Next, define the
-authoritative state promotion/admission contract for that worker-local output,
-or keep it as a PeerCompute-configurable presentation-only mode. Keep the
-direct `GPUBuffer` structured-clone path as an explicit experimental mode only.
+`sourceStateTransferBytes=0` and copied display bytes `0`. Follow-up now
+publishes
+`peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`;
+a ready candidate is still non-mutating and reports
+`statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
+Next, implement StateManager admission for worker-private retained refs, or
+keep this as a PeerCompute-configurable presentation-only mode. Keep the direct
+`GPUBuffer` structured-clone path as an explicit experimental mode only.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

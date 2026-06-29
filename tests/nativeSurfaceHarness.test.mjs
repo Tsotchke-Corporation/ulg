@@ -135,11 +135,14 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /workerOffscreenResidentStageChainStatus/);
   assert.match(sceneSource, /workerOffscreenResidentStageChainAutoStatus/);
   assert.match(sceneSource, /presentation-worker-mechanics-stage-chain-auto\.v0/);
-  assert.match(sceneSource, /not-promoted-worker-local-output-not-connected-to-visible-render-state/);
+  assert.match(sceneSource, /presentation-worker-retained-state-promotion-candidate\.v0/);
+  assert.match(sceneSource, /not-promoted-worker-local-output-awaiting-state-manager-admission/);
+  assert.match(sceneSource, /pending-state-manager-admission-worker-local-retained-refs/);
   assert.match(sceneSource, /workerResidentParticleStateProducerColorRows/);
   assert.match(sceneSource, /drawResidentParticleStateProducer/);
   assert.match(sceneSource, /presentationWorkerRenderRetainedStageOutput/);
   assert.match(sceneSource, /presentation-worker-retained-stage-output-render-request\.v0/);
+  assert.match(sceneSource, /getWorkerOffscreenRetainedStatePromotionCandidate/);
   assert.match(mountSource, /renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy/);
   assert.match(mountSource, /workerOffscreenPresentation/);
   assert.match(mountSource, /presentationWorkerResidentStages/);
@@ -148,6 +151,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(probeSource, /workerOffscreenRenderRows: sceneUserData\.sphWorkerOffscreenRenderRows/);
   assert.match(probeSource, /workerOffscreenResidentStage/);
   assert.match(probeSource, /workerOffscreenResidentStageChainAuto/);
+  assert.match(probeSource, /workerOffscreenRetainedStatePromotionCandidate/);
   assert.match(benchmarkSource, /ULG_BENCH_RENDER_OWNERSHIP/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipPolicyEffectiveMode/);
   assert.match(benchmarkSource, /workerOffscreenPresentationStatus/);
@@ -170,6 +174,9 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenResidentStageChainStatus/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageChainAutoStatus/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageChainAutoStatePromotionStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateAdmissionStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus/);
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);

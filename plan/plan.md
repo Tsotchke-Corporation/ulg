@@ -53,7 +53,7 @@ The new
 `peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` telemetry
 records requested/ready policy state, source signature/mode, same-worker GPU
 handoff, and an explicit
-`statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+`statePromotionStatus=not-promoted-worker-local-output-awaiting-state-manager-admission`.
 Live HTTPS probe and benchmark evidence show the auto chain completes with
 same-worker GPU handoff and copied display bytes `0`. The remaining boundary
 is no longer automatic scheduling; it is promotion or worker-local render
@@ -71,6 +71,17 @@ resident particle-state producer. The rendered canvas status reports
 bytes `0`. Browser benchmark evidence is `good` with same-worker GPU handoff.
 The remaining boundary is authoritative state promotion/admission; the worker
 presentation is no longer just a diagnostic stage-chain proof.
+
+Follow-up checkpoint, 2026-06-29 AKDT: the worker-local retained G2P output now
+publishes an explicit
+`peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`
+contract. A ready candidate means the presentation worker rendered retained
+G2P state with same-worker GPU handoff and zero state/source transfer, but
+still reports `authoritativeStateMutation=false`,
+`statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`,
+and `admissionStatus=pending-state-manager-admission`. The next architecture
+boundary is a StateManager admission path for worker-private retained refs, or
+keeping this as a presentation-only PeerCompute mode.
 
 Current checkpoint, 2026-06-28 AKDT, follow-up: the
 `worker-owned-resident-render-producer` path now consumes packed resident SPH

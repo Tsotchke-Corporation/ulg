@@ -99,7 +99,14 @@ Focused checks:
     `workerOffscreenResidentStageChainAutoStatus=presentation-worker-mechanics-stage-chain-auto-completed`,
     chain status `worker-offscreen-mechanics-stage-chain-completed`,
     `sameWorkerGpuHandoff=true`, and
-    `statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+    `statePromotionStatus=not-promoted-worker-local-output-awaiting-state-manager-admission`.
+  - Follow-up benchmark artifact
+    `/tmp/ulg-retained-promotion-candidate-bench.json` also asserts
+    `workerOffscreenRetainedStatePromotionCandidateStatus=presentation-worker-retained-state-promotion-candidate-ready`,
+    `workerOffscreenRetainedStatePromotionCandidateAdmissionStatus=pending-state-manager-admission`,
+    `workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`,
+    `workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation=false`,
+    and zero source/state transfer bytes.
   - Benchmark artifact
     `/tmp/ulg-auto-presentation-worker-chain-bench.json` completed with suite
     `status=complete`, scenario/probe `good`, auto-chain completed,

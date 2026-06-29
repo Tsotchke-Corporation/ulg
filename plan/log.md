@@ -1,5 +1,55 @@
 # ULG Implementation Log
 
+## 2026-06-29 AKDT - Presentation-Worker Retained State Promotion Candidate
+
+Status:
+
+- The presentation-worker retained G2P render path now publishes
+  `peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`
+  when the retained worker output has rendered locally with same-worker GPU
+  handoff and satisfied worker fence evidence.
+- The candidate is explicitly non-mutating:
+  `authoritativeStateMutation=false`,
+  `admissionStatus=pending-state-manager-admission`, and
+  `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
+  It documents the remaining StateManager admission boundary instead of
+  pretending worker-private GPU buffers are main-thread authoritative state.
+- The long-horizon probe and performance benchmark now capture and flatten
+  `workerOffscreenRetainedStatePromotionCandidate*` fields alongside the
+  existing auto-chain and retained render-row telemetry.
+
+Validation:
+
+- PASS:
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `git diff --check`
+- PASS:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `110` passing tests.
+- PASS:
+  HTTPS benchmark against `https://127.0.0.1:5173` wrote
+  `/tmp/ulg-retained-promotion-candidate-bench.json` with scenario/probe
+  `good`, issues `[]`,
+  `workerOffscreenResidentStageChainAutoStatus=presentation-worker-mechanics-stage-chain-auto-completed`,
+  `workerOffscreenRetainedStatePromotionCandidateStatus=presentation-worker-retained-state-promotion-candidate-ready`,
+  `workerOffscreenRetainedStatePromotionCandidateAdmissionStatus=pending-state-manager-admission`,
+  `workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`,
+  `workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation=false`,
+  `workerOffscreenRetainedStatePromotionCandidateRetainedBufferRefCount=6`,
+  `workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes=0`,
+  and `workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes=0`.
+- PASS:
+  Live server check: HTTPS `https://127.0.0.1:5173/` returns HTTP/2 `200`;
+  HTTP `http://127.0.0.1:5174/` returns HTTP/1.1 `200`; both listeners are
+  bound to `0.0.0.0`.
+
+Open:
+
+- Next slice: implement StateManager admission for worker-private retained refs,
+  or make the presentation-only mode explicit in PeerCompute policy.
+
 ## 2026-06-29 AKDT - Presentation-Worker Retained Output Render Consumption
 
 Status:
@@ -74,7 +124,7 @@ Status:
 - The scheduler is explicitly evidence-only. It publishes
   `peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` with
   `authoritativeStateMutation=false` and
-  `statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+  `statePromotionStatus=not-promoted-worker-local-output-awaiting-state-manager-admission`.
   Worker-local output promotion remains a separate ownership step.
 - Added a source-signature and in-flight guard so the auto path does not start
   duplicate chains against the same state or overlap two chains on the single
@@ -82,6 +132,13 @@ Status:
 - The long-horizon probe and performance benchmark now capture and flatten
   `workerOffscreenResidentStageChainAuto*` fields, including same-worker GPU
   handoff, source mode, stale-output fallback, and promotion status.
+- Follow-up now publishes
+  `peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`
+  after the presentation-worker retained G2P output is rendered locally. A
+  ready candidate reports `authoritativeStateMutation=false`,
+  `admissionStatus=pending-state-manager-admission`, and
+  `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`,
+  making the remaining StateManager admission boundary explicit.
 
 Validation:
 
@@ -112,9 +169,9 @@ Validation:
 Open:
 
 - This does not promote presentation-worker output into the authoritative
-  visible/render state. The next architecture slice is worker-local state
-  promotion or direct worker-local render consumption of the same retained
-  stage outputs.
+  visible/render state. The next architecture slice is StateManager admission
+  for worker-private retained refs, or keeping this as an explicit
+  presentation-only PeerCompute mode.
 
 ## 2026-06-28 AKDT - Worker-Owned Particle-State Render Producer Clean Break
 

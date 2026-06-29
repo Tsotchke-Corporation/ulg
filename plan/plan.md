@@ -83,6 +83,16 @@ and `admissionStatus=pending-state-manager-admission`. The next architecture
 boundary is a StateManager admission path for worker-private retained refs, or
 keeping this as a presentation-only PeerCompute mode.
 
+Follow-up checkpoint, 2026-06-29 AKDT: the presentation-only option is now an
+explicit PeerCompute render ownership mode:
+`presentation-worker-retained-output-presentation-only`. It auto-requests the
+presentation-worker resident stage chain, resolves to the implemented
+`worker-owned-resident-render-producer` path, and reports
+`statePromotionMode=presentation-only` plus
+`authoritativeStateMutationExpected=false`. Live HTTPS benchmark evidence shows
+the mode completes the auto G2P chain and publishes the retained-output
+promotion candidate with zero source/state transfer bytes.
+
 Current checkpoint, 2026-06-28 AKDT, follow-up: the
 `worker-owned-resident-render-producer` path now consumes packed resident SPH
 particle state/thermo plus a compact material/phase color table instead of

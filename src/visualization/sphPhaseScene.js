@@ -6456,6 +6456,14 @@ export function createSphPhaseScene(container, {
         policy?.workerOwnedResidentProducerPending ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
         policy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+      peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested:
+        policy?.presentationWorkerRetainedOutputPresentationOnlyRequested ?? null,
+      peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady:
+        policy?.presentationWorkerRetainedOutputPresentationOnlyReady ?? null,
+      peerComputeRenderOwnershipStatePromotionMode:
+        policy?.statePromotionMode ?? null,
+      peerComputeRenderOwnershipAuthoritativeStateMutationExpected:
+        policy?.authoritativeStateMutationExpected ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested:
         policy?.presentationWorkerResidentStagesRequested ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStagesReady:
@@ -7079,6 +7087,14 @@ export function createSphPhaseScene(container, {
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+      peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyRequested ?? null,
+      peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyReady ?? null,
+      peerComputeRenderOwnershipStatePromotionMode:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.statePromotionMode ?? null,
+      peerComputeRenderOwnershipAuthoritativeStateMutationExpected:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.authoritativeStateMutationExpected ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested:
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesRequested ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStagesReady:

@@ -121,6 +121,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(bridgeSource, /frame-copy-back/);
   assert.match(sceneSource, /createUlgWorkerOffscreenPresentationBridge/);
   assert.match(sceneSource, /sphPeerComputeRenderOwnershipPolicy/);
+  assert.match(policySource, /presentation-worker-retained-output-presentation-only/);
+  assert.match(policySource, /statePromotionMode/);
   assert.match(sceneSource, /sphWorkerOffscreenPresentation/);
   assert.match(sceneSource, /sphWorkerOffscreenRenderRows/);
   assert.match(sceneSource, /sphWorkerOffscreenResidentStage/);
@@ -154,6 +156,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(probeSource, /workerOffscreenRetainedStatePromotionCandidate/);
   assert.match(benchmarkSource, /ULG_BENCH_RENDER_OWNERSHIP/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipPolicyEffectiveMode/);
+  assert.match(benchmarkSource, /peerComputeRenderOwnershipStatePromotionMode/);
+  assert.match(benchmarkSource, /peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested/);
   assert.match(benchmarkSource, /workerOffscreenPresentationStatus/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsStatus/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsInputTransferBytes/);

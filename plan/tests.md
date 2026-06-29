@@ -107,6 +107,16 @@ Focused checks:
     `workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`,
     `workerOffscreenRetainedStatePromotionCandidateAuthoritativeStateMutation=false`,
     and zero source/state transfer bytes.
+  - Presentation-only policy benchmark artifact
+    `/tmp/ulg-presentation-only-policy-bench-2.json` completed as scenario/probe
+    `good` with
+    `peerComputeRenderOwnershipPolicyStatus=render-ownership-presentation-worker-retained-output-presentation-only-ready`,
+    requested mode `presentation-worker-retained-output-presentation-only`,
+    effective mode `worker-owned-resident-render-producer`,
+    `peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested=true`,
+    `peerComputeRenderOwnershipPresentationWorkerResidentStagesReady=true`,
+    `peerComputeRenderOwnershipStatePromotionMode=presentation-only`, and
+    `peerComputeRenderOwnershipAuthoritativeStateMutationExpected=false`.
   - Benchmark artifact
     `/tmp/ulg-auto-presentation-worker-chain-bench.json` completed with suite
     `status=complete`, scenario/probe `good`, auto-chain completed,

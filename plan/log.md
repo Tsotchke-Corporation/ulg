@@ -47,8 +47,56 @@ Validation:
 
 Open:
 
-- Next slice: implement StateManager admission for worker-private retained refs,
-  or make the presentation-only mode explicit in PeerCompute policy.
+- Next slice: implement StateManager admission for worker-private retained refs
+  if this path should become authoritative simulation state.
+
+## 2026-06-29 AKDT - Presentation-Only Retained Output Policy Mode
+
+Status:
+
+- Added `presentation-worker-retained-output-presentation-only` as a
+  PeerCompute render ownership mode. It explicitly requests the worker-owned
+  presentation canvas plus the presentation-worker resident stage chain, but
+  resolves to the existing worker-owned resident render producer implementation.
+- Policy telemetry now exposes
+  `presentationWorkerRetainedOutputPresentationOnlyRequested/Ready`,
+  `statePromotionMode=presentation-only`, and
+  `authoritativeStateMutationExpected=false`. This keeps the current
+  same-worker retained-output path configurable per use case without implying
+  StateManager admission.
+- Resident authority summaries, scene render state, renderer initialization
+  diagnostics, and benchmark summaries all flatten the new policy fields.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-performance-benchmark.mjs`
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `17` passing tests.
+- PASS:
+  HTTPS benchmark with
+  `ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only`
+  wrote `/tmp/ulg-presentation-only-policy-bench-2.json` with scenario/probe
+  `good`, issues `[]`,
+  `peerComputeRenderOwnershipPolicyStatus=render-ownership-presentation-worker-retained-output-presentation-only-ready`,
+  requested mode `presentation-worker-retained-output-presentation-only`,
+  effective mode `worker-owned-resident-render-producer`,
+  `peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested=true`,
+  `peerComputeRenderOwnershipPresentationWorkerResidentStagesReady=true`,
+  `peerComputeRenderOwnershipStatePromotionMode=presentation-only`,
+  `peerComputeRenderOwnershipAuthoritativeStateMutationExpected=false`,
+  auto-chain completed, promotion candidate ready, and zero retained-output
+  source/state transfer bytes.
+
+Open:
+
+- StateManager admission for worker-private retained refs remains the next
+  architecture change if the presentation-worker output should become
+  authoritative simulation state instead of presentation-only output.
 
 ## 2026-06-29 AKDT - Presentation-Worker Retained Output Render Consumption
 

@@ -117,11 +117,39 @@ test('render ownership policy can request presentation-worker resident stages pe
   );
 });
 
+test('render ownership policy exposes presentation-worker retained output as presentation-only', () => {
+  const policy = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'presentation-worker-retained-output-presentation-only',
+    presentationWorkerResidentStagesRequested: false,
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(
+    policy.requestedMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
+  );
+  assert.equal(
+    policy.effectiveMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(
+    policy.status,
+    'render-ownership-presentation-worker-retained-output-presentation-only-ready'
+  );
+  assert.equal(policy.workerOffscreenPresentationRequested, true);
+  assert.equal(policy.workerOwnedResidentProducerRequested, true);
+  assert.equal(policy.presentationWorkerResidentStagesRequested, true);
+  assert.equal(policy.presentationWorkerResidentStagesReady, true);
+  assert.equal(policy.presentationWorkerRetainedOutputPresentationOnlyRequested, true);
+  assert.equal(policy.presentationWorkerRetainedOutputPresentationOnlyReady, true);
+  assert.equal(policy.statePromotionMode, 'presentation-only');
+  assert.equal(policy.authoritativeStateMutationExpected, false);
+});
+
 test('resident authority host summary exposes render ownership policy fields', () => {
   const renderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy: {
-      requestedMode: 'worker-owned-resident-render-producer',
-      presentationWorkerResidentStagesRequested: true
+      requestedMode: 'presentation-worker-retained-output-presentation-only'
     },
     workerOwnedResidentProducerReady: true
   });
@@ -142,6 +170,10 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipPolicySchema, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA);
   assert.equal(
     summary.renderOwnershipPolicyRequestedMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
+  );
+  assert.equal(
+    summary.renderOwnershipPolicyEffectiveMode,
     ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
   );
   assert.equal(summary.renderOwnershipWorkerOffscreenPresentationRequested, true);
@@ -149,4 +181,8 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipTransitionalRenderRowsActive, false);
   assert.equal(summary.renderOwnershipPresentationWorkerResidentStagesRequested, true);
   assert.equal(summary.renderOwnershipPresentationWorkerResidentStagesReady, true);
+  assert.equal(summary.renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested, true);
+  assert.equal(summary.renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady, true);
+  assert.equal(summary.renderOwnershipStatePromotionMode, 'presentation-only');
+  assert.equal(summary.renderOwnershipAuthoritativeStateMutationExpected, false);
 });

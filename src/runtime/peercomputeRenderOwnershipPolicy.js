@@ -6,6 +6,8 @@ export const ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES = Object.freeze({
   MAIN_THREAD_RENDERER: 'main-thread-renderer',
   WORKER_OFFSCREEN_RENDER_ROWS: 'worker-offscreen-render-rows',
   WORKER_OWNED_RESIDENT_RENDER_PRODUCER: 'worker-owned-resident-render-producer',
+  PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY:
+    'presentation-worker-retained-output-presentation-only',
   CROSS_WORKER_GPU_BUFFER_HANDOFF: 'cross-worker-gpubuffer-structured-clone'
 });
 
@@ -76,6 +78,17 @@ export function normalizePeerComputeRenderOwnershipMode(value, fallback = ULG_PE
     return ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER;
   }
   if (
+    normalized === 'presentation-worker-retained'
+    || normalized === 'presentation-worker-retained-output'
+    || normalized === 'presentation-worker-retained-output-presentation-only'
+    || normalized === 'presentation-worker-presentation-only'
+    || normalized === 'worker-retained-presentation-only'
+    || normalized === 'retained-output-presentation-only'
+    || normalized === 'presentation-only'
+  ) {
+    return ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY;
+  }
+  if (
     normalized === 'gpubuffer'
     || normalized === 'gpu-buffer'
     || normalized === 'structured-clone'
@@ -124,6 +137,20 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     'inputTransport'
   ]) || requestedMode;
   let requested = normalizePeerComputeRenderOwnershipMode(rawRequestedMode, null);
+  const policyPresentationWorkerPresentationOnlyRequested = normalizeBoolean(
+    policy.presentationWorkerRetainedOutputPresentationOnly
+      ?? policy.presentationWorkerRetainedOutputPresentationOnlyRequested
+      ?? policy.presentationWorkerPresentationOnly
+      ?? policy.presentationOnly,
+    false
+  );
+  if (
+    policyPresentationWorkerPresentationOnlyRequested
+    && (!requested || requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.AUTO)
+  ) {
+    requested =
+      ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY;
+  }
   const urlRequestedWorkerOffscreen = normalizeBoolean(workerOffscreenPresentationRequested, false);
   const policyRequestedWorkerOffscreen = normalizeBoolean(
     policy.workerOffscreenPresentationRequested ?? policy.workerOffscreenPresentation,
@@ -135,17 +162,25 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       : ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER;
   }
 
+  const presentationWorkerRetainedOutputPresentationOnlyRequested = Boolean(
+    requested
+      === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
+    || policyPresentationWorkerPresentationOnlyRequested
+  );
   const workerOwnedResidentProducerRequested =
-    requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER;
+    requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+    || presentationWorkerRetainedOutputPresentationOnlyRequested;
   const crossWorkerGpuBufferHandoffRequested =
     requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.CROSS_WORKER_GPU_BUFFER_HANDOFF;
-  const presentationWorkerResidentStageChainRequested = normalizeBoolean(
+  const rawPresentationWorkerResidentStageChainRequested =
     presentationWorkerResidentStagesRequested
-      ?? policy.presentationWorkerResidentStagesRequested
-      ?? policy.workerOffscreenResidentStagesRequested
-      ?? policy.workerOwnedResidentStageChainRequested
-      ?? policy.residentStageChainOnPresentationWorker,
-    false
+    ?? policy.presentationWorkerResidentStagesRequested
+    ?? policy.workerOffscreenResidentStagesRequested
+    ?? policy.workerOwnedResidentStageChainRequested
+    ?? policy.residentStageChainOnPresentationWorker;
+  const presentationWorkerResidentStageChainRequested = Boolean(
+    presentationWorkerRetainedOutputPresentationOnlyRequested
+    || normalizeBoolean(rawPresentationWorkerResidentStageChainRequested, false)
   );
   const workerPresentationRequested = Boolean(
     urlRequestedWorkerOffscreen
@@ -170,7 +205,9 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   );
   const effectiveMode = transitionalRenderRowsActive
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS
-    : requested;
+    : (presentationWorkerRetainedOutputPresentationOnlyRequested
+      ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+      : requested);
   const retainedHandoffRequested = retainedGpuBufferHandoffRequested == null
     ? normalizeBoolean(
       policy.retainedGpuBufferHandoffRequested
@@ -207,6 +244,19 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   if (crossWorkerGpuBufferHandoffRequested) {
     status = 'render-ownership-cross-worker-gpubuffer-handoff-requested';
     reason = 'PeerCompute requested direct retained GPUBuffer transport to the presentation worker';
+  } else if (
+    presentationWorkerRetainedOutputPresentationOnlyRequested
+    && targetImplementationReady
+    && presentationWorkerResidentStageChainReady
+  ) {
+    status = 'render-ownership-presentation-worker-retained-output-presentation-only-ready';
+    reason = 'PeerCompute selected presentation-worker retained output as a presentation-only mode';
+  } else if (presentationWorkerRetainedOutputPresentationOnlyRequested && transitionalRenderRowsActive) {
+    status = 'render-ownership-presentation-worker-retained-output-presentation-only-pending-transitional-render-rows';
+    reason = 'presentation-worker retained output mode is selected but the worker-owned producer is not ready; transitional render-row transfer remains active';
+  } else if (presentationWorkerRetainedOutputPresentationOnlyRequested) {
+    status = 'render-ownership-presentation-worker-retained-output-presentation-only-pending';
+    reason = 'presentation-worker retained output mode is selected but presentation-worker resident stages are not ready';
   } else if (workerOwnedResidentProducerRequested && targetImplementationReady) {
     status = 'render-ownership-worker-owned-resident-producer-ready';
     reason = 'PeerCompute selected a worker-owned resident render producer';
@@ -250,6 +300,20 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     workerOwnedResidentProducerPending:
       workerOwnedResidentProducerRequested && !targetImplementationReady,
     workerOwnedResidentProducerSourceTransferRequired,
+    presentationWorkerRetainedOutputPresentationOnlyRequested,
+    presentationWorkerRetainedOutputPresentationOnlyReady: Boolean(
+      presentationWorkerRetainedOutputPresentationOnlyRequested
+      && targetImplementationReady
+      && presentationWorkerResidentStageChainReady
+    ),
+    statePromotionMode: presentationWorkerRetainedOutputPresentationOnlyRequested
+      ? 'presentation-only'
+      : (presentationWorkerResidentStageChainRequested
+        ? 'state-manager-admission-required'
+        : null),
+    authoritativeStateMutationExpected: presentationWorkerRetainedOutputPresentationOnlyRequested
+      ? false
+      : null,
     presentationWorkerResidentStagesRequested: presentationWorkerResidentStageChainRequested,
     presentationWorkerResidentStagesReady: presentationWorkerResidentStageChainReady,
     presentationWorkerResidentStagesPending:

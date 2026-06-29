@@ -79,8 +79,14 @@ Tactical status, 2026-06-28 AKDT:
   `peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`
   contract with
   `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
-  The next task is StateManager admission for worker-private retained refs, or
-  an explicit presentation-only PeerCompute mode.
+  The presentation-only option is now explicit:
+  `renderOwnership=presentation-worker-retained-output-presentation-only`
+  auto-requests this retained G2P chain, resolves to the implemented
+  worker-owned resident producer path, and reports
+  `statePromotionMode=presentation-only` with
+  `authoritativeStateMutationExpected=false`. The remaining architecture task
+  is StateManager admission for worker-private retained refs if that output
+  should become authoritative simulation state.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

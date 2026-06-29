@@ -84,8 +84,13 @@ publishes
 a ready candidate is still non-mutating and reports
 `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
 Next, implement StateManager admission for worker-private retained refs, or
-keep this as a PeerCompute-configurable presentation-only mode. Keep the direct
-`GPUBuffer` structured-clone path as an explicit experimental mode only.
+select the now-explicit PeerCompute presentation-only mode with
+`renderOwnership=presentation-worker-retained-output-presentation-only`. That
+mode auto-requests the presentation-worker resident stage chain, resolves to
+the implemented worker-owned producer path, and records
+`statePromotionMode=presentation-only` with
+`authoritativeStateMutationExpected=false`. Keep the direct `GPUBuffer`
+structured-clone path as an explicit experimental mode only.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

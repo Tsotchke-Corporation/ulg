@@ -6249,6 +6249,14 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       host?.renderOwnershipPolicy?.workerOwnedResidentProducerPending ?? null,
     renderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
       host?.renderOwnershipPolicy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+    renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested:
+      host?.renderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyRequested ?? null,
+    renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady:
+      host?.renderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyReady ?? null,
+    renderOwnershipStatePromotionMode:
+      host?.renderOwnershipPolicy?.statePromotionMode ?? null,
+    renderOwnershipAuthoritativeStateMutationExpected:
+      host?.renderOwnershipPolicy?.authoritativeStateMutationExpected ?? null,
     renderOwnershipPresentationWorkerResidentStagesRequested:
       host?.renderOwnershipPolicy?.presentationWorkerResidentStagesRequested ?? null,
     renderOwnershipPresentationWorkerResidentStagesReady:

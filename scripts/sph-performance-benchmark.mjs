@@ -444,6 +444,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? renderState?.peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired
     ?? metric?.rendererInit?.peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired
     ?? null;
+  const peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested =
+    peerComputeRenderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyRequested
+    ?? renderState?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested
+    ?? null;
+  const peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady =
+    peerComputeRenderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyReady
+    ?? renderState?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady
+    ?? null;
+  const peerComputeRenderOwnershipStatePromotionMode =
+    peerComputeRenderOwnershipPolicy?.statePromotionMode
+    ?? renderState?.peerComputeRenderOwnershipStatePromotionMode
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipStatePromotionMode
+    ?? null;
+  const peerComputeRenderOwnershipAuthoritativeStateMutationExpected =
+    peerComputeRenderOwnershipPolicy?.authoritativeStateMutationExpected
+    ?? renderState?.peerComputeRenderOwnershipAuthoritativeStateMutationExpected
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipAuthoritativeStateMutationExpected
+    ?? null;
   const peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested =
     peerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesRequested
     ?? renderState?.peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested
@@ -1593,6 +1613,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    peerComputeRenderOwnershipPolicyConfiguredByPeerCompute,
 	    peerComputeRenderOwnershipWorkerOwnedResidentProducerPending,
 	    peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired,
+	    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested,
+	    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady,
+	    peerComputeRenderOwnershipStatePromotionMode,
+	    peerComputeRenderOwnershipAuthoritativeStateMutationExpected,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesReady,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesPending,

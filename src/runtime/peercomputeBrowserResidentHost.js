@@ -37,6 +37,10 @@ import {
   uploadSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
+import {
+  ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
+  resolvePeerComputeRenderOwnershipPolicy
+} from './peercomputeRenderOwnershipPolicy.js';
 
 export const ULG_PEERCOMPUTE_RESIDENT_AUTHORITY_HOST_SCHEMA = 'peercompute.ulg.browser-resident-authority-host.v0';
 export const ULG_PEERCOMPUTE_NODEKERNEL_FACADE_SCHEMA = 'peercompute.ulg.nodekernel-facade.v0';
@@ -160,6 +164,21 @@ function retainedGasCellFieldSourceFrom(value = null) {
 function cloneSerializableValue(value) {
   if (value == null) return value;
   return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeSameDeviceRetainedBufferImport(source = null) {
+  if (!source || typeof source !== 'object' || source.sameDevice !== true) return null;
+  const sourceHotBufferKey = normalizeString(
+    source.sourceHotBufferKey || source.hotBufferKey || source.hotBufferRecordKey,
+    null
+  );
+  if (!sourceHotBufferKey) return null;
+  return {
+    schema: source.schema || ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA,
+    ...cloneSerializableValue(source),
+    sourceHotBufferKey,
+    sameDevice: true
+  };
 }
 
 function normalizeRemoteSeedPayload(payload = {}) {
@@ -1796,6 +1815,7 @@ function buildWorkerRetainedAccessContract({
   workerRetainedBufferRefs = [],
   outputFamilies = [],
   sameDeviceMainThreadHandlesAvailable = false,
+  sameDeviceRetainedBufferImport = null,
   workerLocal = true,
   bufferResidency = 'worker-lane-gpu-buffer-retained',
   consumerAccessProtocol = 'same-worker-lane-retained-buffer-ref'
@@ -1805,6 +1825,16 @@ function buildWorkerRetainedAccessContract({
     ? workerRetainedBufferRefs
     : retainedRefs);
   const sameDevice = sameDeviceMainThreadHandlesAvailable === true;
+  const normalizedSameDeviceRetainedBufferImport = normalizeSameDeviceRetainedBufferImport(
+    sameDeviceRetainedBufferImport
+  );
+  const sameDeviceMaterializationAvailable = Boolean(normalizedSameDeviceRetainedBufferImport);
+  const acceptedConsumerModes = sameDevice || sameDeviceMaterializationAvailable
+    ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+    : ['same-worker-lane-retained-buffer-ref'];
+  const acceptedMaterializationModes = sameDevice || sameDeviceMaterializationAvailable
+    ? ['same-device-retained-buffer-import']
+    : [];
   return {
     schema: ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
     status: sameDevice
@@ -1832,20 +1862,19 @@ function buildWorkerRetainedAccessContract({
     localBufferRefs: [],
     mainThreadGpuHandlesAvailable: sameDevice,
     sameDeviceMainThreadHandlesAvailable: sameDevice,
-    localMaterializationStatus: sameDevice
+    sameDeviceRetainedBufferImportAvailable: sameDeviceMaterializationAvailable,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
+    localMaterializationStatus: sameDevice || sameDeviceMaterializationAvailable
       ? 'same-device-retained-buffer-import-ready'
       : 'blocked-worker-private-gpu-handles',
-    localMaterializationBlocker: sameDevice
+    localMaterializationBlocker: sameDevice || sameDeviceMaterializationAvailable
       ? null
       : 'worker-retained-gpu-handles-are-not-main-thread-transferable',
     workerContinuationRequired: !sameDevice,
     workerContinuationProtocol: 'same-worker-lane-retained-buffer-ref',
-    acceptedConsumerModes: sameDevice
-      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
-      : ['same-worker-lane-retained-buffer-ref'],
-    acceptedMaterializationModes: sameDevice
-      ? ['same-device-retained-buffer-import']
-      : [],
+    acceptedConsumerModes,
+    acceptedMaterializationModes,
     remoteRetainedRefsUsableLocally: false,
     stateManagerAdmissionRequired: true,
     authoritativeStateMutation: false
@@ -1970,6 +1999,9 @@ export function planWorkerRetainedContinuationFromAccessContract({
     workerContinuationRequired: contract?.workerContinuationRequired === true,
     mainThreadGpuHandlesAvailable: contract?.mainThreadGpuHandlesAvailable === true,
     sameDeviceMainThreadHandlesAvailable: contract?.sameDeviceMainThreadHandlesAvailable === true,
+    sameDeviceRetainedBufferImportAvailable: contract?.sameDeviceRetainedBufferImportAvailable === true,
+    sameDeviceRetainedBufferImport: contract?.sameDeviceRetainedBufferImport || null,
+    sameDeviceSourceHotBufferKey: contract?.sameDeviceSourceHotBufferKey || null,
     workerLocal: contract?.workerLocal !== false,
     bufferResidency: contract?.bufferResidency || sourceRecord?.bufferResidency || sourceRecord?.payload?.bufferResidency || null,
     workerContinuationProtocol: contract?.workerContinuationProtocol || null,
@@ -2009,6 +2041,8 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   sourceTaskId = null,
   sourceNodeId = null,
   sourceStage = 'g2p',
+  sameDeviceRetainedBufferImport = null,
+  localSameDeviceRetainedBufferImport = null,
   scope = 'ulg-worker-retained-mechanics-publications',
   taskId = null,
   version = null
@@ -2034,6 +2068,15 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     stateKey: resolvedStateKey,
     lease
   });
+  const normalizedSameDeviceRetainedBufferImport = normalizeSameDeviceRetainedBufferImport(
+    sameDeviceRetainedBufferImport
+      || localSameDeviceRetainedBufferImport
+      || candidate.sameDeviceRetainedBufferImport
+      || candidate.localSameDeviceRetainedBufferImport
+      || candidate.workerRetainedBufferImport?.sameDeviceRetainedBufferImport
+      || null
+  );
+  const sameDeviceRetainedBufferImportAvailable = Boolean(normalizedSameDeviceRetainedBufferImport);
   const committedAt = Date.now();
   const workerRetainedBufferImport = {
     schema: ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
@@ -2052,6 +2095,10 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
     localBufferRefs: [],
+    sameDeviceRetainedBufferImportAvailable,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
     copyMode: 'zero-copy-worker-retained-ref-descriptor',
     stateManagerAdmissionRequired: true
   };
@@ -2068,7 +2115,8 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
-    outputFamilies
+    outputFamilies,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport
   });
   workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
   const hotBufferRecord = {
@@ -2091,6 +2139,10 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     workerRetainedBufferRefs,
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
+    sameDeviceRetainedBufferImportAvailable,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
     compactPublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport,
     workerRetainedAccessContract
@@ -2121,6 +2173,10 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
     localBufferRefs: [],
+    sameDeviceRetainedBufferImportAvailable,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
     outputFamilies,
     compactPublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport,
@@ -3356,6 +3412,138 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactCandidate({
   };
 }
 
+function blockedWorkerRetainedMechanicsPublicationRefresh({
+  reason,
+  publication = null,
+  workerPublicationHotBufferKey = null,
+  cacheKey = null,
+  stateKey = null
+} = {}) {
+  return {
+    schema: ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_RESULT_SCHEMA,
+    status: 'blocked-worker-retained-mechanics-publication-refresh',
+    refreshed: false,
+    executorSchema: ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_EXECUTOR_SCHEMA,
+    sourceMode: 'worker-retained-mechanics-publication',
+    reason,
+    cacheKey,
+    stateKey,
+    workerPublicationSchema: publication?.schema || publication?.payload?.schema || null,
+    workerPublicationStatus: publication?.status || publication?.payload?.status || null,
+    workerPublicationHotBufferKey,
+    localBufferRefs: [],
+    retainedBufferRefs: [],
+    gpuFence: {
+      status: 'not-submitted',
+      method: 'worker-retained-mechanics-publication-refresh-blocked'
+    }
+  };
+}
+
+export function refreshUlgSphMlsMpmHotBuffersFromWorkerRetainedMechanicsPublication({
+  device,
+  publication = null,
+  workerPublicationHotBufferKey = null,
+  stateManager = null,
+  cacheKey = null,
+  stateKey = null,
+  lease = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null
+} = {}) {
+  const sourceHotBufferKey = normalizeString(
+    workerPublicationHotBufferKey,
+    publication?.hotBufferKey || publication?.payload?.hotBufferKey || null
+  );
+  const sourceRecord = publication && typeof publication === 'object'
+    ? publication
+    : (
+        sourceHotBufferKey && typeof stateManager?.getHotBuffer === 'function'
+          ? stateManager.getHotBuffer(sourceHotBufferKey)
+          : null
+      );
+  const payload = sourceRecord?.payload && typeof sourceRecord.payload === 'object'
+    ? sourceRecord.payload
+    : null;
+  const resolvedPublicationHotBufferKey = normalizeString(
+    sourceHotBufferKey,
+    sourceRecord?.hotBufferKey || payload?.hotBufferKey || null
+  );
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    sourceRecord?.cacheKey || payload?.cacheKey || null
+  );
+  const resolvedStateKey = normalizeString(
+    stateKey,
+    sourceRecord?.stateKey || payload?.stateKey || null
+  );
+  if (!sourceRecord || typeof sourceRecord !== 'object') {
+    return blockedWorkerRetainedMechanicsPublicationRefresh({
+      reason: 'worker-retained-mechanics-publication-required',
+      workerPublicationHotBufferKey: resolvedPublicationHotBufferKey,
+      cacheKey: resolvedCacheKey,
+      stateKey: resolvedStateKey
+    });
+  }
+  const compactCandidate = sourceRecord.compactPublicationCandidate
+    || payload?.compactPublicationCandidate
+    || sourceRecord.workerRetainedBufferImport?.compactPublicationCandidate
+    || payload?.workerRetainedBufferImport?.compactPublicationCandidate
+    || null;
+  if (!compactCandidate || typeof compactCandidate !== 'object') {
+    return blockedWorkerRetainedMechanicsPublicationRefresh({
+      reason: 'worker-retained-mechanics-publication-compact-candidate-required',
+      publication: sourceRecord,
+      workerPublicationHotBufferKey: resolvedPublicationHotBufferKey,
+      cacheKey: resolvedCacheKey,
+      stateKey: resolvedStateKey
+    });
+  }
+  const sameDeviceRetainedBufferImport = normalizeSameDeviceRetainedBufferImport(
+    sourceRecord.sameDeviceRetainedBufferImport
+      || payload?.sameDeviceRetainedBufferImport
+      || sourceRecord.workerRetainedBufferImport?.sameDeviceRetainedBufferImport
+      || payload?.workerRetainedBufferImport?.sameDeviceRetainedBufferImport
+      || sourceRecord.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+      || payload?.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+      || compactCandidate.sameDeviceRetainedBufferImport
+      || compactCandidate.localSameDeviceRetainedBufferImport
+      || null
+  );
+  const refresh = refreshUlgSphMlsMpmHotBuffersFromCompactCandidate({
+    device,
+    compactCandidateAuthority: {
+      schema: 'peercompute.ulg.worker-retained-mechanics-publication-refresh-authority.v0',
+      status: 'worker-retained-mechanics-publication-refresh-authority-ready',
+      workerPublicationHotBufferKey: resolvedPublicationHotBufferKey,
+      workerPublicationSchema: sourceRecord.schema || payload?.schema || null,
+      workerPublicationStatus: sourceRecord.status || payload?.status || null,
+      compactCandidate,
+      sameDeviceRetainedBufferImport,
+      localSameDeviceRetainedBufferImport: sameDeviceRetainedBufferImport,
+      localRefreshContract: compactCandidate.localRefreshContract || null
+    },
+    compactCandidate,
+    sameDeviceRetainedBufferImport,
+    stateManager,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease,
+    hotBufferKey,
+    hotBufferKeyPrefix
+  });
+  return {
+    ...refresh,
+    sourceMode: refresh.sourceMode || 'worker-retained-mechanics-publication',
+    workerRetainedRefreshSourceMode: 'worker-retained-mechanics-publication',
+    workerPublicationSchema: sourceRecord.schema || payload?.schema || null,
+    workerPublicationStatus: sourceRecord.status || payload?.status || null,
+    workerPublicationHotBufferKey: resolvedPublicationHotBufferKey,
+    workerPublicationSameDeviceRetainedBufferImportAvailable: Boolean(sameDeviceRetainedBufferImport),
+    workerPublicationSameDeviceSourceHotBufferKey: sameDeviceRetainedBufferImport?.sourceHotBufferKey || null
+  };
+}
+
 export function createUlgSphMlsMpmCompactHotBufferRefreshExecutor({
   device,
   materialProperties = null,
@@ -3374,6 +3562,7 @@ export function createUlgSphMlsMpmCompactHotBufferRefreshExecutor({
     device,
     compactCandidateAuthority,
     compactCandidate,
+    sameDeviceRetainedBufferImport,
     stateSeedPayload,
     materialProperties,
     stateManager,
@@ -4991,6 +5180,7 @@ export async function createPeerComputeResidentAuthorityHost({
   gpuDeviceId = 'gpu-device:ulg-browser-resident-host',
   acceptedScopes = ['ulg-sph-resident-pass-dag'],
   requireFenceSatisfied = true,
+  renderOwnershipPolicy = null,
   initialState = null,
   onAdmission = null
 } = {}) {
@@ -5201,6 +5391,11 @@ export async function createPeerComputeResidentAuthorityHost({
   if (nodeKernel?.schema === ULG_PEERCOMPUTE_NODEKERNEL_FACADE_SCHEMA) {
     nodeKernel.hostId = hostId;
   }
+  const initialRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: renderOwnershipPolicy,
+    workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
+    source: 'peercompute-browser-resident-authority-host'
+  });
   const host = {
     schema: ULG_PEERCOMPUTE_RESIDENT_AUTHORITY_HOST_SCHEMA,
     status: 'ready',
@@ -5217,6 +5412,7 @@ export async function createPeerComputeResidentAuthorityHost({
     createUlgMechanicsResidentStageWorkerRunner,
     ulgMechanicsResidentStageWorkerModulePath: DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
     workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
+    renderOwnershipPolicy: initialRenderOwnershipPolicy,
     nodeKernelMode,
     nodeKernelAuthority: summarizeNodeKernelAuthority({
       nodeKernel,
@@ -5248,6 +5444,14 @@ export async function createPeerComputeResidentAuthorityHost({
     },
     getGPUHub() {
       return gpuHub;
+    },
+    setRenderOwnershipPolicy(policy = null) {
+      host.renderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+        peercomputePolicy: policy,
+        workerCapability: host.workerCapability,
+        source: 'peercompute-browser-resident-authority-host'
+      });
+      return host.renderOwnershipPolicy;
     },
     admitLawFamilyPromotion(request = {}) {
       return computeManager.ulgLawFamilyPromotionAdmission({
@@ -5303,6 +5507,12 @@ export async function createPeerComputeResidentAuthorityHost({
       return publishUlgMechanicsWorkerRetainedHotBufferSource({
         stateManager,
         nodeKernel,
+        ...options
+      });
+    },
+    refreshWorkerRetainedMechanicsPublicationHotBuffers(options = {}) {
+      return refreshUlgSphMlsMpmHotBuffersFromWorkerRetainedMechanicsPublication({
+        stateManager,
         ...options
       });
     },
@@ -6020,11 +6230,42 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     workerEffectiveEnableWorkers: host?.workerCapability?.effectiveEnableWorkers ?? null,
     workerCount: host?.workerCapability?.workerCount ?? null,
     workerTargetWorkers: host?.workerCapability?.targetWorkers ?? null,
+    renderOwnershipPolicySchema:
+      host?.renderOwnershipPolicy?.schema || ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
+    renderOwnershipPolicyStatus: host?.renderOwnershipPolicy?.status || null,
+    renderOwnershipPolicyRequestedMode: host?.renderOwnershipPolicy?.requestedMode || null,
+    renderOwnershipPolicyEffectiveMode: host?.renderOwnershipPolicy?.effectiveMode || null,
+    renderOwnershipPolicyInputTransport: host?.renderOwnershipPolicy?.inputTransport || null,
+    renderOwnershipPolicyDisplayTransport: host?.renderOwnershipPolicy?.displayTransport || null,
+    renderOwnershipPolicyConfiguredByPeerCompute:
+      host?.renderOwnershipPolicy?.configuredByPeerCompute ?? null,
+    renderOwnershipWorkerOffscreenPresentationRequested:
+      host?.renderOwnershipPolicy?.workerOffscreenPresentationRequested ?? null,
+    renderOwnershipRetainedGpuBufferHandoffRequested:
+      host?.renderOwnershipPolicy?.retainedGpuBufferHandoffRequested ?? null,
+    renderOwnershipWorkerOwnedResidentProducerRequested:
+      host?.renderOwnershipPolicy?.workerOwnedResidentProducerRequested ?? null,
+    renderOwnershipWorkerOwnedResidentProducerPending:
+      host?.renderOwnershipPolicy?.workerOwnedResidentProducerPending ?? null,
+    renderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
+      host?.renderOwnershipPolicy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+    renderOwnershipPresentationWorkerResidentStagesRequested:
+      host?.renderOwnershipPolicy?.presentationWorkerResidentStagesRequested ?? null,
+    renderOwnershipPresentationWorkerResidentStagesReady:
+      host?.renderOwnershipPolicy?.presentationWorkerResidentStagesReady ?? null,
+    renderOwnershipPresentationWorkerResidentStagesPending:
+      host?.renderOwnershipPolicy?.presentationWorkerResidentStagesPending ?? null,
+    renderOwnershipPresentationWorkerResidentStageTransport:
+      host?.renderOwnershipPolicy?.presentationWorkerResidentStageTransport ?? null,
+    renderOwnershipTransitionalRenderRowsActive:
+      host?.renderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,
     residentMechanicsStageWorkerRunnerFactoryReady: typeof host?.createUlgMechanicsResidentStageWorkerRunner === 'function',
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
+    residentWorkerRetainedMechanicsPublicationRefreshReady:
+      typeof host?.refreshWorkerRetainedMechanicsPublicationHotBuffers === 'function',
     residentWorkerRetainedContinuationPlannerReady: typeof host?.planWorkerRetainedContinuation === 'function',
     residentWorkerRetainedThermalPhasePublicationReady: typeof host?.publishWorkerRetainedThermalPhaseStageOutput === 'function',
     residentWorkerRetainedPressureInterfacePublicationReady: typeof host?.publishWorkerRetainedPressureInterfaceStageOutput === 'function',

@@ -12,11 +12,18 @@ import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.j
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
+export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA =
+  'peercompute.ulg.mechanics-resident-stage-worker-retained-particle-state.v0';
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GPU_BUFFER_USAGE = {
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
+};
+const GPU_MAP_MODE = {
+  READ: globalThis.GPUMapMode?.READ ?? 1
 };
 
 const STAGE_RUNNERS = {
@@ -42,6 +49,13 @@ function laneKeyFor(payload = {}) {
   return [
     normalizeString(payload.lease?.laneId ?? payload.lane?.laneId, 'worker-lane:default'),
     normalizeString(payload.lease?.stateKey ?? payload.lane?.stateKey, 'worker-state:default')
+  ].join('|');
+}
+
+function laneKeyForParts({ laneId = null, stateKey = null } = {}) {
+  return [
+    normalizeString(laneId, 'worker-lane:default'),
+    normalizeString(stateKey, 'worker-state:default')
   ].join('|');
 }
 
@@ -104,6 +118,73 @@ function cloneableValue(value, record, stageId, path = 'result', seen = new Weak
     out[key] = cloneableValue(entry, record, stageId, `${path}.${key}`, seen);
   }
   return out;
+}
+
+function positiveByteLength(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return Math.round(number);
+  }
+  return 0;
+}
+
+function workerStageRetainedByteLength(result = {}) {
+  return positiveByteLength(
+    result.stateBufferByteLength,
+    result.nextParticleStateBufferByteLength,
+    result.state?.byteLength
+  )
+    + positiveByteLength(
+      result.thermoBufferByteLength,
+      result.nextParticleThermoBufferByteLength,
+      result.thermo?.byteLength
+    )
+    + positiveByteLength(
+      result.mechanicsBufferByteLength,
+      result.nextParticleMechanicsBufferByteLength,
+      result.mechanics?.byteLength
+    )
+    + positiveByteLength(
+      result.gridBufferByteLength,
+      result.gridNodes?.byteLength
+    )
+    + positiveByteLength(
+      result.updatedGridBufferByteLength,
+      result.updatedGridNodes?.byteLength
+    )
+    + positiveByteLength(
+      result.pressureInterfaceForceRowsBufferByteLength,
+      result.forceRowsBufferByteLength,
+      result.forceRowByteLength
+    )
+    + positiveByteLength(
+      result.pressureInterfaceGasPressureCellRowByteLength,
+      result.gasPressureCellRowByteLength,
+      result.gasPressureCellRowsBufferByteLength
+    )
+    + positiveByteLength(
+      result.productEventBufferByteLength,
+      result.residentProductMass?.productEventBufferByteLength
+    )
+    + positiveByteLength(
+      result.spatialGasLedgerBufferByteLength,
+      result.compactSpatialGasReadbackByteLength
+    );
+}
+
+function workerStageCopyBudget({ result = {}, readbackMode = null } = {}) {
+  const retainedBytes = workerStageRetainedByteLength(result);
+  const noFullReadback = readbackMode === 'no-full-readback'
+    || result.readbackMode === 'no-full-readback'
+    || result.normalHotLoopReadbackFree === true;
+  return {
+    schema: 'peercompute.compute.gpu-resident-lane-copy-budget.v0',
+    uploadBytes: 0,
+    readbackBytes: noFullReadback ? 0 : retainedBytes,
+    retainedBytes,
+    compactSummaryBytes: 0,
+    fullReadbackReason: noFullReadback ? null : 'worker-stage-full-readback-mode'
+  };
 }
 
 function retainedRefsForStageResult(stageId, result = {}) {
@@ -212,14 +293,69 @@ function workerContext(payload = {}) {
     || {};
 }
 
-async function getWorkerDeviceResult(preferWebGpu) {
+export async function resolveUlgMechanicsResidentStageWorkerDeviceResult({
+  preferWebGpu = false,
+  providedDeviceResult = null,
+  providedDevice = null,
+  requestDeviceResult = null,
+  navigatorRef = globalThis.navigator
+} = {}) {
   if (preferWebGpu !== true) return null;
+  if (providedDeviceResult?.device) {
+    return {
+      ...providedDeviceResult,
+      status: providedDeviceResult.status || 'webgpu-ready-supplied-worker-device-result',
+      reason: providedDeviceResult.reason || 'caller supplied worker device result',
+      workerDeviceSource: 'provided-device-result',
+      workerDeviceProvided: true
+    };
+  }
+  if (providedDevice?.createBuffer) {
+    return {
+      status: 'webgpu-ready-supplied-worker-device',
+      reason: 'caller supplied worker device',
+      device: providedDevice,
+      workerDeviceSource: 'provided-device',
+      workerDeviceProvided: true
+    };
+  }
+  const request = typeof requestDeviceResult === 'function'
+    ? requestDeviceResult
+    : requestOpticalGpuDevice;
+  const result = await request(navigatorRef, {
+    onDeviceLost() {}
+  });
+  return result
+    ? {
+        ...result,
+        workerDeviceSource: result.workerDeviceSource || 'worker-requested-device',
+        workerDeviceProvided: false
+      }
+    : null;
+}
+
+async function getWorkerDeviceResult(preferWebGpu, data = {}) {
+  if (preferWebGpu !== true) return null;
+  if (data?.deviceResult?.device || data?.device?.createBuffer) {
+    return resolveUlgMechanicsResidentStageWorkerDeviceResult({
+      preferWebGpu,
+      providedDeviceResult: data.deviceResult,
+      providedDevice: data.device
+    });
+  }
   if (!workerDeviceResultPromise) {
     workerDeviceResultPromise = requestOpticalGpuDevice(globalThis.navigator, {
       onDeviceLost() {
         workerDeviceResultPromise = null;
       }
-    });
+    }).then((result) => result
+      ? {
+          ...result,
+          workerDeviceSource: result.workerDeviceSource || 'worker-requested-device',
+          workerDeviceProvided: false
+        }
+      : result
+    );
   }
   return workerDeviceResultPromise;
 }
@@ -236,11 +372,124 @@ function writeWorkerStorageBuffer(device, label, data) {
   return buffer;
 }
 
+function hasWorkerRetainedGpuStageOutput(stageId, rawResult = {}) {
+  if (!rawResult || typeof rawResult !== 'object') return false;
+  if (stageId === 'p2g') {
+    return Boolean(rawResult.gridBuffer || rawResult.gpuResult?.gridBuffer);
+  }
+  if (stageId === 'gridUpdate') {
+    return Boolean(rawResult.updatedGridBuffer || rawResult.gpuResult?.updatedGridBuffer);
+  }
+  if (stageId === 'g2p' || stageId === 'thermalPhase' || stageId === 'reactionProduct') {
+    return Boolean(
+      rawResult.stateBuffer
+      || rawResult.mechanicsBuffer
+      || rawResult.thermoBuffer
+      || rawResult.gpuResult?.stateBuffer
+      || rawResult.gpuResult?.mechanicsBuffer
+      || rawResult.gpuResult?.thermoBuffer
+    );
+  }
+  return false;
+}
+
+function sameWorkerQueueFenceFallbackAllowed({ data, rawResult, workerDeviceResult, stageId }) {
+  return data?.sameWorkerQueueFenceFallback !== false
+    && (
+      data?.sameWorkerQueueFenceFallback === true
+      || workerDeviceResult?.workerDeviceSource === 'offscreen-presentation-worker-device'
+      || data?.deviceResult?.workerDeviceSource === 'offscreen-presentation-worker-device'
+    )
+    && rawResult?.backend === 'webgpu'
+    && hasWorkerRetainedGpuStageOutput(stageId, rawResult);
+}
+
 function retainedG2pOutput(record) {
   const g2p = record?.stageResults?.g2p || null;
   const source = g2p?.gpuResult || g2p;
   if (!source?.stateBuffer || !source?.mechanicsBuffer) return null;
   return source;
+}
+
+export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+  laneId = null,
+  stateKey = null,
+  particleCount = null,
+  stateStrideFloats = null,
+  thermoStrideFloats = null,
+  stateByteLength = null,
+  thermoByteLength = null,
+  sourceStageId = 'g2p'
+} = {}) {
+  const key = laneKeyForParts({ laneId, stateKey });
+  const record = retainedLanes.get(key);
+  if (!record) {
+    return {
+      schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA,
+      status: 'worker-retained-particle-state-missing-lane',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      sourceStageId,
+      retainedWithinWorker: false
+    };
+  }
+  const g2p = retainedG2pOutput(record);
+  const source = sourceStageId === 'g2p' ? g2p : null;
+  const thermoBuffer = record.retainedThermoBuffer || source?.thermoBuffer || null;
+  const resolvedParticleCount = Math.max(0, Math.floor(Number(
+    particleCount ?? source?.particleCount
+  ) || 0));
+  const resolvedStateStrideFloats = Math.max(1, Math.floor(Number(
+    stateStrideFloats ?? source?.stateStrideFloats
+  ) || 8));
+  const resolvedThermoStrideFloats = Math.max(12, Math.floor(Number(
+    thermoStrideFloats ?? source?.thermoStrideFloats
+  ) || 12));
+  const resolvedStateByteLength = positiveByteLength(
+    stateByteLength,
+    source?.stateBufferByteLength,
+    resolvedParticleCount * resolvedStateStrideFloats * Float32Array.BYTES_PER_ELEMENT
+  );
+  const resolvedThermoByteLength = positiveByteLength(
+    thermoByteLength,
+    record.retainedThermoBufferByteLength,
+    source?.thermoBufferByteLength,
+    resolvedParticleCount * resolvedThermoStrideFloats * Float32Array.BYTES_PER_ELEMENT
+  );
+  if (!source?.stateBuffer || !thermoBuffer || resolvedParticleCount <= 0) {
+    return {
+      schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA,
+      status: 'worker-retained-particle-state-missing-buffer',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      sourceStageId,
+      retainedWithinWorker: false,
+      particleCount: resolvedParticleCount,
+      stateBufferRetained: Boolean(source?.stateBuffer),
+      thermoBufferRetained: Boolean(thermoBuffer),
+      mechanicsBufferRetained: Boolean(source?.mechanicsBuffer),
+      retainedThermoBufferSourceStage: record.retainedThermoBufferSourceStage || null
+    };
+  }
+  return {
+    schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA,
+    status: 'worker-retained-particle-state-ready',
+    laneId: normalizeString(laneId, null),
+    stateKey: normalizeString(stateKey, null),
+    sourceStageId,
+    retainedWithinWorker: true,
+    sourceStateBuffer: source.stateBuffer,
+    sourceThermoBuffer: thermoBuffer,
+    sourceMechanicsBuffer: source.mechanicsBuffer || null,
+    particleCount: resolvedParticleCount,
+    stateStrideFloats: resolvedStateStrideFloats,
+    thermoStrideFloats: resolvedThermoStrideFloats,
+    stateBufferByteLength: resolvedStateByteLength,
+    thermoBufferByteLength: resolvedThermoByteLength,
+    mechanicsBufferByteLength: positiveByteLength(source.mechanicsBufferByteLength),
+    retainedThermoBufferSourceStage: record.retainedThermoBufferSourceStage || null,
+    retainedThermoBufferSeededFromCpu: record.retainedThermoBufferSeededFromCpu === true
+  };
 }
 
 function retainedThermalOutput(record) {
@@ -459,9 +708,79 @@ async function completeWorkerQueueFence({ stageId, data, rawResult, workerDevice
       method: null
     };
   }
-  await queue.onSubmittedWorkDone();
+  const fenceSchema = rawResult?.gpuFence?.schema
+    || rawResult?.gpuFenceReport?.schema
+    || 'peercompute.compute.gpu-fence-report.v0';
+  const applyFencePatch = (fencePatch) => {
+    rawResult.queueCompletionStatus = fencePatch.queueCompletionStatus;
+    rawResult.queueCompletionMethod = fencePatch.queueCompletionMethod;
+    if (fencePatch.queueCompletionErrorName != null) {
+      rawResult.queueCompletionErrorName = fencePatch.queueCompletionErrorName;
+    }
+    if (fencePatch.queueCompletionErrorMessage != null) {
+      rawResult.queueCompletionErrorMessage = fencePatch.queueCompletionErrorMessage;
+    }
+    rawResult.gpuFence = {
+      ...(rawResult.gpuFence || rawResult.gpuFenceReport || {}),
+      ...fencePatch
+    };
+    rawResult.gpuFenceReport = {
+      ...(rawResult.gpuFenceReport || rawResult.gpuFence || {}),
+      ...fencePatch
+    };
+    return fencePatch;
+  };
+  try {
+    await queue.onSubmittedWorkDone();
+  } catch (error) {
+    const sentinelFence = await completeWorkerQueueFenceWithSentinelReadback({
+      device: workerDeviceResult?.device || data?.deviceResult?.device || null,
+      stageId,
+      fenceSchema,
+      originalError: error
+    });
+    if (sentinelFence?.fenceSatisfied === true) {
+      return applyFencePatch(sentinelFence);
+    }
+    if (sameWorkerQueueFenceFallbackAllowed({ data, rawResult, workerDeviceResult, stageId })) {
+      return applyFencePatch({
+        schema: fenceSchema,
+        required: rawResult?.gpuFence?.required === true || rawResult?.gpuFenceReport?.required === true,
+        fenceSatisfied: true,
+        status: 'gpu-fence-satisfied',
+        reason: `${stageId}-same-worker-queue-ordering-evidenced`,
+        queueCompletionStatus: 'queue-submitted-same-worker-gpu-handoff-no-cpu-fence',
+        queueCompletionMethod: 'same-worker-webgpu-queue-in-order',
+        queueCompletionFallbackFrom: 'worker-device.queue.onSubmittedWorkDone',
+        queueCompletionFallbackStatus: sentinelFence?.queueCompletionFallbackStatus || null,
+        queueCompletionFallbackErrorName: sentinelFence?.queueCompletionFallbackErrorName || null,
+        queueCompletionFallbackErrorMessage: sentinelFence?.queueCompletionFallbackErrorMessage || null,
+        queueCompletionOriginalErrorName: error instanceof Error ? error.name : null,
+        queueCompletionOriginalErrorMessage: error instanceof Error ? error.message : String(error),
+        cpuQueueFenceBypassed: true,
+        sameWorkerGpuHandoff: true,
+        source: 'ulg-mechanics-resident-stage-worker'
+      });
+    }
+    const fencePatch = {
+      schema: fenceSchema,
+      required: rawResult?.gpuFence?.required === true || rawResult?.gpuFenceReport?.required === true,
+      fenceSatisfied: false,
+      status: 'gpu-fence-unsatisfied',
+      reason: `${stageId}-worker-queue-completion-error`,
+      queueCompletionStatus: 'queue-completion-error',
+      queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+      queueCompletionErrorName: error instanceof Error ? error.name : null,
+      queueCompletionErrorMessage: error instanceof Error ? error.message : String(error),
+      queueCompletionFallbackStatus: sentinelFence?.queueCompletionFallbackStatus || null,
+      queueCompletionFallbackErrorName: sentinelFence?.queueCompletionFallbackErrorName || null,
+      queueCompletionFallbackErrorMessage: sentinelFence?.queueCompletionFallbackErrorMessage || null,
+      source: 'ulg-mechanics-resident-stage-worker'
+    };
+    return applyFencePatch(fencePatch);
+  }
   const fencePatch = {
-    schema: rawResult?.gpuFence?.schema || rawResult?.gpuFenceReport?.schema || 'peercompute.compute.gpu-fence-report.v0',
+    schema: fenceSchema,
     required: rawResult?.gpuFence?.required === true || rawResult?.gpuFenceReport?.required === true,
     fenceSatisfied: true,
     status: 'gpu-fence-satisfied',
@@ -470,17 +789,77 @@ async function completeWorkerQueueFence({ stageId, data, rawResult, workerDevice
     queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
     source: 'ulg-mechanics-resident-stage-worker'
   };
-  rawResult.queueCompletionStatus = fencePatch.queueCompletionStatus;
-  rawResult.queueCompletionMethod = fencePatch.queueCompletionMethod;
-  rawResult.gpuFence = {
-    ...(rawResult.gpuFence || rawResult.gpuFenceReport || {}),
-    ...fencePatch
-  };
-  rawResult.gpuFenceReport = {
-    ...(rawResult.gpuFenceReport || rawResult.gpuFence || {}),
-    ...fencePatch
-  };
-  return fencePatch;
+  return applyFencePatch(fencePatch);
+}
+
+async function completeWorkerQueueFenceWithSentinelReadback({
+  device,
+  stageId,
+  fenceSchema,
+  originalError
+} = {}) {
+  if (
+    !device?.createBuffer
+    || !device?.createCommandEncoder
+    || typeof device?.queue?.submit !== 'function'
+  ) {
+    return {
+      fenceSatisfied: false,
+      queueCompletionFallbackStatus: 'sentinel-readback-unavailable',
+      queueCompletionFallbackErrorName: null,
+      queueCompletionFallbackErrorMessage: 'worker WebGPU device cannot create a sentinel queue fence'
+    };
+  }
+  let sourceBuffer = null;
+  let readbackBuffer = null;
+  try {
+    sourceBuffer = device.createBuffer({
+      label: 'ulg-worker-queue-fence-sentinel-source',
+      size: 4,
+      usage: GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    });
+    device.queue.writeBuffer(sourceBuffer, 0, new Uint32Array([0x756c6701]));
+    readbackBuffer = device.createBuffer({
+      label: 'ulg-worker-queue-fence-sentinel-readback',
+      size: 4,
+      usage: GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.MAP_READ
+    });
+    const encoder = device.createCommandEncoder({
+      label: 'ulg-worker-queue-fence-sentinel'
+    });
+    encoder.copyBufferToBuffer(sourceBuffer, 0, readbackBuffer, 0, 4);
+    device.queue.submit([encoder.finish()]);
+    await readbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    readbackBuffer.getMappedRange();
+    readbackBuffer.unmap();
+    return {
+      schema: fenceSchema,
+      required: true,
+      fenceSatisfied: true,
+      status: 'gpu-fence-satisfied',
+      reason: `${stageId}-worker-queue-completion-sentinel-readback-evidenced`,
+      queueCompletionStatus: 'sentinel-readback-map-completed',
+      queueCompletionMethod: 'mapAsync(worker-queue-fence-sentinel)',
+      queueCompletionFallbackFrom: 'worker-device.queue.onSubmittedWorkDone',
+      queueCompletionFallbackErrorName: originalError instanceof Error ? originalError.name : null,
+      queueCompletionFallbackErrorMessage: originalError instanceof Error ? originalError.message : String(originalError),
+      source: 'ulg-mechanics-resident-stage-worker'
+    };
+  } catch (error) {
+    return {
+      fenceSatisfied: false,
+      queueCompletionFallbackStatus: 'sentinel-readback-error',
+      queueCompletionFallbackErrorName: error instanceof Error ? error.name : null,
+      queueCompletionFallbackErrorMessage: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    try {
+      sourceBuffer?.destroy?.();
+    } catch {}
+    try {
+      readbackBuffer?.destroy?.();
+    } catch {}
+  }
 }
 
 function baseStageData(payload = {}) {
@@ -668,7 +1047,7 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
   }
   const record = getLaneRecord(payload);
   const data = stageDataForPayload(payload, record);
-  const workerDeviceResult = await getWorkerDeviceResult(data.preferWebGpu === true);
+  const workerDeviceResult = await getWorkerDeviceResult(data.preferWebGpu === true, data);
   if (workerDeviceResult) {
     data.deviceResult = workerDeviceResult;
     data.navigatorRef = globalThis.navigator;
@@ -699,6 +1078,18 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
   });
   record.stageResults[stageId] = rawResult;
   const cloneableResult = cloneableValue(rawResult, record, stageId);
+  const copyBudget = workerStageCopyBudget({
+    result: cloneableResult,
+    readbackMode: data.readbackMode
+  });
+  if (data.gpuResidentLane && typeof data.gpuResidentLane === 'object') {
+    const workerLaneRequirement = {
+      ...data.gpuResidentLane,
+      copyBudget
+    };
+    cloneableResult.gpuResidentLane = workerLaneRequirement;
+    cloneableResult.gpuResidentLaneRequirement = workerLaneRequirement;
+  }
   const workerRetainedBufferRefs = [...new Set(retainedWorkerRefs(cloneableResult))];
   const retainedBufferRefs = [...new Set([
     ...retainedRefsForStageResult(stageId, rawResult),
@@ -716,6 +1107,8 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerWebGpuStatus: rawResult?.webgpuStatus?.status || workerDeviceResult?.status || null,
     workerWebGpuFallback: rawResult?.webgpuStatus?.fallback || null,
     workerDeviceCached: Boolean(workerDeviceResult?.device),
+    workerDeviceSource: workerDeviceResult?.workerDeviceSource || null,
+    workerDeviceProvided: workerDeviceResult?.workerDeviceProvided === true,
     workerQueueFence,
     workerQueueFenceSatisfied: workerQueueFence?.fenceSatisfied === true,
     workerRetainedContinuationInput,

@@ -1,6 +1,190 @@
 # ULG Implementation Plan
 
+## Clean-Break Routing - Adaptive MLS-MPM
+
+True adaptive MLS-MPM is carved out into
+`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`. Keep it
+separate from the current fixed-grid water/liquid pressure work. The adaptive
+track starts after the next clean break and covers per-particle support radius,
+normalized variable-support P2G/G2P, conservation-safe split/merge/coarsening,
+and mass/momentum/volume/energy continuity tests.
+
 ## Current Target
+
+Current checkpoint, 2026-06-29 AKDT: the worker-owned presentation worker can
+now execute mechanics resident stages on its own WebGPU presentation device.
+The offscreen worker imports the mechanics resident-stage runner, supplies its
+existing `GPUDevice` as the stage device, and publishes nested
+`peercompute.ulg.presentation-worker-resident-stage.v0` telemetry for started,
+completed, failed, and timeout outcomes. Browser evidence against
+`https://127.0.0.1:5173` proves a same-lane
+`P2G -> gridUpdate -> G2P` chain completes inside the presentation worker with
+`summaryBackend=webgpu`, `workerWebGpuStatus=webgpu-executed-no-full-readback`,
+retained GPU buffer refs, and copied display bytes still `0`. Chromium's
+CPU-visible queue fences reject this worker device with
+`OperationError: A valid external Instance reference no longer exists`; for
+same-worker GPU-to-GPU handoff the worker now records an explicit
+`queue-submitted-same-worker-gpu-handoff-no-cpu-fence` proof based on WebGPU
+same-queue ordering instead of requiring a CPU fence. The next target is to
+wire this proven presentation-worker stage chain behind PeerCompute/render
+ownership configuration so normal hot-loop scheduling can choose it, rather
+than invoking it only through the diagnostic scene API.
+
+Follow-up checkpoint, 2026-06-29 AKDT: the proven stage chain is now
+policy-selectable. `peercompute.ulg.render-ownership-policy.v0` carries
+`presentationWorkerResidentStagesRequested/Ready/Pending` plus
+`presentationWorkerResidentStageTransport=offscreen-presentation-worker-device`;
+local URLs can request it with `presentationWorkerResidentStages=1`. The scene
+now exposes `runWorkerOffscreenMechanicsStageChainOnPresentationDevice()`,
+which builds `P2G -> gridUpdate -> G2P` payloads from the current resident
+particle state and returns compact per-stage scheduler evidence. A live browser
+probe with `presentationWorkerResidentStages=1` reported policy requested and
+ready, chain status `worker-offscreen-mechanics-stage-chain-completed`, three
+WebGPU/no-full stages, satisfied same-worker handoff fences, and retained GPU
+refs. The remaining integration work is automatic hot-loop selection and state
+promotion, not stage-chain proof.
+
+Follow-up checkpoint, 2026-06-29 AKDT: automatic selection is now wired as an
+evidence-only scheduler path. With
+`presentationWorkerResidentStages=1`, the scene waits for cloneable
+SPH/MLS-MPM particle state plus the worker-owned presentation device, then
+auto-runs the same `P2G -> gridUpdate -> G2P` chain on the presentation worker.
+The new
+`peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` telemetry
+records requested/ready policy state, source signature/mode, same-worker GPU
+handoff, and an explicit
+`statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+Live HTTPS probe and benchmark evidence show the auto chain completes with
+same-worker GPU handoff and copied display bytes `0`. The remaining boundary
+is no longer automatic scheduling; it is promotion or worker-local render
+consumption of the retained presentation-worker stage outputs.
+
+Follow-up checkpoint, 2026-06-29 AKDT: worker-local render consumption is now
+implemented for the presentation-worker stage chain. After G2P completes in
+the offscreen presentation worker, the worker resolves its own retained G2P
+state buffer plus lane-retained thermo buffer and binds them directly in the
+resident particle-state producer. The rendered canvas status reports
+`producerSourceKind=worker-retained-resident-stage-output`,
+`producerSourceTransport=worker-retained-resident-stage-output`,
+`sourceStageId=g2p`, `retainedParticleStateStatus=worker-retained-particle-state-ready`,
+`sourceStateTransferBytes=0`, `sourceTransferBytes=0`, and copied display
+bytes `0`. Browser benchmark evidence is `good` with same-worker GPU handoff.
+The remaining boundary is authoritative state promotion/admission; the worker
+presentation is no longer just a diagnostic stage-chain proof.
+
+Current checkpoint, 2026-06-28 AKDT, follow-up: the
+`worker-owned-resident-render-producer` path now consumes packed resident SPH
+particle state/thermo plus a compact material/phase color table instead of
+decoded visual render rows. The worker-owned device runs the particle-state
+producer pass, writes compact render rows into its local storage buffer, and
+draws on the transferred `OffscreenCanvas`. Benchmark evidence against the
+live HTTPS server reports
+`worker-offscreen-resident-particle-state-producer-rendered`,
+`producerSourceKind=worker-resident-particle-state`,
+`sourceRowsPacked=false`, decoded visual source transfer `0`,
+`renderRowsReadbackByteLength=0`, readback mode `no-full-readback`, no readback
+coercion, copied display bytes `0`, and
+`renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree=true`.
+The next target is a plan-change boundary: move resident simulation/render
+production into the worker-owned device path, or establish a validated
+same-device GPU object transport.
+
+Current checkpoint, 2026-06-28 AKDT, follow-up: render ownership is now a
+PeerCompute-compatible policy. `peercompute.ulg.render-ownership-policy.v0`
+can be supplied by PeerCompute/runtime options or seeded locally with
+`renderOwnership=...`. It selects among `main-thread-renderer`,
+`worker-offscreen-render-rows`, `worker-owned-resident-render-producer`, and
+`cross-worker-gpubuffer-structured-clone`. The worker-owned resident producer
+mode now requests worker-owned canvas presentation, runs a worker-local WebGPU
+producer pass to write the render-row storage buffer, and does not request the
+blocked direct retained-GPUBuffer route. The HTTPS benchmark with
+`ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer` reports
+requested/effective mode `worker-owned-resident-render-producer`,
+`worker-offscreen-resident-render-producer-rendered`,
+`workerLocalRenderRowsProduced=true`, first source upload `512` bytes, retained
+GPUBuffer handoff `not-requested`, copied display bytes `0`, and scenario
+`good`. A targeted HTTPS Playwright smoke now renders the same resident
+execution twice and proves the repeated unchanged-source path:
+first draw `source-cache-uploaded`/`sourceTransferBytes=512`, second draw
+`source-cache-reused`, `sourceCacheHit=true`, `sourceRowsPacked=false`,
+`sourceTransferBytes=0`, and `inputTransferBytes=64`. The next implementation
+target is feeding this producer's first source from worker-owned resident state
+instead of main-thread visual source rows.
+
+Current checkpoint, 2026-06-28 AKDT, follow-up: the worker-owned transferred
+canvas now renders compact decoded render rows. The scene posts a compact
+particle-row payload only when decoded rows are available; the worker writes
+that input into a local WebGPU storage buffer and draws instanced quads on its
+own `OffscreenCanvas`. Telemetry is
+`peercompute.ulg.worker-offscreen-render-rows.v0` and separates
+`main-thread-compact-render-row-transfer` input bytes from copied display-frame
+bytes. The display path is still `worker-owned-presented-canvas`, copied
+display bytes remain `0`, and `frame-copy-back` remains rejected. The tiny
+HTTPS benchmark with `surfaceDraw=three-render-row-points` reports
+`worker-offscreen-render-rows-rendered`, `particleCount=16`, compact input
+transfer `576` bytes, zero browser console issues, and suite gate `pass`.
+This completes the first visible worker-canvas render input slice. The next
+Ocean-style target is eliminating the forced full render-row readback and
+compact CPU row transfer by making the worker consume retained render
+GPUBuffer state or a same-device imported draw buffer. The transitional
+readback is explicit in telemetry as
+`worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback`;
+an auto-mode HTTPS smoke reports that coercion, 16 rendered worker particles,
+576 compact input bytes, zero copied display bytes, and suite gate `pass`.
+Follow-up evidence closes the direct retained-buffer variant for the current
+browser/page: `GPUBuffer` postMessage to a worker throws `DataCloneError`, and
+benchmark telemetry reports
+`worker-offscreen-retained-gpubuffer-handoff-blocked-structured-clone-unavailable`
+with retained render rows/surface buffers present and plan change required.
+The next implementation plan must move resident render production into the
+worker-owned device path, or first establish a validated cross-worker
+same-device GPU object transport.
+
+Current checkpoint, 2026-06-28 AKDT: the first actual worker-owned presentation
+bridge exists behind `workerOffscreenPresentation=1`. The scene creates a
+displayed canvas layer, transfers it to a module worker with
+`transferControlToOffscreen`, and the worker configures WebGPU on the
+transferred `OffscreenCanvas`. Telemetry is
+`peercompute.ulg.worker-offscreen-presentation.v0` and reports
+`worker-owned-presented-canvas`, zero copied display bytes, and explicit
+`frame-copy-back` rejection. `ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1`
+exercises this path in generated benchmark scenario URLs; the tiny smoke is
+`status=complete`, suite gate `pass`, scenario/probe `good`, zero browser
+console issues, and `worker-offscreen-presentation-ready` for three clears.
+This was still a bridge, not the final renderer. The particle-state producer
+checkpoint above supersedes this decoded-row source-transfer step while
+preserving the same ImageBitmap/readPixels/frame-copy-back rejection.
+Headless Chromium verified one ready worker frame before destroying the worker
+device, so persistent-worker validation still needs a longer live
+browser/device run.
+
+Current checkpoint, 2026-06-24 AKDT: worker-based offscreen rendering is the
+right PeerCompute direction only if the render worker owns the presented canvas.
+The performance benchmark now publishes
+`peercompute.ulg.worker-offscreen-frame-transport-budget.v0`, which treats
+`transferControlToOffscreen` / worker-owned presented canvas as the preferred
+zero-copy display path and treats per-frame ImageBitmap/readPixels-style
+copy-back as the rejected path. A desktop `1280x800` frame is already
+`3.91 MiB/frame` and `234.38 MiB/s` at `60 Hz`; high-DPR phone viewports are
+larger. The next render-worker implementation should therefore transfer the
+display canvas to the worker or fail closed. Do not build a frame-copy shuttle
+as the normal visual path.
+
+Current checkpoint, 2026-06-22 AKDT: the immediate water/liquid bugfix path now
+uses a simpler fixed-support MLS-MPM initialization policy. Requested drop/base
+edge counts stay authoritative for particle counts, one global spacing defines
+mechanics rest volume and visual particle radius, and phase density at the
+selected temperature/pressure defines per-particle mass. This removes the
+role/material-specific particle-radius matching and adaptive edge-search path
+from `sphPhaseDemo.js`; crystal packing and molecular/entity size remain
+diagnostic metadata, not solver particle radius authority. A phase change to a
+large-volume gas does not auto-spawn hundreds or thousands of solver particles
+in the fixed path. Gas mass, volume, and pressure stay in species ledgers/fields
+until an explicit gas-admission or true adaptive split/merge policy creates
+additional particles. Focused unit, physics-atomic, render-buffer, and live
+HTTPS no-full/sphere probes pass for this checkpoint. Remaining visible H2O
+quality is renderer/surface work: the sphere path is visible and closure-PBR
+backed, but still particle-like rather than a merged refractive liquid surface.
 
 Current checkpoint, 2026-06-20 AKDT: compact algorithm-derived rows are now
 crossing into active runtime consumers. Surface extraction rows feed native
@@ -2985,6 +3169,51 @@ physics work:
 - [ ] Extend Na/H2O beyond the one-step mounted gas-promotion proof to repeated
   horizons with product carry-forward, no double counting, visible product/gas
   evidence, and accepted pressure coupling.
+
+### Current SPH/P0 Status - 2026-06-22 10:34 AKDT
+
+- [x] Fixed-support H2O/H2O MLS-MPM now has a clean incompressibility break:
+  CPU carrier, CPU/GPU G2P, WGSL, focused invariants, long liquid atomic, and
+  mounted no-full browser probes use/accept the `1 +/- 0.005` condensed `J`
+  envelope.
+- [x] Live HTTPS browser evidence on `https://127.0.0.1:5173` shows no black
+  canvas regression on this path; the mounted no-full probe reports motion and
+  nonblank frames, and the explicit sphere diagnostic renders visible liquid
+  H2O spheres through the closure-derived PBR bridge.
+- [ ] Continue water visual quality separately: the sphere diagnostic is still
+  visually particle-like/blue, so transparency/refraction, merged liquid-surface
+  quality, and surface-tension behavior remain open follow-up work.
+- [ ] Keep true adaptive MLS-MPM out of this bugfix track. The per-particle
+  support radius, normalized variable-support P2G/G2P, and conservation-safe
+  split/merge plan lives in
+  `plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md`.
+
+### Current Worker-Render Status - 2026-06-28 AKDT
+
+- [x] Worker-owned render presentation is policy-selectable through
+  `peercompute.ulg.render-ownership-policy.v0` and can be requested per local
+  or PeerCompute use case with `worker-owned-resident-render-producer`.
+- [x] The worker-owned producer now consumes packed resident SPH particle
+  state/thermo plus a compact material/phase color table, produces render rows
+  inside the worker WebGPU device, and draws on the transferred
+  `OffscreenCanvas`.
+- [x] The particle-state producer preserves `no-full-readback`. Benchmark
+  evidence reports decoded visual source transfer `0`,
+  `renderRowsReadbackByteLength=0`, no readback coercion, copied display bytes
+  `0`, and
+  `renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree=true`.
+- [x] The presentation worker can execute a same-lane mechanics
+  `P2G -> gridUpdate -> G2P` resident chain on its own WebGPU device. Browser
+  proof shows WebGPU/no-full stages, retained worker GPU refs, and satisfied
+  `same-worker-webgpu-queue-in-order` fences without frame-copy-back.
+- [x] PeerCompute/render ownership policy can request the presentation-worker
+  resident stage chain, and the scene exposes
+  `runWorkerOffscreenMechanicsStageChainOnPresentationDevice()` as the
+  scheduler-facing entrypoint.
+- [ ] Wire automatic hot-loop selection/state promotion to the
+  policy-selectable presentation-worker stage chain. Keep manual scene calls as
+  diagnostics until that scheduler path is explicit.
+- [ ] Do not revive ImageBitmap/readPixels/frame-copy-back as a display path.
 
 ## Integration Rule
 

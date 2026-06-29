@@ -7,6 +7,7 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
+  resolveUlgMechanicsResidentStageWorkerDeviceResult,
   runUlgMechanicsResidentStageWorkerPayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 
@@ -80,6 +81,58 @@ function payload(stageRecord, context, input = null, {
     }
   };
 }
+
+test('ULG mechanics resident stage worker device resolver adopts a supplied worker device result', async () => {
+  let requestCount = 0;
+  const device = { label: 'presentation-worker-webgpu-device' };
+  const supplied = {
+    status: 'presentation-worker-device-ready',
+    reason: 'offscreen canvas already owns device',
+    device
+  };
+
+  const result = await resolveUlgMechanicsResidentStageWorkerDeviceResult({
+    preferWebGpu: true,
+    providedDeviceResult: supplied,
+    requestDeviceResult: async () => {
+      requestCount += 1;
+      return { status: 'unexpected-requested-device', device: { label: 'unexpected' } };
+    }
+  });
+
+  assert.equal(result.device, device);
+  assert.equal(result.status, 'presentation-worker-device-ready');
+  assert.equal(result.workerDeviceSource, 'provided-device-result');
+  assert.equal(result.workerDeviceProvided, true);
+  assert.equal(requestCount, 0);
+});
+
+test('ULG mechanics resident stage worker device resolver wraps a supplied worker device', async () => {
+  let requestCount = 0;
+  const device = {
+    createBuffer() {
+      return { label: 'supplied-worker-buffer' };
+    },
+    queue: {
+      writeBuffer() {}
+    }
+  };
+
+  const result = await resolveUlgMechanicsResidentStageWorkerDeviceResult({
+    preferWebGpu: true,
+    providedDevice: device,
+    requestDeviceResult: async () => {
+      requestCount += 1;
+      return { status: 'unexpected-requested-device', device: { label: 'unexpected' } };
+    }
+  });
+
+  assert.equal(result.device, device);
+  assert.equal(result.status, 'webgpu-ready-supplied-worker-device');
+  assert.equal(result.workerDeviceSource, 'provided-device');
+  assert.equal(result.workerDeviceProvided, true);
+  assert.equal(requestCount, 0);
+});
 
 test('ULG mechanics resident stage worker runs P2G, grid update, and G2P through one retained lane store', async () => {
   const buffers = manualBuffers();

@@ -1,5 +1,414 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-29 Retained Stage Output Render
+
+The presentation-worker mechanics stage chain now feeds worker-local
+presentation directly. After G2P completes on the offscreen presentation
+worker, the worker resolves its own retained G2P state buffer and retained
+thermo buffer, binds them in the resident particle-state producer, and renders
+without a main-thread state transfer.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/services/ulgOffscreenRender.worker.js`
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  - Passed.
+- Focused worker/render ownership suite:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `110/110`.
+- HTTPS retained-output probe:
+  `/tmp/ulg-retained-stage-output-render-probe-2.json`
+  - Retained render status persisted across both metrics with
+    `workerOffscreenRenderRowsProducerSourceKind=worker-retained-resident-stage-output`,
+    `workerOffscreenRenderRowsProducerSourceTransport=worker-retained-resident-stage-output`,
+    `workerOffscreenRenderRowsSourceStageId=g2p`,
+    `workerOffscreenRenderRowsRetainedParticleStateStatus=worker-retained-particle-state-ready`,
+    `workerOffscreenRenderRowsSourceStateTransferBytes=0`,
+    `workerOffscreenRenderRowsSourceTransferBytes=0`, and
+    `workerOffscreenResidentStageChainAutoSameWorkerGpuHandoff=true`.
+  - Browser console/page errors: `0`.
+  - Overall analysis stayed `bad` only because this run disabled motion
+    evidence and therefore reported `missing-max-speed` and
+    `no-positive-displacement`.
+- HTTPS benchmark:
+  `/tmp/ulg-retained-stage-output-render-bench.json`
+  - Suite status `complete`, gate `pass`, scenario `good`, probe `good`,
+    issues `[]`.
+  - Render rows: `worker-offscreen-resident-particle-state-producer-rendered`,
+    retained stage-output source/transport, `sourceStageId=g2p`, retained
+    particle state ready, `sourceStateTransferBytes=0`,
+    `sourceTransferBytes=0`, `inputTransferBytes=96`, copied display bytes
+    `0`, and frame-copy-back rejected.
+
+## Current Focused Result - 2026-06-29 Presentation-Worker Mechanics Stages
+
+The worker-owned presentation worker can now run mechanics resident stages on
+its own WebGPU device. The bridge exposes
+`runResidentStageOnPresentationDevice`, the scene exposes
+`runWorkerOffscreenResidentStageOnPresentationDevice`, and telemetry is
+published as `peercompute.ulg.presentation-worker-resident-stage.v0`.
+The policy-selected auto scheduler now publishes
+`peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` and keeps
+the run explicitly non-authoritative until worker-local render/state promotion
+is implemented.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`
+  `node --check src/services/ulgOffscreenRender.worker.js`
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  - Passed.
+- Focused worker/render ownership suite:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `109/109`.
+- Focused auto-chain recheck:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `31/31`.
+- Browser stage proof against `https://127.0.0.1:5173` with
+  `renderOwnership=worker-owned-resident-render-producer`,
+  `workerOffscreenPresentation=1`, and `residentAuto=0`:
+  - Single P2G completed with `summaryBackend=webgpu`,
+    `workerWebGpuStatus=webgpu-executed-no-full-readback`, retained refs, and
+    `gpuFenceSatisfied=true`.
+  - Same-lane `P2G -> gridUpdate -> G2P` completed in the presentation worker;
+    all three stages reported WebGPU/no-full-readback, retained refs, and
+    `queueCompletionStatus=queue-submitted-same-worker-gpu-handoff-no-cpu-fence`.
+- Policy-driven browser proof with `presentationWorkerResidentStages=1`:
+  `runWorkerOffscreenMechanicsStageChainOnPresentationDevice()` built the stage
+  payloads from current scene resident state and returned
+  `worker-offscreen-mechanics-stage-chain-completed`, three completed WebGPU
+  no-full stages, `gpuFenceSatisfied=true`, and
+  `sameWorkerGpuHandoff=true`.
+- Policy-enabled benchmark:
+  `ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES=1` with
+  `ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer` completed
+  as suite `status=complete`, scenario `status=good`, policy requested/ready
+  `true`, worker presentation ready, render-row readback byte length `0`, and
+  copied display bytes `0`.
+- Automatic policy path:
+  - HTTPS probe artifact
+    `/tmp/ulg-auto-presentation-worker-chain-probe.json` completed with
+    result `status=good`, issues `[]`,
+    `workerOffscreenResidentStageChainAutoStatus=presentation-worker-mechanics-stage-chain-auto-completed`,
+    chain status `worker-offscreen-mechanics-stage-chain-completed`,
+    `sameWorkerGpuHandoff=true`, and
+    `statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+  - Benchmark artifact
+    `/tmp/ulg-auto-presentation-worker-chain-bench.json` completed with suite
+    `status=complete`, scenario/probe `good`, auto-chain completed,
+    same-worker handoff `true`, copied display bytes `0`, and browser console
+    issue count `0`.
+
+Residual risk:
+
+- Chromium rejects CPU-visible queue fences on this worker-owned presentation
+  device with `OperationError: A valid external Instance reference no longer
+  exists`, and a 4-byte sentinel `mapAsync` fallback also fails in the same
+  environment. For same-worker GPU-to-GPU stage handoff, the accepted fence is
+  explicit same-queue WebGPU ordering. Cross-thread or CPU-admission paths must
+  still require a real CPU-visible queue fence.
+- The presentation-worker stage chain is now policy-selected automatically, but
+  it is still evidence-only. It does not yet promote worker-local stage output
+  into the authoritative visible/render state.
+
+## Current Focused Result - 2026-06-28 Worker Particle-State Producer
+
+The worker-owned resident producer now consumes packed resident SPH particle
+state/thermo plus a compact material/phase color table instead of decoded
+visual render rows. The readback planner preserves `no-full-readback` for this
+particle-state path while still forcing full readback for the older
+transitional decoded-row worker bridge.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check src/services/ulgOffscreenRender.worker.js`
+  `node --check src/visualization/offscreenPresentationBridge.js`
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `node --check tests/offscreenPresentationBridge.test.mjs`
+  `node --check tests/sphPhaseRenderer.test.mjs`
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  - Passed.
+- Focused worker/render ownership suite:
+  `node --test tests/sphPhaseRenderer.test.mjs tests/offscreenPresentationBridge.test.mjs tests/nativeSurfaceHarness.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  - Passed: `100/100`.
+- HTTPS benchmark:
+  `ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer
+  ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=auto`
+  against `https://127.0.0.1:5173` passed with
+  `worker-offscreen-resident-particle-state-producer-rendered`,
+  `producerSourceKind=worker-resident-particle-state`,
+  `sourceRowsPacked=false`, decoded visual source transfer `0`, state source
+  transfer `1312` bytes, input transfer `1376` bytes,
+  `renderRowsReadbackByteLength=0`, readback mode `no-full-readback`, no
+  readback coercion,
+  `renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree=true`,
+  copied display bytes `0`, and retained GPUBuffer handoff `not-requested`.
+
+Residual risk:
+
+- The first source upload still copies packed state/thermo from the main-thread
+  resident state into the worker. Eliminating that copy requires an ownership
+  boundary change: move resident simulation/render production into the
+  worker-owned device path, or establish a validated same-device GPU object
+  transport.
+
+## Current Focused Result - 2026-06-28 PeerCompute Render Ownership
+
+Render ownership is now a PeerCompute-compatible policy instead of a single
+demo flag. `peercompute.ulg.render-ownership-policy.v0` can select the
+main-thread renderer, the transitional worker-offscreen render-row bridge, the
+target worker-owned resident render producer, or the direct cross-worker
+GPUBuffer handoff experiment. The worker-owned resident producer mode now runs
+a worker-local WebGPU producer pass before drawing. Repeated unchanged-source
+draws reuse a worker-resident source cache, and the mode does not request the
+blocked direct GPUBuffer handoff.
+
+Focused checks:
+
+- Syntax:
+  `node --check` passed for `src/runtime/peercomputeRenderOwnershipPolicy.js`,
+  `src/runtime/peercomputeBrowserResidentHost.js`,
+  `src/visualization/offscreenPresentationBridge.js`,
+  `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`,
+  `scripts/sph-performance-benchmark.mjs`,
+  `scripts/sph-long-horizon-probe.mjs`, and
+  `tests/peercomputeRenderOwnershipPolicy.test.mjs`.
+- Policy/offscreen/render adjacency:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs
+  tests/offscreenPresentationBridge.test.mjs tests/nativeSurfaceHarness.test.mjs
+  tests/sphPhaseRenderer.test.mjs --test-name-pattern "render ownership|worker
+  offscreen|render-row particle modes|surface buffer handoff"` passed `97/97`.
+- PeerCompute host summary regression:
+  focused `tests/peercomputeComputeManagerIntegration.test.mjs` run passed
+  `18/18` in this checkout.
+- Source-cache focused checks:
+  `node --test tests/offscreenPresentationBridge.test.mjs
+  tests/nativeSurfaceHarness.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  passed `20/20`.
+- Browser benchmark:
+  `ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer
+  ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1
+  ULG_BENCH_SURFACE_DRAW_MODE=auto` against
+  `https://127.0.0.1:5173` reported requested/effective mode
+  `worker-owned-resident-render-producer`, input
+  `worker-owned-resident-render-producer`,
+  `worker-offscreen-resident-render-producer-rendered`,
+  `workerLocalRenderRowsProduced=true`, first source upload `512` bytes,
+  direct retained GPUBuffer handoff `not-requested`, copied display bytes `0`,
+  and scenario `good`.
+- Targeted browser cache smoke:
+  HTTPS Playwright against `renderOwnership=worker-owned-resident-render-producer`
+  ran one resident MLS-MPM step, rendered the same execution twice, and reported
+  first draw `source-cache-uploaded`/`sourceTransferBytes=512`, second draw
+  `source-cache-reused`, `sourceCacheHit=true`, `sourceRowsPacked=false`,
+  `sourceTransferBytes=0`, and `inputTransferBytes=64`.
+
+Residual risk:
+
+- Superseded by the worker particle-state producer checkpoint above. The
+  remaining risk is no longer decoded visual-row source upload; it is the
+  ownership boundary needed to avoid the first packed state/thermo upload.
+
+## Current Focused Result - 2026-06-28 Worker Render Rows
+
+The worker-owned presentation canvas now has a transitional render-row draw
+path. When decoded render rows are available, the scene posts compact particle
+rows to the transferred `OffscreenCanvas` worker. The worker writes them to a
+WebGPU storage buffer and draws instanced quads directly to the presented
+canvas. This preserves the zero-display-copy rule: the benchmark reports
+compact input-transfer bytes separately from copied frame bytes, and copied
+display bytes stay at `0`.
+
+Focused checks:
+
+- Syntax:
+  `node --check` passed for the bridge, worker, scene, long-horizon probe, and
+  performance benchmark files touched by this slice.
+- Unit/source harness:
+  `node --test tests/offscreenPresentationBridge.test.mjs
+  tests/nativeSurfaceHarness.test.mjs` passed `12/12`.
+- Renderer/render-row adjacency:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `77/77`, and
+  `node --test tests/sphRenderGpuKernel.test.mjs` passed `55/55`.
+- Demo adjacency:
+  focused `tests/sphPhaseDemo.test.mjs` render/particle/background coverage
+  passed `46/46`.
+- Browser benchmark:
+  `ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1
+  ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-points` against
+  `https://127.0.0.1:5173` reported
+  `worker-offscreen-render-rows-rendered`, `particleCount=16`,
+  compact input transfer `576` bytes, copied display bytes `0`,
+  frame-copy-back rejected, zero browser console issues, and suite gate `pass`.
+- Auto-mode browser benchmark:
+  `ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1
+  ULG_BENCH_SURFACE_DRAW_MODE=auto` reported the transitional readback reason
+  `worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback`,
+  `renderRowsReadbackForcedForWorkerOffscreenPresentation=true`,
+  `worker-offscreen-render-rows-rendered`, `particleCount=16`, compact input
+  transfer `576` bytes, copied display bytes `0`, zero browser console issues,
+  and suite gate `pass`.
+- Retained GPUBuffer handoff boundary:
+  local HTTPS Playwright microprobe showed direct `GPUBuffer` postMessage to a
+  worker throws `DataCloneError: GPUBuffer object could not be cloned`. The
+  benchmark now reports
+  `worker-offscreen-retained-gpubuffer-handoff-blocked-structured-clone-unavailable`,
+  retained render rows and retained surface buffers present, plan change
+  required `true`, preferred replacement `worker-owned-resident-render-producer`,
+  copied display bytes `0`, zero browser console issues, and suite gate `pass`.
+
+Residual risk:
+
+- This is not the final Ocean-style worker renderer. It still relies on
+  main-thread decoded render rows and a compact typed-array transfer. The
+  current direct retained-GPUBuffer handoff is blocked, so the next gate is a
+  worker-owned resident render producer or another validated same-device
+  browser path.
+
+## Current Focused Result - 2026-06-28 Worker-Owned Offscreen Presentation
+
+The repo now has an opt-in transferred-canvas worker presentation bridge. Enable
+it with `workerOffscreenPresentation=1`. The scene creates a displayed canvas
+layer, transfers it with `transferControlToOffscreen`, and the worker configures
+WebGPU on that `OffscreenCanvas`. Telemetry uses
+`peercompute.ulg.worker-offscreen-presentation.v0` and keeps copied display
+bytes at zero while explicitly rejecting `frame-copy-back`.
+
+Focused checks:
+
+- Syntax:
+  `node --check` passed for the bridge, worker, scene, mount, long-horizon
+  probe, and performance benchmark files touched by this slice.
+- Unit/source harness:
+  `node --test tests/offscreenPresentationBridge.test.mjs
+  tests/nativeSurfaceHarness.test.mjs` passed `11/11`.
+- Renderer/demo adjacency:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `77/77`, and focused
+  `tests/sphPhaseDemo.test.mjs` render/particle/background coverage passed
+  `46/46`.
+- Browser smoke:
+  `https://127.0.0.1:5173/?workerOffscreenPresentation=1&residentAuto=0`
+  produced a transferred worker canvas with `readyEver=true`,
+  `readyFrameCount=1`, `contextStatus=webgpu-context-ready`,
+  `copiedBytesPerFrame=0`, and `frameCopyBackRejected=true`.
+- Benchmark flag:
+  `ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1` now adds
+  `workerOffscreenPresentation=1` to generated scenario URLs and records
+  `workerOffscreenPresentationRequested` in the page-level report.
+  Tiny smoke output `/tmp/ulg-worker-offscreen-presentation-bench.json`
+  reported `status=complete`, suite gate `pass`, scenario/probe `good`, zero
+  browser console issues, `worker-offscreen-presentation-ready`,
+  `readyFrameCount=3`, copied bytes `0`, and frame-copy-back rejected.
+- Diff hygiene:
+  `git diff --check` passed.
+
+Residual risk:
+
+- The worker currently clears a transparent presentation canvas; it does not
+  yet consume retained resident render buffers.
+- Headless Chromium destroyed the worker WebGPU device after the first clear in
+  the manual smoke run. A subsequent benchmark smoke kept the worker ready for
+  three clears, but longer live-device validation is still needed before this
+  is treated as the final renderer path.
+
+## Current Focused Result - 2026-06-24 Worker Offscreen Frame Transport Budget
+
+The performance benchmark now reports a stable worker-offscreen frame transport
+budget. The preferred path is a worker-owned presented canvas
+(`transferControlToOffscreen`) with zero copied display bytes. The rejected path
+is a per-frame copy-back shuttle, such as worker readback or ImageBitmap frames
+sent to the main thread; the benchmark estimates RGBA8 bytes per frame and
+bytes per second from viewport size, device pixel ratio, and refresh rate.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- Native/source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs` passed `8/8`, including the
+  `peercompute.ulg.worker-offscreen-frame-transport-budget.v0` schema guard.
+- Benchmark schema smoke:
+  one-step direct-resident benchmark wrote
+  `/tmp/ulg-worker-offscreen-transport-budget-bench.json`; desktop `1280x800`
+  reports copy-back `3.91 MiB/frame` and `234.38 MiB/s` at `60 Hz`, while the
+  worker-owned presented-canvas path reports `0` copied bytes.
+
+Residual risk:
+
+- This does not implement the worker renderer. It prevents the benchmark from
+  treating frame-copy-back as equivalent to zero-copy worker presentation.
+
+## Pending Gate - True Adaptive MLS-MPM
+
+`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md` defines the
+next clean-break adaptive MLS-MPM test target. Required future gates are:
+
+- variable-support kernel partition-of-unity and first-moment tests;
+- CPU P2G/G2P round-trip tests across support radii;
+- WGSL/WebGPU parity tests for supported support tiers;
+- split/merge conservation tests for mass, center of mass, linear momentum,
+  represented affine momentum, volume, density, internal energy, and
+  material/phase metadata;
+- repeated split/merge drift tests for mass, momentum, and energy continuity;
+- browser visual sequence checks proving coarsened/adaptive blocks move
+  coherently without role-specific particle-size divergence.
+
+## Current Focused Result - 2026-06-22 Fixed Global Particle Volume
+
+The fixed-support MLS-MPM initializer now treats particle size as numerical
+resolution, not a per-material radius policy. Requested drop/base edge counts
+determine particle counts, a single global spacing determines mechanics rest
+volume and visual radius, and material closure density at temperature/pressure
+determines per-particle mass. Phase-change expansion does not spawn extra
+solver particles in this path; gas volume stays represented by species
+ledgers/fields until a later gas-admission or true adaptive split/merge policy
+creates additional particles.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js` and
+  `node --check src/runtime/material/algorithmMaterialRows.js` passed.
+- Demo initialization coverage:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "initial
+  particle spacing|same material|large requested drop edge|large
+  non-H2O|matching material preserves|low requested drop edge|material state
+  changes mass|crystal packing"` reported `46/46`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `11/14` with the three expected opt-in
+  long-horizon skips.
+- Render/buffer adjacent coverage:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "visual
+  particle radius|particle scale|radius|render rows"` passed `55/55`, and
+  `node --test tests/sphGpuBuffers.test.mjs --test-name-pattern
+  "visualParticleRadius|particle|mechanics|material bank"` passed `10/10`.
+- Live HTTPS no-full browser probe:
+  H2O/H2O at `https://127.0.0.1:5173` completed `status=good`, issues `[]`,
+  nonblank frames `7/7`, and bounded `J=0.9996516704559326..1.0049999952316284`.
+- Live HTTPS sphere browser probe:
+  H2O/H2O sphere mode completed `status=good`, nonblank frames `5/5`,
+  `surfaceDrawStatus=resident-render-row-spheres-built`,
+  `sphereMaterialSource=closure-derived-pbr`, `sphereClosurePbr=true`, and zero
+  console issues.
+
+Residual risk:
+
+- Visible water still appears as sphere particles rather than a merged
+  transparent/refractive liquid surface. Keep that work in the renderer/surface
+  quality track.
+- True adaptive support/split/merge remains out of scope for this fixed-size
+  simplification.
+
 ## Current Focused Result - 2026-06-20 GPU Contact Kinematics Particle Bins
 
 The pressure-interface WebGPU producer now builds a bounded same-device
@@ -10941,6 +11350,44 @@ Mounted worker-stage lane guard, 2026-06-18 14:24 AKDT:
     invalid WebGPU buffers/bind groups/command buffers, and WGSL parse errors;
     the issue list was empty.
 
+Mounted worker-retained authority evidence, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- Focused Node stage-chain coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "stage-chain|lane stage|worker"`
+  - Passed: `65/65`.
+  - Covers the shared mechanics stage-lane summary after adding copy-budget
+    and buffer byte-length fields.
+- Worker module tests:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  - Passed: `6/6`.
+  - Covers the worker module after adding source-side worker-stage copy-budget
+    publication.
+- Focused HTTPS browser gate:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase mounted resident scheduler can publish worker-retained mechanics stage lane"`
+  - Passed: `1/1` in `20.2s`.
+  - The mounted `residentStageWorkers=1` lane now proves
+    `authorityHostSource=peercompute-browser-nodekernel-authority-host`,
+    `gpuResidentLaneStageExecutionAuthorityPath=node-kernel-execution`,
+    the mechanics stage lane contract schema, the read/write conflict policy,
+    StateManager warm-delta admission for the worker-retained publication, and
+    the same-worker retained-ref continuation plan.
+  - The same gate still requires the worker-retained hot-buffer record to be
+    stored with no main-thread local buffer refs and
+    `renderHandoffStatus=blocked-worker-gpu-handles-not-main-thread-renderable`.
+  - It also requires per-stage no-full readback modes, readback-free hot-loop
+    flags, `stage-copy-budgets-recorded`, zero aggregate readback bytes,
+    positive retained-budget bytes, and positive retained worker-stage buffer
+    byte totals.
+
 ULG extension output descriptor consumption, 2026-06-18 14:31 AKDT:
 
 - `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
@@ -12195,6 +12642,207 @@ Contact-bin diagnostic flag lifetime fix, 2026-06-20 AKDT:
 - Whitespace:
   `git diff --check`
   passed.
+
+Worker compact same-device materialization slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  passed.
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  passed.
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`
+  passed.
+- Syntax:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  passed.
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Resident-authority integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident authority host admits worker-retained mechanics output descriptors"`
+  - Passed: `18/18`.
+  - Covers the baseline worker-private descriptor plus the new same-device
+    retained-buffer import route through publication, hot storage, warm delta,
+    access contract, and continuation plan.
+- Mounted worker browser gate:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase mounted resident scheduler can publish worker-retained mechanics stage lane"`
+  - Passed: `1/1`.
+  - Requires same-device materialization availability while keeping worker-owned
+    GPU handles non-main-thread-renderable.
+- Real browser PeerCompute resident-authority gate:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Requires the same-device source key to propagate through the standalone
+    worker stage-chain candidate, publication, hot-buffer record, warm delta,
+    and worker-retained access contract.
+
+Worker publication compact refresh bridge, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  passed.
+- Syntax:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  passed.
+- Resident-authority compact refresh integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "compact"`
+  - Passed: `18/18`.
+  - Covers direct `sameDeviceRetainedBufferImport` forwarding through
+    `createUlgSphMlsMpmCompactHotBufferRefreshExecutor()` and the new
+    `host.refreshWorkerRetainedMechanicsPublicationHotBuffers()` bridge from an
+    admitted worker mechanics publication to zero-upload same-device hot-buffer
+    aliasing.
+
+Native same-device main-thread import slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Focused visible-consumer contract:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "SPH visible GPU surface consumer requires renderer and pixel validation"`
+  - Passed: `71/71`.
+  - Covers native route selection, `main-thread` import scope, awaiting
+    pixel-validation status, and validated `same-device-main-thread-import-ready`.
+- HTTPS browser gate:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase native same-device surface consumer publishes browser-frame validation readiness"`
+  - Passed: `1/1` in `14.8s`.
+  - Uses the live HTTPS Vite server bound to `0.0.0.0`.
+  - Requests `renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer`,
+    keeps `no-full-readback` and skipped compact summary, runs a fresh resident
+    batch plus a continued resident batch, renders the native bridge, publishes
+    browser-frame validation evidence through the scene API, and requires
+    `same-device-main-thread-import-ready`.
+  - Requires `continuationAvailable=true` after the first batch,
+    `continuedFromResidentState=true` in the second batch, and monotonic
+    resident step advance.
+
+Mounted Mg/O2 non-water binary product browser acceptance, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Focused browser e2e:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted non-water binary reaction retains condensed product events" --timeout 300000`
+  - Passed: `1/1` in `40.3s`.
+  - Reused the live HTTPS Vite server bound to `0.0.0.0`.
+  - Covers hot `Mg/o2` with a one-reaction binary-ionic MgO table, condensed
+    `mgo` product term, zero gas-product rows, retained resident product-event
+    rows, zero resident gas-species ledger rows, render-bound product event
+    buffer, decoded `mgo` render rows, fixed-capacity reaction-bin diagnostics,
+    G2P particle-scale policy, and clean WebGPU console output.
+
+Mounted active-metal/H2O reaction-bin multi-material validation, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Baseline physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/11`; skipped the `3` opt-in long-horizon liquid gates.
+- Browser e2e against the live HTTPS server:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted resident active-metal/H2O promotes product gas pressure" --timeout 480000`
+  - Passed: `1/1` in `5.7m`.
+  - Reused the running `0.0.0.0` HTTPS Vite server.
+  - The mounted resident workflow now asserts
+    `reactionProposalNeighborMode=fixed-capacity-particle-bin-grid`,
+    `reactionParticleBinGridStatus=reaction-particle-bin-grid-prepared`,
+    positive cell/capacity/index-buffer/max-contact-radius diagnostics, and
+    default `reactionParticleBinOverflowMetadataReadbackRequested=false`.
+  - Coverage spans Na/H2O first, continuation, reset/post-reset; K/H2O and
+    Cs/H2O first, continuation, and long-horizon continuation; and Ca/H2O
+    first plus continuation.
+
+Mounted Ca/H2O multivalent long-horizon continuation, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Browser e2e against the live HTTPS server:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted resident active-metal/H2O promotes product gas pressure" --timeout 540000`
+  - Passed: `1/1` in `6.3m`.
+  - Extends the mounted active-metal workflow so Ca/H2O now matches K/Cs
+    long-horizon shape with first pass, continuation, and second no-full
+    continuation. The added Ca pass asserts resident product carry-forward,
+    retained `Ca(OH)2`/H2 pressure, fixed-capacity reaction-bin diagnostics,
+    and the GPU-resident spatial gas pressure source.
+
+Mounted derived-material contact-bin browser acceptance, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Browser e2e against the live HTTPS server:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase demo runs derived material properties by default" --timeout 240000`
+  - Passed: `1/1` in `32.9s`.
+  - The mounted derived-material browser path now requires
+    `pressureInterfaceContactBinGridStatus` to be ready/submitted with
+    `pressureInterfaceContactBinGridEnabled=true`, positive cell count,
+    capacity, average occupancy, and index-buffer bytes, plus
+    `pressureInterfaceContactBinGridEstimatedOverflowRisk=false`, whenever
+    the pressure-interface solver is ready.
+
+Algorithm surface-policy native extraction browser acceptance, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Browser e2e against the live HTTPS server:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase no-full render refresh can skip compact surface summary readback" --timeout 180000`
+  - Passed: `1/1` in `20.1s`.
+  - The no-full native marching-cubes path now asserts the selected
+    buffer-volume descriptor reports
+    `surfaceExtractionPolicyStatus=algorithm-surface-policy-row-selected`,
+    `surfaceExtractionPolicyRowsSchema=peercompute.ulg.algorithm-material-surface-extraction-rows.v0`,
+    `surfaceExtractionPolicyRowSchema=peercompute.ulg.algorithm-material-surface-extraction-row.v0`,
+    `surfaceExtractionPolicyIsovaluePolicy=density-kernel-half-occupancy`,
+    and positive smoothing/voxel/normal policy values.
+  - The same run updates the browser expectation to the current direct native
+    hot path:
+    `surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind=surface-draw-compact-position-buffer`
+    and
+    `surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout=peercompute.webgpu-marching-cubes.compact-position-rows.v0`.
+
+Native browser-frame surface validation slice, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Syntax:
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  passed.
+- Focused native tests:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `27/27`.
+  - Covers default ULG-owned compact-position indirect draw metadata, native
+    browser-frame validation publication, native probe viewport defaults for a
+    compositor-stable validation path, and the native canvas sizing guard.
+- HTTPS native browser-frame validation:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173/ ULG_PROBE_OUTPUT=/tmp/ulg-native-browser-frame-validation-probe-https-defaultviewport.json ULG_PROBE_FRAME_DIR=/tmp/ulg-native-browser-frame-validation-frames-https-defaultviewport ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=native-webgpu-surface-consumer ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS=1500 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=native-webgpu-surface-consumer&renderer=native-webgpu&visualCapture=1&nativeSurfacePixelValidation=1' node scripts/sph-long-horizon-probe.mjs`
+  - Passed: `status=good`, `issues=[]`.
+  - Browser console issue count: `0`.
+  - Browser launch viewport defaulted to `320x240`.
+  - `nativeSurfaceBrowserFrameValidation.status=passed`.
+  - Center crop observed `10099/27313` visible native WebGPU pixels with
+    surface-like variation.
+  - `nativeSurfaceValidation.status=native-surface-visible-consumer-ready`.
+  - `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`.
+- Build:
+  `npm run build`
+  - Passed with the existing large chunk warning only.
+- Whitespace:
+  `git diff --check`
+  passed.
+- ICC:
+  `npm run icc:update`
+  - Passed with `indexedFiles=354` and `memoryChunks=2118`.
 - ICC:
   `npm run icc:update`
   - Passed with `indexedFiles=354` and `memoryChunks=2111`.
@@ -12432,3 +13080,211 @@ Direct compact-position native surface draw slice, 2026-06-20 AKDT:
 - Whitespace:
   `git diff --check`
   passed.
+
+Al/O2 and Cl2 condensed product browser acceptance, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphMaterialOptions.js`
+  passed.
+- Syntax:
+  `node --check tests/sphMaterialOptions.test.mjs`
+  passed.
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Syntax:
+  `node --check tests/reactionDiscovery.test.mjs`
+  passed.
+- Material options:
+  `node --test tests/sphMaterialOptions.test.mjs`
+  - Passed: `4/4`.
+- Whitespace:
+  `git diff --check -- tests/demo.e2e.mjs tests/reactionDiscovery.test.mjs src/visualization/sphMaterialOptions.js tests/sphMaterialOptions.test.mjs`
+  passed.
+- Browser:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted non-water binary reactions retain condensed product events" --timeout 540000`
+  - Passed: `1/1` in `3.9m`.
+  - Covers Mg/O2 -> MgO, hot Al/O2 -> Al2O3, and hot Na/Cl2 -> NaCl mounted no-full resident
+    product-event retention, render-bound product buffers, zero gas-product
+    ledgers, and decoded condensed product render rows.
+
+Three render-row live motion regression, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check tests/sphPhaseRenderer.test.mjs`
+  passed.
+- Syntax:
+  `node --check tests/demo.e2e.mjs`
+  passed.
+- Focused renderer tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row particle|render-row sphere|resident render source"`
+  - Passed: `71/71`.
+  - The readback planner now keeps Three point/sphere particle modes on
+    `full-parity-readback` even when a previous Three bridge is visible.
+- Browser:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "resident auto Three sphere bridge refreshes visible rows" --timeout 240000`
+  - Passed: `1/1`.
+  - Covers resident auto `three-render-row-spheres` refreshing from newer live
+    resident physics rows, with
+    `renderRowsReadbackEffectiveMode=full-parity-readback`,
+    `renderRowsReadbackRetainedPreviousBridge=false`, and decoded center motion
+    between sampled render refreshes.
+
+Same-device native consumer probe telemetry, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Whitespace:
+  `git diff --check -- scripts/sph-performance-benchmark.mjs scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Browser:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "native same-device surface consumer publishes browser-frame validation readiness" --timeout 300000`
+  - Passed: `1/1`.
+  - Rechecks that the scene still publishes
+    `surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImport*` fields for the
+    native engine-owned main-canvas consumer. The benchmark and long-horizon
+    probe now flatten those fields into artifact output.
+- Benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_OUTPUT=/tmp/ulg-native-same-device-telemetry-bench.json ULG_BENCH_PARTICLE_COUNTS=100 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_TIMEOUT_MS=180000 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed as benchmark suite `status=complete`; scenario `status=good`.
+  - New artifact fields report same-device import selected `true`, route
+    `native-webgpu-surface-consumer`, thread `main-thread`, device scope
+    `engine-owned-native-webgpu-canvas-device`, and status
+    `same-device-main-thread-import-awaiting-pixel-validation`.
+  - Probe status remains `bad` for the existing
+    `native-surface-browser-frame-validation-failed` blocker; browser console
+    issue count stayed `0` and estimated readback bytes stayed `0`.
+
+Native browser-frame capture unsupported classification, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`
+  passed.
+- Syntax:
+  `node --check tests/sphPhaseRenderer.test.mjs`
+  passed.
+- Focused renderer tests:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "visible GPU surface consumer"`
+  - Passed: `71/71`.
+  - Covers the new `unsupported` pixel-validation status mapping to
+    `browser-frame-validation-capture-unsupported`.
+- Browser:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "native same-device surface consumer publishes browser-frame validation readiness" --timeout 300000`
+  - Passed: `1/1`.
+  - Rechecks browser-frame validation publication through the mounted scene API.
+- Benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_OUTPUT=/tmp/ulg-native-same-device-telemetry-bench-unsupported.json ULG_BENCH_PARTICLE_COUNTS=100 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_TIMEOUT_MS=180000 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed as benchmark suite `status=complete`; scenario `status=good`.
+  - Probe status remains `bad`, but the native browser-frame issue is now
+    `native-surface-browser-frame-validation-unsupported` instead of a failed
+    render; scene telemetry reports pixel validation `unsupported` and blocker
+    family `browser-frame-validation-capture-unsupported`.
+
+Native benchmark stable browser-frame viewport, 2026-06-20 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Whitespace:
+  `git diff --check -- scripts/sph-performance-benchmark.mjs scripts/sph-long-horizon-probe.mjs`
+  passed.
+- Benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_OUTPUT=/tmp/ulg-native-same-device-telemetry-bench-stable-viewport-coherent.json ULG_BENCH_PARTICLE_COUNTS=100 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_TIMEOUT_MS=180000 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed as benchmark suite `status=complete`; scenario `status=good`; probe
+    `status=good`.
+  - Reports `probeViewport` `320x240`, no probe issues, visible native GPU
+    consumer ready `true`, same-device import
+    `same-device-main-thread-import-ready`, pixel validation `passed`, blocker
+    family `null`, browser console issue count `0`, and zero estimated
+    readback bytes.
+- Larger benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_OUTPUT=/tmp/ulg-native-same-device-10k-stable-viewport.json ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_TIMEOUT_MS=240000 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed with actual particles `9826`, suite `status=complete`, scenario
+    `status=good`, probe `status=good`, no probe issues, visible native GPU
+    consumer ready `true`, same-device import
+    `same-device-main-thread-import-ready`, pixel validation `passed`, blocker
+    family `null`, browser console issue count `0`, and zero estimated
+    readback bytes.
+- Mobile-shaped benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_OUTPUT=/tmp/ulg-native-same-device-mobile-shaped-stable-viewport.json ULG_BENCH_PARTICLE_COUNTS=100 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_TIMEOUT_MS=180000 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=2 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_HAS_TOUCH=1 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=1 ULG_BENCH_LAW_VISCOSITY=1 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed as suite `status=complete`; scenario `status=good`; probe
+    `status=good`.
+  - Reports mobile-shaped viewport `390x844`, device scale factor `2`, touch
+    enabled, stable native probe viewport `320x240`, visible native GPU
+    consumer ready `true`, same-device import
+    `same-device-main-thread-import-ready`, pixel validation `passed`, blocker
+    family `null`, browser console issue count `0`, and zero estimated
+    readback bytes.
+
+Fixed-support water incompressibility clean break, 2026-06-22 AKDT:
+
+- Unit:
+  `node --test tests/mlsMpmCarrier.test.mjs`
+  - Passed: `2/2`.
+  - Confirms the CPU carrier keeps water within the condensed
+    `1 +/- 0.005` volume-ratio envelope.
+- Unit:
+  `node --test tests/sphG2pGpuKernel.test.mjs`
+  - Passed: `17/17` when first run, and passed again as part of the combined
+    carrier/G2P command below.
+  - Confirms the CPU G2P path and WGSL source guard use the tighter condensed
+    `J` clamp.
+- Focused demo:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "ambient water|initial particle spacing|liquid|MLS-MPM sound-speed|hydrostatic"`
+  - Passed: `46/46`.
+- Focused physics invariants:
+  `node --test --test-name-pattern "H2O/H2O mechanics|H2O/H2O EOS-on|long-horizon liquid acceptance" tests/physicsBehaviorInvariants.test.mjs`
+  - Passed focused non-opt-in checks; long liquid checks skipped unless their
+    opt-in env is present.
+- Long liquid atomic:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test --test-name-pattern "H2O/H2O long-horizon liquid acceptance" tests/physicsBehaviorInvariants.test.mjs`
+  - Passed: `2/2`.
+- Focused grid pressure:
+  `node --test tests/sphGridGpuKernel.test.mjs --test-name-pattern "pressure|hydrostatic|fluid|liquid|condensed|P2G|MLS-MPM"`
+  - Passed: `21/21`.
+- Focused GPU buffer mechanics:
+  `node --test tests/sphGpuBuffers.test.mjs --test-name-pattern "MLS-MPM GPU mechanics buffer|mechanics"`
+  - Passed: `10/10`.
+- Combined recheck:
+  `node --test tests/mlsMpmCarrier.test.mjs tests/sphG2pGpuKernel.test.mjs`
+  - Passed: `19/19`.
+- Project atomics:
+  `npm run test:physics-atomics`
+  - Passed: `11/14`, with the 3 long-horizon liquid checks skipped unless
+    `ULG_RUN_LONG_LIQUID_ATOMIC=1` is set.
+  - The run initially exposed a stale plain-SPH solid-H2O fixture placement
+    (`0.25 m` initial support gap). The fixture now derives contact height from
+    the material-derived base block edge, then the npm gate passed.
+- Mounted browser no-full H2O/H2O:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_PROBE_OUTPUT=/tmp/ulg-water-incompressible-nofull-probe.json ULG_PROBE_FRAME_DIR=/tmp/ulg-water-incompressible-nofull-frames ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0&mech=mlsmpm' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=32 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=every-step ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_MIN_J=0.995 ULG_PROBE_MAX_J=1.005 ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S=0.05 ULG_PROBE_FAIL_ON_BAD=1 node scripts/sph-long-horizon-probe.mjs`
+  - Passed with status `good`, no issues, no browser console issues,
+    `minVolumeObservedJ=0.998684823513031`,
+    `maxVolumeObservedJ=1.0049999952316284`,
+    `maxSpeedObservedMPerS=0.739406943321228`,
+    `maxDisplacementObservedM=0.00036962516605854034`, resident render source
+    advanced, and all seven captured frames nonblank.
+- Mounted browser sphere H2O/H2O:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_PROBE_OUTPUT=/tmp/ulg-water-spheres-probe.json ULG_PROBE_FRAME_DIR=/tmp/ulg-water-spheres-frames ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&visualCapture=1&residentAuto=0&mech=mlsmpm&surfaceDraw=three-render-row-spheres' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=every-step ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_MIN_J=0.995 ULG_PROBE_MAX_J=1.005 ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S=0.01 ULG_PROBE_FAIL_ON_BAD=1 node scripts/sph-long-horizon-probe.mjs`
+  - Passed with status `good`, no issues, no browser console issues, visible
+    sphere frames, `surfaceDrawStatus=resident-render-row-spheres-built`,
+    `surfaceDrawRenderBridgeSpherePbrMaterialSource=closure-derived-pbr`,
+    `surfaceDrawRenderBridgeSphereClosurePbr=true`, variable sphere sizing, and
+    152 decoded liquid H2O render rows.
+- Mounted browser full-readback H2O/H2O:
+  same scenario with `ULG_PROBE_READBACK_MODE=full-parity-readback` timed out
+  before completing the first 32-step batch. It did capture nonblank
+  sky-blue/grid frames, but it is not an accepted physics gate for this
+  scenario.

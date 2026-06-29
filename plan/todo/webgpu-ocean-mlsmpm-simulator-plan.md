@@ -52,6 +52,97 @@ The system is still not Ocean-style fast because:
   dynamics;
 - draw buffers are not yet fed to a fully GPU-resident Three/WebGPU render path.
 
+Tactical status, 2026-06-28 AKDT:
+
+- Presentation-worker mechanics execution is now browser-proven. The
+  worker-owned offscreen presentation worker can run the mechanics resident
+  stage runner on its own WebGPU device, and a same-lane
+  `P2G -> gridUpdate -> G2P` diagnostic chain completes with WebGPU/no-full
+  readback, retained worker GPU refs, and `gpuFenceSatisfied=true`.
+  CPU-visible queue fences fail on this worker-owned presentation device in
+  Chromium, so same-worker GPU handoff uses explicit WebGPU same-queue ordering
+  via `queue-submitted-same-worker-gpu-handoff-no-cpu-fence`.
+- Scheduler wiring is now automatic but evidence-only. Render ownership policy
+  can request `presentationWorkerResidentStages=1`; the scene exposes
+  `runWorkerOffscreenMechanicsStageChainOnPresentationDevice()` for diagnostics
+  and automatically runs the chain when cloneable resident state plus the
+  presentation-worker device are ready. Telemetry is
+  `peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0` and
+  reports
+  `statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+  Follow-up now directly consumes the retained presentation-worker G2P output
+  for worker-local presentation: the offscreen worker resolves the retained
+  state/thermo buffers in-module, binds them in the resident particle-state
+  producer, and reports `worker-retained-resident-stage-output` with
+  `sourceStateTransferBytes=0` and copied display bytes `0`. The next task is
+  authoritative worker-local state promotion/admission, or an explicit
+  presentation-only PeerCompute mode.
+- Render ownership is now a PeerCompute-compatible policy via
+  `peercompute.ulg.render-ownership-policy.v0`. The policy can select
+  `main-thread-renderer`, `worker-offscreen-render-rows`,
+  `worker-owned-resident-render-producer`, or
+  `cross-worker-gpubuffer-structured-clone` per use case. Local demos can seed
+  it with `renderOwnership=...`; PeerCompute/runtime options can supply it
+  directly.
+- `worker-owned-resident-render-producer` is now an executable target mode. It
+  requests the worker-owned presentation canvas, runs a worker-local WebGPU
+  compute pass to produce the render-row storage buffer, and does not request
+  the blocked direct retained-GPUBuffer handoff. The benchmark with
+  `ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer` reports
+  requested/effective mode `worker-owned-resident-render-producer`,
+  `worker-offscreen-resident-render-producer-rendered`,
+  `workerLocalRenderRowsProduced=true`, first source upload `512` bytes,
+  retained GPUBuffer handoff `not-requested`, copied display bytes `0`, and
+  scenario `good`.
+- Repeated unchanged-source producer draws now reuse a worker-resident source
+  cache. The targeted HTTPS Playwright smoke renders the same resident
+  execution twice and reports first draw
+  `source-cache-uploaded`/`sourceTransferBytes=512`, second draw
+  `source-cache-reused`, `sourceCacheHit=true`, `sourceRowsPacked=false`,
+  `sourceTransferBytes=0`, and `inputTransferBytes=64`. That reduced repeated
+  visual-source transfers and avoided repeated row packing; the follow-up below
+  supersedes the first decoded-row upload with particle-state source transfer.
+- The first-upload source has now moved from decoded visual rows to packed
+  resident SPH particle state/thermo plus a compact material/phase color table.
+  The worker owns the particle-state producer compute pass, writes compact
+  render rows into its local storage buffer, and draws on the transferred
+  canvas without forcing full render-row readback. Fresh benchmark evidence
+  reports `worker-offscreen-resident-particle-state-producer-rendered`,
+  `producerSourceKind=worker-resident-particle-state`,
+  `sourceRowsPacked=false`, decoded visual source transfer `0`,
+  state source transfer `1312` bytes on first upload,
+  `renderRowsReadbackByteLength=0`, readback mode `no-full-readback`, no
+  readback coercion, copied display bytes `0`, and
+  `renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree=true`.
+- Worker-owned offscreen presentation now has a concrete transferred-canvas
+  path. `workerOffscreenPresentation=1` creates a displayed canvas layer,
+  transfers it with `transferControlToOffscreen`, and the worker configures
+  WebGPU directly on that `OffscreenCanvas` while reporting zero copied display
+  bytes and rejecting `frame-copy-back`.
+- Follow-up worker rendering now accepts compact decoded render rows through
+  `peercompute.ulg.worker-offscreen-render-rows.v0`. The worker writes the
+  compact particle rows to a worker-local storage buffer and draws instanced
+  quads directly to the transferred canvas. The current benchmark smoke with
+  `surfaceDraw=three-render-row-points` reports
+  `worker-offscreen-render-rows-rendered`, `particleCount=16`, compact input
+  transfer `576` bytes, copied display bytes `0`, zero browser console issues,
+  and suite gate `pass`.
+- In `surfaceDraw=auto`, `workerOffscreenPresentation=1` now explicitly forces
+  full render-row readback for this transitional bridge and reports
+  `worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback`.
+  The auto-mode smoke also renders 16 worker particles with 576 compact input
+  bytes, copied display bytes `0`, zero browser console issues, and suite gate
+  `pass`.
+- The decoded-row path remains transitional, but the particle-state producer is
+  the current accepted zero-copy worker presentation path. Direct retained
+  GPUBuffer handoff is still blocked in the current browser/page: the local
+  HTTPS Playwright probe throws `DataCloneError` for `GPUBuffer` postMessage to
+  a worker, and the benchmark reports direct retained GPUBuffer handoff
+  `not-requested` for this policy. The next renderer optimization is therefore
+  not frame-copy-back or cross-worker GPUBuffer transport; it is wiring the
+  proven presentation-worker resident stage chain into PeerCompute-selected
+  hot-loop scheduling.
+
 Tactical status, 2026-06-19 AKDT:
 
 - Reaction proposal now has a GPU-resident neighbor-bin producer. The WebGPU
@@ -96,6 +187,33 @@ Tactical status, 2026-06-19 AKDT:
   publishes the classification through resident render-state summaries. This is
   diagnostic plumbing only; it does not mark native rendering ready without
   pixel/readback validation.
+- Same-device native consumer import telemetry now reaches both long-horizon
+  probe metrics and performance benchmark artifacts. The flattened fields
+  report whether the native path selected a main-thread same-device import, its
+  route, thread, engine-owned device scope, and readiness status, so benchmark
+  evidence can distinguish true same-device native presentation from a fallback
+  without reopening mounted Playwright internals. A tiny native benchmark
+  against the live HTTPS server reports same-device import selected `true`,
+  route `native-webgpu-surface-consumer`, device scope
+  `engine-owned-native-webgpu-canvas-device`, and status
+  `same-device-main-thread-import-awaiting-pixel-validation`; the remaining
+  blocker is still browser-frame validation, not console errors or readback
+  bytes. Follow-up native benchmark classification now distinguishes the local
+  headless transparent-black canvas crop as
+  `native-surface-browser-frame-validation-unsupported` with blocker family
+  `browser-frame-validation-capture-unsupported`, rather than treating it as a
+  failed native render. The performance benchmark now defaults native consumer
+  child probes to the compositor-stable `320x240` validation viewport and
+  exposes both benchmark and probe viewport fields; the tiny native benchmark
+  is `probeStatus=good`, visible consumer ready, same-device import
+  `same-device-main-thread-import-ready`, pixel validation `passed`, blocker
+  family `null`, and zero readback bytes. The same route also passes a 10k-ish
+  native benchmark with actual particles `9826`, `probeStatus=good`, same-device
+  import ready, pixel validation passed, blocker family `null`, and zero
+  readback bytes. A mobile-shaped local benchmark with viewport `390x844`,
+  device scale factor `2`, and touch enabled also reaches `probeStatus=good`
+  with same-device import ready, pixel validation passed, blocker family
+  `null`, and zero readback bytes.
 - Active-grid plan-only summary work now has an explicit refresh cadence.
   `runMlsMpmResidentStepWithOptionalWebGpu()` records whether a plan-only
   active-grid summary was eligible, requested, deferred, or skipped, and

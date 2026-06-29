@@ -29,6 +29,160 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
   assert.match(probeSource, /gpuBufferHandoffReady,/);
 });
 
+test('performance benchmark reports worker offscreen frame transport budget', () => {
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+
+  assert.match(
+    benchmarkSource,
+    /peercompute\.ulg\.worker-offscreen-frame-transport-budget\.v0/,
+    'worker offscreen frame transport budget should have a stable schema'
+  );
+  assert.match(
+    benchmarkSource,
+    /worker-owned-presented-canvas/,
+    'benchmark should identify transferred OffscreenCanvas-style presentation as the zero-copy path'
+  );
+  assert.match(
+    benchmarkSource,
+    /frame-copy-back/,
+    'benchmark should keep the per-frame copy-back path visible as the rejected architecture'
+  );
+  assert.match(
+    benchmarkSource,
+    /rgba8FrameBytes/,
+    'benchmark should estimate display-frame copy bytes from viewport dimensions'
+  );
+  assert.match(
+    benchmarkSource,
+    /workerOffscreenFrameTransportBudget:/,
+    'benchmark scenarios should publish the worker offscreen transport budget'
+  );
+  assert.match(
+    benchmarkSource,
+    /ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION/,
+    'benchmark should expose an env switch for exercising the actual transferred-canvas path'
+  );
+  assert.match(
+    benchmarkSource,
+    /workerOffscreenPresentationRequested/,
+    'benchmark report should record whether worker-offscreen presentation was requested'
+  );
+});
+
+test('worker offscreen presentation path requires transferred canvas ownership', () => {
+  const bridgeSource = readRepoFile('src/visualization/offscreenPresentationBridge.js');
+  const workerSource = readRepoFile('src/services/ulgOffscreenRender.worker.js');
+  const mechanicsWorkerSource = readRepoFile('src/services/ulgMechanicsResidentStage.worker.js');
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const policySource = readRepoFile('src/runtime/peercomputeRenderOwnershipPolicy.js');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+
+  assert.match(workerSource, /peercompute\.ulg\.worker-offscreen-presentation\.v0/);
+  assert.match(workerSource, /peercompute\.ulg\.worker-offscreen-render-rows\.v0/);
+  assert.match(workerSource, /peercompute\.ulg\.worker-offscreen-resident-render-producer\.v0/);
+  assert.match(workerSource, /peercompute\.ulg\.worker-offscreen-resident-particle-state-producer\.v0/);
+  assert.match(bridgeSource, /transferControlToOffscreen/);
+  assert.match(workerSource, /getContext\('webgpu'\)/);
+  assert.match(workerSource, /type === 'draw-render-rows'/);
+  assert.match(workerSource, /type === 'draw-resident-render-producer'/);
+  assert.match(workerSource, /type === 'draw-resident-particle-state-producer'/);
+  assert.match(workerSource, /worker-resident-particle-state-transfer/);
+  assert.match(workerSource, /worker-resident-particle-state-cache/);
+  assert.match(workerSource, /peercompute\.ulg\.presentation-worker-resident-stage\.v0/);
+  assert.match(workerSource, /run-resident-stage-on-presentation-device/);
+  assert.match(workerSource, /offscreen-presentation-worker-device/);
+  assert.match(workerSource, /worker-offscreen-resident-stage-on-presentation-device-started/);
+  assert.match(workerSource, /worker-offscreen-resident-stage-on-presentation-device-timeout/);
+  assert.match(workerSource, /queueCompletionErrorMessage/);
+  assert.match(workerSource, /sameWorkerQueueFenceFallback/);
+  assert.match(mechanicsWorkerSource, /mapAsync\(worker-queue-fence-sentinel\)/);
+  assert.match(mechanicsWorkerSource, /queue-submitted-same-worker-gpu-handoff-no-cpu-fence/);
+  assert.match(workerSource, /source-cache-reused/);
+  assert.match(workerSource, /worker-offscreen-resident-render-producer-blocked-source-cache-miss/);
+  assert.match(workerSource, /worker-resident-source-cache/);
+  assert.match(workerSource, /createComputePipeline/);
+  assert.match(workerSource, /createRenderPipeline/);
+  assert.match(bridgeSource, /main-thread-compact-render-row-transfer/);
+  assert.match(bridgeSource, /reuseSourceCache/);
+  assert.match(bridgeSource, /source-cache-reused/);
+  assert.match(bridgeSource, /sourceRowsPacked/);
+  assert.match(bridgeSource, /drawResidentParticleStateProducer/);
+  assert.match(bridgeSource, /runResidentStageOnPresentationDevice/);
+  assert.match(bridgeSource, /peercompute\.ulg\.presentation-worker-resident-stage\.v0/);
+  assert.match(bridgeSource, /peercompute\.ulg\.worker-offscreen-retained-gpubuffer-handoff\.v0/);
+  assert.match(bridgeSource, /cross-worker-gpubuffer-structured-clone/);
+  assert.match(bridgeSource, /worker-owned-resident-render-producer/);
+  assert.match(policySource, /peercompute\.ulg\.render-ownership-policy\.v0/);
+  assert.match(policySource, /worker-owned-resident-render-producer/);
+  assert.match(policySource, /cross-worker-gpubuffer-structured-clone/);
+  assert.match(bridgeSource, /worker-owned-presented-canvas/);
+  assert.match(bridgeSource, /frame-copy-back/);
+  assert.match(sceneSource, /createUlgWorkerOffscreenPresentationBridge/);
+  assert.match(sceneSource, /sphPeerComputeRenderOwnershipPolicy/);
+  assert.match(sceneSource, /sphWorkerOffscreenPresentation/);
+  assert.match(sceneSource, /sphWorkerOffscreenRenderRows/);
+  assert.match(sceneSource, /sphWorkerOffscreenResidentStage/);
+  assert.match(sceneSource, /runWorkerOffscreenResidentStageOnPresentationDevice/);
+  assert.match(sceneSource, /runWorkerOffscreenMechanicsStageChainOnPresentationDevice/);
+  assert.match(sceneSource, /peercompute\.ulg\.presentation-worker-mechanics-stage-chain\.v0/);
+  assert.match(sceneSource, /workerOffscreenResidentStageTimeoutMs/);
+  assert.match(sceneSource, /workerOffscreenResidentStageErrorMessage/);
+  assert.match(sceneSource, /workerOffscreenResidentStageQueueCompletionStatus/);
+  assert.match(sceneSource, /workerOffscreenResidentStageQueueCompletionFallbackFrom/);
+  assert.match(sceneSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
+  assert.match(sceneSource, /workerOffscreenResidentStageChainStatus/);
+  assert.match(sceneSource, /workerOffscreenResidentStageChainAutoStatus/);
+  assert.match(sceneSource, /presentation-worker-mechanics-stage-chain-auto\.v0/);
+  assert.match(sceneSource, /not-promoted-worker-local-output-not-connected-to-visible-render-state/);
+  assert.match(sceneSource, /workerResidentParticleStateProducerColorRows/);
+  assert.match(sceneSource, /drawResidentParticleStateProducer/);
+  assert.match(sceneSource, /presentationWorkerRenderRetainedStageOutput/);
+  assert.match(sceneSource, /presentation-worker-retained-stage-output-render-request\.v0/);
+  assert.match(mountSource, /renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy/);
+  assert.match(mountSource, /workerOffscreenPresentation/);
+  assert.match(mountSource, /presentationWorkerResidentStages/);
+  assert.match(probeSource, /peerComputeRenderOwnershipPolicy/);
+  assert.match(probeSource, /workerOffscreenPresentation: sceneUserData\.sphWorkerOffscreenPresentation/);
+  assert.match(probeSource, /workerOffscreenRenderRows: sceneUserData\.sphWorkerOffscreenRenderRows/);
+  assert.match(probeSource, /workerOffscreenResidentStage/);
+  assert.match(probeSource, /workerOffscreenResidentStageChainAuto/);
+  assert.match(benchmarkSource, /ULG_BENCH_RENDER_OWNERSHIP/);
+  assert.match(benchmarkSource, /peerComputeRenderOwnershipPolicyEffectiveMode/);
+  assert.match(benchmarkSource, /workerOffscreenPresentationStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsInputTransferBytes/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheHit/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceRowsPacked/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceStateTransferBytes/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsProducerSourceKind/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceStageId/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsRetainedParticleStateStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsRetainedStageOutputPreserved/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageStatus/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageTimeoutMs/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageErrorMessage/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageQueueCompletionStatus/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageQueueCompletionFallbackFrom/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageChainStatus/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageChainAutoStatus/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageChainAutoStatePromotionStatus/);
+  assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
+  assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
+  assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedGpuBufferHandoffStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedGpuBufferHandoffPlanChangeRequired/);
+  assert.match(probeSource, /workerOffscreenRetainedGpuBufferHandoff/);
+  assert.match(probeSource, /renderRowsReadbackForcedForWorkerOffscreenPresentation/);
+  assert.match(benchmarkSource, /renderRowsReadbackForcedForWorkerOffscreenPresentation/);
+  assert.match(workerSource, /worker-retained-resident-stage-output/);
+  assert.match(workerSource, /resolveUlgMechanicsResidentStageWorkerRetainedParticleState/);
+  assert.doesNotMatch(workerSource, /ImageBitmap|readPixels|toDataURL|toBlob/);
+});
+
 test('native WebGPU surface requests retain render-field buffers by default', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 
@@ -41,6 +195,21 @@ test('native WebGPU surface requests retain render-field buffers by default', ()
     sceneSource,
     /native-webgpu-surface-consumer request retains render-field buffers without compact summary readback/,
     'native WebGPU surface coercion should remain explicit in diagnostics'
+  );
+});
+
+test('native WebGPU renderer canvas avoids exact full-viewport compositor capture path', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /if \(useNativeWebGpuRenderer\) \{[\s\S]*?style\.width = 'calc\(100% - 1px\)'[\s\S]*?style\.height = 'calc\(100% - 1px\)'/,
+    'native WebGPU canvas should avoid the Chromium transparent screenshot path for exact full-viewport absolute canvases'
+  );
+  assert.match(
+    sceneSource,
+    /Chromium's native WebGPU screenshot path can expose an exactly full-viewport absolute canvas/,
+    'the native canvas sizing guard should document the browser-frame validation reason'
   );
 });
 
@@ -77,6 +246,16 @@ test('native WebGPU browser probe analyzes captured frames without artifact outp
     /captureFrames = probeMode !== 'direct-resident'[\s\S]*?\|\| nativeSurfaceFrameValidationRequired/,
     'native frame validation should not require ULG_PROBE_CAPTURE_FRAMES or ULG_PROBE_FRAME_DIR'
   );
+  assert.match(
+    probeSource,
+    /nativeSurfaceFrameValidationViewport \? 320 : 1280/,
+    'native browser-frame validation should default to a compositor-stable viewport unless the caller overrides it'
+  );
+  assert.match(
+    probeSource,
+    /nativeSurfaceFrameValidationViewport \? 240 : 800/,
+    'native browser-frame validation should pair the stable viewport width with a stable height'
+  );
   assert.doesNotMatch(
     probeSource,
     /if \(!frameDir\) \{\s*return \{[\s\S]*?frames: \[\]/,
@@ -91,6 +270,42 @@ test('native WebGPU browser probe analyzes captured frames without artifact outp
     probeSource,
     /residentNoReadbackRenderSourceEvidenceAvailable[\s\S]*?residentRenderSourceTimeAdvanced/,
     'native no-full surface probes should not require CPU motion diagnostics when render-source evidence is current'
+  );
+});
+
+test('native WebGPU browser-frame validation publishes back into scene state', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(
+    sceneSource,
+    /publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation/,
+    'scene API should expose a browser-frame validation publisher for native WebGPU'
+  );
+  assert.match(
+    sceneSource,
+    /peercompute\.ulg\.sph-native-webgpu-browser-frame-validation\.v0/,
+    'browser-frame validation should publish a schema-tagged engine-state record'
+  );
+  assert.match(
+    sceneSource,
+    /publishSphNativeWebGpuSurfaceConsumerPixelValidation\(bridge,[\s\S]*?source,[\s\S]*?nonzeroPixelCount,[\s\S]*?pixelCount/,
+    'browser-frame validation must feed the same visible-consumer pixel-validation path'
+  );
+  assert.match(
+    probeSource,
+    /browserFrameValidationFromVisualFrame\(canvasCenterFrame,[\s\S]*?playwright-canvas-center-crop/,
+    'probe should analyze the clipped canvas-center frame while the page is alive'
+  );
+  assert.match(
+    probeSource,
+    /publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation/,
+    'probe should publish browser-frame validation back into the live scene API'
+  );
+  assert.match(
+    probeSource,
+    /lastMetric\.renderState = \{[\s\S]*?publishResult\.renderStatePatch/,
+    'probe should patch final metric state after browser-frame validation publishes'
   );
 });
 
@@ -129,13 +344,13 @@ test('native WebGPU surface consumer uses submit-fence pacing', () => {
   );
   assert.match(
     sceneSource,
-    /const controlsChanged = Boolean\(controls\.update\(\)\)/,
-    'native surface rendering should redraw from OrbitControls camera changes'
+    /controls\.update\(\);\s*const rendered = renderSceneFrame\(\{ reason: 'animation-frame' \}\);/,
+    'native surface rendering should update camera controls before each engine frame'
   );
   assert.match(
     sceneSource,
-    /!nativeSurfaceConsumerActive \|\| controlsChanged/,
-    'native surface rendering should be on-demand instead of continuous in the main animation loop'
+    /if \(rendered\) \{\s*renderSphResidentSurfaceDrawOverlay\(\{ reason: 'animation-frame' \}\);/,
+    'native main-canvas WebGPU surfaces must redraw every engine frame because swap-chain contents are not retained'
   );
   assert.match(
     sceneSource,

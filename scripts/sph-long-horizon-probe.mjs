@@ -13,6 +13,9 @@ const DEFAULT_IRON_BASE_HEIGHT_M = 2.5;
 const DEFAULT_BOX_DIMS_M = [5, 5, 5];
 const DEFAULT_DROP_PARTICLE_EDGE = 3;
 const DEFAULT_BASE_PARTICLE_EDGE = 5;
+const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-3;
+const CONDENSED_MIN_VOLUME_RATIO_J = 1 - CONDENSED_VOLUME_STRAIN_TOLERANCE;
+const CONDENSED_MAX_VOLUME_RATIO_J = 1 + CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
 const BROWSER_CONSOLE_ENTRY_LIMIT = 500;
 const BROWSER_CONSOLE_ISSUE_LIMIT = 200;
@@ -300,9 +303,17 @@ function normalizedNativeSurfaceDebugMode(value, fallback = 'none') {
 }
 
 function probePageOptions() {
+  const surfaceDrawDiagnosticModeEnv = String(
+    process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
+  ).toLowerCase();
+  const surfaceDrawDiagnosticMode = SURFACE_DRAW_DIAGNOSTIC_MODES.has(surfaceDrawDiagnosticModeEnv)
+    ? surfaceDrawDiagnosticModeEnv
+    : surfaceDrawModeFromScenarioUrl(process.env.ULG_PROBE_URL || DEFAULT_URL);
+  const nativeSurfaceFrameValidationViewport =
+    surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer';
   const viewport = {
-    width: positiveInteger(process.env.ULG_PROBE_VIEWPORT_WIDTH, 1280),
-    height: positiveInteger(process.env.ULG_PROBE_VIEWPORT_HEIGHT, 800)
+    width: positiveInteger(process.env.ULG_PROBE_VIEWPORT_WIDTH, nativeSurfaceFrameValidationViewport ? 320 : 1280),
+    height: positiveInteger(process.env.ULG_PROBE_VIEWPORT_HEIGHT, nativeSurfaceFrameValidationViewport ? 240 : 800)
   };
   const deviceScaleFactor = finiteNumber(process.env.ULG_PROBE_DEVICE_SCALE_FACTOR, null);
   const isMobile = booleanEnv(process.env.ULG_PROBE_IS_MOBILE, false);
@@ -436,7 +447,7 @@ function paethPredictor(left, up, upLeft) {
   return upLeft;
 }
 
-function analyzePngFrame(bytes) {
+function analyzePngFrame(bytes, { region = null } = {}) {
   const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   if (!Buffer.isBuffer(bytes) || bytes.length < 33 || !bytes.subarray(0, 8).equals(signature)) {
     return { status: 'unsupported', reason: 'not-png' };
@@ -492,14 +503,36 @@ function analyzePngFrame(bytes) {
         colorType
       };
     }
+    const sampleX0 = Math.max(0, Math.min(width, Math.floor(Number(region?.x) || 0)));
+    const sampleY0 = Math.max(0, Math.min(height, Math.floor(Number(region?.y) || 0)));
+    const requestedSampleWidth = Number(region?.width);
+    const requestedSampleHeight = Number(region?.height);
+    const sampleX1 = Math.max(
+      sampleX0,
+      Math.min(width, Math.ceil(sampleX0 + (Number.isFinite(requestedSampleWidth) && requestedSampleWidth > 0
+        ? requestedSampleWidth
+        : width)))
+    );
+    const sampleY1 = Math.max(
+      sampleY0,
+      Math.min(height, Math.ceil(sampleY0 + (Number.isFinite(requestedSampleHeight) && requestedSampleHeight > 0
+        ? requestedSampleHeight
+        : height)))
+    );
+    const sampleWidth = sampleX1 - sampleX0;
+    const sampleHeight = sampleY1 - sampleY0;
     let previous = Buffer.alloc(rowBytes);
     let nonzeroRgbPixelCount = 0;
     let nonzeroAlphaPixelCount = 0;
     let opaquePixelCount = 0;
     let transparentPixelCount = 0;
     let maxChannel = 0;
+    let minRgbChannel = 255;
+    let maxRgbChannel = 0;
     let minAlpha = 255;
     let maxAlpha = 0;
+    const distinctRgbColors = new Set();
+    const distinctRgbColorLimit = 4096;
     for (let y = 0; y < height; y += 1) {
       const rowStart = y * (rowBytes + 1);
       const filter = inflated[rowStart];
@@ -526,7 +559,12 @@ function analyzePngFrame(bytes) {
         }
         row[x] = value;
       }
+      if (y < sampleY0 || y >= sampleY1) {
+        previous = row;
+        continue;
+      }
       for (let x = 0; x < width; x += 1) {
+        if (x < sampleX0 || x >= sampleX1) continue;
         const pixelOffset = x * bytesPerPixel;
         let r = 0;
         let g = 0;
@@ -556,16 +594,28 @@ function analyzePngFrame(bytes) {
         if (a >= 255) opaquePixelCount += 1;
         if (a === 0) transparentPixelCount += 1;
         maxChannel = Math.max(maxChannel, r, g, b, a);
+        minRgbChannel = Math.min(minRgbChannel, r, g, b);
+        maxRgbChannel = Math.max(maxRgbChannel, r, g, b);
         minAlpha = Math.min(minAlpha, a);
         maxAlpha = Math.max(maxAlpha, a);
+        if (distinctRgbColors.size < distinctRgbColorLimit) {
+          distinctRgbColors.add(`${r},${g},${b}`);
+        }
       }
       previous = row;
     }
-    const pixelCount = width * height;
+    const pixelCount = sampleWidth * sampleHeight;
+    const rgbChannelSpan = maxRgbChannel - minRgbChannel;
+    const distinctRgbColorCount = distinctRgbColors.size;
     return {
       status: 'ready',
-      width,
-      height,
+      width: sampleWidth,
+      height: sampleHeight,
+      sourceWidth: region ? width : undefined,
+      sourceHeight: region ? height : undefined,
+      region: region
+        ? { x: sampleX0, y: sampleY0, width: sampleWidth, height: sampleHeight }
+        : undefined,
       bitDepth,
       colorType,
       pixelCount,
@@ -576,6 +626,12 @@ function analyzePngFrame(bytes) {
       nonzeroRgbRatio: pixelCount > 0 ? nonzeroRgbPixelCount / pixelCount : 0,
       nonzeroAlphaRatio: pixelCount > 0 ? nonzeroAlphaPixelCount / pixelCount : 0,
       maxChannel,
+      minRgbChannel,
+      maxRgbChannel,
+      rgbChannelSpan,
+      distinctRgbColorCount,
+      distinctRgbColorCountCapped: distinctRgbColorCount >= distinctRgbColorLimit,
+      hasSurfaceLikeVariation: rgbChannelSpan >= 8 || distinctRgbColorCount >= 4,
       minAlpha,
       maxAlpha,
       allTransparentBlack: nonzeroRgbPixelCount === 0 && nonzeroAlphaPixelCount === 0,
@@ -592,6 +648,74 @@ function analyzePngFrame(bytes) {
       colorType
     };
   }
+}
+
+function browserFrameValidationFromVisualFrame(
+  frame,
+  { source = null, transparentBlackUnsupported = false } = {}
+) {
+  const frameSource = source ?? frame?.captureSource ?? 'browser-frame';
+  if (!frame || frame.status !== 'captured') {
+    return {
+      schema: 'peercompute.ulg.sph-browser-frame-pixel-validation.v0',
+      status: 'not-run',
+      reason: frame?.reason || frame?.error || 'browser-frame capture did not produce a captured PNG frame',
+      source: frameSource,
+      png: null
+    };
+  }
+  const precomputedPng = frame.validationPng?.status === 'ready'
+    ? frame.validationPng
+    : null;
+  const match = !precomputedPng && typeof frame.dataUrl === 'string'
+    ? /^data:image\/png;base64,(.+)$/i.exec(frame.dataUrl)
+    : null;
+  if (!precomputedPng && !match) {
+    return {
+      schema: 'peercompute.ulg.sph-browser-frame-pixel-validation.v0',
+      status: 'not-run',
+      reason: 'browser-frame capture did not include a PNG data URL',
+      source: frameSource,
+      png: null
+    };
+  }
+  const png = precomputedPng || analyzePngFrame(Buffer.from(match[1], 'base64'));
+  if (png?.status !== 'ready') {
+    return {
+      schema: 'peercompute.ulg.sph-browser-frame-pixel-validation.v0',
+      status: 'not-run',
+      reason: `browser-frame PNG analysis unavailable: ${png?.reason || png?.status || 'unknown'}`,
+      source: frameSource,
+      png
+    };
+  }
+  const hasSurfaceLikePixels = Boolean(png.hasVisiblePixels && png.hasSurfaceLikeVariation);
+  const transparentBlackNativeCaptureUnsupported = Boolean(
+    transparentBlackUnsupported
+    && !hasSurfaceLikePixels
+    && png.allTransparentBlack
+  );
+  const status = hasSurfaceLikePixels
+    ? 'passed'
+    : (transparentBlackNativeCaptureUnsupported ? 'unsupported' : 'failed');
+  const visiblePixelCount = Math.min(png.nonzeroRgbPixelCount, png.nonzeroAlphaPixelCount);
+  return {
+    schema: 'peercompute.ulg.sph-browser-frame-pixel-validation.v0',
+    status,
+    reason: status === 'passed'
+      ? `browser-frame ${frameSource} observed ${visiblePixelCount}/${png.pixelCount} visible pixels with surface-like variation inside the native WebGPU canvas region`
+      : (status === 'unsupported'
+        ? `browser-frame ${frameSource} returned transparent black for a rendered native WebGPU canvas; treating Playwright/headless canvas capture as unsupported rather than a failed render`
+        : (png.hasVisiblePixels
+          ? `browser-frame ${frameSource} observed only uniform/non-surface canvas pixels inside the native WebGPU canvas region`
+          : `browser-frame ${frameSource} observed no visible pixels inside the native WebGPU canvas region`)),
+    source: frameSource,
+    width: png.width,
+    height: png.height,
+    nonzeroPixelCount: visiblePixelCount,
+    pixelCount: png.pixelCount,
+    png
+  };
 }
 
 async function persistCapturedFrames({ frames, frameDir }) {
@@ -632,6 +756,10 @@ async function persistCapturedFrames({ frames, frameDir }) {
       canvasCssWidth: frame.canvasCssWidth ?? null,
       canvasCssHeight: frame.canvasCssHeight ?? null,
       canvasDevicePixelRatio: frame.canvasDevicePixelRatio ?? null,
+      canvasSelection: frame.canvasSelection ?? null,
+      canvasElementFallback: frame.canvasElementFallback ?? null,
+      validationPng: frame.validationPng ?? null,
+      validationRegion: frame.validationRegion ?? null,
       reason: frame.reason ?? null,
       error: frame.error ?? null
     };
@@ -700,6 +828,12 @@ async function capturePlaywrightCanvasCenterFrame({
   try {
     const canvasSummary = await page.evaluate(() => {
       const canvases = Array.from(document.querySelectorAll('canvas'));
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const sceneApi = overlay?.__sphScene || null;
+      const renderBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+      const nativeConsumer = sceneApi?.scene?.userData?.sphNativeWebGpuSurfaceConsumer
+        || renderBridge?.nativeConsumer
+        || null;
       const visibleCanvases = canvases
         .map((canvas, index) => {
           const rect = canvas.getBoundingClientRect?.();
@@ -724,7 +858,29 @@ async function capturePlaywrightCanvasCenterFrame({
                 }
               : null,
             width: canvas.width ?? null,
-            height: canvas.height ?? null
+            height: canvas.height ?? null,
+            style: style
+              ? {
+                  position: style.position,
+                  display: style.display,
+                  visibility: style.visibility,
+                  opacity: style.opacity,
+                  zIndex: style.zIndex,
+                  pointerEvents: style.pointerEvents,
+                  backgroundColor: style.backgroundColor,
+                  mixBlendMode: style.mixBlendMode,
+                  transform: style.transform
+                }
+              : null,
+            sameAsRenderBridgeCanvas: renderBridge?.canvas === canvas,
+            sameAsNativeConsumerCanvas: nativeConsumer?.canvas === canvas,
+            rendererBridge: renderBridge?.rendererBridge ?? null,
+            renderBridgeStatus: renderBridge?.status ?? null,
+            renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+            renderBridgeFrameCount: renderBridge?.frameCount ?? null,
+            renderBridgeNativeSurfaceDebugMode:
+              renderBridge?.lastNativeSurfaceDebugMode ?? renderBridge?.nativeSurfaceDebugMode ?? null,
+            renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null
           };
         })
         .filter((entry) => entry.visible);
@@ -743,7 +899,17 @@ async function capturePlaywrightCanvasCenterFrame({
                 }
               : null,
             width: fallbackCanvas.width ?? null,
-            height: fallbackCanvas.height ?? null
+            height: fallbackCanvas.height ?? null,
+            style: null,
+            sameAsRenderBridgeCanvas: renderBridge?.canvas === fallbackCanvas,
+            sameAsNativeConsumerCanvas: nativeConsumer?.canvas === fallbackCanvas,
+            rendererBridge: renderBridge?.rendererBridge ?? null,
+            renderBridgeStatus: renderBridge?.status ?? null,
+            renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+            renderBridgeFrameCount: renderBridge?.frameCount ?? null,
+            renderBridgeNativeSurfaceDebugMode:
+              renderBridge?.lastNativeSurfaceDebugMode ?? renderBridge?.nativeSurfaceDebugMode ?? null,
+            renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null
           }
         : null);
       return {
@@ -771,14 +937,80 @@ async function capturePlaywrightCanvasCenterFrame({
           height: Math.max(1, selected.rect.height * 0.6)
         }
       : null;
-    const screenshot = clipRect
+    let screenshot = clipRect
       ? await page.screenshot({ type: 'png', clip: clipRect })
       : await page.locator('canvas').nth(selected.index).screenshot({ type: 'png' });
+    let screenshotSource = base.captureSource;
+    let screenshotPng = analyzePngFrame(screenshot);
+    let validationPng = screenshotPng;
+    let validationRegion = null;
+    let canvasElementFallback = null;
+    if (
+      clipRect
+      && screenshotPng?.status === 'ready'
+      && !screenshotPng.hasVisiblePixels
+      && selected.index != null
+      && selected.index >= 0
+    ) {
+      try {
+        const elementScreenshot = await page.locator('canvas').nth(selected.index).screenshot({ type: 'png' });
+        const elementFullPng = analyzePngFrame(elementScreenshot);
+        const elementRegion = elementFullPng?.status === 'ready'
+          ? {
+              x: elementFullPng.width * 0.2,
+              y: elementFullPng.height * 0.2,
+              width: elementFullPng.width * 0.6,
+              height: elementFullPng.height * 0.6
+            }
+          : null;
+        const elementPng = elementRegion
+          ? analyzePngFrame(elementScreenshot, { region: elementRegion })
+          : elementFullPng;
+        canvasElementFallback = {
+          status: elementPng?.status === 'ready'
+            ? (elementPng.hasVisiblePixels ? 'used-visible-canvas-element-center' : 'blank-canvas-element-center')
+            : 'canvas-element-analysis-unavailable',
+          source: 'playwright-canvas-element-center',
+          png: elementPng?.status === 'ready'
+            ? {
+                status: elementPng.status,
+                width: elementPng.width,
+                height: elementPng.height,
+                sourceWidth: elementPng.sourceWidth ?? null,
+                sourceHeight: elementPng.sourceHeight ?? null,
+                region: elementPng.region ?? null,
+                pixelCount: elementPng.pixelCount,
+                nonzeroRgbPixelCount: elementPng.nonzeroRgbPixelCount,
+                nonzeroAlphaPixelCount: elementPng.nonzeroAlphaPixelCount,
+                hasVisiblePixels: elementPng.hasVisiblePixels,
+                rgbChannelSpan: elementPng.rgbChannelSpan,
+                distinctRgbColorCount: elementPng.distinctRgbColorCount,
+                hasSurfaceLikeVariation: elementPng.hasSurfaceLikeVariation
+              }
+            : elementPng
+        };
+        if (elementPng?.status === 'ready' && elementPng.hasVisiblePixels) {
+          screenshot = elementScreenshot;
+          screenshotPng = elementFullPng;
+          validationPng = elementPng;
+          validationRegion = elementPng.region ?? elementRegion;
+          screenshotSource = 'playwright-canvas-element-center-fallback';
+        }
+      } catch (error) {
+        canvasElementFallback = {
+          status: 'canvas-element-capture-error',
+          source: 'playwright-canvas-element',
+          reason: error instanceof Error ? error.message : String(error),
+          png: null
+        };
+      }
+    }
     return {
       ...base,
+      captureSource: screenshotSource,
       status: 'captured',
-      width: clipRect?.width ?? selected.width ?? null,
-      height: clipRect?.height ?? selected.height ?? null,
+      width: screenshotPng?.status === 'ready' ? screenshotPng.width : (clipRect?.width ?? selected.width ?? null),
+      height: screenshotPng?.status === 'ready' ? screenshotPng.height : (clipRect?.height ?? selected.height ?? null),
       canvasCount: canvasSummary.canvasCount ?? null,
       visibleCanvasCount: canvasSummary.visibleCanvasCount ?? null,
       canvasIndex: selected.index,
@@ -787,6 +1019,10 @@ async function capturePlaywrightCanvasCenterFrame({
       canvasCssWidth: clipRect?.width ?? selected.rect?.width ?? null,
       canvasCssHeight: clipRect?.height ?? selected.rect?.height ?? null,
       canvasDevicePixelRatio: canvasSummary.devicePixelRatio ?? null,
+      canvasSelection: selected,
+      canvasElementFallback,
+      validationPng,
+      validationRegion,
       dataUrl: `data:image/png;base64,${screenshot.toString('base64')}`
     };
   } catch (error) {
@@ -1900,6 +2136,31 @@ async function runBrowserProbe({
           renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
           ?? surfaceDraw?.visibleGpuConsumerNativeDeviceTextureReadbackSmokeReason
           ?? null;
+        const sameDeviceMainThreadImportSelected =
+          renderState?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected
+          ?? surfaceDraw?.visibleGpuConsumerSameDeviceMainThreadImportSelected
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected
+          ?? null;
+        const sameDeviceMainThreadImportRoute =
+          renderState?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute
+          ?? surfaceDraw?.visibleGpuConsumerSameDeviceMainThreadImportRoute
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute
+          ?? null;
+        const sameDeviceMainThreadImportThread =
+          renderState?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread
+          ?? surfaceDraw?.visibleGpuConsumerSameDeviceMainThreadImportThread
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread
+          ?? null;
+        const sameDeviceMainThreadImportDeviceScope =
+          renderState?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope
+          ?? surfaceDraw?.visibleGpuConsumerSameDeviceMainThreadImportDeviceScope
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope
+          ?? null;
+        const sameDeviceMainThreadImportStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus
+          ?? surfaceDraw?.visibleGpuConsumerSameDeviceMainThreadImportStatus
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus
+          ?? null;
         const validationScope =
           renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationScope
           ?? surfaceDraw?.renderBridgeNativeSurfaceValidationScope
@@ -1972,6 +2233,11 @@ async function runBrowserProbe({
           deviceMapSmokeStatus,
           deviceTextureReadbackSmokeStatus,
           deviceTextureReadbackSmokeReason,
+          sameDeviceMainThreadImportSelected,
+          sameDeviceMainThreadImportRoute,
+          sameDeviceMainThreadImportThread,
+          sameDeviceMainThreadImportDeviceScope,
+          sameDeviceMainThreadImportStatus,
           validationScope,
           offscreenValidationEligible,
           offscreenValidationSkippedReason,
@@ -2100,9 +2366,23 @@ async function runBrowserProbe({
           status: mechanicsMaterialPhaseUpload.status ?? null,
           phaseRecordCount: mechanicsMaterialPhaseUpload.phaseRecordCount ?? null,
           recordsByteLength: mechanicsMaterialPhaseUpload.recordsByteLength ?? null
-        } : null,
-        rendererInit: sceneUserData.sphRendererInit || null,
-        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
+	        } : null,
+	        rendererInit: sceneUserData.sphRendererInit || null,
+	        peerComputeRenderOwnershipPolicy:
+	          sceneUserData.sphPeerComputeRenderOwnershipPolicy
+	          || overlay.__sphPeerComputeRenderOwnershipPolicy
+	          || null,
+	        workerOffscreenPresentation: sceneUserData.sphWorkerOffscreenPresentation || null,
+	        workerOffscreenRenderRows: sceneUserData.sphWorkerOffscreenRenderRows || null,
+	        workerOffscreenRetainedGpuBufferHandoff:
+	          sceneUserData.sphWorkerOffscreenRetainedGpuBufferHandoff || null,
+		        workerOffscreenResidentStage:
+		          sceneUserData.sphWorkerOffscreenResidentStage || null,
+		        workerOffscreenResidentStageChain:
+		          sceneUserData.sphWorkerOffscreenResidentStageChain || null,
+		        workerOffscreenResidentStageChainAuto:
+		          sceneUserData.sphWorkerOffscreenResidentStageChainAuto || null,
+		        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
         nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
@@ -2289,6 +2569,14 @@ async function runBrowserProbe({
             renderRowsReadbackEffectiveMode: renderState.renderRowsReadbackEffectiveMode ?? null,
             renderRowsReadbackCoercionReason: renderState.renderRowsReadbackCoercionReason ?? null,
             renderRowsReadbackForcedForThreeBridge: renderState.renderRowsReadbackForcedForThreeBridge ?? null,
+            renderRowsReadbackForcedForWorkerOffscreenPresentation:
+              renderState.renderRowsReadbackForcedForWorkerOffscreenPresentation ?? null,
+            renderRowsReadbackForcedForWorkerOwnedResidentProducer:
+              renderState.renderRowsReadbackForcedForWorkerOwnedResidentProducer ?? null,
+            renderRowsReadbackWorkerOffscreenPresentationRequired:
+              renderState.renderRowsReadbackWorkerOffscreenPresentationRequired ?? null,
+            renderRowsReadbackWorkerOwnedResidentProducerRequired:
+              renderState.renderRowsReadbackWorkerOwnedResidentProducerRequired ?? null,
             renderRowsReadbackRetainedPreviousBridge: renderState.renderRowsReadbackRetainedPreviousBridge ?? null,
             renderRowsGpuHandoffCopy: renderState.renderRowsGpuHandoffCopy ?? null,
             renderRowsHandoffMode: renderState.renderRowsHandoffMode ?? null,
@@ -2485,6 +2773,10 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeRendererBackend: renderState.surfaceDrawRenderBridgeRendererBackend ?? null,
             surfaceDrawRenderBridgeParticleRenderMode:
               renderState.surfaceDrawRenderBridgeParticleRenderMode ?? null,
+            surfaceDrawRenderBridgeSphereMaterialSummaries:
+              Array.isArray(renderState.surfaceDrawRenderBridgeSphereMaterialSummaries)
+                ? renderState.surfaceDrawRenderBridgeSphereMaterialSummaries.map((summary) => ({ ...summary }))
+                : [],
             surfaceDrawRenderBridgeSphereSizingMode:
               renderState.surfaceDrawRenderBridgeSphereSizingMode ?? null,
             surfaceDrawRenderBridgeSphereVariableSize:
@@ -2771,6 +3063,16 @@ async function runBrowserProbe({
             visibleGpuConsumerRenderBridgeStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
             visibleGpuConsumerRendererCapabilityStatus:
               surfaceDraw.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
+            visibleGpuConsumerSameDeviceMainThreadImportSelected:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
+            visibleGpuConsumerSameDeviceMainThreadImportRoute:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+            visibleGpuConsumerSameDeviceMainThreadImportThread:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+            visibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+            visibleGpuConsumerSameDeviceMainThreadImportStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
             visibleGpuConsumerPixelValidationStatus:
               surfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
             visibleGpuConsumerValidated:
@@ -2933,6 +3235,9 @@ async function runBrowserProbe({
             renderBridgeParticleRenderMode: surfaceDraw.renderBridgeParticleRenderMode ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
               ? [...surfaceDraw.renderBridgeSphereMaterialKeys]
+              : [],
+            renderBridgeSphereMaterialSummaries: Array.isArray(surfaceDraw.renderBridgeSphereMaterialSummaries)
+              ? surfaceDraw.renderBridgeSphereMaterialSummaries.map((summary) => ({ ...summary }))
               : [],
             renderBridgeSphereSizingMode: surfaceDraw.renderBridgeSphereSizingMode ?? null,
             renderBridgeSphereVariableSize: surfaceDraw.renderBridgeSphereVariableSize ?? null,
@@ -3443,7 +3748,289 @@ async function runBrowserProbe({
             phase: 'post-probe-canvas-center-crop',
             sampleIndex: Array.isArray(timeline.metrics) ? Math.max(0, timeline.metrics.length - 1) : null
           });
+          const lastMetricBeforeBrowserFrameValidation = Array.isArray(timeline.metrics)
+            ? timeline.metrics[timeline.metrics.length - 1]
+            : null;
+          const nativeBridgeRenderedBeforeBrowserFrameValidation = Boolean(
+            surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+            && (
+              lastMetricBeforeBrowserFrameValidation?.surfaceDraw?.renderBridgeLastRenderStatus
+                === 'native-webgpu-surface-consumer-rendered'
+              || lastMetricBeforeBrowserFrameValidation?.surfaceDraw?.renderBridgeLastRenderStatus
+                === 'native-webgpu-surface-consumer-debug-clear-rendered'
+              || lastMetricBeforeBrowserFrameValidation?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
+                === 'native-webgpu-surface-consumer-rendered'
+              || lastMetricBeforeBrowserFrameValidation?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
+                === 'native-webgpu-surface-consumer-debug-clear-rendered'
+            )
+          );
+          const browserFrameValidation = browserFrameValidationFromVisualFrame(canvasCenterFrame, {
+            source: canvasCenterFrame.captureSource || 'playwright-canvas-center-crop',
+            transparentBlackUnsupported: nativeBridgeRenderedBeforeBrowserFrameValidation
+          });
+          if (browserFrameValidation.png?.status === 'ready') {
+            canvasCenterFrame.png = browserFrameValidation.png;
+            canvasCenterFrame.blankFrame = !browserFrameValidation.png.hasVisiblePixels;
+          }
           timeline.visualFrames.push(canvasCenterFrame);
+          if (surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer') {
+            const publishResult = await page.evaluate(async (validation) => {
+              const overlay = document.querySelector('#sph-phase-overlay');
+              const sceneApi = overlay?.__sphScene || null;
+              const publishStatus = sceneApi?.publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation?.({
+                status: validation.status,
+                reason: validation.reason,
+                source: validation.source,
+                width: validation.width ?? null,
+                height: validation.height ?? null,
+                nonzeroPixelCount: validation.nonzeroPixelCount ?? null,
+                pixelCount: validation.pixelCount ?? null
+              }) || {
+                schema: 'peercompute.ulg.sph-native-webgpu-browser-frame-validation.v0',
+                status: 'browser-frame-validation-blocked-scene-api-unavailable',
+                reason: 'scene API did not expose browser-frame native WebGPU validation'
+              };
+              const renderState = sceneApi?.getSphResidentRenderState?.() || overlay?.__sphResidentRenderState || null;
+              const surfaceDraw = sceneApi?.getSphResidentSurfaceDraw?.() || overlay?.__sphResidentSurfaceDraw || null;
+              const renderBridge = sceneApi?.getSphResidentSurfaceDrawRenderBridge?.() || null;
+              const readNativeIndirectArgs = async () => {
+                const device = renderBridge?.device || null;
+                const drawState = renderBridge?.drawState || null;
+                const indirectBuffer = drawState?.drawIndirectRowsBuffer || surfaceDraw?.drawIndirectRowsBuffer || null;
+                const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
+                if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.submit || !indirectBuffer) {
+                  return {
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
+                    status: 'not-run',
+                    reason: 'native bridge indirect GPUBuffer or device queue was unavailable',
+                    args: null
+                  };
+                }
+                const usage = globalThis.GPUBufferUsage || {};
+                const mapMode = globalThis.GPUMapMode || {};
+                let readback = null;
+                try {
+                  readback = device.createBuffer({
+                    label: 'ulg-sph-probe-native-surface-indirect-args-readback',
+                    size: byteLength,
+                    usage: (usage.MAP_READ ?? 1) | (usage.COPY_DST ?? 8)
+                  });
+                  const encoder = device.createCommandEncoder({
+                    label: 'ulg-sph-probe-native-surface-indirect-args-readback'
+                  });
+                  encoder.copyBufferToBuffer(indirectBuffer, 0, readback, 0, byteLength);
+                  device.queue.submit([encoder.finish()]);
+                  await Promise.resolve(device.queue.onSubmittedWorkDone?.() ?? undefined);
+                  await readback.mapAsync(mapMode.READ ?? 1, 0, byteLength);
+                  const args = Array.from(new Uint32Array(readback.getMappedRange(0, byteLength)).slice(0, 4));
+                  readback.unmap();
+                  readback.destroy?.();
+                  return {
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
+                    status: args[0] > 0 && args[1] > 0 ? 'passed' : 'failed',
+                    reason: args[0] > 0 && args[1] > 0
+                      ? `native bridge indirect args are drawable: vertexCount=${args[0]} instanceCount=${args[1]}`
+                      : `native bridge indirect args are not drawable: vertexCount=${args[0]} instanceCount=${args[1]}`,
+                    args,
+                    vertexCount: args[0],
+                    instanceCount: args[1],
+                    firstVertex: args[2],
+                    firstInstance: args[3]
+                  };
+                } catch (error) {
+                  readback?.destroy?.();
+                  return {
+                    schema: 'peercompute.ulg.sph-native-webgpu-indirect-args-validation.v0',
+                    status: 'error',
+                    reason: error instanceof Error ? error.message : String(error),
+                    args: null
+                  };
+                }
+              };
+              const nativeIndirectArgsValidation = await readNativeIndirectArgs();
+              if (overlay && sceneApi) {
+                overlay.__sphResidentRenderState = renderState;
+                overlay.__sphResidentSurfaceDraw = surfaceDraw;
+              }
+              const renderStatePatch = renderState ? {
+                surfaceDrawVisibleGpuConsumerReady: Boolean(renderState.surfaceDrawVisibleGpuConsumerReady),
+                surfaceDrawVisibleGpuConsumerStatus: renderState.surfaceDrawVisibleGpuConsumerStatus ?? null,
+                surfaceDrawVisibleGpuConsumerReason: renderState.surfaceDrawVisibleGpuConsumerReason ?? null,
+                surfaceDrawVisibleGpuConsumerPixelValidationStatus:
+                  renderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+                surfaceDrawVisibleGpuConsumerValidated:
+                  Boolean(renderState.surfaceDrawVisibleGpuConsumerValidated),
+                surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated:
+                  Boolean(renderState.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected:
+                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute:
+                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread:
+                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
+                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus:
+                  renderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
+                surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
+                  renderState.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
+                surfaceDrawRenderBridgePixelValidationStatus:
+                  renderState.surfaceDrawRenderBridgePixelValidationStatus ?? null,
+                surfaceDrawRenderBridgePixelValidationReason:
+                  renderState.surfaceDrawRenderBridgePixelValidationReason ?? null,
+                surfaceDrawRenderBridgePixelValidationSource:
+                  renderState.surfaceDrawRenderBridgePixelValidationSource ?? null,
+                surfaceDrawRenderBridgePixelValidationWidth:
+                  renderState.surfaceDrawRenderBridgePixelValidationWidth ?? null,
+                surfaceDrawRenderBridgePixelValidationHeight:
+                  renderState.surfaceDrawRenderBridgePixelValidationHeight ?? null,
+                surfaceDrawRenderBridgePixelValidationNonzeroPixelCount:
+                  renderState.surfaceDrawRenderBridgePixelValidationNonzeroPixelCount ?? null,
+                surfaceDrawRenderBridgePixelValidationPixelCount:
+                  renderState.surfaceDrawRenderBridgePixelValidationPixelCount ?? null
+              } : null;
+              const surfaceDrawPatch = surfaceDraw ? {
+                surfaceDrawVisibleGpuConsumerReady: Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerReady),
+                surfaceDrawVisibleGpuConsumerStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null,
+                surfaceDrawVisibleGpuConsumerReason: surfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null,
+                surfaceDrawVisibleGpuConsumerPixelValidationStatus:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+                surfaceDrawVisibleGpuConsumerValidated:
+                  Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerValidated),
+                surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated:
+                  Boolean(surfaceDraw.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated),
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+                surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
+                surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily:
+                  surfaceDraw.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily ?? null,
+                renderBridgePixelValidationStatus:
+                  surfaceDraw.renderBridgePixelValidationStatus ?? null,
+                renderBridgePixelValidationReason:
+                  surfaceDraw.renderBridgePixelValidationReason ?? null,
+                renderBridgePixelValidationSource:
+                  surfaceDraw.renderBridgePixelValidationSource ?? null,
+                renderBridgePixelValidationWidth:
+                  surfaceDraw.renderBridgePixelValidationWidth ?? null,
+                renderBridgePixelValidationHeight:
+                  surfaceDraw.renderBridgePixelValidationHeight ?? null,
+                renderBridgePixelValidationNonzeroPixelCount:
+                  surfaceDraw.renderBridgePixelValidationNonzeroPixelCount ?? null,
+                renderBridgePixelValidationPixelCount:
+                  surfaceDraw.renderBridgePixelValidationPixelCount ?? null
+              } : null;
+              return {
+                publishStatus,
+                renderStatePatch,
+                surfaceDrawPatch,
+                nativeIndirectArgsValidation,
+                nativeSurfaceValidation: {
+                  native: true,
+                  ready: Boolean(
+                    renderState?.surfaceDrawVisibleGpuConsumerReady
+                    || surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+                  ),
+                  pending: false,
+                  status: (
+                    renderState?.surfaceDrawVisibleGpuConsumerReady
+                    || surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+                  )
+                    ? 'native-surface-visible-consumer-ready'
+                    : 'native-surface-browser-frame-validation-settled-not-ready',
+                  pixelValidationStatus:
+                    renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+                    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+                    ?? null,
+                  pixelValidationReason:
+                    renderState?.surfaceDrawRenderBridgePixelValidationReason
+                    ?? surfaceDraw?.renderBridgePixelValidationReason
+                    ?? null,
+                  validationBlockerFamily:
+                    renderState?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+                    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeValidationBlockerFamily
+                    ?? null
+                }
+              };
+            }, {
+              status: browserFrameValidation.status,
+              reason: browserFrameValidation.reason,
+              source: browserFrameValidation.source,
+              width: browserFrameValidation.width ?? null,
+              height: browserFrameValidation.height ?? null,
+              nonzeroPixelCount: browserFrameValidation.nonzeroPixelCount ?? null,
+              pixelCount: browserFrameValidation.pixelCount ?? null
+            }).catch((error) => ({
+              publishStatus: {
+                schema: 'peercompute.ulg.sph-native-webgpu-browser-frame-validation.v0',
+                status: 'browser-frame-validation-publish-error',
+                reason: error instanceof Error ? error.message : String(error)
+              },
+              renderStatePatch: null,
+              surfaceDrawPatch: null,
+              nativeIndirectArgsValidation: null,
+              nativeSurfaceValidation: null
+            }));
+            timeline.nativeSurfaceDrawIndirectArgsValidation =
+              publishResult.nativeIndirectArgsValidation || null;
+            timeline.nativeSurfaceBrowserFrameValidation = {
+              ...browserFrameValidation,
+              png: browserFrameValidation.png ? {
+                status: browserFrameValidation.png.status,
+                width: browserFrameValidation.png.width,
+                height: browserFrameValidation.png.height,
+                pixelCount: browserFrameValidation.png.pixelCount,
+                nonzeroRgbPixelCount: browserFrameValidation.png.nonzeroRgbPixelCount,
+                nonzeroAlphaPixelCount: browserFrameValidation.png.nonzeroAlphaPixelCount,
+                hasVisiblePixels: browserFrameValidation.png.hasVisiblePixels,
+                rgbChannelSpan: browserFrameValidation.png.rgbChannelSpan,
+                distinctRgbColorCount: browserFrameValidation.png.distinctRgbColorCount,
+                hasSurfaceLikeVariation: browserFrameValidation.png.hasSurfaceLikeVariation
+              } : null,
+              publishStatus: publishResult.publishStatus || null
+            };
+            const lastMetric = Array.isArray(timeline.metrics) && timeline.metrics.length > 0
+              ? timeline.metrics[timeline.metrics.length - 1]
+              : null;
+            if (lastMetric && publishResult.renderStatePatch) {
+              lastMetric.renderState = {
+                ...(lastMetric.renderState || {}),
+                ...publishResult.renderStatePatch
+              };
+            }
+            if (lastMetric && publishResult.surfaceDrawPatch) {
+              lastMetric.surfaceDraw = {
+                ...(lastMetric.surfaceDraw || {}),
+                ...publishResult.surfaceDrawPatch
+              };
+            }
+            if (lastMetric && publishResult.nativeSurfaceValidation) {
+              lastMetric.nativeSurfaceValidation = {
+                ...(lastMetric.nativeSurfaceValidation || {}),
+                ...publishResult.nativeSurfaceValidation,
+                nativeIndirectArgsValidationStatus:
+                  publishResult.nativeIndirectArgsValidation?.status ?? null,
+                nativeIndirectArgsValidationReason:
+                  publishResult.nativeIndirectArgsValidation?.reason ?? null,
+                nativeIndirectArgs:
+                  publishResult.nativeIndirectArgsValidation?.args ?? null
+              };
+            }
+            if (timeline.visualFrameCapture) {
+              timeline.visualFrameCapture.browserFramePixelValidationStatus =
+                browserFrameValidation.status;
+              timeline.visualFrameCapture.browserFramePixelValidationSource =
+                browserFrameValidation.source;
+              timeline.visualFrameCapture.browserFramePixelValidationPublishedStatus =
+                publishResult.publishStatus?.status ?? null;
+            }
+          }
           const screenshot = await page.screenshot({ type: 'png', fullPage: false });
           const viewport = page.viewportSize?.() || {};
           timeline.visualFrames.push({
@@ -4739,6 +5326,7 @@ function analyzeTimeline(timeline, {
     : null;
   const capturedVisualFrames = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
     .filter((frame) => frame?.status === 'captured');
+  const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
   const pngAnalyzedVisualFrames = capturedVisualFrames.filter((frame) => frame?.png?.status === 'ready');
   const pngAnalyzedCanvasFrames = pngAnalyzedVisualFrames.filter((frame) => (
     String(frame?.captureSource || '').includes('canvas')
@@ -4756,6 +5344,14 @@ function analyzeTimeline(timeline, {
     .filter((frame) => frame.png?.hasVisiblePixels === true)
     .length;
   const browserCanvasPixelValidated = nonblankCanvasFrameCount > 0;
+  const nativeBrowserFrameValidation = timeline?.nativeSurfaceBrowserFrameValidation || null;
+  const nativeBrowserFramePixelValidated = Boolean(
+    nativeBrowserFrameValidation?.status === 'passed'
+  );
+  const visibleGpuConsumerBrowserPixelValidated =
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+      ? nativeBrowserFramePixelValidated
+      : browserCanvasPixelValidated;
   const nextCenterOfMassYSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.nextCenterOfMassM?.[1]))
     .filter(Number.isFinite);
@@ -5238,7 +5834,6 @@ function analyzeTimeline(timeline, {
   const residentSurfaceVisibleGpuConsumerInputReadySampleCount = metrics.filter((metric) => (
     residentSurfaceVisibleGpuConsumerInputReady(metric)
   )).length;
-  const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
   const requestedRenderReadbackMode = String(timeline?.renderReadbackMode || '').toLowerCase();
   const requestedRenderFieldSurfaceSummaryMode = String(
     timeline?.renderFieldSurfaceSummaryMode || ''
@@ -5809,13 +6404,13 @@ function analyzeTimeline(timeline, {
   ) {
     if (minVolumeObservedJ == null) {
       issues.push('missing-liquid-J');
-    } else if (minVolumeObservedJ < 0.95) {
-      issues.push('same-material-liquid-J<0.95');
+    } else if (minVolumeObservedJ < CONDENSED_MIN_VOLUME_RATIO_J) {
+      issues.push(`same-material-liquid-J<${CONDENSED_MIN_VOLUME_RATIO_J}`);
     }
     if (maxVolumeObservedJ == null) {
       issues.push('missing-liquid-J');
-    } else if (maxVolumeObservedJ > 1.05) {
-      issues.push('same-material-liquid-J>1.05');
+    } else if (maxVolumeObservedJ > CONDENSED_MAX_VOLUME_RATIO_J) {
+      issues.push(`same-material-liquid-J>${CONDENSED_MAX_VOLUME_RATIO_J}`);
     }
     if (cohortDiagnostics.length === 0) {
       issues.push('missing-same-material-cohort-diagnostics');
@@ -5924,9 +6519,21 @@ function analyzeTimeline(timeline, {
     )
     && residentSurfaceBufferHandoffSampleCount > 0
     && residentSurfaceVisibleGpuConsumerSampleCount === 0
-    && !browserCanvasPixelValidated
+    && !visibleGpuConsumerBrowserPixelValidated
   ) {
     issues.push('resident-surface-visible-gpu-consumer-not-ready');
+  }
+  if (
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeBrowserFrameValidation?.status === 'failed'
+  ) {
+    issues.push('native-surface-browser-frame-validation-failed');
+  }
+  if (
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && nativeBrowserFrameValidation?.status === 'unsupported'
+  ) {
+    issues.push('native-surface-browser-frame-validation-unsupported');
   }
   if (capturedVisualFrames.length > 0 && pngAnalyzedVisualFrames.length === 0) {
     issues.push('visual-frames-not-png-analyzable');
@@ -6087,6 +6694,12 @@ function analyzeTimeline(timeline, {
     blankCanvasFrameCount,
     nonblankCanvasFrameCount,
     browserCanvasPixelValidated,
+    nativeBrowserFramePixelValidated,
+    nativeBrowserFrameValidationStatus: nativeBrowserFrameValidation?.status ?? null,
+    nativeBrowserFrameValidationReason: nativeBrowserFrameValidation?.reason ?? null,
+    nativeBrowserFrameValidationRgbChannelSpan: nativeBrowserFrameValidation?.png?.rgbChannelSpan ?? null,
+    nativeBrowserFrameValidationDistinctRgbColorCount:
+      nativeBrowserFrameValidation?.png?.distinctRgbColorCount ?? null,
     browserCanvasCaptureUnsupportedByNativeWebGpu,
     nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired,
     visualFrameTimesS,
@@ -6130,6 +6743,7 @@ async function main() {
   const viteBin = process.env.ULG_PROBE_VITE_BIN || path.join(depsDir, 'vite', 'bin', 'vite.js');
   const output = process.env.ULG_PROBE_OUTPUT ? path.resolve(process.env.ULG_PROBE_OUTPUT) : null;
   const port = positiveInteger(process.env.ULG_PROBE_PORT, 5177);
+  const externalBaseUrl = String(process.env.ULG_PROBE_BASE_URL || '').trim();
   const timeoutMs = positiveInteger(process.env.ULG_PROBE_TIMEOUT_MS, 180_000);
   const scenarioUrl = process.env.ULG_PROBE_URL || DEFAULT_URL;
   const probeMode = normalizedProbeMode(process.env.ULG_PROBE_MODE);
@@ -6316,7 +6930,13 @@ async function main() {
     particleBoundsToleranceM
   };
   const nodeModules = await ensureNodeModules(repoDir, depsDir);
-  const server = startViteServer({ repoDir, port, viteBin, timeoutMs });
+  const server = externalBaseUrl
+    ? {
+      baseUrl: externalBaseUrl,
+      ready: waitForHttp(externalBaseUrl, timeoutMs),
+      stop() {}
+    }
+    : startViteServer({ repoDir, port, viteBin, timeoutMs });
   let result;
   try {
     await server.ready;

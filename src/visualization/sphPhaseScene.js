@@ -117,7 +117,35 @@ import {
 import {
   readResidentStepsCommittedWarmDelta
 } from '../runtime/peercomputeResidentCommitBridge.js';
+import {
+  ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES,
+  resolvePeerComputeRenderOwnershipPolicy
+} from '../runtime/peercomputeRenderOwnershipPolicy.js';
 import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
+import {
+  createUlgWorkerOffscreenPresentationBridge
+} from './offscreenPresentationBridge.js';
+
+export const SPH_SCENE_BACKGROUND_COLOR_DEFAULT = '#87ceeb';
+
+function normalizeHexColor(value) {
+  const raw = String(value ?? '').trim();
+  const six = raw.match(/^#?([0-9a-f]{6})$/i);
+  if (six) return `#${six[1].toLowerCase()}`;
+  const three = raw.match(/^#?([0-9a-f]{3})$/i);
+  if (!three) return null;
+  const [r, g, b] = three[1].toLowerCase();
+  return `#${r}${r}${g}${g}${b}${b}`;
+}
+
+export function normalizeSphSceneBackgroundColorHex(
+  value,
+  fallback = SPH_SCENE_BACKGROUND_COLOR_DEFAULT
+) {
+  return normalizeHexColor(value)
+    || normalizeHexColor(fallback)
+    || SPH_SCENE_BACKGROUND_COLOR_DEFAULT;
+}
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 export const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'no-full-readback';
@@ -179,6 +207,160 @@ function compactResidentLaneStateKeySuffix(stateKey = '') {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return hash.toString(36);
+}
+
+const workerResidentRenderProducerSourceKeyFloat32 = new Float32Array(1);
+const workerResidentRenderProducerSourceKeyUint32 =
+  new Uint32Array(workerResidentRenderProducerSourceKeyFloat32.buffer);
+
+function updateWorkerResidentRenderProducerSourceHash(hash, bits, index) {
+  const value = bits >>> 0;
+  hash.h1 ^= value;
+  hash.h1 = Math.imul(hash.h1, 16777619) >>> 0;
+  hash.h2 = (hash.h2 + Math.imul(value ^ Math.imul(index + 1, 0x45d9f3b), 0x27d4eb2d)) >>> 0;
+  hash.h2 = ((hash.h2 << 13) | (hash.h2 >>> 19)) >>> 0;
+}
+
+function workerResidentRenderProducerNumericSourceKeyPart(label, value) {
+  const length = value && Number.isFinite(Number(value.length))
+    ? Math.max(0, Math.floor(Number(value.length)))
+    : 0;
+  const hash = {
+    h1: (2166136261 ^ length) >>> 0,
+    h2: (0x9e3779b9 ^ length) >>> 0
+  };
+  if (value instanceof Float32Array) {
+    const bits = new Uint32Array(value.buffer, value.byteOffset, value.length);
+    for (let index = 0; index < bits.length; index += 1) {
+      updateWorkerResidentRenderProducerSourceHash(hash, bits[index], index);
+    }
+  } else if (value) {
+    for (let index = 0; index < length; index += 1) {
+      const number = Number(value[index]);
+      workerResidentRenderProducerSourceKeyFloat32[0] = Number.isFinite(number)
+        ? Math.fround(number)
+        : 0;
+      updateWorkerResidentRenderProducerSourceHash(
+        hash,
+        workerResidentRenderProducerSourceKeyUint32[0],
+        index
+      );
+    }
+  }
+  return `${label}:${length}:${hash.h1.toString(36)}:${hash.h2.toString(36)}`;
+}
+
+function workerResidentRenderProducerSourceCacheKey(decoded = null) {
+  const positionsM = decoded?.positionsM || null;
+  const positionLength = positionsM && Number.isFinite(Number(positionsM.length))
+    ? Math.max(0, Math.floor(Number(positionsM.length)))
+    : 0;
+  if (positionLength <= 0) return null;
+  return [
+    'peercompute.ulg.worker-resident-render-producer-source-cache.v0',
+    workerResidentRenderProducerNumericSourceKeyPart('positionsM', positionsM),
+    workerResidentRenderProducerNumericSourceKeyPart('colorsRgb', decoded?.colorsRgb || null),
+    workerResidentRenderProducerNumericSourceKeyPart('particleRadiiM', decoded?.particleRadiiM || null)
+  ].join('|');
+}
+
+const WORKER_RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS = 8;
+
+function workerResidentParticleStateProducerColorRows(
+  decoded = null,
+  {
+    sphParticleState = null,
+    materialProperties = null,
+    reactionTable = null
+  } = {}
+) {
+  const rows = Array.isArray(decoded?.rows) ? decoded.rows : [];
+  const colorsRgb = decoded?.colorsRgb || null;
+  const colorRowsByKey = new Map();
+  const addColorRow = ({
+    materialId,
+    phaseId,
+    red = 1,
+    green = 1,
+    blue = 1,
+    alpha = 1
+  } = {}) => {
+    const resolvedMaterialId = Number(materialId);
+    const resolvedPhaseId = Number(phaseId);
+    if (!Number.isFinite(resolvedMaterialId) || !Number.isFinite(resolvedPhaseId)) return;
+    const key = `${Math.round(resolvedMaterialId)}:${Math.round(resolvedPhaseId)}`;
+    if (colorRowsByKey.has(key)) return;
+    colorRowsByKey.set(key, {
+      materialId: resolvedMaterialId,
+      phaseId: resolvedPhaseId,
+      red: Number.isFinite(Number(red)) ? Math.max(0, Math.min(1, Number(red))) : 1,
+      green: Number.isFinite(Number(green)) ? Math.max(0, Math.min(1, Number(green))) : 1,
+      blue: Number.isFinite(Number(blue)) ? Math.max(0, Math.min(1, Number(blue))) : 1,
+      alpha: Number.isFinite(Number(alpha)) ? Math.max(0, Math.min(1, Number(alpha))) : 1
+    });
+  };
+  const materialMap = buildSphRenderMaterialMap(materialProperties || {}, reactionTable);
+  for (let index = 0; index < (sphParticleState?.metadata?.length || 0); index += 1) {
+    const meta = sphParticleState.metadata[index];
+    const materialId = Number(meta?.materialId);
+    const phaseId = Number(meta?.phaseId);
+    const descriptor = renderDescriptorForSurfaceRecord(meta, index, {
+      materialProperties,
+      reactionTable,
+      materialMap
+    });
+    const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
+    const optics = opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
+    const color = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
+    addColorRow({
+      materialId,
+      phaseId,
+      red: color[0],
+      green: color[1],
+      blue: color[2],
+      alpha: 1
+    });
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const materialId = Number(row?.materialId);
+    const phaseId = Number(row?.phaseId);
+    const colorOffset = index * 3;
+    const red = Number(colorsRgb?.[colorOffset + 0]);
+    const green = Number(colorsRgb?.[colorOffset + 1]);
+    const blue = Number(colorsRgb?.[colorOffset + 2]);
+    addColorRow({ materialId, phaseId, red, green, blue, alpha: 1 });
+  }
+  const colorRows = new Float32Array(
+    colorRowsByKey.size * WORKER_RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS
+  );
+  let offset = 0;
+  for (const row of colorRowsByKey.values()) {
+    colorRows[offset + 0] = row.materialId;
+    colorRows[offset + 1] = row.phaseId;
+    colorRows[offset + 2] = 0;
+    colorRows[offset + 3] = 0;
+    colorRows[offset + 4] = row.red;
+    colorRows[offset + 5] = row.green;
+    colorRows[offset + 6] = row.blue;
+    colorRows[offset + 7] = row.alpha;
+    offset += WORKER_RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS;
+  }
+  return colorRows;
+}
+
+function workerResidentParticleStateProducerSourceCacheKey(sphParticleState = null, colorRows = null) {
+  const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
+  if (particleCount <= 0) return null;
+  return [
+    'peercompute.ulg.worker-resident-particle-state-producer-source-cache.v0',
+    `particleCount:${particleCount}`,
+    `stateStride:${Math.max(0, Math.floor(Number(sphParticleState?.stateStrideFloats) || 0))}`,
+    `thermoStride:${Math.max(0, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 0))}`,
+    workerResidentRenderProducerNumericSourceKeyPart('state', sphParticleState?.state || null),
+    workerResidentRenderProducerNumericSourceKeyPart('thermo', sphParticleState?.thermo || null),
+    workerResidentRenderProducerNumericSourceKeyPart('materialColorRows', colorRows || null)
+  ].join('|');
 }
 
 function scopedResidentComputeLaneId(laneId = 'ulg:sph-resident:scene', stateKey = null) {
@@ -562,6 +744,9 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   requestedRenderRowsReadbackMode = null,
   useThreeRenderRowBridge = false,
   useWebGpuRenderRowOverlayBridge = false,
+  useWorkerOffscreenPresentation = false,
+  useWorkerOwnedResidentRenderProducer = false,
+  useWorkerOwnedResidentParticleStateProducer = false,
   previousThreeRenderRowBridgeVisible = false
 } = {}) {
   const requestedRenderRowsReadbackModeFromCaller =
@@ -571,22 +756,51 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
       : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   const threeBridge = Boolean(useThreeRenderRowBridge);
   const webGpuOverlayBridge = Boolean(useWebGpuRenderRowOverlayBridge);
-  const retainPreviousThreeRenderRowBridgeNoFull = Boolean(
-    threeBridge
-    && previousThreeRenderRowBridgeVisible
-    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+  const workerOffscreenPresentationBridge = Boolean(useWorkerOffscreenPresentation);
+  const workerOwnedResidentRenderProducerBridge = Boolean(useWorkerOwnedResidentRenderProducer);
+  const workerOwnedResidentParticleStateProducerBridge = Boolean(
+    workerOwnedResidentRenderProducerBridge
+    && useWorkerOwnedResidentParticleStateProducer
   );
+  const workerOwnedResidentRenderRowsSourceTransferBridge = Boolean(
+    workerOwnedResidentRenderProducerBridge
+    && !workerOwnedResidentParticleStateProducerBridge
+  );
+  const workerOffscreenRenderRowsTransferBridge = Boolean(
+    workerOffscreenPresentationBridge
+    && !workerOwnedResidentParticleStateProducerBridge
+  );
+  const retainPreviousThreeRenderRowBridgeNoFull = false;
   let requestedRenderRowsReadbackModeResolved = requestedRenderRowsReadbackModeFromCaller;
-  if (webGpuOverlayBridge || retainPreviousThreeRenderRowBridgeNoFull) {
+  if (webGpuOverlayBridge) {
     requestedRenderRowsReadbackModeResolved = RESIDENT_NO_FULL_READBACK_MODE;
-  } else if (threeBridge) {
+  } else if (
+    threeBridge
+    || workerOffscreenRenderRowsTransferBridge
+    || workerOwnedResidentRenderRowsSourceTransferBridge
+  ) {
     requestedRenderRowsReadbackModeResolved = RESIDENT_FULL_READBACK_MODE;
   }
-  const renderRowsReadbackModeCoercionReason = retainPreviousThreeRenderRowBridgeNoFull
-    ? 'three-render-row-bridge-retains-previous-no-full-readback'
-    : (threeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-      ? 'three-render-row-bridge-requires-fresh-physics-readback'
-      : null);
+  let renderRowsReadbackModeCoercionReason = null;
+  if (retainPreviousThreeRenderRowBridgeNoFull) {
+    renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-retains-previous-no-full-readback';
+  } else if (threeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE) {
+    renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-requires-fresh-physics-readback';
+  } else if (
+    workerOwnedResidentRenderRowsSourceTransferBridge
+    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+    && !webGpuOverlayBridge
+  ) {
+    renderRowsReadbackModeCoercionReason =
+      'worker-owned-resident-render-producer-source-transfer-requires-fresh-physics-readback';
+  } else if (
+    workerOffscreenRenderRowsTransferBridge
+    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+    && !webGpuOverlayBridge
+  ) {
+    renderRowsReadbackModeCoercionReason =
+      'worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback';
+  }
   return {
     schema: 'peercompute.ulg.sph-resident-render-row-bridge-readback-plan.v0',
     requestedRenderRowsReadbackModeFromCaller,
@@ -594,8 +808,17 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
     renderRowsReadbackModeCoercionReason,
     retainPreviousThreeRenderRowBridgeNoFull,
     previousThreeRenderRowBridgeVisible: Boolean(previousThreeRenderRowBridgeVisible),
-    freshPhysicsReadbackRequired: threeBridge && !retainPreviousThreeRenderRowBridgeNoFull,
-    webGpuOverlayNoFullReadback: webGpuOverlayBridge
+    freshPhysicsReadbackRequired:
+      (threeBridge || workerOffscreenRenderRowsTransferBridge || workerOwnedResidentRenderRowsSourceTransferBridge)
+      && !webGpuOverlayBridge
+      && !retainPreviousThreeRenderRowBridgeNoFull,
+    webGpuOverlayNoFullReadback: webGpuOverlayBridge,
+    workerOffscreenPresentationReadbackRequired:
+      workerOffscreenRenderRowsTransferBridge && !webGpuOverlayBridge,
+    workerOwnedResidentRenderProducerReadbackRequired:
+      workerOwnedResidentRenderRowsSourceTransferBridge && !webGpuOverlayBridge,
+    workerOwnedResidentParticleStateProducerReadbackFree:
+      workerOwnedResidentParticleStateProducerBridge && !webGpuOverlayBridge
   };
 }
 
@@ -1440,6 +1663,12 @@ function nativeSurfaceConsumerValidationBlockerFamily({
     return 'native-surface-validation-pending';
   }
   if (
+    pixelValidationStatus === 'unsupported'
+    || pixelValidationStatus === 'capture-unsupported'
+  ) {
+    return 'browser-frame-validation-capture-unsupported';
+  }
+  if (
     pixelValidationStatus
     && pixelValidationStatus !== 'not-run'
     && pixelValidationStatus !== 'passed'
@@ -1483,6 +1712,9 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
   const nativeWebGpuBridgeBound = Boolean(
     renderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
     && renderBridgeStatus === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS
+  );
+  const nativeWebGpuMainThreadImportSelected = Boolean(
+    renderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
   );
   const renderBridgeBound = Boolean(threeWebGpuBridgeBound || nativeWebGpuBridgeBound);
   const normalizedPixelValidationStatus = pixelValidationStatus || 'not-run';
@@ -1552,6 +1784,21 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     && visibleNoReadbackSupported
     && renderBridgeBound
   );
+  let sameDeviceMainThreadImportStatus = null;
+  if (nativeWebGpuMainThreadImportSelected) {
+    sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-blocked-input-not-ready';
+    if (inputReady && inputKind !== 'surface-draw-buffers') {
+      sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-blocked-unsupported-input-kind';
+    } else if (inputReady && !visibleNoReadbackSupported) {
+      sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-blocked-renderer-capability';
+    } else if (inputReady && visibleNoReadbackSupported && !nativeWebGpuBridgeBound) {
+      sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-awaiting-native-bridge';
+    } else if (runtimeConsumerReady && !consumerValidated) {
+      sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-awaiting-pixel-validation';
+    } else if (runtimeConsumerReady && consumerValidated) {
+      sameDeviceMainThreadImportStatus = 'same-device-main-thread-import-ready';
+    }
+  }
   let status = 'resident-surface-visible-gpu-consumer-blocked-input-not-ready';
   let reason = handoff?.reason || 'resident GPU surface buffers are not ready for a visible direct consumer';
   if (inputReady && inputKind === 'render-field-buffers') {
@@ -1585,6 +1832,15 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     inputStatus: handoff?.status ?? null,
     inputSchema: handoff?.directConsumerInputSchema ?? null,
     runtimeConsumerReady,
+    sameDeviceMainThreadImportSelected: nativeWebGpuMainThreadImportSelected,
+    sameDeviceMainThreadImportRoute: nativeWebGpuMainThreadImportSelected
+      ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      : null,
+    sameDeviceMainThreadImportThread: nativeWebGpuMainThreadImportSelected ? 'main-thread' : null,
+    sameDeviceMainThreadImportDeviceScope: nativeWebGpuMainThreadImportSelected
+      ? 'engine-owned-native-webgpu-canvas-device'
+      : null,
+    sameDeviceMainThreadImportStatus,
     renderBridgeMode,
     renderBridgeStatus,
     renderBridgeBound,
@@ -1623,6 +1879,16 @@ function assignResidentSurfaceVisibleGpuConsumer(target, visibleGpuConsumer) {
   target.surfaceDrawVisibleGpuConsumerInputStatus = visibleGpuConsumer.inputStatus;
   target.surfaceDrawVisibleGpuConsumerInputSchema = visibleGpuConsumer.inputSchema;
   target.surfaceDrawVisibleGpuConsumerRuntimeReady = visibleGpuConsumer.runtimeConsumerReady;
+  target.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected =
+    visibleGpuConsumer.sameDeviceMainThreadImportSelected;
+  target.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute =
+    visibleGpuConsumer.sameDeviceMainThreadImportRoute;
+  target.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread =
+    visibleGpuConsumer.sameDeviceMainThreadImportThread;
+  target.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope =
+    visibleGpuConsumer.sameDeviceMainThreadImportDeviceScope;
+  target.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus =
+    visibleGpuConsumer.sameDeviceMainThreadImportStatus;
   target.surfaceDrawVisibleGpuConsumerRenderBridgeMode = visibleGpuConsumer.renderBridgeMode;
   target.surfaceDrawVisibleGpuConsumerRenderBridgeStatus = visibleGpuConsumer.renderBridgeStatus;
   target.surfaceDrawVisibleGpuConsumerRenderBridgeBound = visibleGpuConsumer.renderBridgeBound;
@@ -4715,7 +4981,7 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   const optics = opticsOverride || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
   const usesTransmission = optics.transmission > 0.01;
   const renderAlpha = renderAlphaFromOpticalResponse(optics, descriptor);
-  const transparent = renderAlpha < 0.999;
+  const transparent = usesTransmission || renderAlpha < 0.999;
   const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const baseColorLinear = optics.baseColorLinear || null;
   const materialColor = new Three.Color();
@@ -4769,9 +5035,12 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
 
 const RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY = 0.66;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_MIN_METALNESS = 0.72;
-const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_METALNESS = 0.58;
-const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ROUGHNESS = 0.34;
-const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ENV_INTENSITY = 1.45;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_LOW_LUMINANCE = 0.08;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_IOR = 1.0;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MAX_METALNESS = 1.0;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ROUGHNESS = 0.5;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ENVMAP_INTENSITY = 1.8;
+const RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL = 0.04;
 const SURFACE_MESH_MOBILE_TRANSMISSIVE_OPACITY = 0.78;
 
 function srgbLuminance(color = []) {
@@ -4788,6 +5057,27 @@ function threeColorLuminance(color = null) {
   const b = Number(color?.b);
   if (![r, g, b].every(Number.isFinite)) return 0;
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function finiteMaterialDiagnosticNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function colorDiagnosticTriplet(color = null) {
+  const r = finiteMaterialDiagnosticNumber(color?.r);
+  const g = finiteMaterialDiagnosticNumber(color?.g);
+  const b = finiteMaterialDiagnosticNumber(color?.b);
+  return r == null || g == null || b == null ? null : [r, g, b];
+}
+
+function opticalBaseColorSrgbDiagnostic(optics = {}) {
+  const color = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? null;
+  if (!Array.isArray(color) || color.length < 3) return null;
+  const r = finiteMaterialDiagnosticNumber(color[0]);
+  const g = finiteMaterialDiagnosticNumber(color[1]);
+  const b = finiteMaterialDiagnosticNumber(color[2]);
+  return r == null || g == null || b == null ? null : [r, g, b];
 }
 
 function fallbackBridgeColorSrgbForDescriptor(descriptor = {}) {
@@ -5031,17 +5321,33 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
     changed = true;
   }
 
+  const blockedOptics = Boolean(optics.blocked)
+    || Math.round(Number(optics.vertexColorPolicyId) || 0) === 255
+    || optics.vertexColorPolicy === 'blocked'
+    || Number(optics.status) === 0;
   const transmission = Number(material.transmission ?? optics.transmission ?? 0);
   if (Number.isFinite(transmission) && transmission > 0.01) {
     material.userData.renderRowSphereOriginalTransmission = transmission;
-    material.transmission = 0;
-    material.thickness = 0;
-    material.opacity = Math.max(
-      Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
-      minTransmissiveOpacity
-    );
-    material.transparent = material.opacity < 0.999;
-    material.userData.renderRowSphereTransmissionProxy = true;
+    material.userData.renderRowSphereOriginalThickness = Number(material.thickness ?? 0);
+    if (blockedOptics) {
+      material.transmission = 0;
+      material.thickness = 0;
+      material.opacity = Math.max(
+        Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+        minTransmissiveOpacity
+      );
+      material.transparent = material.opacity < 0.999;
+      material.userData.renderRowSphereTransmissionProxy = true;
+    } else {
+      material.transmission = transmission;
+      material.thickness = Math.max(Number(material.thickness) || 0, Number(optics.thickness) || 0.06);
+      material.transparent = true;
+      material.userData.renderRowSphereTransmissionProxy = false;
+      material.userData.renderRowSpherePreservedTransmission = true;
+      if ('ior' in material && Number(optics.ior) > 1) {
+        material.ior = Number(optics.ior);
+      }
+    }
     changed = true;
   }
 
@@ -5049,14 +5355,21 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
   const currentLuminance = materialColor
     ? 0.2126 * materialColor.r + 0.7152 * materialColor.g + 0.0722 * materialColor.b
     : 0;
-  const blockedOptics = Boolean(optics.blocked)
-    || Math.round(Number(optics.vertexColorPolicyId) || 0) === 255
-    || optics.vertexColorPolicy === 'blocked'
-    || Number(optics.status) === 0;
+  const fallbackLuminance = srgbLuminance(fallbackColor);
+  const descriptorPhase = String(descriptor?.phase ?? optics.phase ?? '').toLowerCase();
+  const gasLikeTransmissiveMaterial = descriptorPhase === 'gas' || descriptorPhase === 'vapor';
   const needsTransmissiveProxyColor = Boolean(material.userData.renderRowSphereTransmissionProxy)
     && currentLuminance < 0.08
     && srgbLuminance(fallbackColor) > currentLuminance;
-  if (materialColor && (blockedOptics || currentLuminance <= 0.01 || needsTransmissiveProxyColor)) {
+  const needsTransmissiveDisplayTint = Boolean(material.userData.renderRowSphereTransmissionProxy)
+    && !gasLikeTransmissiveMaterial
+    && fallbackLuminance > 0.04
+    && fallbackLuminance < currentLuminance - 0.02
+    && !blockedOptics;
+  if (
+    materialColor
+    && (blockedOptics || currentLuminance <= 0.01 || needsTransmissiveProxyColor || needsTransmissiveDisplayTint)
+  ) {
     materialColor.setRGB(
       clamp(fallbackColor[0], 0, 1),
       clamp(fallbackColor[1], 0, 1),
@@ -5070,24 +5383,45 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       ? 'blocked-optical-material'
       : needsTransmissiveProxyColor
       ? 'transmissive-proxy-low-luminance'
+      : needsTransmissiveDisplayTint
+      ? 'transmissive-proxy-display-tint'
       : 'low-luminance-material';
     changed = true;
   }
 
   const metalness = Number(material.metalness ?? optics.metalness ?? 0);
-  const fallbackLuminance = srgbLuminance(fallbackColor);
   const metallicVisibilityCandidate = Number.isFinite(metalness)
     && metalness >= RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_MIN_METALNESS
     && fallbackLuminance > 0.04
     && !blockedOptics;
   if (metallicVisibilityCandidate) {
     material.userData.renderRowSphereMetallicVisibilityProxy = true;
-    material.userData.renderRowSphereOriginalMetalness = metalness;
-    material.userData.renderRowSphereOriginalRoughness = Number(material.roughness ?? optics.roughness ?? 0);
-    material.userData.renderRowSphereOriginalEnvMapIntensity = Number(material.envMapIntensity ?? 0);
+    material.userData.renderRowSphereMetallicDisplayProxy = true;
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalMetalness))) {
+      material.userData.renderRowSphereOriginalMetalness = metalness;
+    }
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalRoughness))) {
+      material.userData.renderRowSphereOriginalRoughness = Number(material.roughness ?? optics.roughness ?? 0);
+    }
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalEnvMapIntensity))) {
+      material.userData.renderRowSphereOriginalEnvMapIntensity = Number(material.envMapIntensity ?? 0);
+    }
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalEmissiveIntensity))) {
+      material.userData.renderRowSphereOriginalEmissiveIntensity = Number(material.emissiveIntensity ?? 0);
+    }
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalIor))) {
+      material.userData.renderRowSphereOriginalIor = Number(material.ior ?? optics.ior ?? 0);
+    }
     material.userData.renderRowSphereFallbackColor = [...fallbackColor];
-    material.userData.renderRowSphereFallbackReason = 'metallic-sphere-visibility-proxy';
-    if (materialColor && fallbackLuminance > currentLuminance) {
+    const needsMetallicFallbackColor = Boolean(
+      materialColor
+      && currentLuminance < RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_LOW_LUMINANCE
+      && fallbackLuminance > currentLuminance
+    );
+    material.userData.renderRowSphereFallbackReason = needsMetallicFallbackColor
+      ? 'metallic-sphere-low-luminance-pbr-color'
+      : 'metallic-sphere-renderer-safe-pbr';
+    if (needsMetallicFallbackColor) {
       materialColor.setRGB(
         clamp(fallbackColor[0], 0, 1),
         clamp(fallbackColor[1], 0, 1),
@@ -5096,22 +5430,37 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       );
     }
     if ('metalness' in material) {
-      material.metalness = Math.min(
-        metalness,
-        RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_METALNESS
-      );
+      const nextMetalness = Number.isFinite(metalness) ? metalness : RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MAX_METALNESS;
+      material.metalness = Math.max(0, Math.min(RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MAX_METALNESS, nextMetalness));
     }
     if ('roughness' in material) {
       const roughness = Number(material.roughness ?? optics.roughness ?? 0);
       material.roughness = Math.max(
-        Number.isFinite(roughness) ? roughness : 0,
-        RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ROUGHNESS
+        RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ROUGHNESS,
+        Math.min(1, Number.isFinite(roughness) ? roughness : RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ROUGHNESS)
       );
     }
     material.envMapIntensity = Math.max(
       Number(material.envMapIntensity) || 0,
-      RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_ENV_INTENSITY
+      RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_MIN_ENVMAP_INTENSITY
     );
+    if ('ior' in material) {
+      material.ior = Math.max(
+        Number(material.ior) || 0,
+        RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_IOR
+      );
+    }
+    if (material.emissive) {
+      material.emissive.setRGB(
+        clamp(fallbackColor[0] * RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL, 0, 1),
+        clamp(fallbackColor[1] * RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL, 0, 1),
+        clamp(fallbackColor[2] * RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL, 0, 1),
+        (activeThreeNamespace || THREE).SRGBColorSpace
+      );
+      material.emissiveIntensity = Math.max(Number(material.emissiveIntensity) || 0, 1);
+      material.userData.renderRowSphereMetallicDisplayEmissiveFill =
+        RENDER_ROW_SPHERE_BRIDGE_METALLIC_DISPLAY_EMISSIVE_FILL;
+    }
     material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.84);
     material.transparent = material.opacity < 0.999;
     changed = true;
@@ -5119,6 +5468,96 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
 
   if (changed) material.needsUpdate = true;
   return material;
+}
+
+export function summarizeRenderRowSphereBridgeMaterial(mesh = null, materialOverride = null) {
+  const material = materialOverride || (Array.isArray(mesh?.material) ? mesh.material[0] : mesh?.material) || null;
+  if (!mesh || !material) return null;
+  const userData = mesh.userData || {};
+  const materialUserData = material.userData || {};
+  const optics = materialUserData.optical || userData.optical || {};
+  const fallbackColor = materialUserData.renderRowSphereFallbackColor
+    || userData.renderRowSphereFallbackColor
+    || null;
+  return {
+    surfaceKey: userData.surfaceKey ?? null,
+    materialKey: userData.materialKey ?? optics.material ?? null,
+    renderKey: userData.renderKey ?? optics.renderKey ?? null,
+    phase: userData.phase ?? optics.phase ?? null,
+    renderDomainId: userData.renderDomainId ?? null,
+    renderDomainKey: userData.renderDomainKey ?? null,
+    pointCount: finiteMaterialDiagnosticNumber(userData.pointCount ?? mesh.count),
+    instanceCount: finiteMaterialDiagnosticNumber(mesh.count),
+    materialType: material.type || null,
+    materialName: material.name || null,
+    colorLinear: colorDiagnosticTriplet(material.color),
+    emissiveLinear: colorDiagnosticTriplet(material.emissive),
+    colorLuminance: finiteMaterialDiagnosticNumber(threeColorLuminance(material.color)),
+    emissiveLuminance: finiteMaterialDiagnosticNumber(threeColorLuminance(material.emissive)),
+    opacity: finiteMaterialDiagnosticNumber(material.opacity),
+    transparent: Boolean(material.transparent),
+    depthWrite: material.depthWrite ?? null,
+    depthTest: material.depthTest ?? null,
+    metalness: finiteMaterialDiagnosticNumber(material.metalness),
+    roughness: finiteMaterialDiagnosticNumber(material.roughness),
+    transmission: finiteMaterialDiagnosticNumber(material.transmission),
+    thickness: finiteMaterialDiagnosticNumber(material.thickness),
+    ior: finiteMaterialDiagnosticNumber(material.ior),
+    envMapIntensity: finiteMaterialDiagnosticNumber(material.envMapIntensity),
+    emissiveIntensity: finiteMaterialDiagnosticNumber(material.emissiveIntensity),
+    opticalBaseColorSrgb: opticalBaseColorSrgbDiagnostic(optics),
+    opticalMetalness: finiteMaterialDiagnosticNumber(optics.metalness),
+    opticalRoughness: finiteMaterialDiagnosticNumber(optics.roughness),
+    opticalTransmission: finiteMaterialDiagnosticNumber(optics.transmission),
+    opticalAlpha: finiteMaterialDiagnosticNumber(optics.alpha ?? optics.opacity),
+    opticalStatus: finiteMaterialDiagnosticNumber(optics.status),
+    opticalRecordIndex: finiteMaterialDiagnosticNumber(optics.recordIndex),
+    opticalRenderModel: optics.renderModel ?? null,
+    opticalSource: optics.source ?? optics.pbr?.source ?? null,
+    renderRowSpherePbrMaterialSource: userData.renderRowSpherePbrMaterialSource
+      ?? materialUserData.renderRowSpherePbrMaterialSource
+      ?? null,
+    renderRowSphereClosurePbr: Boolean(
+      userData.renderRowSphereClosurePbr
+      || materialUserData.renderRowSphereClosurePbr
+    ),
+    renderRowSphereTransmissionProxy: Boolean(
+      userData.renderRowSphereTransmissionProxy
+      || materialUserData.renderRowSphereTransmissionProxy
+    ),
+    renderRowSpherePreservedTransmission: Boolean(
+      userData.renderRowSpherePreservedTransmission
+      || materialUserData.renderRowSpherePreservedTransmission
+    ),
+    renderRowSphereFallbackColor: Array.isArray(fallbackColor) ? [...fallbackColor] : null,
+    renderRowSphereFallbackReason: materialUserData.renderRowSphereFallbackReason
+      || userData.renderRowSphereFallbackReason
+      || null,
+    renderRowSphereMetallicVisibilityProxy: Boolean(
+      userData.renderRowSphereMetallicVisibilityProxy
+      || materialUserData.renderRowSphereMetallicVisibilityProxy
+    ),
+    renderRowSphereMetallicDisplayProxy: Boolean(
+      userData.renderRowSphereMetallicDisplayProxy
+      || materialUserData.renderRowSphereMetallicDisplayProxy
+    ),
+    renderRowSphereOriginalMetalness: finiteMaterialDiagnosticNumber(
+      materialUserData.renderRowSphereOriginalMetalness
+    ),
+    renderRowSphereOriginalRoughness: finiteMaterialDiagnosticNumber(
+      materialUserData.renderRowSphereOriginalRoughness
+    ),
+    renderRowSphereOriginalIor: finiteMaterialDiagnosticNumber(
+      materialUserData.renderRowSphereOriginalIor
+    ),
+    surfaceMaterialRendererProxy: Boolean(
+      userData.surfaceMaterialRendererProxy
+      || materialUserData.surfaceMaterialRendererProxy
+    ),
+    surfaceMaterialRendererProxyReason: materialUserData.surfaceMaterialRendererProxyReason
+      || userData.surfaceMaterialRendererProxyReason
+      || null
+  };
 }
 
 function applySurfaceRenderOrdering(mesh, optics = {}, descriptorOrRow = {}) {
@@ -5257,6 +5696,7 @@ export function createContinuousSurfaceBatches({
         normalizedPositions: [],
         colorsRgb: [],
         particleRadiiM: [],
+        liquidContinuityRadiiM: [],
         bounds: emptyBounds(),
         count: 0
       };
@@ -5285,13 +5725,24 @@ export function createContinuousSurfaceBatches({
     if (Number.isFinite(particleRadiusM) && particleRadiusM > 0) {
       batch.particleRadiiM.push(particleRadiusM);
     }
+    const initialSpacingM = Number(sourceObject.initialParticleSpacingM);
+    if (
+      descriptor.phase === 'liquid'
+      && Number.isFinite(initialSpacingM)
+      && initialSpacingM > 0
+    ) {
+      batch.liquidContinuityRadiiM.push(initialSpacingM * 0.5);
+    }
     expandBounds(batch.bounds, x, y, z);
     batch.count += 1;
   }
   return [...batches.values()].map((batch) => ({
     ...batch,
-    surfaceRadiusM: estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
-      ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM)
+    surfaceRadiusM: Math.max(
+      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
+        ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
+      estimateSurfaceRadiusFromParticleRadiiM(batch.liquidContinuityRadiiM) ?? 0
+    )
   }));
 }
 
@@ -5748,7 +6199,10 @@ export function createSphPhaseScene(container, {
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
+  backgroundColor = SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   nativeSurfacePixelValidation = false,
+  workerOffscreenPresentation = false,
+  renderOwnershipPolicy = null,
   residentAuthorityHost = null,
   navigatorRef = globalThis.navigator
 } = {}) {
@@ -5814,19 +6268,50 @@ export function createSphPhaseScene(container, {
   const scene = new Three.Scene();
   let sceneResidentAuthorityHost = residentAuthorityHost || null;
   scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+  let sceneRenderOwnershipPolicy = null;
+  function resolveSceneRenderOwnershipPolicy(policy = null) {
+    sceneRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+      peercomputePolicy:
+        policy
+        || renderOwnershipPolicy
+        || sceneResidentAuthorityHost?.renderOwnershipPolicy
+        || null,
+      workerOffscreenPresentationRequested: workerOffscreenPresentation,
+      workerOwnedResidentProducerReady: true,
+      workerOwnedResidentProducerSourceTransferRequiredOverride: true,
+      source: 'sph-phase-scene'
+    });
+    scene.userData.sphPeerComputeRenderOwnershipPolicy = sceneRenderOwnershipPolicy;
+    return sceneRenderOwnershipPolicy;
+  }
+  resolveSceneRenderOwnershipPolicy();
+  const configuredWorkerOffscreenPresentation = Boolean(
+    sceneRenderOwnershipPolicy?.workerOffscreenPresentationRequested
+  );
+  const configuredRetainedGpuBufferHandoff = Boolean(
+    sceneRenderOwnershipPolicy?.retainedGpuBufferHandoffRequested
+  );
   function setResidentAuthorityHost(host = null) {
     sceneResidentAuthorityHost = host || null;
     scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+    resolveSceneRenderOwnershipPolicy(sceneResidentAuthorityHost?.renderOwnershipPolicy || null);
     return sceneResidentAuthorityHost;
   }
   function resolveSceneResidentAuthorityHost(host = null) {
     return host || sceneResidentAuthorityHost || globalThis.__ulgResidentAuthorityHost || null;
   }
-  // A dark slate background rather than near-black: the ice/water surfaces are physically
-  // transmissive (clear), so they take their look from what is behind them — a pure-black void made
-  // them read dark. Transmission samples the background render, so lifting it brightens the glassy
-  // surfaces without faking opacity.
-  scene.background = new Three.Color(0x18222b);
+  let sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(backgroundColor);
+  scene.background = new Three.Color(sceneBackgroundColorHex);
+  scene.userData.sphSceneBackgroundColor = {
+    schema: 'peercompute.ulg.sph-scene-background-color.v0',
+    status: 'scene-background-color-applied',
+    reason: 'scene-initialization',
+    color: sceneBackgroundColorHex,
+    updatedAtMs: nowMs(),
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
 
   const initialViewport = resolveSphSceneViewportSize(container);
   const width = initialViewport.width;
@@ -5883,17 +6368,517 @@ export function createSphPhaseScene(container, {
     : 'three-webgpu-renderer-initializing';
   let rendererInitError = null;
   let rendererInitPromise = null;
+  let workerOffscreenPresentationBridge = null;
+  let workerOffscreenResidentStageChainAutoPromise = null;
+  let workerOffscreenResidentStageChainAutoSignature = null;
+  let workerOffscreenResidentStageChainAutoCompletedSignature = null;
+  let workerOffscreenResidentStageChainAutoSequence = 0;
+  function publishWorkerOffscreenRetainedGpuBufferHandoffStatus(status = null) {
+    const nextStatus = status
+      || workerOffscreenPresentationBridge?.retainedGpuBufferHandoffStatus
+      || null;
+    scene.userData.sphWorkerOffscreenRetainedGpuBufferHandoff = nextStatus;
+    renderer.userData.sphWorkerOffscreenRetainedGpuBufferHandoff = nextStatus;
+    return nextStatus;
+  }
+  function publishWorkerOffscreenResidentStageStatus(status = null) {
+    const nextStatus = status
+      || workerOffscreenPresentationBridge?.residentStageStatus
+      || currentWorkerOffscreenPresentationStatus()?.workerOffscreenResidentStage
+      || null;
+    scene.userData.sphWorkerOffscreenResidentStage = nextStatus;
+    renderer.userData.sphWorkerOffscreenResidentStage = nextStatus;
+    return nextStatus;
+  }
+  function publishWorkerOffscreenRenderRowsStatus(status = null) {
+    const nextStatus = status
+      || workerOffscreenPresentationBridge?.renderRowsStatus
+      || currentWorkerOffscreenPresentationStatus()?.workerOffscreenRenderRows
+      || null;
+    scene.userData.sphWorkerOffscreenRenderRows = nextStatus;
+    renderer.userData.sphWorkerOffscreenRenderRows = nextStatus;
+    return nextStatus;
+  }
+  function publishWorkerOffscreenPresentationStatus(status = null) {
+    const nextStatus = status || workerOffscreenPresentationBridge?.status || null;
+    scene.userData.sphWorkerOffscreenPresentation = nextStatus;
+    renderer.userData.sphWorkerOffscreenPresentation = nextStatus;
+    if (nextStatus?.workerOffscreenRenderRows) {
+      publishWorkerOffscreenRenderRowsStatus(nextStatus.workerOffscreenRenderRows);
+    }
+    if (nextStatus?.workerOffscreenResidentStage) {
+      publishWorkerOffscreenResidentStageStatus(nextStatus.workerOffscreenResidentStage);
+    }
+    return nextStatus;
+  }
+  function currentWorkerOffscreenPresentationStatus() {
+    return scene.userData.sphWorkerOffscreenPresentation
+      || workerOffscreenPresentationBridge?.status
+      || null;
+  }
+  function peerComputeRenderOwnershipPolicyRenderStateFields() {
+    const policy = scene.userData.sphPeerComputeRenderOwnershipPolicy || null;
+    return {
+      peerComputeRenderOwnershipPolicy: policy,
+      peerComputeRenderOwnershipPolicyStatus: policy?.status ?? null,
+      peerComputeRenderOwnershipPolicyReason: policy?.reason ?? null,
+      peerComputeRenderOwnershipPolicyRequestedMode: policy?.requestedMode ?? null,
+      peerComputeRenderOwnershipPolicyEffectiveMode: policy?.effectiveMode ?? null,
+      peerComputeRenderOwnershipPolicyInputTransport: policy?.inputTransport ?? null,
+      peerComputeRenderOwnershipPolicyDisplayTransport: policy?.displayTransport ?? null,
+      peerComputeRenderOwnershipPolicyConfiguredByPeerCompute:
+        policy?.configuredByPeerCompute ?? null,
+      peerComputeRenderOwnershipWorkerOffscreenPresentationRequested:
+        policy?.workerOffscreenPresentationRequested ?? null,
+      peerComputeRenderOwnershipRetainedGpuBufferHandoffRequested:
+        policy?.retainedGpuBufferHandoffRequested ?? null,
+      peerComputeRenderOwnershipWorkerOwnedResidentProducerRequested:
+        policy?.workerOwnedResidentProducerRequested ?? null,
+      peerComputeRenderOwnershipWorkerOwnedResidentProducerPending:
+        policy?.workerOwnedResidentProducerPending ?? null,
+      peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
+        policy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested:
+        policy?.presentationWorkerResidentStagesRequested ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesReady:
+        policy?.presentationWorkerResidentStagesReady ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesPending:
+        policy?.presentationWorkerResidentStagesPending ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStageTransport:
+        policy?.presentationWorkerResidentStageTransport ?? null,
+      peerComputeRenderOwnershipTransitionalRenderRowsActive:
+        policy?.transitionalRenderRowsActive ?? null,
+      peerComputeRenderOwnershipFrameCopyBackRejected:
+        policy?.frameCopyBackRejected ?? null
+    };
+  }
+  function workerOffscreenPresentationRenderStateFields() {
+    const status = currentWorkerOffscreenPresentationStatus();
+    return {
+      workerOffscreenPresentationStatus: status?.status ?? null,
+      workerOffscreenPresentationReason: status?.reason ?? null,
+      workerOffscreenPresentationTransport: status?.transport ?? null,
+      workerOffscreenPresentationDisplayHandoff: status?.displayHandoff ?? null,
+      workerOffscreenPresentationFrameCopyBackRejected:
+        status?.frameCopyBackRejected ?? null,
+      workerOffscreenPresentationCopiedBytesPerFrame:
+        status?.copiedBytesPerFrame ?? null,
+      workerOffscreenPresentationCopiedBytesPerSecond:
+        status?.copiedBytesPerSecond ?? null,
+      workerOffscreenPresentationCanvasTransferred:
+        status?.canvasTransferred ?? null,
+      workerOffscreenPresentationWorkerReady:
+        status?.workerReady ?? null,
+      workerOffscreenPresentationReadyEver:
+        status?.readyEver ?? null,
+      workerOffscreenPresentationReadyFrameCount:
+        status?.readyFrameCount ?? null,
+      workerOffscreenPresentationContextStatus:
+        status?.contextStatus ?? null,
+      workerOffscreenPresentationFrameCount:
+        status?.frameCount ?? null
+    };
+  }
+  function currentWorkerOffscreenRenderRowsStatus() {
+    return scene.userData.sphWorkerOffscreenRenderRows
+      || workerOffscreenPresentationBridge?.renderRowsStatus
+      || currentWorkerOffscreenPresentationStatus()?.workerOffscreenRenderRows
+      || null;
+  }
+  function workerOffscreenRetainedStageOutputMatchesParticleState(sphParticleState = null) {
+    const status = currentWorkerOffscreenRenderRowsStatus();
+    const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
+    if (
+      particleCount <= 0
+      || status?.producerSourceKind !== 'worker-retained-resident-stage-output'
+      || status?.producerSourceTransport !== 'worker-retained-resident-stage-output'
+      || status?.sourceStageId !== 'g2p'
+      || status?.retainedParticleStateStatus !== 'worker-retained-particle-state-ready'
+      || Math.max(0, Math.floor(Number(status?.particleCount) || 0)) !== particleCount
+    ) {
+      return false;
+    }
+    const step = sphParticleState?.step ?? 'unknown';
+    return String(status?.sourceCacheKey || '').includes(`sphStep:${step}`);
+  }
+  function workerOffscreenRenderRowsRenderStateFields() {
+    const status = currentWorkerOffscreenRenderRowsStatus();
+    return {
+      workerOffscreenRenderRows: status || null,
+      workerOffscreenRenderRowsStatus: status?.status ?? null,
+      workerOffscreenRenderRowsReason: status?.reason ?? null,
+      workerOffscreenRenderRowsSchema: status?.schema ?? null,
+      workerOffscreenRenderRowsInputTransport: status?.inputTransport ?? null,
+      workerOffscreenRenderRowsDisplayTransport: status?.displayTransport ?? null,
+      workerOffscreenRenderRowsDisplayHandoff: status?.displayHandoff ?? null,
+      workerOffscreenRenderRowsFrameCopyBackRejected:
+        status?.frameCopyBackRejected ?? null,
+      workerOffscreenRenderRowsCopiedBytesPerFrame:
+        status?.copiedBytesPerFrame ?? null,
+      workerOffscreenRenderRowsCopiedBytesPerSecond:
+        status?.copiedBytesPerSecond ?? null,
+      workerOffscreenRenderRowsParticleCount:
+        status?.particleCount ?? null,
+      workerOffscreenRenderRowsInputTransferBytes:
+        status?.inputTransferBytes ?? null,
+      workerOffscreenRenderRowsParticleBufferByteLength:
+        status?.particleBufferByteLength ?? null,
+      workerOffscreenRenderRowsWorkerLocalProduced:
+        status?.workerLocalRenderRowsProduced ?? null,
+      workerOffscreenRenderRowsProducerSourceKind:
+        status?.producerSourceKind ?? null,
+      workerOffscreenRenderRowsProducerSourceTransport:
+        status?.producerSourceTransport ?? null,
+      workerOffscreenRenderRowsSourceStageId:
+        status?.sourceStageId ?? null,
+      workerOffscreenRenderRowsRetainedParticleStateStatus:
+        status?.retainedParticleStateStatus ?? null,
+      workerOffscreenRenderRowsRetainedStageOutputPreserved:
+        status?.retainedStageOutputPreservedByResidentRenderAssembly ?? null,
+      workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput:
+        status?.skippedLegacyDrawForRetainedStageOutput ?? null,
+      workerOffscreenRenderRowsSourceTransferBytes:
+        status?.sourceTransferBytes ?? null,
+      workerOffscreenRenderRowsSourceStateTransferBytes:
+        status?.sourceStateTransferBytes ?? null,
+      workerOffscreenRenderRowsSourceCacheKey:
+        status?.sourceCacheKey ?? null,
+      workerOffscreenRenderRowsSourceCacheStatus:
+        status?.sourceCacheStatus ?? null,
+      workerOffscreenRenderRowsSourceCacheHit:
+        status?.sourceCacheHit ?? null,
+      workerOffscreenRenderRowsSourceRowsPacked:
+        status?.sourceRowsPacked ?? null,
+      workerOffscreenRenderRowsCanvasTransferred:
+        status?.canvasTransferred ?? null,
+      workerOffscreenRenderRowsWorkerReady:
+        status?.workerReady ?? null,
+      workerOffscreenRenderRowsReadyEver:
+        status?.readyEver ?? null,
+      workerOffscreenRenderRowsReadyFrameCount:
+        status?.readyFrameCount ?? null,
+      workerOffscreenRenderRowsFrameCount:
+        status?.frameCount ?? null,
+      workerOffscreenRenderRowsContextStatus:
+        status?.contextStatus ?? null
+    };
+  }
+  function currentWorkerOffscreenRetainedGpuBufferHandoffStatus() {
+    return scene.userData.sphWorkerOffscreenRetainedGpuBufferHandoff
+      || workerOffscreenPresentationBridge?.retainedGpuBufferHandoffStatus
+      || null;
+  }
+  function workerOffscreenRetainedGpuBufferHandoffRenderStateFields() {
+    const status = currentWorkerOffscreenRetainedGpuBufferHandoffStatus();
+    return {
+      workerOffscreenRetainedGpuBufferHandoff: status || null,
+      workerOffscreenRetainedGpuBufferHandoffStatus: status?.status ?? null,
+      workerOffscreenRetainedGpuBufferHandoffReason: status?.reason ?? null,
+      workerOffscreenRetainedGpuBufferHandoffInputTransport: status?.inputTransport ?? null,
+      workerOffscreenRetainedGpuBufferHandoffPreferredReplacementTransport:
+        status?.preferredReplacementTransport ?? null,
+      workerOffscreenRetainedGpuBufferHandoffFrameCopyBackRejected:
+        status?.frameCopyBackRejected ?? null,
+      workerOffscreenRetainedGpuBufferHandoffPlanChangeRequired:
+        status?.planChangeRequired ?? null,
+      workerOffscreenRetainedGpuBufferHandoffPresentationReady:
+        status?.presentationReady ?? null,
+      workerOffscreenRetainedGpuBufferHandoffCrossOriginIsolated:
+        status?.crossOriginIsolated ?? null,
+      workerOffscreenRetainedGpuBufferHandoffStructuredCloneSupported:
+        status?.gpuBufferStructuredCloneSupported ?? null,
+      workerOffscreenRetainedGpuBufferHandoffProbeStatus:
+        status?.gpuBufferStructuredCloneProbeStatus ?? null,
+      workerOffscreenRetainedGpuBufferHandoffRetainedRenderRowsBufferAvailable:
+        status?.retainedRenderRowsBufferAvailable ?? null,
+      workerOffscreenRetainedGpuBufferHandoffRetainedRenderRowsBufferByteLength:
+        status?.retainedRenderRowsBufferByteLength ?? null,
+      workerOffscreenRetainedGpuBufferHandoffRetainedSurfaceDrawBufferAvailable:
+        status?.retainedSurfaceDrawBufferAvailable ?? null,
+      workerOffscreenRetainedGpuBufferHandoffRetainedSurfaceDrawBufferByteLength:
+        status?.retainedSurfaceDrawBufferByteLength ?? null,
+      workerOffscreenRetainedGpuBufferHandoffWorkerPresentationDeviceOwner:
+        status?.workerPresentationDeviceOwner ?? null,
+      workerOffscreenRetainedGpuBufferHandoffResidentBufferDeviceOwner:
+        status?.residentBufferDeviceOwner ?? null,
+      workerOffscreenRetainedGpuBufferHandoffSameDeviceOwner:
+        status?.sameDeviceOwner ?? null
+    };
+  }
+  function currentWorkerOffscreenResidentStageStatus() {
+    return scene.userData.sphWorkerOffscreenResidentStage
+      || workerOffscreenPresentationBridge?.residentStageStatus
+      || currentWorkerOffscreenPresentationStatus()?.workerOffscreenResidentStage
+      || null;
+  }
+  function workerOffscreenResidentStageRenderStateFields() {
+    const status = currentWorkerOffscreenResidentStageStatus();
+    const chainStatus = scene.userData.sphWorkerOffscreenResidentStageChain || null;
+    const chainAutoStatus = scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    return {
+      workerOffscreenResidentStage: status || null,
+      workerOffscreenResidentStageStatus: status?.status ?? null,
+      workerOffscreenResidentStageReason: status?.reason ?? null,
+      workerOffscreenResidentStageInputTransport: status?.inputTransport ?? null,
+      workerOffscreenResidentStageStageId: status?.stageId ?? null,
+      workerOffscreenResidentStageLaneId: status?.laneId ?? null,
+      workerOffscreenResidentStageStateKey: status?.stateKey ?? null,
+      workerOffscreenResidentStageWorkerDeviceSource: status?.workerDeviceSource ?? null,
+      workerOffscreenResidentStageWorkerDeviceProvided:
+        status?.workerDeviceProvided ?? null,
+      workerOffscreenResidentStageRetainedBufferRefCount:
+        Array.isArray(status?.residentStageRetainedBufferRefs)
+          ? status.residentStageRetainedBufferRefs.length
+          : null,
+      workerOffscreenResidentStageGpuFenceSatisfied:
+        status?.residentStageGpuFence?.fenceSatisfied ?? null,
+      workerOffscreenResidentStageGpuFenceStatus:
+        status?.residentStageGpuFence?.status ?? null,
+      workerOffscreenResidentStageQueueCompletionStatus:
+        status?.residentStageGpuFence?.queueCompletionStatus ?? null,
+      workerOffscreenResidentStageQueueCompletionMethod:
+        status?.residentStageGpuFence?.queueCompletionMethod ?? null,
+      workerOffscreenResidentStageQueueCompletionFallbackFrom:
+        status?.residentStageGpuFence?.queueCompletionFallbackFrom ?? null,
+      workerOffscreenResidentStageQueueCompletionErrorMessage:
+        status?.residentStageGpuFence?.queueCompletionErrorMessage ?? null,
+      workerOffscreenResidentStageCpuQueueFenceBypassed:
+        status?.residentStageGpuFence?.cpuQueueFenceBypassed ?? null,
+      workerOffscreenResidentStageSameWorkerGpuHandoff:
+        status?.residentStageGpuFence?.sameWorkerGpuHandoff ?? null,
+      workerOffscreenResidentStageSummaryStatus:
+        status?.residentStageSummary?.status ?? null,
+      workerOffscreenResidentStageSummaryStageId:
+        status?.residentStageSummary?.stageId ?? null,
+      workerOffscreenResidentStageElapsedMs:
+        status?.elapsedMs ?? null,
+      workerOffscreenResidentStageTimeoutMs:
+        status?.timeoutMs ?? null,
+      workerOffscreenResidentStageErrorName:
+        status?.errorName ?? null,
+      workerOffscreenResidentStageErrorMessage:
+        status?.errorMessage ?? null,
+      workerOffscreenResidentStageChain: chainStatus,
+      workerOffscreenResidentStageChainStatus:
+        chainStatus?.status ?? null,
+      workerOffscreenResidentStageChainStageCount:
+        Array.isArray(chainStatus?.stages) ? chainStatus.stages.length : null,
+      workerOffscreenResidentStageChainSameWorkerGpuHandoff:
+        chainStatus?.sameWorkerGpuHandoff ?? null,
+      workerOffscreenResidentStageChainAuto: chainAutoStatus,
+      workerOffscreenResidentStageChainAutoStatus:
+        chainAutoStatus?.status ?? null,
+      workerOffscreenResidentStageChainAutoReason:
+        chainAutoStatus?.reason ?? null,
+      workerOffscreenResidentStageChainAutoRequested:
+        chainAutoStatus?.requested ?? null,
+      workerOffscreenResidentStageChainAutoPolicyReady:
+        chainAutoStatus?.policyReady ?? null,
+      workerOffscreenResidentStageChainAutoPresentationReady:
+        chainAutoStatus?.presentationReady ?? null,
+      workerOffscreenResidentStageChainAutoSourceSignature:
+        chainAutoStatus?.sourceSignature ?? null,
+      workerOffscreenResidentStageChainAutoSourceMode:
+        chainAutoStatus?.sourceMode ?? null,
+      workerOffscreenResidentStageChainAutoSourceCpuStateStale:
+        chainAutoStatus?.sourceCpuStateStale ?? null,
+      workerOffscreenResidentStageChainAutoLatestResidentOutputCpuStateStale:
+        chainAutoStatus?.latestResidentOutputCpuStateStale ?? null,
+      workerOffscreenResidentStageChainAutoAuthoritativeStateMutation:
+        chainAutoStatus?.authoritativeStateMutation ?? null,
+      workerOffscreenResidentStageChainAutoStatePromotionStatus:
+        chainAutoStatus?.statePromotionStatus ?? null,
+      workerOffscreenResidentStageChainAutoChainStatus:
+        chainAutoStatus?.chainStatus ?? null,
+      workerOffscreenResidentStageChainAutoSameWorkerGpuHandoff:
+        chainAutoStatus?.sameWorkerGpuHandoff ?? null,
+      workerOffscreenResidentStageChainAutoSequence:
+        chainAutoStatus?.sequence ?? null,
+      workerOffscreenResidentStageChainAutoRetryIndex:
+        chainAutoStatus?.retryIndex ?? null
+    };
+  }
+  function refreshWorkerOffscreenRetainedGpuBufferHandoff({
+    renderRowsExecution = null,
+    surfaceDraw = null,
+    deviceResult = null,
+    reason = 'resident-render-refresh'
+  } = {}) {
+    if (!workerOffscreenPresentationBridge?.resolveRetainedGpuBufferHandoff) {
+      return publishWorkerOffscreenRetainedGpuBufferHandoffStatus(null);
+    }
+    const status = workerOffscreenPresentationBridge.resolveRetainedGpuBufferHandoff({
+      retainedRenderRowsBufferAvailable: Boolean(renderRowsExecution?.renderRowsBuffer),
+      retainedRenderRowsBufferByteLength: renderRowsExecution?.renderRowsBufferByteLength ?? 0,
+      retainedSurfaceDrawBufferAvailable: Boolean(
+        surfaceDraw?.drawRowsBufferRetained
+        || surfaceDraw?.compactedVertexRowsBufferRetained
+        || surfaceDraw?.compactPositionRowsBufferRetained
+      ),
+      retainedSurfaceDrawBufferByteLength:
+        surfaceDraw?.drawRowsBufferByteLength
+        ?? surfaceDraw?.compactedVertexRowsBufferByteLength
+        ?? surfaceDraw?.compactPositionRowsBufferByteLength
+        ?? 0,
+      gpuBufferStructuredCloneSupported: false,
+      gpuBufferStructuredCloneProbeStatus:
+        'gpubuffer-worker-structured-clone-blocked-local-https-probe',
+      gpuBufferStructuredCloneProbeReason:
+        "local HTTPS Playwright probe threw DataCloneError: GPUBuffer object could not be cloned",
+      workerPresentationDeviceOwner: 'worker-owned-presentation-device',
+      residentBufferDeviceOwner: deviceResult?.rendererOwnedDevice
+        ? 'main-thread-renderer-owned-resident-device'
+        : 'main-thread-resident-device',
+      reason
+    });
+    return publishWorkerOffscreenRetainedGpuBufferHandoffStatus(status);
+  }
+  function workerOffscreenViewProjectionMatrix() {
+    camera.updateProjectionMatrix?.();
+    camera.updateMatrixWorld?.(true);
+    const matrix = new Three.Matrix4();
+    matrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    return new Float32Array(matrix.elements);
+  }
+  function submitWorkerOffscreenRenderRows({
+    decoded = null,
+    sphParticleState = null,
+    reason = 'resident-render-rows-refresh'
+  } = {}) {
+    if (!workerOffscreenPresentationBridge?.drawRenderRows) {
+      return publishWorkerOffscreenRenderRowsStatus(null);
+    }
+    const positionsM = decoded?.positionsM || null;
+    const policy = scene.userData.sphPeerComputeRenderOwnershipPolicy || null;
+    const useResidentProducer =
+      policy?.effectiveMode === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+      && typeof workerOffscreenPresentationBridge.drawResidentRenderProducer === 'function';
+    const canUseResidentParticleStateProducer = Boolean(
+      useResidentProducer
+      && typeof workerOffscreenPresentationBridge.drawResidentParticleStateProducer === 'function'
+      && sphParticleState?.state instanceof Float32Array
+      && sphParticleState?.thermo instanceof Float32Array
+      && Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0)) > 0
+    );
+    const drawFn = useResidentProducer
+      ? workerOffscreenPresentationBridge.drawResidentRenderProducer.bind(workerOffscreenPresentationBridge)
+      : workerOffscreenPresentationBridge.drawRenderRows.bind(workerOffscreenPresentationBridge);
+    if (!canUseResidentParticleStateProducer && (!positionsM || positionsM.length <= 0)) {
+      return publishWorkerOffscreenRenderRowsStatus(
+        drawFn({
+          positionsM,
+          reason: useResidentProducer
+            ? `worker-owned-resident-render-producer:${reason}`
+            : reason
+        })
+      );
+    }
+    const backingMinPx = Math.max(
+      1,
+      Math.min(Number(renderer.domElement?.width) || width, Number(renderer.domElement?.height) || height)
+    );
+    const commonDrawOptions = {
+      viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      radiusScalePx: Math.max(48, Math.min(240, backingMinPx * 0.14)),
+      fallbackPointSizePx: Math.max(3, Math.min(8, backingMinPx * 0.008)),
+      minPointSizePx: 2,
+      maxPointSizePx: Math.max(12, Math.min(28, backingMinPx * 0.035)),
+      reason: useResidentProducer
+        ? `worker-owned-resident-render-producer:${reason}`
+        : reason
+    };
+    const residentParticleStateColorRows = canUseResidentParticleStateProducer
+      ? workerResidentParticleStateProducerColorRows(decoded, {
+          sphParticleState,
+          materialProperties: currentMaterialProperties,
+          reactionTable: sphReactionTable
+        })
+      : null;
+    const status = canUseResidentParticleStateProducer
+      ? workerOffscreenPresentationBridge.drawResidentParticleStateProducer({
+          sphParticleState,
+          materialColorRows: residentParticleStateColorRows,
+          sourceCacheKey: workerResidentParticleStateProducerSourceCacheKey(
+            sphParticleState,
+            residentParticleStateColorRows
+          ),
+          ...commonDrawOptions
+        })
+      : drawFn({
+          positionsM,
+          colorsRgb: decoded.colorsRgb || null,
+          particleRadiiM: decoded.particleRadiiM || null,
+          sourceCacheKey: useResidentProducer
+            ? workerResidentRenderProducerSourceCacheKey(decoded)
+            : null,
+          ...commonDrawOptions
+        });
+    return publishWorkerOffscreenRenderRowsStatus(status);
+  }
+  function setBackgroundColor(nextColor, { reason = 'background-color-control', refresh = true } = {}) {
+    sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(nextColor, sceneBackgroundColorHex);
+    const color = new Three.Color(sceneBackgroundColorHex);
+    scene.background = color;
+    renderer.setClearColor?.(color, 1);
+    container.style.backgroundColor = sceneBackgroundColorHex;
+    renderer.domElement.style.backgroundColor = sceneBackgroundColorHex;
+    scene.userData.sphSceneBackgroundColor = {
+      schema: 'peercompute.ulg.sph-scene-background-color.v0',
+      status: 'scene-background-color-applied',
+      reason,
+      color: sceneBackgroundColorHex,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    workerOffscreenPresentationBridge?.setBackgroundColor?.(sceneBackgroundColorHex, { reason });
+    if (refresh) {
+      forceViewportRefreshBurst({ reason: `background-color:${reason}`, frameCount: 2 });
+    }
+    return scene.userData.sphSceneBackgroundColor;
+  }
+  setBackgroundColor(sceneBackgroundColorHex, { reason: 'renderer-initialization', refresh: false });
   renderer.setPixelRatio(resolveSphScenePixelRatio(window.devicePixelRatio));
   renderer.setSize(width, height, false);
   renderer.domElement.style.position = 'absolute';
-  renderer.domElement.style.inset = '0';
+  if (useNativeWebGpuRenderer) {
+    renderer.domElement.style.left = '0';
+    renderer.domElement.style.top = '0';
+    renderer.domElement.style.right = 'auto';
+    renderer.domElement.style.bottom = 'auto';
+    // Chromium's native WebGPU screenshot path can expose an exactly full-viewport absolute canvas
+    // as transparent. Keep the native canvas off that compositor edge case while still filling the
+    // scene for presentation and pointer controls.
+    renderer.domElement.style.width = 'calc(100% - 1px)';
+    renderer.domElement.style.height = 'calc(100% - 1px)';
+  } else {
+    renderer.domElement.style.inset = '0';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+  }
   renderer.domElement.style.display = 'block';
-  renderer.domElement.style.width = '100%';
-  renderer.domElement.style.height = '100%';
   renderer.outputColorSpace = Three.SRGBColorSpace;
   renderer.toneMapping = Three.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   container.appendChild(renderer.domElement);
+  workerOffscreenPresentationBridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: configuredWorkerOffscreenPresentation,
+    retainedGpuBufferHandoffRequested: configuredRetainedGpuBufferHandoff,
+    container,
+    width,
+    height,
+    devicePixelRatio: resolveSphScenePixelRatio(window.devicePixelRatio),
+    backgroundColor: sceneBackgroundColorHex,
+    clearAlpha: 0,
+    navigatorRef,
+    windowRef: window,
+    onStatus: publishWorkerOffscreenPresentationStatus,
+    onRenderRowsStatus: publishWorkerOffscreenRenderRowsStatus,
+    onRetainedGpuBufferHandoffStatus: publishWorkerOffscreenRetainedGpuBufferHandoffStatus,
+    onResidentStageStatus: publishWorkerOffscreenResidentStageStatus
+  });
+  publishWorkerOffscreenPresentationStatus();
   function rendererBackendName() {
     if (renderer.isNativeWebGPURenderer) return 'native-webgpu';
     if (renderer.isWebGPURenderer) {
@@ -5935,6 +6920,58 @@ export function createSphPhaseScene(container, {
       rendererSurfaceBufferPresentationEnabled: Boolean(
         renderer.userData?.sphThreeWebGpuSurfaceBufferPresentationEnabled
       ),
+      peerComputeRenderOwnershipPolicy: scene.userData.sphPeerComputeRenderOwnershipPolicy || null,
+      peerComputeRenderOwnershipStatus:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.status ?? null,
+      peerComputeRenderOwnershipRequestedMode:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.requestedMode ?? null,
+      peerComputeRenderOwnershipEffectiveMode:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.effectiveMode ?? null,
+      peerComputeRenderOwnershipInputTransport:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.inputTransport ?? null,
+      peerComputeRenderOwnershipConfiguredByPeerCompute:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.configuredByPeerCompute ?? null,
+      peerComputeRenderOwnershipTransitionalRenderRowsActive:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
+      peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.workerOwnedResidentProducerSourceTransferRequired ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesRequested ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesReady:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesReady ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStagesPending:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesPending ?? null,
+      peerComputeRenderOwnershipPresentationWorkerResidentStageTransport:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStageTransport ?? null,
+      workerOffscreenPresentationRequested: configuredWorkerOffscreenPresentation,
+      workerOffscreenRetainedGpuBufferHandoffRequested: configuredRetainedGpuBufferHandoff,
+      workerOffscreenPresentation: currentWorkerOffscreenPresentationStatus(),
+      workerOffscreenPresentationStatus:
+        currentWorkerOffscreenPresentationStatus()?.status ?? null,
+      workerOffscreenPresentationTransport:
+        currentWorkerOffscreenPresentationStatus()?.transport ?? null,
+      workerOffscreenPresentationFrameCopyBackRejected:
+        currentWorkerOffscreenPresentationStatus()?.frameCopyBackRejected ?? null,
+      workerOffscreenRenderRows: currentWorkerOffscreenRenderRowsStatus(),
+      workerOffscreenRenderRowsStatus:
+        currentWorkerOffscreenRenderRowsStatus()?.status ?? null,
+      workerOffscreenRenderRowsInputTransport:
+        currentWorkerOffscreenRenderRowsStatus()?.inputTransport ?? null,
+      workerOffscreenRenderRowsFrameCopyBackRejected:
+        currentWorkerOffscreenRenderRowsStatus()?.frameCopyBackRejected ?? null,
+      workerOffscreenRetainedGpuBufferHandoff:
+        currentWorkerOffscreenRetainedGpuBufferHandoffStatus(),
+      workerOffscreenRetainedGpuBufferHandoffStatus:
+        currentWorkerOffscreenRetainedGpuBufferHandoffStatus()?.status ?? null,
+      workerOffscreenRetainedGpuBufferHandoffPlanChangeRequired:
+        currentWorkerOffscreenRetainedGpuBufferHandoffStatus()?.planChangeRequired ?? null,
+      workerOffscreenResidentStage: currentWorkerOffscreenResidentStageStatus(),
+      workerOffscreenResidentStageStatus:
+        currentWorkerOffscreenResidentStageStatus()?.status ?? null,
+      workerOffscreenResidentStageInputTransport:
+        currentWorkerOffscreenResidentStageStatus()?.inputTransport ?? null,
+      workerOffscreenResidentStageWorkerDeviceSource:
+        currentWorkerOffscreenResidentStageStatus()?.workerDeviceSource ?? null,
       rendererDeviceSource: renderer.userData?.sphWebGpuDeviceSource || null,
       rendererDevicePreflight: renderer.userData?.sphWebGpuDevicePreflight || null,
       rendererBackendDeviceReady: Boolean(
@@ -8804,14 +9841,26 @@ export function createSphPhaseScene(container, {
   function publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
     status = 'not-run',
     reason = null,
-    sample = null
+    sample = null,
+    source = null,
+    width = null,
+    height = null,
+    nonzeroPixelCount = null,
+    pixelCount = null
   } = {}) {
     if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
     const normalizedStatus = String(status || 'not-run');
+    const normalizedSource = source == null ? null : String(source);
     bridge.pixelValidationStatus = normalizedStatus;
     bridge.nativeWebGpuSurfaceConsumerPixelValidationStatus = normalizedStatus;
     bridge.pixelValidationReason = reason;
     bridge.nativeWebGpuSurfaceConsumerPixelValidationReason = reason;
+    bridge.pixelValidationSource = normalizedSource;
+    bridge.nativeWebGpuSurfaceConsumerPixelValidationSource = normalizedSource;
+    bridge.pixelValidationWidth = width ?? bridge.pixelValidationWidth ?? null;
+    bridge.pixelValidationHeight = height ?? bridge.pixelValidationHeight ?? null;
+    bridge.pixelValidationNonzeroPixelCount = nonzeroPixelCount;
+    bridge.pixelValidationPixelCount = pixelCount;
     if (sample) bridge.pixelValidationSample = sample;
 
     const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer || null;
@@ -8819,6 +9868,11 @@ export function createSphPhaseScene(container, {
       nativeConsumer.pixelValidationStatus = normalizedStatus;
       nativeConsumer.pixelValidationReason = reason;
       nativeConsumer.pixelValidationSample = sample;
+      nativeConsumer.pixelValidationSource = normalizedSource;
+      nativeConsumer.pixelValidationWidth = bridge.pixelValidationWidth ?? null;
+      nativeConsumer.pixelValidationHeight = bridge.pixelValidationHeight ?? null;
+      nativeConsumer.pixelValidationNonzeroPixelCount = nonzeroPixelCount;
+      nativeConsumer.pixelValidationPixelCount = pixelCount;
       nativeConsumer.updatedAtMs = nowMs();
       scene.userData.sphNativeWebGpuSurfaceConsumer = nativeConsumer;
     }
@@ -8827,6 +9881,11 @@ export function createSphPhaseScene(container, {
       sphResidentSurfaceDraw.renderBridgePixelValidationStatus = normalizedStatus;
       sphResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus = normalizedStatus;
       sphResidentSurfaceDraw.renderBridgePixelValidationReason = reason;
+      sphResidentSurfaceDraw.renderBridgePixelValidationSource = normalizedSource;
+      sphResidentSurfaceDraw.renderBridgePixelValidationWidth = bridge.pixelValidationWidth ?? null;
+      sphResidentSurfaceDraw.renderBridgePixelValidationHeight = bridge.pixelValidationHeight ?? null;
+      sphResidentSurfaceDraw.renderBridgePixelValidationNonzeroPixelCount = nonzeroPixelCount;
+      sphResidentSurfaceDraw.renderBridgePixelValidationPixelCount = pixelCount;
       if (sample) sphResidentSurfaceDraw.renderBridgePixelValidationSample = sample;
       const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
         surfaceDraw: sphResidentSurfaceDraw,
@@ -8852,6 +9911,11 @@ export function createSphPhaseScene(container, {
       sphResidentRenderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus =
         normalizedStatus;
       sphResidentRenderState.surfaceDrawRenderBridgePixelValidationReason = reason;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationSource = normalizedSource;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationWidth = bridge.pixelValidationWidth ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationHeight = bridge.pixelValidationHeight ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationNonzeroPixelCount = nonzeroPixelCount;
+      sphResidentRenderState.surfaceDrawRenderBridgePixelValidationPixelCount = pixelCount;
       if (sample) sphResidentRenderState.surfaceDrawRenderBridgePixelValidationSample = sample;
       if (sphResidentSurfaceDraw) {
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerReady =
@@ -8860,6 +9924,16 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null;
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerReason =
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected =
+          Boolean(sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected);
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null;
+        sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus =
+          sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null;
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus =
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null;
         sphResidentRenderState.surfaceDrawVisibleGpuConsumerValidated =
@@ -8882,6 +9956,77 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
       }
     }
+  }
+
+  function publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation({
+    status = 'not-run',
+    reason = null,
+    source = 'browser-frame',
+    width = null,
+    height = null,
+    nonzeroPixelCount = null,
+    pixelCount = null,
+    sample = null
+  } = {}) {
+    const bridge = sphResidentSurfaceDrawRenderBridge;
+    const schema = 'peercompute.ulg.sph-native-webgpu-browser-frame-validation.v0';
+    if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      return {
+        schema,
+        status: 'browser-frame-validation-blocked-native-bridge-not-ready',
+        reason: 'browser-frame validation requires the engine-owned native WebGPU surface consumer bridge'
+      };
+    }
+    const normalizedStatus = status === 'passed'
+      ? 'passed'
+      : (status === 'failed'
+        ? 'failed'
+        : (
+          status === 'unsupported' || status === 'capture-unsupported'
+            ? 'unsupported'
+            : 'not-run'
+        ));
+    const normalizedReason = reason || (
+      normalizedStatus === 'passed'
+        ? 'browser-frame validation observed nonzero pixels inside the native WebGPU canvas region'
+        : (normalizedStatus === 'failed'
+          ? 'browser-frame validation did not observe visible pixels inside the native WebGPU canvas region'
+          : (normalizedStatus === 'unsupported'
+            ? 'browser-frame validation capture is unsupported for this native WebGPU canvas path'
+            : 'browser-frame validation did not run'))
+    );
+    publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+      status: normalizedStatus,
+      reason: normalizedReason,
+      sample,
+      source,
+      width,
+      height,
+      nonzeroPixelCount,
+      pixelCount
+    });
+    const result = {
+      schema,
+      status: normalizedStatus === 'passed'
+        ? 'browser-frame-validation-passed'
+        : (normalizedStatus === 'failed'
+          ? 'browser-frame-validation-failed'
+          : (normalizedStatus === 'unsupported'
+            ? 'browser-frame-validation-capture-unsupported'
+            : 'browser-frame-validation-not-run')),
+      reason: normalizedReason,
+      source,
+      width: width ?? null,
+      height: height ?? null,
+      nonzeroPixelCount: nonzeroPixelCount ?? null,
+      pixelCount: pixelCount ?? null,
+      visibleGpuConsumerReady: Boolean(sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerReady),
+      visibleGpuConsumerStatus: sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerStatus ?? null,
+      visibleGpuConsumerReason: sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerReason ?? null,
+      updatedAtMs: nowMs()
+    };
+    scene.userData.sphNativeWebGpuBrowserFrameValidation = result;
+    return result;
   }
 
   function resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
@@ -9162,6 +10307,16 @@ export function createSphPhaseScene(container, {
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null;
       sphResidentRenderState.surfaceDrawVisibleGpuConsumerReason =
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected =
+        Boolean(sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected);
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null;
+      sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus =
+        sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null;
       sphResidentRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus =
         sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null;
       sphResidentRenderState.surfaceDrawVisibleGpuConsumerValidated =
@@ -10029,6 +11184,7 @@ export function createSphPhaseScene(container, {
     let bridgeUpdateCount = 0;
     let threeMeshes = null;
     let bridgeMaterialKeys = [];
+    let bridgeMaterialSummaries = [];
     let minParticleRadiusM = null;
     let maxParticleRadiusM = null;
     let sphereBridgeTransmissionProxyCount = 0;
@@ -10206,10 +11362,14 @@ export function createSphPhaseScene(container, {
         mesh.userData.renderDomainId = descriptor.renderDomainId;
         mesh.userData.renderDomainKey = descriptor.renderDomainKey;
         mesh.userData.renderRowSphereTransmissionProxy = Boolean(material.userData.renderRowSphereTransmissionProxy);
+        mesh.userData.renderRowSpherePreservedTransmission =
+          Boolean(material.userData.renderRowSpherePreservedTransmission);
         mesh.userData.renderRowSphereFallbackColor = material.userData.renderRowSphereFallbackColor || null;
         mesh.userData.renderRowSphereFallbackReason = material.userData.renderRowSphereFallbackReason || null;
         mesh.userData.renderRowSphereMetallicVisibilityProxy =
           Boolean(material.userData.renderRowSphereMetallicVisibilityProxy);
+        mesh.userData.renderRowSphereMetallicDisplayProxy =
+          Boolean(material.userData.renderRowSphereMetallicDisplayProxy);
         mesh.userData.surfaceMaterialRendererProxy = Boolean(material.userData.surfaceMaterialRendererProxy);
         mesh.userData.surfaceMaterialRendererProxyReason = material.userData.surfaceMaterialRendererProxyReason || null;
         mesh.userData.renderRowSphereGeometryProxy = Boolean(mesh.geometry?.userData?.threeWebGpuMappedBufferSafeProxy);
@@ -10221,6 +11381,8 @@ export function createSphPhaseScene(container, {
         if (material.userData.renderRowSphereTransmissionProxy) sphereBridgeTransmissionProxyCount += 1;
         if (material.userData.renderRowSphereFallbackColor) sphereBridgeFallbackColorCount += 1;
         if (material.userData.renderRowSphereMetallicVisibilityProxy) sphereBridgeMetallicVisibilityProxyCount += 1;
+        const materialSummary = summarizeRenderRowSphereBridgeMaterial(mesh, material);
+        if (materialSummary) bridgeMaterialSummaries.push(materialSummary);
         let groupMinRadius = Number.POSITIVE_INFINITY;
         let groupMaxRadius = Number.NEGATIVE_INFINITY;
         for (let localIndex = 0; localIndex < indices.length; localIndex += 1) {
@@ -10272,6 +11434,7 @@ export function createSphPhaseScene(container, {
       group.userData.sphereBridgeReusedMeshCount = reusedSphereMeshCount;
       group.userData.sphereBridgeCreatedMeshCount = createdSphereMeshCount;
       group.userData.sphereBridgeDisposedMeshCount = disposedSphereMeshCount;
+      group.userData.sphereBridgeMaterialSummaries = bridgeMaterialSummaries;
     } else {
       let positions = null;
       let colors = null;
@@ -10419,6 +11582,7 @@ export function createSphPhaseScene(container, {
       pointsVertexColorOnly: renderRowSphereBridgeContract.pointsVertexColorOnly,
       sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
+      sphereBridgeMaterialSummaries: bridgeMaterialSummaries,
       sphereBridgeTransmissionProxyCount,
       sphereBridgeFallbackColorCount,
       sphereBridgeMetallicVisibilityProxyCount,
@@ -12514,6 +13678,16 @@ export function createSphPhaseScene(container, {
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null;
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerReason =
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected =
+            Boolean(sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected);
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null;
+          sphResidentRenderState.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus =
+            sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null;
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus =
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null;
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerValidated =
@@ -12646,6 +13820,10 @@ export function createSphPhaseScene(container, {
       sphResidentSurfaceDrawRenderBridge,
       'resident mechanics output was published after the current render bridge'
     );
+    maybeRunWorkerOffscreenResidentStageChainAuto({
+      reason: 'resident-step-artifacts-published',
+      sourceExecution: stepsExecution || step || null
+    });
   }
 
   async function refreshSphGpuParticleBuffers({
@@ -15834,6 +17012,10 @@ export function createSphPhaseScene(container, {
     mlsMpmMechanicsPredictionSignature = null;
     scene.userData.mlsMpmMechanicsPrediction = null;
     clearMlsMpmResidentExecutionArtifacts();
+    maybeRunWorkerOffscreenResidentStageChainAuto({
+      reason: 'set-particles-initial-state-published',
+      retryLimit: 40
+    });
     measure('surfaceApply', () => {
       if (skipCpuSurfaceGeometry) {
         releaseThreeSurfaceSuppression('set-particles-three-resident-bridge-fast-path');
@@ -17125,6 +18307,9 @@ export function createSphPhaseScene(container, {
         renderBridgeOpticalSpectralSampleStrideFloats: renderBridge?.opticalSpectralSampleStrideFloats ?? 0,
         renderBridgeParticleRenderMode: renderBridge?.particleRenderMode ?? null,
         renderBridgeSphereMaterialKeys: [...(renderBridge?.sphereBridgeMaterialKeys || [])],
+        renderBridgeSphereMaterialSummaries: Array.isArray(renderBridge?.sphereBridgeMaterialSummaries)
+          ? renderBridge.sphereBridgeMaterialSummaries.map((summary) => ({ ...summary }))
+          : [],
         renderBridgeSphereSizingMode: renderBridge?.sphereBridgeSizingMode ?? null,
         renderBridgeSphereVariableSize: Boolean(renderBridge?.sphereBridgeVariableSize),
         renderBridgeSpherePbrMaterialSource: renderBridge?.sphereBridgePbrMaterialSource ?? null,
@@ -17791,6 +18976,11 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeStatus: sphResidentSurfaceDrawRenderBridge?.status ?? null,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy ?? null,
         surfaceDrawRenderBridgeRetainedPreviousOverlay: Boolean(sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay),
+        ...peerComputeRenderOwnershipPolicyRenderStateFields(),
+        ...workerOffscreenPresentationRenderStateFields(),
+        ...workerOffscreenRenderRowsRenderStateFields(),
+        ...workerOffscreenRetainedGpuBufferHandoffRenderStateFields(),
+        ...workerOffscreenResidentStageRenderStateFields(),
         gpuAuthoritativeState: false,
         compactRenderReadback: false,
         scientificValidation: false,
@@ -17848,6 +19038,11 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeStatus: sphResidentSurfaceDrawRenderBridge?.status ?? null,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy ?? null,
         surfaceDrawRenderBridgeRetainedPreviousOverlay: Boolean(sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay),
+        ...peerComputeRenderOwnershipPolicyRenderStateFields(),
+        ...workerOffscreenPresentationRenderStateFields(),
+        ...workerOffscreenRenderRowsRenderStateFields(),
+        ...workerOffscreenRetainedGpuBufferHandoffRenderStateFields(),
+        ...workerOffscreenResidentStageRenderStateFields(),
         gpuAuthoritativeState: false,
         compactRenderReadback: false,
         scientificValidation: false,
@@ -18090,10 +19285,22 @@ export function createSphPhaseScene(container, {
         && previousResidentRenderBridge.rendererBridge === requestedThreeRenderRowBridgeMode
         && hasVisibleResidentSurfaceDrawBridge(previousResidentRenderBridge)
       );
+      const useWorkerOwnedResidentRenderProducer =
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.effectiveMode
+        === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER;
+      const useWorkerOwnedResidentParticleStateProducer = Boolean(
+        useWorkerOwnedResidentRenderProducer
+        && nextSphParticleState?.state instanceof Float32Array
+        && nextSphParticleState?.thermo instanceof Float32Array
+        && Math.max(0, Math.floor(Number(nextSphParticleState?.particleCount) || 0)) > 0
+      );
       const renderRowReadbackPlan = resolveResidentRenderRowBridgeReadbackPlan({
         requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeFromCaller,
         useThreeRenderRowBridge: shouldUseThreeRenderRowPointsBridge,
         useWebGpuRenderRowOverlayBridge: shouldUseWebGpuRenderRowOverlayBridge,
+        useWorkerOffscreenPresentation: configuredWorkerOffscreenPresentation,
+        useWorkerOwnedResidentRenderProducer,
+        useWorkerOwnedResidentParticleStateProducer,
         previousThreeRenderRowBridgeVisible
       });
       const {
@@ -18906,6 +20113,10 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats = renderBridge?.opticalSpectralSampleStrideFloats ?? 0;
           nextResidentSurfaceDraw.renderBridgeParticleRenderMode = renderBridge?.particleRenderMode ?? null;
           nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
+          nextResidentSurfaceDraw.renderBridgeSphereMaterialSummaries =
+            Array.isArray(renderBridge?.sphereBridgeMaterialSummaries)
+              ? renderBridge.sphereBridgeMaterialSummaries.map((summary) => ({ ...summary }))
+              : [];
           nextResidentSurfaceDraw.renderBridgeSphereSizingMode = renderBridge?.sphereBridgeSizingMode ?? null;
           nextResidentSurfaceDraw.renderBridgeSphereVariableSize = Boolean(renderBridge?.sphereBridgeVariableSize);
           nextResidentSurfaceDraw.renderBridgeSpherePbrMaterialSource =
@@ -18935,11 +20146,21 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderRowsReadbackRequestedMode = requestedRenderRowsReadbackModeFromCaller;
           nextResidentSurfaceDraw.renderRowsReadbackEffectiveMode = requestedRenderRowsReadbackMode;
           nextResidentSurfaceDraw.renderRowsReadbackCoercionReason = renderRowsReadbackModeCoercionReason;
-	          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = Boolean(
-	            shouldUseThreeRenderRowPointsBridge
-	            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-	            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
-	          );
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = Boolean(
+            shouldUseThreeRenderRowPointsBridge
+            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+          );
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForWorkerOffscreenPresentation = Boolean(
+            renderRowReadbackPlan.workerOffscreenPresentationReadbackRequired
+            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+          );
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForWorkerOwnedResidentProducer = Boolean(
+            renderRowReadbackPlan.workerOwnedResidentRenderProducerReadbackRequired
+            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+          );
 	          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
 	            renderRowsExecution.particleScaleStability ?? null;
@@ -19720,6 +20941,47 @@ export function createSphPhaseScene(container, {
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
       });
+      const retainedStageOutputAlreadyRendered =
+        workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState);
+      const workerOffscreenRenderRowsStatus = retainedStageOutputAlreadyRendered
+        ? publishWorkerOffscreenRenderRowsStatus({
+            ...currentWorkerOffscreenRenderRowsStatus(),
+            retainedStageOutputPreservedByResidentRenderAssembly: true,
+            skippedLegacyDrawForRetainedStageOutput: true
+          })
+        : submitWorkerOffscreenRenderRows({
+            decoded,
+            sphParticleState: nextSphParticleState,
+            reason: 'resident-render-state-assembly'
+          });
+      const workerOffscreenRetainedGpuBufferHandoffStatus = refreshWorkerOffscreenRetainedGpuBufferHandoff({
+        renderRowsExecution,
+        surfaceDraw: sphResidentSurfaceDraw,
+        deviceResult: resolvedDeviceResult,
+        reason: 'resident-render-state-assembly'
+      });
+      if (configuredWorkerOffscreenPresentation) {
+        markSphResidentRenderProgress('resident-render-worker-offscreen-render-rows-submitted', {
+          stage: 'worker-offscreen-render-rows',
+          source: 'resident-render-refresh',
+          status: workerOffscreenRenderRowsStatus?.status ?? null,
+          particleCount: workerOffscreenRenderRowsStatus?.particleCount ?? null,
+          inputTransferBytes: workerOffscreenRenderRowsStatus?.inputTransferBytes ?? null,
+          frameCopyBackRejected: workerOffscreenRenderRowsStatus?.frameCopyBackRejected ?? null,
+          retainedStageOutputPreserved: retainedStageOutputAlreadyRendered
+        });
+        markSphResidentRenderProgress('resident-render-worker-offscreen-retained-gpubuffer-handoff-resolved', {
+          stage: 'worker-offscreen-retained-gpubuffer-handoff',
+          source: 'resident-render-refresh',
+          status: workerOffscreenRetainedGpuBufferHandoffStatus?.status ?? null,
+          reason: workerOffscreenRetainedGpuBufferHandoffStatus?.reason ?? null,
+          planChangeRequired: workerOffscreenRetainedGpuBufferHandoffStatus?.planChangeRequired ?? null,
+          retainedRenderRowsBufferAvailable:
+            workerOffscreenRetainedGpuBufferHandoffStatus?.retainedRenderRowsBufferAvailable ?? null,
+          retainedSurfaceDrawBufferAvailable:
+            workerOffscreenRetainedGpuBufferHandoffStatus?.retainedSurfaceDrawBufferAvailable ?? null
+        });
+      }
       markSphResidentRenderProgress('resident-render-state-assembly-started', {
         stage: 'resident-render-state',
         source: 'resident-render-refresh',
@@ -19763,6 +21025,25 @@ export function createSphPhaseScene(container, {
           shouldUseThreeRenderRowPointsBridge
           && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
           && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+        ),
+        renderRowsReadbackForcedForWorkerOffscreenPresentation: Boolean(
+          renderRowReadbackPlan.workerOffscreenPresentationReadbackRequired
+          && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+          && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+        ),
+        renderRowsReadbackForcedForWorkerOwnedResidentProducer: Boolean(
+          renderRowReadbackPlan.workerOwnedResidentRenderProducerReadbackRequired
+          && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+          && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+        ),
+        renderRowsReadbackWorkerOffscreenPresentationRequired: Boolean(
+          renderRowReadbackPlan.workerOffscreenPresentationReadbackRequired
+        ),
+        renderRowsReadbackWorkerOwnedResidentProducerRequired: Boolean(
+          renderRowReadbackPlan.workerOwnedResidentRenderProducerReadbackRequired
+        ),
+        renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree: Boolean(
+          renderRowReadbackPlan.workerOwnedResidentParticleStateProducerReadbackFree
         ),
         renderRowsReadbackRetainedPreviousBridge: Boolean(
           sphResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
@@ -20119,6 +21400,17 @@ export function createSphPhaseScene(container, {
         surfaceDrawVisibleGpuConsumerRuntimeReady: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRuntimeReady
         ),
+        surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportSelected
+        ),
+        surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportRoute ?? null,
+        surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportThread ?? null,
+        surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportDeviceScope ?? null,
+        surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus:
+          sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImportStatus ?? null,
         surfaceDrawVisibleGpuConsumerRenderBridgeMode:
           sphResidentSurfaceDraw?.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
         surfaceDrawVisibleGpuConsumerRenderBridgeStatus:
@@ -20353,6 +21645,10 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeParticleRenderMode:
           sphResidentSurfaceDraw?.renderBridgeParticleRenderMode ?? null,
         surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
+        surfaceDrawRenderBridgeSphereMaterialSummaries:
+          Array.isArray(sphResidentSurfaceDraw?.renderBridgeSphereMaterialSummaries)
+            ? sphResidentSurfaceDraw.renderBridgeSphereMaterialSummaries.map((summary) => ({ ...summary }))
+            : [],
         surfaceDrawRenderBridgeSphereSizingMode:
           sphResidentSurfaceDraw?.renderBridgeSphereSizingMode ?? null,
         surfaceDrawRenderBridgeSphereVariableSize:
@@ -20380,6 +21676,11 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.renderBridgeRetainedPreviousOverlay
           || sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay
         ),
+        ...peerComputeRenderOwnershipPolicyRenderStateFields(),
+        ...workerOffscreenPresentationRenderStateFields(),
+        ...workerOffscreenRenderRowsRenderStateFields(),
+        ...workerOffscreenRetainedGpuBufferHandoffRenderStateFields(),
+        ...workerOffscreenResidentStageRenderStateFields(),
         renderRowsBufferRetained: Boolean(renderRowsExecution.renderRowsBufferRetained),
         renderRowsBufferByteLength: renderRowsExecution.renderRowsBufferByteLength ?? 0,
         productEventCount,
@@ -20448,6 +21749,11 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeUpdateCount: sphResidentSurfaceDrawRenderBridge?.updateCount ?? 0,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy ?? null,
         surfaceDrawRenderBridgeRetainedPreviousOverlay: Boolean(sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay),
+        ...peerComputeRenderOwnershipPolicyRenderStateFields(),
+        ...workerOffscreenPresentationRenderStateFields(),
+        ...workerOffscreenRenderRowsRenderStateFields(),
+        ...workerOffscreenRetainedGpuBufferHandoffRenderStateFields(),
+        ...workerOffscreenResidentStageRenderStateFields(),
         gpuAuthoritativeState: false,
         compactRenderReadback: false,
         scientificValidation: false,
@@ -20865,12 +22171,12 @@ export function createSphPhaseScene(container, {
   }
   function animate() {
     if (!running) return;
-    const controlsChanged = Boolean(controls.update());
+    controls.update();
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
     const nativeSurfaceConsumerActive = Boolean(
       sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
     );
-    if (rendered && (!nativeSurfaceConsumerActive || controlsChanged)) {
+    if (rendered) {
       renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
     }
     requestAnimationFrame(animate);
@@ -20890,6 +22196,12 @@ export function createSphPhaseScene(container, {
     renderer.setPixelRatio(pixelRatio);
     renderer.setSize(w, h, false);
     resizeSphResidentSurfaceDrawOverlayCanvas();
+    workerOffscreenPresentationBridge?.resize?.({
+      width: w,
+      height: h,
+      devicePixelRatio: pixelRatio,
+      reason
+    });
     const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
     scene.userData.sphViewportResize = {
       schema: 'peercompute.ulg.sph-scene-viewport-resize.v0',
@@ -20906,6 +22218,7 @@ export function createSphPhaseScene(container, {
       containerRectHeight: viewport.rectHeight || null,
       visualViewportWidth: viewport.visualViewportWidth || null,
       visualViewportHeight: viewport.visualViewportHeight || null,
+      workerOffscreenPresentation: currentWorkerOffscreenPresentationStatus(),
       updatedAtMs: nowMs(),
       scientificValidation: false,
       sphValidation: false,
@@ -20934,6 +22247,7 @@ export function createSphPhaseScene(container, {
         resizeStatus,
         overlayCanvasWidth: sphResidentSurfaceDrawRenderBridge?.canvas?.width ?? null,
         overlayCanvasHeight: sphResidentSurfaceDrawRenderBridge?.canvas?.height ?? null,
+        workerOffscreenPresentation: currentWorkerOffscreenPresentationStatus(),
         updatedAtMs: nowMs(),
         scientificValidation: false,
         sphValidation: false,
@@ -21084,10 +22398,623 @@ export function createSphPhaseScene(container, {
     if (sphResidentSurfaceDrawRenderBridge?.canvas?.parentNode) {
       sphResidentSurfaceDrawRenderBridge.canvas.parentNode.removeChild(sphResidentSurfaceDrawRenderBridge.canvas);
     }
+    workerOffscreenPresentationBridge?.dispose?.();
+    workerOffscreenPresentationBridge = null;
     sphResidentSurfaceDrawRenderBridge = null;
     scene.userData.sphResidentSurfaceDrawRenderBridge = null;
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
+  }
+
+  function publishWorkerOffscreenResidentStageChainAutoStatus(status = null) {
+    const nextStatus = status || scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    scene.userData.sphWorkerOffscreenResidentStageChainAuto = nextStatus;
+    renderer.userData.sphWorkerOffscreenResidentStageChainAuto = nextStatus;
+    return nextStatus;
+  }
+
+  function workerOffscreenResidentStageChainAutoSource({
+    sourceExecution = null
+  } = {}) {
+    const latestSphState = sourceExecution?.nextSphParticleState
+      || sourceExecution?.finalStep?.nextSphParticleState
+      || sourceExecution?.nextParticleState
+      || mlsMpmResidentSteps?.nextSphParticleState
+      || mlsMpmResidentStep?.nextSphParticleState
+      || null;
+    const latestMlsState = sourceExecution?.nextMlsMpmParticleState
+      || sourceExecution?.finalStep?.nextMlsMpmParticleState
+      || sourceExecution?.nextMlsMpmParticleState
+      || mlsMpmResidentSteps?.nextMlsMpmParticleState
+      || mlsMpmResidentStep?.nextMlsMpmParticleState
+      || null;
+    const latestResidentOutputCpuStateStale = Boolean(
+      latestSphState?.cpuStateStale || latestMlsState?.cpuStateStale
+    );
+    const baseSphState = sphGpuParticleState || scene.userData.sphGpuParticleState || null;
+    const baseMlsState = mlsMpmGpuParticleState || scene.userData.mlsMpmGpuParticleState || null;
+    const useLatestResidentOutput = Boolean(
+      latestSphState?.state
+      && latestSphState?.thermo
+      && latestMlsState?.mechanics
+      && !latestResidentOutputCpuStateStale
+    );
+    const sourceSphState = useLatestResidentOutput ? latestSphState : baseSphState;
+    const sourceMlsState = useLatestResidentOutput ? latestMlsState : baseMlsState;
+    const sourceMode = useLatestResidentOutput
+      ? 'latest-resident-output-cloneable-state'
+      : (latestResidentOutputCpuStateStale
+        ? 'scene-cpu-state-fallback-after-no-full-resident-output'
+        : 'scene-cpu-state');
+    const sphSignature = sphGpuParticleSignature(sourceSphState);
+    const mlsSignature = mlsMpmGpuParticleSignature(sourceMlsState);
+    return {
+      sphParticleState: sourceSphState,
+      mlsMpmParticleState: sourceMlsState,
+      sphSignature,
+      mlsSignature,
+      sourceSignature: sphSignature && mlsSignature
+        ? `${sphSignature}|${mlsSignature}`
+        : null,
+      sourceMode,
+      sourceStep: sourceSphState?.step ?? sourceMlsState?.step ?? null,
+      sourceTime: sourceSphState?.time ?? sourceMlsState?.time ?? null,
+      sourceCpuStateStale: Boolean(sourceSphState?.cpuStateStale || sourceMlsState?.cpuStateStale),
+      latestResidentOutputCpuStateStale,
+      latestResidentOutputAvailable: Boolean(latestSphState && latestMlsState),
+      latestResidentOutputUsed: useLatestResidentOutput
+    };
+  }
+
+  function workerOffscreenResidentStageChainAutoBaseStatus({
+    status,
+    reason,
+    policy = null,
+    presentationStatus = null,
+    source = null,
+    sequence = null,
+    retryIndex = 0,
+    extra = {}
+  } = {}) {
+    const requested = policy?.presentationWorkerResidentStagesRequested === true;
+    const policyReady = policy?.presentationWorkerResidentStagesReady === true;
+    const presentationReady = Boolean(
+      workerOffscreenPresentationBridge?.runResidentStageOnPresentationDevice
+      && presentationStatus?.canvasTransferred
+      && presentationStatus?.workerReady
+      && presentationStatus?.status !== 'worker-offscreen-presentation-disposed'
+    );
+    return {
+      schema: 'peercompute.ulg.presentation-worker-mechanics-stage-chain-auto.v0',
+      status,
+      reason,
+      requested,
+      policyReady,
+      policyTransport: policy?.presentationWorkerResidentStageTransport ?? null,
+      presentationReady,
+      canvasTransferred: presentationStatus?.canvasTransferred ?? null,
+      workerReady: presentationStatus?.workerReady ?? null,
+      sourceSignature: source?.sourceSignature ?? null,
+      sourceMode: source?.sourceMode ?? null,
+      sourceStep: source?.sourceStep ?? null,
+      sourceTime: source?.sourceTime ?? null,
+      sourceCpuStateStale: source?.sourceCpuStateStale ?? null,
+      latestResidentOutputCpuStateStale:
+        source?.latestResidentOutputCpuStateStale ?? null,
+      latestResidentOutputAvailable:
+        source?.latestResidentOutputAvailable ?? null,
+      latestResidentOutputUsed:
+        source?.latestResidentOutputUsed ?? null,
+      authoritativeStateMutation: false,
+      statePromotionStatus: 'not-promoted-worker-local-output-not-connected-to-visible-render-state',
+      statePromotionReason:
+        'presentation-worker stage-chain output remains evidence-only until the worker-local render producer consumes the same worker-owned buffers',
+      sequence,
+      retryIndex,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false,
+      ...extra
+    };
+  }
+
+  function maybeRunWorkerOffscreenResidentStageChainAuto({
+    reason = 'policy-auto-presentation-worker-resident-stage-chain',
+    sourceExecution = null,
+    force = false,
+    retryIndex = 0,
+    retryLimit = 0,
+    retryDelayMs = 100
+  } = {}) {
+    const policy = scene.userData.sphPeerComputeRenderOwnershipPolicy
+      || sceneRenderOwnershipPolicy
+      || null;
+    if (policy?.presentationWorkerResidentStagesRequested !== true) return null;
+    const source = workerOffscreenResidentStageChainAutoSource({ sourceExecution });
+    const presentationStatus = currentWorkerOffscreenPresentationStatus();
+    const signature = source.sourceSignature
+      ? [
+          source.sourceSignature,
+          policy.presentationWorkerResidentStageTransport || 'transport-pending'
+        ].join('|')
+      : null;
+    const base = (status, extra = {}) => workerOffscreenResidentStageChainAutoBaseStatus({
+      status,
+      reason,
+      policy,
+      presentationStatus,
+      source,
+      sequence: extra.sequence ?? (workerOffscreenResidentStageChainAutoSequence || null),
+      retryIndex,
+      extra
+    });
+    if (policy.presentationWorkerResidentStagesReady !== true) {
+      return publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        'presentation-worker-mechanics-stage-chain-auto-blocked-policy-not-ready',
+        { blocker: 'presentation-worker-resident-stage-policy-not-ready' }
+      ));
+    }
+    if (
+      !source.sphParticleState?.state
+      || !source.sphParticleState?.thermo
+      || !source.mlsMpmParticleState?.mechanics
+      || !signature
+    ) {
+      return publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        'presentation-worker-mechanics-stage-chain-auto-blocked-state-unavailable',
+        { blocker: 'cloneable-sph-and-mls-mpm-particle-state-required' }
+      ));
+    }
+    const presentationReady = Boolean(
+      workerOffscreenPresentationBridge?.runResidentStageOnPresentationDevice
+      && presentationStatus?.canvasTransferred
+      && presentationStatus?.workerReady
+      && presentationStatus?.status !== 'worker-offscreen-presentation-disposed'
+    );
+    if (!presentationReady) {
+      const pending = publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        'presentation-worker-mechanics-stage-chain-auto-pending-presentation-worker',
+        { blocker: 'worker-offscreen-presentation-ready-required' }
+      ));
+      if (retryIndex < retryLimit && running) {
+        setTimeout(() => {
+          if (!running) return;
+          maybeRunWorkerOffscreenResidentStageChainAuto({
+            reason,
+            sourceExecution,
+            force,
+            retryIndex: retryIndex + 1,
+            retryLimit,
+            retryDelayMs
+          });
+        }, Math.max(25, Number(retryDelayMs) || 100));
+      }
+      return pending;
+    }
+    if (
+      !force
+      && workerOffscreenResidentStageChainAutoPromise
+      && workerOffscreenResidentStageChainAutoSignature === signature
+    ) {
+      return publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        'presentation-worker-mechanics-stage-chain-auto-joining-in-flight',
+        { inFlight: true }
+      ));
+    }
+    if (!force && workerOffscreenResidentStageChainAutoPromise) {
+      const deferred = publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        'presentation-worker-mechanics-stage-chain-auto-deferred-in-flight',
+        {
+          inFlight: true,
+          pendingSourceSignature: signature,
+          activeSourceSignature: workerOffscreenResidentStageChainAutoSignature
+        }
+      ));
+      if (retryIndex < retryLimit && running) {
+        setTimeout(() => {
+          if (!running) return;
+          maybeRunWorkerOffscreenResidentStageChainAuto({
+            reason,
+            sourceExecution,
+            force,
+            retryIndex: retryIndex + 1,
+            retryLimit,
+            retryDelayMs
+          });
+        }, Math.max(25, Number(retryDelayMs) || 100));
+      }
+      return deferred;
+    }
+    if (
+      !force
+      && workerOffscreenResidentStageChainAutoCompletedSignature === signature
+    ) {
+      return scene.userData.sphWorkerOffscreenResidentStageChainAuto || base(
+        'presentation-worker-mechanics-stage-chain-auto-cache-hit'
+      );
+    }
+    const sequence = workerOffscreenResidentStageChainAutoSequence + 1;
+    workerOffscreenResidentStageChainAutoSequence = sequence;
+    const runGeneration = mlsMpmResidentExecutionGeneration;
+    workerOffscreenResidentStageChainAutoSignature = signature;
+    const runningStatus = publishWorkerOffscreenResidentStageChainAutoStatus(base(
+      'presentation-worker-mechanics-stage-chain-auto-running',
+      {
+        sequence,
+        inFlight: true,
+        residentExecutionGeneration: runGeneration
+      }
+    ));
+    workerOffscreenResidentStageChainAutoPromise = runWorkerOffscreenMechanicsStageChainOnPresentationDevice({
+      reason,
+      timeoutMs: 7000,
+      laneId: 'ulg:scene:presentation-worker-auto-mechanics-chain',
+      stateKey: `ulg:scene:presentation-worker-auto-mechanics-chain:${sequence}`,
+      sourceSphParticleState: source.sphParticleState,
+      sourceMlsMpmParticleState: source.mlsMpmParticleState,
+      sourceSignature: source.sourceSignature,
+      sourceMode: source.sourceMode,
+      sourceCpuStateStale: source.sourceCpuStateStale,
+      latestResidentOutputCpuStateStale: source.latestResidentOutputCpuStateStale,
+      autoRun: true
+    }).then((chainStatus) => {
+      const stale = runGeneration !== mlsMpmResidentExecutionGeneration;
+      const completed = chainStatus?.status === 'worker-offscreen-mechanics-stage-chain-completed';
+      if (!stale && completed) {
+        workerOffscreenResidentStageChainAutoCompletedSignature = signature;
+      }
+      return publishWorkerOffscreenResidentStageChainAutoStatus(base(
+        stale
+          ? 'presentation-worker-mechanics-stage-chain-auto-stale-discarded'
+          : (completed
+            ? 'presentation-worker-mechanics-stage-chain-auto-completed'
+            : 'presentation-worker-mechanics-stage-chain-auto-blocked'),
+        {
+          sequence,
+          inFlight: false,
+          residentExecutionGeneration: runGeneration,
+          currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+          stale,
+          chainStatus: chainStatus?.status ?? null,
+          chain: chainStatus || null,
+          sameWorkerGpuHandoff: chainStatus?.sameWorkerGpuHandoff ?? null,
+          blocker: chainStatus?.blocker ?? null
+        }
+      ));
+    }).catch((error) => publishWorkerOffscreenResidentStageChainAutoStatus(base(
+      'presentation-worker-mechanics-stage-chain-auto-failed',
+      {
+        sequence,
+        inFlight: false,
+        residentExecutionGeneration: runGeneration,
+        errorName: error instanceof Error ? error.name : null,
+        errorMessage: error instanceof Error ? error.message : String(error)
+      }
+    ))).finally(() => {
+      if (workerOffscreenResidentStageChainAutoSignature === signature) {
+        workerOffscreenResidentStageChainAutoPromise = null;
+      }
+    });
+    return runningStatus;
+  }
+
+  function submitWorkerOffscreenResidentStageOnPresentationDevice({
+    payload = null,
+    reason = 'scene-api-run-resident-stage-on-presentation-device'
+  } = {}) {
+    if (!workerOffscreenPresentationBridge?.runResidentStageOnPresentationDevice) {
+      return publishWorkerOffscreenResidentStageStatus({
+        status: 'worker-offscreen-resident-stage-on-presentation-device-blocked-bridge-unavailable',
+        reason,
+        inputTransport: null,
+        workerReady: false
+      });
+    }
+    return publishWorkerOffscreenResidentStageStatus(
+      workerOffscreenPresentationBridge.runResidentStageOnPresentationDevice({
+        payload,
+        reason
+      })
+    );
+  }
+
+  function workerOffscreenMechanicsStageRecord(stageId) {
+    if (stageId === 'p2g') {
+      return {
+        id: 'p2g',
+        lawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+        runtimeTarget: 'gpu-hub-resident-stage-worker',
+        reads: ['sph-particle-state', 'mls-mpm-mechanics'],
+        writes: ['mls-mpm-grid']
+      };
+    }
+    if (stageId === 'gridUpdate') {
+      return {
+        id: 'gridUpdate',
+        lawNodeId: 'ulg-mls-mpm-mechanics-gridUpdate-stage',
+        runtimeTarget: 'gpu-hub-resident-stage-worker',
+        reads: ['mls-mpm-grid'],
+        writes: ['mls-mpm-grid']
+      };
+    }
+    return {
+      id: 'g2p',
+      lawNodeId: 'ulg-mls-mpm-mechanics-g2p-stage',
+      runtimeTarget: 'gpu-hub-resident-stage-worker',
+      reads: ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'],
+      writes: ['sph-particle-state', 'mls-mpm-mechanics']
+    };
+  }
+
+  function workerOffscreenRetainedStageOutputRenderRequest({
+    stageId,
+    laneId,
+    stateKey,
+    sphParticleState = null,
+    mlsMpmParticleState = null,
+    reason = 'presentation-worker-retained-stage-output-render'
+  } = {}) {
+    if (stageId !== 'g2p') return null;
+    const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
+    if (particleCount <= 0) return null;
+    const backingMinPx = Math.max(
+      1,
+      Math.min(Number(renderer.domElement?.width) || width, Number(renderer.domElement?.height) || height)
+    );
+    const stateStrideFloats = Math.max(1, Math.floor(Number(sphParticleState?.stateStrideFloats) || 8));
+    const thermoStrideFloats = Math.max(12, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 12));
+    const materialColorRows = workerResidentParticleStateProducerColorRows(null, {
+      sphParticleState,
+      materialProperties: currentMaterialProperties,
+      reactionTable: sphReactionTable
+    });
+    return {
+      schema: 'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0',
+      enabled: true,
+      sourceStageId: stageId,
+      reason,
+      laneId,
+      stateKey,
+      particleCount,
+      stateStrideFloats,
+      thermoStrideFloats,
+      stateByteLength:
+        sphParticleState?.state?.byteLength
+        || particleCount * stateStrideFloats * Float32Array.BYTES_PER_ELEMENT,
+      thermoByteLength:
+        sphParticleState?.thermo?.byteLength
+        || particleCount * thermoStrideFloats * Float32Array.BYTES_PER_ELEMENT,
+      colorRowCount: Math.floor(materialColorRows.length / WORKER_RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS),
+      colorRowsByteLength: materialColorRows.byteLength,
+      materialColorRows,
+      sourceCacheKey: [
+        'peercompute.ulg.presentation-worker-retained-stage-output-render.v0',
+        `lane:${laneId || 'default'}`,
+        `state:${stateKey || 'default'}`,
+        `stage:${stageId}`,
+        `count:${particleCount}`,
+        `sphStep:${sphParticleState?.step ?? 'unknown'}`,
+        `mlsStep:${mlsMpmParticleState?.step ?? 'unknown'}`,
+        `colors:${materialColorRows.length}`
+      ].join('|'),
+      viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      radiusScalePx: Math.max(48, Math.min(240, backingMinPx * 0.14)),
+      fallbackPointSizePx: Math.max(3, Math.min(8, backingMinPx * 0.008)),
+      minPointSizePx: 2,
+      maxPointSizePx: Math.max(12, Math.min(28, backingMinPx * 0.035)),
+      fallbackRadiusM: 0.02,
+      fallbackColorRgb: [1, 1, 1],
+      alpha: 0.92,
+      width: Number(renderer.domElement?.width) || width,
+      height: Number(renderer.domElement?.height) || height,
+      cssWidth: width,
+      cssHeight: height,
+      pixelRatio: resolveSphScenePixelRatio(window.devicePixelRatio),
+      backgroundColor: sceneBackgroundColorHex,
+      clearAlpha: 0,
+      authoritativeStateMutation: false,
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+
+  function workerOffscreenMechanicsStagePayload({
+    stageId,
+    laneId,
+    stateKey,
+    timeoutMs,
+    taskIdPrefix,
+    sourceSphParticleState = null,
+    sourceMlsMpmParticleState = null
+  }) {
+    const currentSphState = sourceSphParticleState
+      || sphGpuParticleState
+      || scene.userData.sphGpuParticleState
+      || null;
+    const currentMlsState = sourceMlsMpmParticleState
+      || mlsMpmGpuParticleState
+      || scene.userData.mlsMpmGpuParticleState
+      || null;
+    return {
+      timeoutMs,
+      stage: workerOffscreenMechanicsStageRecord(stageId),
+      lease: {
+        laneId,
+        stateKey,
+        queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission'
+      },
+      context: {
+        ulgMechanicsResidentStageWorker: {
+          schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+          taskIdPrefix,
+          preferWebGpu: true,
+          readbackMode: 'no-full-readback',
+          common: {
+            sphParticleState: currentSphState,
+            mlsMpmParticleState: currentMlsState,
+            gridSpacingM: currentSphState?.smoothingLengthM ?? currentMlsState?.gridSpacingM ?? 1,
+            boxDimsM: [...dims],
+            dt: currentMlsState?.mechanicsDtS ?? 0.0005,
+            gravityMPerS2: currentMlsState?.gravityMPerS2 || [0, -9.80665, 0],
+            cflFactor: currentMlsState?.gridCflFactor ?? 10,
+            presentationWorkerRenderRetainedStageOutput:
+              workerOffscreenRetainedStageOutputRenderRequest({
+                stageId,
+                laneId,
+                stateKey,
+                sphParticleState: currentSphState,
+                mlsMpmParticleState: currentMlsState,
+                reason: `presentation-worker-retained-stage-output:${stageId}`
+              })
+          }
+        }
+      }
+    };
+  }
+
+  function compactWorkerOffscreenResidentStageStatus(status = null) {
+    return {
+      status: status?.status ?? null,
+      stageId: status?.stageId ?? null,
+      reason: status?.reason ?? null,
+      summaryStatus: status?.residentStageSummary?.status ?? null,
+      summaryBackend: status?.residentStageSummary?.backend ?? null,
+      summaryWebGpuStatus:
+        status?.residentStageSummary?.workerWebGpuStatus
+        ?? status?.residentStageSummary?.webgpuStatus?.status
+        ?? null,
+      gpuFenceStatus: status?.residentStageGpuFence?.status ?? null,
+      gpuFenceSatisfied: status?.residentStageGpuFence?.fenceSatisfied ?? null,
+      queueCompletionStatus: status?.residentStageGpuFence?.queueCompletionStatus ?? null,
+      queueCompletionMethod: status?.residentStageGpuFence?.queueCompletionMethod ?? null,
+      sameWorkerGpuHandoff: status?.residentStageGpuFence?.sameWorkerGpuHandoff ?? null,
+      retainedBufferRefCount: Array.isArray(status?.residentStageRetainedBufferRefs)
+        ? status.residentStageRetainedBufferRefs.length
+        : null,
+      errorName: status?.errorName ?? null,
+      errorMessage: status?.errorMessage ?? null
+    };
+  }
+
+  async function waitForWorkerOffscreenResidentStageTerminal(stageId, timeoutMs) {
+    const startedAt = nowMs();
+    while (nowMs() - startedAt < timeoutMs) {
+      const status = currentWorkerOffscreenResidentStageStatus();
+      if (
+        status?.stageId === stageId
+        && /completed|failed|timeout|blocked/.test(String(status.status || ''))
+      ) {
+        return status;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return currentWorkerOffscreenResidentStageStatus();
+  }
+
+  async function runWorkerOffscreenMechanicsStageChainOnPresentationDevice({
+    reason = 'scene-api-run-mechanics-stage-chain-on-presentation-device',
+    timeoutMs = 7000,
+    laneId = 'ulg:scene:presentation-worker-mechanics-chain',
+    stateKey = 'ulg:scene:presentation-worker-mechanics-chain-state',
+    sourceSphParticleState = null,
+    sourceMlsMpmParticleState = null,
+    sourceSignature = null,
+    sourceMode = null,
+    sourceCpuStateStale = null,
+    latestResidentOutputCpuStateStale = null,
+    autoRun = false
+  } = {}) {
+    const currentSphState = sourceSphParticleState
+      || sphGpuParticleState
+      || scene.userData.sphGpuParticleState
+      || null;
+    const currentMlsState = sourceMlsMpmParticleState
+      || mlsMpmGpuParticleState
+      || scene.userData.mlsMpmGpuParticleState
+      || null;
+    const chainStatus = {
+      schema: 'peercompute.ulg.presentation-worker-mechanics-stage-chain.v0',
+      status: 'worker-offscreen-mechanics-stage-chain-running',
+      reason,
+      laneId,
+      stateKey,
+      stageIds: ['p2g', 'gridUpdate', 'g2p'],
+      stages: [],
+      autoRun: Boolean(autoRun),
+      sourceSignature: sourceSignature || (
+        sphGpuParticleSignature(currentSphState) && mlsMpmGpuParticleSignature(currentMlsState)
+          ? `${sphGpuParticleSignature(currentSphState)}|${mlsMpmGpuParticleSignature(currentMlsState)}`
+          : null
+      ),
+      sourceMode: sourceMode || 'scene-cpu-state',
+      sourceStep: currentSphState?.step ?? currentMlsState?.step ?? null,
+      sourceTime: currentSphState?.time ?? currentMlsState?.time ?? null,
+      sourceCpuStateStale: sourceCpuStateStale ?? Boolean(
+        currentSphState?.cpuStateStale || currentMlsState?.cpuStateStale
+      ),
+      latestResidentOutputCpuStateStale:
+        latestResidentOutputCpuStateStale ?? null,
+      authoritativeStateMutation: false,
+      statePromotionStatus: 'not-promoted-worker-local-output-not-connected-to-visible-render-state',
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    scene.userData.sphWorkerOffscreenResidentStageChain = chainStatus;
+    renderer.userData.sphWorkerOffscreenResidentStageChain = chainStatus;
+    if (
+      !currentSphState?.state
+      || !currentSphState?.thermo
+      || !currentMlsState?.mechanics
+    ) {
+      chainStatus.status = 'worker-offscreen-mechanics-stage-chain-blocked-state-unavailable';
+      chainStatus.reason = 'resident SPH and MLS-MPM particle state buffers are required';
+      chainStatus.updatedAtMs = nowMs();
+      return chainStatus;
+    }
+    for (const stageId of chainStatus.stageIds) {
+      const payload = workerOffscreenMechanicsStagePayload({
+        stageId,
+        laneId,
+        stateKey,
+        timeoutMs,
+        taskIdPrefix: `${laneId}:${stateKey}`,
+        sourceSphParticleState: currentSphState,
+        sourceMlsMpmParticleState: currentMlsState
+      });
+      const submitted = submitWorkerOffscreenResidentStageOnPresentationDevice({
+        payload,
+        reason: `${reason}:${stageId}`
+      });
+      if (!/submit-posted|started|completed/.test(String(submitted?.status || ''))) {
+        const compact = compactWorkerOffscreenResidentStageStatus(submitted);
+        chainStatus.stages.push(compact);
+        chainStatus.status = 'worker-offscreen-mechanics-stage-chain-blocked';
+        chainStatus.blocker = submitted?.status || 'resident-stage-submit-blocked';
+        chainStatus.updatedAtMs = nowMs();
+        return chainStatus;
+      }
+      const completed = await waitForWorkerOffscreenResidentStageTerminal(stageId, timeoutMs);
+      const compact = compactWorkerOffscreenResidentStageStatus(completed);
+      chainStatus.stages.push(compact);
+      chainStatus.updatedAtMs = nowMs();
+      if (
+        compact.status !== 'worker-offscreen-resident-stage-on-presentation-device-completed'
+        || compact.gpuFenceSatisfied !== true
+      ) {
+        chainStatus.status = 'worker-offscreen-mechanics-stage-chain-blocked';
+        chainStatus.blocker = compact.status || 'resident-stage-not-completed';
+        return chainStatus;
+      }
+    }
+    chainStatus.status = 'worker-offscreen-mechanics-stage-chain-completed';
+    chainStatus.workerDeviceSource = 'offscreen-presentation-worker-device';
+    chainStatus.sameWorkerGpuHandoff = chainStatus.stages.every((stage) => stage.sameWorkerGpuHandoff === true);
+    chainStatus.updatedAtMs = nowMs();
+    return chainStatus;
   }
 
   function setSurfaceRadiusScale(scale) {
@@ -21097,6 +23024,26 @@ export function createSphPhaseScene(container, {
   return {
     setParticles,
     setSurfaceRadiusScale,
+    setBackgroundColor,
+    getBackgroundColor() {
+      return sceneBackgroundColorHex;
+    },
+    runWorkerOffscreenResidentStageOnPresentationDevice({
+      payload = null,
+      reason = 'scene-api-run-resident-stage-on-presentation-device'
+    } = {}) {
+      return submitWorkerOffscreenResidentStageOnPresentationDevice({ payload, reason });
+    },
+    runWorkerOffscreenMechanicsStageChainOnPresentationDevice,
+    getWorkerOffscreenResidentStageStatus() {
+      return currentWorkerOffscreenResidentStageStatus();
+    },
+    getWorkerOffscreenResidentStageChainStatus() {
+      return scene.userData.sphWorkerOffscreenResidentStageChain || null;
+    },
+    getWorkerOffscreenResidentStageChainAutoStatus() {
+      return scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
+    },
     refreshViewportAndOverlay,
     dispose,
     scene,
@@ -21182,6 +23129,13 @@ export function createSphPhaseScene(container, {
     getSphResidentSurfaceDrawRenderBridge() {
       return sphResidentSurfaceDrawRenderBridge;
     },
+    getWorkerOffscreenPresentation() {
+      return currentWorkerOffscreenPresentationStatus();
+    },
+    getPeerComputeRenderOwnershipPolicy() {
+      return scene.userData.sphPeerComputeRenderOwnershipPolicy || null;
+    },
+    publishSphNativeWebGpuSurfaceConsumerBrowserFrameValidation,
     getSphResidentSurfaceDrawOverlayPolicy() {
       return resolveSceneResidentSurfaceDrawOverlayPolicy();
     },

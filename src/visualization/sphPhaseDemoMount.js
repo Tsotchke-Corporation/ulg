@@ -3,9 +3,11 @@
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
 import {
+  SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   createSphPhaseScene,
+  normalizeSphSceneBackgroundColorHex,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend
 } from './sphPhaseScene.js';
@@ -28,6 +30,9 @@ import {
   ensurePeerComputeResidentAuthorityHost,
   summarizePeerComputeResidentAuthorityHost
 } from '../runtime/peercomputeBrowserResidentHost.js';
+import {
+  resolvePeerComputeRenderOwnershipPolicy
+} from '../runtime/peercomputeRenderOwnershipPolicy.js';
 import {
   SPH_COLD_START_CACHE_SCHEMA,
   SPH_COLD_START_CACHE_STORAGE_KEY,
@@ -131,6 +136,8 @@ const DROP_TEMP_DEFAULT_K = 293.15;
 const BASE_TEMP_DEFAULT_K = 293.15;
 const RESIDENT_STEPS_PER_SCHEDULE_FALLBACK = 2;
 const RESIDENT_STEPS_PER_SCHEDULE_MAX = 16;
+const RESIDENT_PARTICLE_BRIDGE_STEPS_PER_SCHEDULE_MAX = 128;
+const RESIDENT_PARTICLE_BRIDGE_TARGET_BATCH_TIME_S = 1 / 30;
 const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
 const RESIDENT_RENDER_READBACK_CADENCE = 3;
 const RESIDENT_PENDING_SLOW_NOTICE_MS = 20_000;
@@ -173,6 +180,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawv',
   'lawst',
   'blob',
+  'bg',
   'residentAuto',
   'residentWorkers',
   'residentStageWorkers',
@@ -181,6 +189,11 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'rendererPresentationUnsafe',
   'rendererResidentDevice',
   'surfaceBufferPresentation',
+  'workerOffscreenPresentation',
+  'renderOwnership',
+  'renderOwner',
+  'peercomputeRenderOwnership',
+  'renderUseCase',
   'surfaceDraw',
   'surfaceDrawDiagnostic',
   'nativeSurfacePixelValidation',
@@ -243,6 +256,10 @@ function residentSurfaceDrawParticleRenderMode(mode) {
 
 function residentSurfaceDrawModeUsesParticleBridge(mode) {
   return residentSurfaceDrawParticleRenderMode(mode) != null;
+}
+
+function residentSurfaceDrawModeNeedsInitialVisualRefresh(mode) {
+  return residentSurfaceDrawModeUsesParticleBridge(mode);
 }
 
 function residentSurfaceDrawModeUsesCompactBridge(mode) {
@@ -1519,6 +1536,8 @@ function buildOverlayShell() {
       <div id="sph-blob" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">render mode — live</div>
       <div id="sph-render-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">background color — live</div>
+      <div id="sph-background-color" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -1553,9 +1572,9 @@ function canonicalMaterialKeyFromUrl(value) {
 }
 
 function normalizeUrlControlValue(key, value) {
-  return key === 'drop' || key === 'base'
-    ? canonicalMaterialKeyFromUrl(value)
-    : value;
+  if (key === 'drop' || key === 'base') return canonicalMaterialKeyFromUrl(value);
+  if (key === 'bg') return normalizeSphSceneBackgroundColorHex(value);
+  return value;
 }
 
 function openElementPicker({ overlay, select, roleLabel }) {
@@ -1807,6 +1826,15 @@ export async function mountSphPhaseDemoOverlay({
   }
   renderModeEl.appendChild(renderModeSelect);
 
+  const backgroundColorEl = overlay.querySelector('#sph-background-color');
+  const backgroundColorInput = document.createElement('input');
+  backgroundColorInput.type = 'color';
+  backgroundColorInput.value = SPH_SCENE_BACKGROUND_COLOR_DEFAULT;
+  backgroundColorInput.title = 'Choose the scene background color';
+  backgroundColorInput.setAttribute('aria-label', 'Choose scene background color');
+  backgroundColorInput.style.cssText = 'width:100%;height:40px;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;padding:4px;';
+  backgroundColorEl.appendChild(backgroundColorInput);
+
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
   for (const [role, label, def] of [['drop', 'drop block', DROP_MATERIAL_DEFAULT], ['base', 'base block', BASE_MATERIAL_DEFAULT]]) {
@@ -1876,7 +1904,8 @@ export async function mountSphPhaseDemoOverlay({
     lawr: lawInputs.reactions,
     lawv: lawInputs.viscosity,
     lawst: lawInputs.surfaceTension,
-    blob: blobInput
+    blob: blobInput,
+    bg: backgroundColorInput
   };
   function urlValueForControl(el) {
     return el?.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
@@ -2047,6 +2076,59 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('surfacePixelValidation'),
     false
   );
+  const rawRenderOwnershipMode =
+    initialHash.get('renderOwnership')
+    ?? initialQuery.get('renderOwnership')
+    ?? initialHash.get('renderOwner')
+    ?? initialQuery.get('renderOwner')
+    ?? initialHash.get('peercomputeRenderOwnership')
+    ?? initialQuery.get('peercomputeRenderOwnership')
+    ?? initialHash.get('rendererOwnership')
+    ?? initialQuery.get('rendererOwnership');
+  const renderOwnershipUseCase =
+    initialHash.get('renderUseCase')
+    ?? initialQuery.get('renderUseCase')
+    ?? initialHash.get('peercomputeRenderUseCase')
+    ?? initialQuery.get('peercomputeRenderUseCase')
+    ?? null;
+  const directWorkerOffscreenPresentationEnabled = booleanUrlParam(
+    initialHash.get('workerOffscreenPresentation')
+      ?? initialQuery.get('workerOffscreenPresentation')
+      ?? initialHash.get('offscreenPresentation')
+      ?? initialQuery.get('offscreenPresentation')
+      ?? initialHash.get('workerCanvas')
+      ?? initialQuery.get('workerCanvas'),
+    false
+  );
+  const presentationWorkerResidentStagesRequested = booleanUrlParam(
+    initialHash.get('presentationWorkerResidentStages')
+      ?? initialQuery.get('presentationWorkerResidentStages')
+      ?? initialHash.get('workerOffscreenResidentStages')
+      ?? initialQuery.get('workerOffscreenResidentStages')
+      ?? initialHash.get('workerResidentStages')
+      ?? initialQuery.get('workerResidentStages')
+      ?? initialHash.get('residentStageChainOnPresentationWorker')
+      ?? initialQuery.get('residentStageChainOnPresentationWorker'),
+    false
+  );
+  const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy:
+      currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
+      || runtime?.peercomputeRenderOwnershipPolicy
+      || runtime?.renderOwnershipPolicy
+      || null,
+    requestedMode: rawRenderOwnershipMode,
+    workerOffscreenPresentationRequested: directWorkerOffscreenPresentationEnabled,
+    presentationWorkerResidentStagesRequested,
+    useCase: renderOwnershipUseCase,
+    source: rawRenderOwnershipMode
+      ? 'sph-phase-demo-url'
+      : 'sph-phase-demo'
+  });
+  const workerOffscreenPresentationEnabled = Boolean(
+    initialPeerComputeRenderOwnershipPolicy.workerOffscreenPresentationRequested
+  );
+  overlay.__sphPeerComputeRenderOwnershipPolicy = initialPeerComputeRenderOwnershipPolicy;
   const acquireInitialRendererWebGpuDevice = Boolean(
     initialSphRendererBackend === 'webgpu'
     && initialThreeWebGpuRendererPresentationEnabled
@@ -2127,6 +2209,13 @@ export async function mountSphPhaseDemoOverlay({
     if (initialThreeWebGpuRendererResidentDeviceEnabled) q.set('rendererResidentDevice', '1');
     if (initialThreeWebGpuRendererPresentationUnsafe) q.set('rendererPresentationUnsafe', '1');
     if (initialThreeWebGpuSurfaceBufferPresentationEnabled) q.set('surfaceBufferPresentation', '1');
+    if (workerOffscreenPresentationEnabled) q.set('workerOffscreenPresentation', '1');
+    if (presentationWorkerResidentStagesRequested) q.set('presentationWorkerResidentStages', '1');
+    if (rawRenderOwnershipMode != null) q.set(
+      'renderOwnership',
+      initialPeerComputeRenderOwnershipPolicy.requestedMode
+    );
+    if (renderOwnershipUseCase) q.set('renderUseCase', renderOwnershipUseCase);
     if (nativeSurfacePixelValidationEnabled) q.set('nativeSurfacePixelValidation', '1');
     q.set('surfaceDraw', currentResidentSurfaceDrawDiagnosticMode());
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
@@ -2146,7 +2235,11 @@ export async function mountSphPhaseDemoOverlay({
   function scenarioFromControls() {
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
-    return createSphPhaseScenario({ wallFaces, boxDimensionsM: boxDimensionsFromControls() });
+    return createSphPhaseScenario({
+      wallFaces,
+      boxDimensionsM: boxDimensionsFromControls(),
+      ironVolumeFractionOfIce: 1
+    });
   }
 
   function physicalLawGroupsFromControls() {
@@ -2177,11 +2270,13 @@ export async function mountSphPhaseDemoOverlay({
       dropParticleEdge: Number.isFinite(dropEdge) && dropEdge >= 1 ? dropEdge : DROP_PARTICLE_EDGE_DEFAULT,
       baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT,
       mechanics: mechanicsModeFromControls(),
-      physicalLawGroups: physicalLawGroupsFromControls()
+      physicalLawGroups: physicalLawGroupsFromControls(),
+      allowReducedProductProperties: true
     };
   }
 
   const blobScaleOf = () => { const v = Number(blobInput.value); return Number.isFinite(v) && v > 0 ? v : BLOB_SCALE_DEFAULT; };
+  const backgroundColorOf = () => normalizeSphSceneBackgroundColorHex(backgroundColorInput.value);
   let renderModeRefreshToken = 0;
   let peerClosureCacheLookup = null;
   let peerClosureCacheWrite = null;
@@ -3075,10 +3170,19 @@ export async function mountSphPhaseDemoOverlay({
     rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
+    backgroundColor: backgroundColorOf(),
     nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
+    workerOffscreenPresentation: workerOffscreenPresentationEnabled,
+    renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
   overlay.__sphScene = scene;
+  overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
+  overlay.__sphPeerComputeRenderOwnershipPolicy =
+    scene.getPeerComputeRenderOwnershipPolicy?.()
+    || scene.scene?.userData?.sphPeerComputeRenderOwnershipPolicy
+    || initialPeerComputeRenderOwnershipPolicy;
+  overlay.__sphWorkerOffscreenPresentation = scene.getWorkerOffscreenPresentation?.() || null;
   overlay.__sphDriver = driver;
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
@@ -3113,6 +3217,7 @@ export async function mountSphPhaseDemoOverlay({
   let pendingMlsMpmGridUpdateSignature = null;
   let pendingMlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmResidentStepsSignature = null;
+  let pendingInitialResidentVisualRefreshSignature = null;
   let pendingMlsMpmResidentStepsToken = 0;
   let pendingMountedMechanicsStageWorkerLanePromise = null;
   let mountedMechanicsStageWorkerLaneSequence = 0;
@@ -3178,12 +3283,17 @@ export async function mountSphPhaseDemoOverlay({
     peerComputeResidentAuthorityHostPromise = ensurePeerComputeResidentAuthorityHost({
       peercomputeModuleUrl,
       computeTaskModulePath: residentComputeTaskModulePath,
+      renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       enableWorkers: initialResidentWorkersEnabled
     })
       .then((host) => {
         peerComputeResidentAuthorityHost = host;
         globalThis.__ulgResidentAuthorityHost = host;
         scene?.setResidentAuthorityHost?.(host);
+        overlay.__sphPeerComputeRenderOwnershipPolicy =
+          scene?.getPeerComputeRenderOwnershipPolicy?.()
+          || host?.renderOwnershipPolicy
+          || initialPeerComputeRenderOwnershipPolicy;
         publishPeerComputeResidentAuthorityHostStatus('ready');
         if (overlay.isConnected) {
           scheduleMlsMpmResidentSteps({ force: true });
@@ -3343,12 +3453,12 @@ export async function mountSphPhaseDemoOverlay({
 
   function currentSimulationTimeS() {
     return finiteNumberOrNull(
-      driver?.demo?.state?.time
-        ?? activeViewState?.time
-        ?? scene.getMlsMpmResidentStep?.()?.particlePingPong?.nextTime
+      scene.getMlsMpmResidentStep?.()?.particlePingPong?.nextTime
         ?? overlay.__mlsMpmResidentStep?.particlePingPong?.nextTime
         ?? scene.getMlsMpmResidentSteps?.()?.nextSphParticleState?.time
         ?? overlay.__mlsMpmResidentSteps?.nextSphParticleState?.time
+        ?? driver?.demo?.state?.time
+        ?? activeViewState?.time
     );
   }
 
@@ -3448,6 +3558,12 @@ export async function mountSphPhaseDemoOverlay({
     const p2gProjection = scene.getMlsMpmP2gGridProjection?.() || overlay.__mlsMpmP2gGridProjection || null;
     const gridUpdate = scene.getMlsMpmGridUpdate?.() || overlay.__mlsMpmGridUpdate || null;
     const renderState = scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
+    const renderCadence = renderState?.renderReadbackCadence || overlay.__sphResidentRenderReadbackCadence || null;
+    const particleBridgeLiveReadback = Boolean(
+      renderCadence?.particleRenderModeRefresh === true
+      && renderCadence?.skipped !== true
+      && Number(renderCadence?.renderReadbackCount) > 0
+    );
     const gridSpacingM = gridUpdate?.gridSpacingM || p2gProjection?.gridSpacingM || residentStep?.gridUpdate?.gridSpacingM || null;
     const motion = residentMotionDiagnostic({ residentStep, residentSteps, gridSpacingM });
     overlay.__sphResidentMotionDiagnostic = motion;
@@ -3477,7 +3593,10 @@ export async function mountSphPhaseDemoOverlay({
     if (overlay.__mlsMpmResidentStepsSlow?.status) {
       messages.push('Resident physics is still deriving a GPU-resident step; waiting for the current batch.');
     }
-    if (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown') {
+    if (
+      (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown')
+      && !particleBridgeLiveReadback
+    ) {
       messages.push('Resident physics is stepping, but compact motion proof is unavailable.');
     } else if (motion.status === 'motion-below-visible-threshold') {
       messages.push('Resident physics is stepping, but displacement is below the visible threshold.');
@@ -3646,9 +3765,168 @@ export async function mountSphPhaseDemoOverlay({
     return promise || null;
   }
 
+  function scheduleInitialResidentVisualRefreshForBridge({
+    generation = particleSyncGeneration,
+    residentExecutionPolicy = residentExecutionPolicyFromUrl()
+  } = {}) {
+    const mode = currentResidentSurfaceDrawDiagnosticMode();
+    const particleRenderMode = residentSurfaceDrawParticleRenderMode(mode);
+    if (!particleRenderMode) return false;
+    const signature = `${generation}|${mode}|${particleRenderMode}`;
+    if (pendingInitialResidentVisualRefreshSignature === signature) return true;
+    pendingInitialResidentVisualRefreshSignature = signature;
+    overlay.__mlsMpmResidentAutoSchedule = {
+      schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+      status: 'resident-initial-visual-refresh-scheduled',
+      residentAuto: false,
+      residentInitialVisualRefresh: true,
+      residentExecutionPolicy,
+      generation,
+      surfaceDrawDiagnosticMode: mode,
+      particleRenderMode,
+      updatedAtMs: performance.now()
+    };
+    publishRenderModeSelection('resident-initial-visual-refresh-scheduled', {
+      reason: 'residentAuto disabled; particle bridge still needs an initial visible render state',
+      generation,
+      surfaceDrawDiagnosticMode: mode,
+      particleRenderMode
+    });
+    updateResidentPerf({
+      residentStepsPerSchedule: currentResidentStepsPerSchedule(),
+      residentAutoScheduleStatus: 'resident-initial-visual-refresh-scheduled'
+    });
+    const prereqs = [
+      scheduleSphGpuParticleUpload(),
+      scheduleMlsMpmGpuParticleUpload(),
+      scheduleSphThermalResponseGraphUpload()
+    ].filter(Boolean);
+    const runRefresh = async () => {
+      if (!overlay.isConnected || generation !== particleSyncGeneration) return null;
+      overlay.__mlsMpmResidentAutoSchedule = {
+        ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+        status: 'resident-initial-visual-refresh-pending',
+        updatedAtMs: performance.now()
+      };
+      publishRenderModeSelection('resident-initial-visual-refresh-pending', {
+        reason: 'residentAuto disabled; refreshing particle bridge from uploaded initial buffers',
+        generation,
+        surfaceDrawDiagnosticMode: mode,
+        particleRenderMode
+      });
+      const renderStartMs = performance.now();
+      const cadence = residentRenderReadbackDecision({
+        forceDue: true,
+        forceReason: 'resident-auto-disabled-initial-visual-refresh'
+      });
+      try {
+        const renderState = await scene.refreshSphResidentRenderState?.({
+          preferWebGpu: true,
+          materialProperties: activeMaterialProperties(),
+          gasPressureSummary: currentGasPressureSummary(
+            overlay.__sphResidentGasPressureSummary
+              || activeViewStateGasPressure
+              || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+          ),
+          residentAuthorityHost: currentResidentAuthorityHostForScene(),
+          pressureInterfaceGasCellFieldImport:
+            scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+          pressureInterfaceGasCellFieldAdmission:
+            scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
+          pressureInterfaceGasCellFieldImportStateKey: null,
+          renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(mode) ? 'skip' : 'auto',
+          surfaceDrawDiagnosticMode: mode
+        });
+        if (!overlay.isConnected || generation !== particleSyncGeneration) return renderState;
+        residentRenderReadbackCount += 1;
+        overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
+          ...cadence,
+          skipped: false,
+          renderReadbackCount: residentRenderReadbackCount,
+          skippedCount: residentRenderReadbackSkippedCount
+        });
+        overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+        overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+        overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
+        overlay.__sphResidentRenderStateError = null;
+        overlay.__mlsMpmResidentAutoSchedule = {
+          ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+          status: 'resident-initial-visual-refresh-complete',
+          visibleRendererBridge:
+            overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
+            || renderState?.surfaceDrawVisibleRendererBridge
+            || null,
+          renderStateStatus: renderState?.status || null,
+          completedAtMs: performance.now(),
+          updatedAtMs: performance.now()
+        };
+        updateResidentPerf({
+          renderReadbacks: residentRenderReadbackCount,
+          skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+          effectiveRenderReadbackCadence: 1,
+          playbackVisualRefreshForced: true,
+          lastRenderReadbackMs: performance.now() - renderStartMs,
+          lastRenderReadbackSkipped: false,
+          residentAutoScheduleStatus: 'resident-initial-visual-refresh-complete'
+        });
+        publishRenderModeSelection('resident-initial-visual-refresh-complete', {
+          reason: 'residentAuto disabled; particle bridge refreshed from uploaded initial buffers',
+          generation,
+          surfaceDrawDiagnosticMode: mode,
+          particleRenderMode,
+          visibleRendererBridge:
+            overlay.__sphResidentSurfaceDraw?.visibleRendererBridge
+            || renderState?.surfaceDrawVisibleRendererBridge
+            || null,
+          renderStateStatus: renderState?.status || null
+        });
+        renderStatus();
+        updateWarningBanner();
+        return renderState;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        overlay.__sphResidentRenderStateError = message;
+        overlay.__mlsMpmResidentAutoSchedule = {
+          ...(overlay.__mlsMpmResidentAutoSchedule || {}),
+          status: 'resident-initial-visual-refresh-error',
+          error: message,
+          updatedAtMs: performance.now()
+        };
+        updateResidentPerf({
+          residentAutoScheduleStatus: 'resident-initial-visual-refresh-error'
+        });
+        publishRenderModeSelection('resident-initial-visual-refresh-error', {
+          reason: 'residentAuto disabled initial particle bridge refresh failed',
+          generation,
+          surfaceDrawDiagnosticMode: mode,
+          particleRenderMode,
+          error: message
+        });
+        renderStatus();
+        updateWarningBanner();
+        return null;
+      } finally {
+        if (pendingInitialResidentVisualRefreshSignature === signature) {
+          pendingInitialResidentVisualRefreshSignature = null;
+        }
+      }
+    };
+    if (!prereqs.length) {
+      runRefresh();
+      return true;
+    }
+    Promise.allSettled(prereqs).finally(runRefresh);
+    return true;
+  }
+
   function scheduleInitialMlsMpmResidentSteps({ generation = particleSyncGeneration } = {}) {
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     if (!initialResidentAutoEnabled) {
+      const mode = currentResidentSurfaceDrawDiagnosticMode();
+      if (residentSurfaceDrawModeNeedsInitialVisualRefresh(mode)) {
+        scheduleInitialResidentVisualRefreshForBridge({ generation, residentExecutionPolicy });
+        return;
+      }
       overlay.__mlsMpmResidentAutoSchedule = {
         schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
         status: 'disabled-by-url-residentAuto',
@@ -3838,6 +4116,7 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   function currentResidentStepsPerSchedule() {
+    let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
     const candidates = [
       scene.getMlsMpmGpuParticleState?.()?.mechanicalSubsteps,
       activeViewState?.mlsMpmGpuParticleState?.mechanicalSubsteps,
@@ -3848,10 +4127,27 @@ export async function mountSphPhaseDemoOverlay({
     for (const candidate of candidates) {
       const count = Number(candidate);
       if (Number.isFinite(count) && count > 0) {
-        return Math.max(1, Math.min(RESIDENT_STEPS_PER_SCHEDULE_MAX, Math.round(count)));
+        baseCount = Math.max(1, Math.min(RESIDENT_STEPS_PER_SCHEDULE_MAX, Math.round(count)));
+        break;
       }
     }
-    return RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
+    const particleBridgePlayback = residentSurfaceDrawModeUsesParticleBridge(
+      currentResidentSurfaceDrawDiagnosticMode()
+    );
+    if (!particleBridgePlayback) return baseCount;
+    const dtCandidates = [
+      scene.getMlsMpmGpuParticleState?.()?.mechanicsDtS,
+      activeViewState?.mlsMpmGpuParticleState?.mechanicsDtS,
+      activeViewState?.gpuMechanics?.dt,
+      driver?.demo?.gpuMechanics?.dt
+    ];
+    const dt = dtCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0);
+    if (!Number.isFinite(dt) || dt <= 0) return baseCount;
+    const targetCount = Math.ceil(RESIDENT_PARTICLE_BRIDGE_TARGET_BATCH_TIME_S / dt);
+    return Math.max(
+      baseCount,
+      Math.min(RESIDENT_PARTICLE_BRIDGE_STEPS_PER_SCHEDULE_MAX, targetCount)
+    );
   }
 
   function currentResidentTargetSubsteps() {
@@ -4000,6 +4296,22 @@ export async function mountSphPhaseDemoOverlay({
           blocker: 'scene-particle-states-required'
         });
       }
+      const sameDeviceRetainedBufferImport = (
+        sourceExecution?.sameDeviceRetainedBufferImport
+        || sourceExecution?.finalStep?.sameDeviceRetainedBufferImport
+        || sourceExecution?.finalStep?.g2pReconstruction?.sameDeviceRetainedBufferImport
+        || sourceExecution?.finalStep?.g2pReconstruction?.gpuResult?.sameDeviceRetainedBufferImport
+        || scene.userData?.mlsMpmResidentSameDeviceHotBufferSourcePublication?.sameDeviceRetainedBufferImport
+        || null
+      );
+      const sameDeviceSourceHotBufferKey = sameDeviceRetainedBufferImport?.sameDevice === true
+        ? (
+            sameDeviceRetainedBufferImport.sourceHotBufferKey
+            || sameDeviceRetainedBufferImport.hotBufferKey
+            || sameDeviceRetainedBufferImport.hotBufferRecordKey
+            || null
+          )
+        : null;
       const workerRunner = resolvedHost.createUlgMechanicsResidentStageWorkerRunner({
         timeoutMs: 60000,
         requestIdPrefix: `ulg-mounted-mechanics-stage-worker-${sequence}`
@@ -4021,8 +4333,12 @@ export async function mountSphPhaseDemoOverlay({
           gpuResidentLaneDomainKey: 'sph-phase-demo-mounted-stage-worker',
           gpuHubResidentStageWorkerRunner: workerRunner,
           gpuHubResidentStageWorkerModuleUrl: resolvedHost.ulgMechanicsResidentStageWorkerModulePath,
+          sameDeviceRetainedBufferImport,
           gpuHubResidentStageWorkerOutputPublisher: (payload) => (
-            resolvedHost.publishWorkerRetainedMechanicsStageOutput(payload)
+            resolvedHost.publishWorkerRetainedMechanicsStageOutput({
+              ...payload,
+              sameDeviceRetainedBufferImport
+            })
           )
         });
         const chain = stageResult?.mechanicsStageTaskChain || null;
@@ -4030,7 +4346,73 @@ export async function mountSphPhaseDemoOverlay({
         const hotBufferRecord = hotBufferKey
           ? resolvedHost.stateManager?.getHotBuffer?.(hotBufferKey)
           : null;
+        const stateManagerWarmDeltas = resolvedHost.stateManager
+          ?.getWarmDeltas?.('ulg-worker-retained-mechanics-publications') || {};
+        const workerWarmDelta = Object.values(stateManagerWarmDeltas)
+          .find((entry) => entry?.payload?.hotBufferKey === hotBufferKey) || null;
+        const workerRetainedAccessContract = hotBufferRecord?.workerRetainedAccessContract
+          || hotBufferRecord?.workerRetainedBufferImport?.workerRetainedAccessContract
+          || workerWarmDelta?.payload?.workerRetainedAccessContract
+          || null;
         const published = chain?.workerCompactPublicationCommitted === true;
+        let workerRetainedContinuationPlan = null;
+        if (
+          hotBufferKey
+          && published
+          && typeof resolvedHost.planWorkerRetainedContinuation === 'function'
+        ) {
+          workerRetainedContinuationPlan = resolvedHost.planWorkerRetainedContinuation({
+            hotBufferKey,
+            requiredOutputFamilies: workerRetainedAccessContract?.outputFamilies
+              || ['sph-particle-state', 'mls-mpm-mechanics'],
+            consumerStageId: 'p2g',
+            consumerLawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+            requestedLaneId: 'ulg:mounted:mechanics-stage-worker-lane',
+            requestedStateKey: 'ulg:mounted:mechanics-stage-worker-state'
+          });
+        }
+        const stageLaneSummaries = chain?.gpuResidentLaneStageTaskLaneSummaries || {};
+        const stageCopyBudgetPresent = Object.values(stageLaneSummaries)
+          .some((summary) => Boolean(summary?.copyBudget));
+        const stageCopyBudgetTotals = Object.values(stageLaneSummaries).reduce((totals, summary) => ({
+          uploadBytes: totals.uploadBytes + Math.max(0, Number(summary?.copyBudgetUploadBytes) || 0),
+          readbackBytes: totals.readbackBytes + Math.max(0, Number(summary?.copyBudgetReadbackBytes) || 0),
+          retainedBytes: totals.retainedBytes + Math.max(0, Number(summary?.copyBudgetRetainedBytes) || 0),
+          compactSummaryBytes:
+            totals.compactSummaryBytes + Math.max(0, Number(summary?.copyBudgetCompactSummaryBytes) || 0)
+        }), {
+          uploadBytes: 0,
+          readbackBytes: 0,
+          retainedBytes: 0,
+          compactSummaryBytes: 0
+        });
+        const stageBufferByteTotals = Object.values(stageLaneSummaries).reduce((totals, summary) => {
+          const stateBytes = Math.max(0, Number(summary?.stateBufferByteLength) || 0);
+          const thermoBytes = Math.max(0, Number(summary?.thermoBufferByteLength) || 0);
+          const mechanicsBytes = Math.max(0, Number(summary?.mechanicsBufferByteLength) || 0);
+          const gridBytes = Math.max(0, Number(summary?.gridBufferByteLength) || 0);
+          const updatedGridBytes = Math.max(0, Number(summary?.updatedGridBufferByteLength) || 0);
+          return {
+            stateBufferByteLength: totals.stateBufferByteLength + stateBytes,
+            thermoBufferByteLength: totals.thermoBufferByteLength + thermoBytes,
+            mechanicsBufferByteLength: totals.mechanicsBufferByteLength + mechanicsBytes,
+            gridBufferByteLength: totals.gridBufferByteLength + gridBytes,
+            updatedGridBufferByteLength: totals.updatedGridBufferByteLength + updatedGridBytes,
+            totalByteLength: totals.totalByteLength
+              + stateBytes
+              + thermoBytes
+              + mechanicsBytes
+              + gridBytes
+              + updatedGridBytes
+          };
+        }, {
+          stateBufferByteLength: 0,
+          thermoBufferByteLength: 0,
+          mechanicsBufferByteLength: 0,
+          gridBufferByteLength: 0,
+          updatedGridBufferByteLength: 0,
+          totalByteLength: 0
+        });
         return publishMountedMechanicsStageWorkerLane(
           published ? 'worker-stage-lane-published' : 'worker-stage-lane-executed',
           {
@@ -4038,23 +4420,126 @@ export async function mountSphPhaseDemoOverlay({
             scheduleToken,
             generation,
             sequence,
+            authorityHostStatus: resolvedHost.status || null,
+            authorityHostSource: resolvedHost.source || null,
+            authorityHostNodeId: resolvedHost.nodeKernel?.nodeId || resolvedHost.nodeId || null,
+            stateManagerWarmDeltaScope: 'ulg-worker-retained-mechanics-publications',
+            stateManagerWarmDeltaFound: Boolean(workerWarmDelta),
+            stateManagerWarmDeltaStatus: workerWarmDelta?.payload?.status || null,
+            sameDeviceRetainedBufferImportAvailable:
+              sameDeviceRetainedBufferImport?.sameDevice === true && Boolean(sameDeviceSourceHotBufferKey),
+            sameDeviceRetainedBufferImportSourceHotBufferKey: sameDeviceSourceHotBufferKey,
             stageChainStatus: chain?.status || null,
+            gpuResidentLaneStagePlanLaneId: chain?.gpuResidentLaneStagePlanLaneId || null,
+            gpuResidentLaneStagePlanStateKey: chain?.gpuResidentLaneStagePlanStateKey || null,
+            gpuResidentLaneStagePlanContractSchema: chain?.gpuResidentLaneStagePlanContractSchema || null,
             gpuHubResidentStageExecutorMode: chain?.gpuHubResidentStageExecutorMode || null,
             gpuResidentLaneStageExecutionStatus: chain?.gpuResidentLaneStageExecutionStatus || null,
+            gpuResidentLaneStageExecutionStageOrder:
+              chain?.gpuResidentLaneStageExecutionStageOrder || [],
+            gpuResidentLaneStageExecutionAuthorityPath:
+              chain?.gpuResidentLaneStageExecutionAuthorityPath || null,
             gpuResidentLaneStageExecutionUsedGpuHubExecutors:
               chain?.gpuResidentLaneStageExecutionUsedGpuHubExecutors ?? null,
             gpuResidentLaneStageExecutionWorkerRunnerSupplied:
               chain?.gpuResidentLaneStageExecutionWorkerRunnerSupplied ?? null,
             gpuResidentLaneStageExecutionWorkerResidencyStatuses:
               chain?.gpuResidentLaneStageExecutionWorkerResidencyStatuses || {},
+            gpuResidentLaneStageExecutionStateFamilyConflictPolicy:
+              chain?.gpuResidentLaneStageExecutionStateFamilyConflictPolicy || null,
+            gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount:
+              chain?.gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount ?? null,
             gpuResidentLaneStageTaskBackends: chain?.gpuResidentLaneStageTaskBackends || {},
+            gpuResidentLaneStageTaskReadbackModes:
+              chain?.gpuResidentLaneStageTaskReadbackModes || {},
+            gpuResidentLaneStageTaskNormalHotLoopReadbackFree:
+              chain?.gpuResidentLaneStageTaskNormalHotLoopReadbackFree || {},
             gpuResidentLaneStageTaskFenceSatisfied: chain?.gpuResidentLaneStageTaskFenceSatisfied || {},
+            gpuResidentLaneStageTaskCopyBudgets: Object.fromEntries(
+              Object.entries(stageLaneSummaries)
+                .map(([stageId, summary]) => [stageId, summary?.copyBudget || null])
+            ),
+            gpuResidentLaneStageTaskCopyBudgetStatus: stageCopyBudgetPresent
+              ? 'stage-copy-budgets-recorded'
+              : 'stage-copy-budgets-not-present-worker-summary',
+            gpuResidentLaneStageTaskCopyBudgetTotals: stageCopyBudgetTotals,
+            gpuResidentLaneStageTaskBufferByteTotals: stageBufferByteTotals,
             workerCompactPublicationCandidateStatus: chain?.workerCompactPublicationCandidateStatus || null,
+            workerCompactPublicationCandidateSameDeviceRetainedBufferImportAvailable:
+              chain?.workerCompactPublicationCandidateSameDeviceRetainedBufferImportAvailable === true,
+            workerCompactPublicationCandidateSameDeviceSourceHotBufferKey:
+              chain?.workerCompactPublicationCandidateSameDeviceSourceHotBufferKey || null,
+            workerCompactPublicationCandidateLocalMaterializationStatus:
+              chain?.workerCompactPublicationCandidateLocalMaterializationStatus || null,
+            workerCompactPublicationCandidateAcceptedMaterializationModes:
+              chain?.workerCompactPublicationCandidateAcceptedMaterializationModes || [],
             workerCompactPublicationStatus: chain?.workerCompactPublicationStatus || null,
             workerCompactPublicationCommitted: published,
             workerCompactPublicationHotBufferKey: hotBufferKey,
+            workerCompactPublicationCommitDeltaTaskId:
+              chain?.workerCompactPublicationCommitDeltaTaskId || null,
+            workerCompactPublicationSameDeviceRetainedBufferImportAvailable:
+              chain?.workerCompactPublicationSameDeviceRetainedBufferImportAvailable === true,
+            workerCompactPublicationSameDeviceSourceHotBufferKey:
+              chain?.workerCompactPublicationSameDeviceSourceHotBufferKey || null,
+            workerCompactPublicationRecordSchema: hotBufferRecord?.schema || null,
             workerCompactPublicationRecordStatus: hotBufferRecord?.status || null,
+            workerCompactPublicationRecordStateKey: hotBufferRecord?.stateKey || null,
+            workerCompactPublicationRecordSourceStage: hotBufferRecord?.sourceStage || null,
+            workerCompactPublicationRecordWorkerLocal: hotBufferRecord?.workerLocal === true,
+            workerCompactPublicationRecordSameDevice: hotBufferRecord?.sameDevice === true,
+            workerCompactPublicationRecordCopyMode: hotBufferRecord?.copyMode || null,
+            workerCompactPublicationRecordSameDeviceRetainedBufferImportAvailable:
+              hotBufferRecord?.sameDeviceRetainedBufferImportAvailable === true,
+            workerCompactPublicationRecordSameDeviceSourceHotBufferKey:
+              hotBufferRecord?.sameDeviceSourceHotBufferKey || null,
+            workerCompactPublicationRecordLocalBufferRefCount:
+              hotBufferRecord?.localBufferRefs?.length ?? null,
+            workerCompactPublicationRecordWorkerRetainedBufferRefCount:
+              hotBufferRecord?.workerRetainedBufferRefs?.length ?? null,
             workerCompactPublicationRecordHasWorkerRunner: Boolean(hotBufferRecord?.workerRunner),
+            workerRetainedAccessContractSchema: workerRetainedAccessContract?.schema || null,
+            workerRetainedAccessContractStatus: workerRetainedAccessContract?.status || null,
+            workerRetainedAccessContractWorkerContinuationRequired:
+              workerRetainedAccessContract?.workerContinuationRequired === true,
+            workerRetainedAccessContractMainThreadGpuHandlesAvailable:
+              workerRetainedAccessContract?.mainThreadGpuHandlesAvailable === true,
+            workerRetainedAccessContractSameDeviceRetainedBufferImportAvailable:
+              workerRetainedAccessContract?.sameDeviceRetainedBufferImportAvailable === true,
+            workerRetainedAccessContractSameDeviceSourceHotBufferKey:
+              workerRetainedAccessContract?.sameDeviceSourceHotBufferKey || null,
+            workerRetainedAccessContractLocalMaterializationStatus:
+              workerRetainedAccessContract?.localMaterializationStatus || null,
+            workerRetainedAccessContractLocalMaterializationBlocker:
+              workerRetainedAccessContract?.localMaterializationBlocker || null,
+            workerRetainedAccessContractAcceptedConsumerModes:
+              workerRetainedAccessContract?.acceptedConsumerModes || [],
+            workerRetainedAccessContractAcceptedMaterializationModes:
+              workerRetainedAccessContract?.acceptedMaterializationModes || [],
+            workerRetainedAccessContractOutputFamilies:
+              workerRetainedAccessContract?.outputFamilies || [],
+            workerRetainedAccessContractLocalBufferRefCount:
+              workerRetainedAccessContract?.localBufferRefs?.length ?? null,
+            workerRetainedAccessContractWorkerRetainedBufferRefCount:
+              workerRetainedAccessContract?.workerRetainedBufferRefs?.length ?? null,
+            workerRetainedContinuationPlanStatus:
+              workerRetainedContinuationPlan?.status || null,
+            workerRetainedContinuationPlanConsumerMode:
+              workerRetainedContinuationPlan?.consumerMode || null,
+            workerRetainedContinuationPlanWorkerRunnerAvailable:
+              workerRetainedContinuationPlan?.workerRunnerAvailable === true,
+            workerRetainedContinuationPlanSameDeviceRetainedBufferImportAvailable:
+              workerRetainedContinuationPlan?.sameDeviceRetainedBufferImportAvailable === true,
+            workerRetainedContinuationPlanSameDeviceSourceHotBufferKey:
+              workerRetainedContinuationPlan?.sameDeviceSourceHotBufferKey || null,
+            workerRetainedContinuationPlanUseWorkerInput:
+              workerRetainedContinuationPlan?.useWorkerRetainedInput === true,
+            workerRetainedContinuationPlanMissingOutputFamilies:
+              workerRetainedContinuationPlan?.missingOutputFamilies || [],
+            workerRetainedContinuationPlanWorkerRetainedBufferRefCount:
+              workerRetainedContinuationPlan?.workerRetainedBufferRefCount ?? null,
+            workerRetainedContinuationPlanLocalBufferRefCount:
+              workerRetainedContinuationPlan?.localBufferRefCount ?? null,
             renderHandoffStatus: published
               ? 'blocked-worker-gpu-handles-not-main-thread-renderable'
               : 'blocked-worker-publication-required',
@@ -4778,6 +5263,16 @@ export async function mountSphPhaseDemoOverlay({
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
+  function applyBackgroundColorFromControl(reason = 'background-color-control-input') {
+    overlay.__sphSceneBackgroundColor = scene.setBackgroundColor?.(backgroundColorOf(), { reason }) || null;
+    syncUrlFromControls();
+    renderStatus();
+    updateWarningBanner();
+    return overlay.__sphSceneBackgroundColor;
+  }
+  backgroundColorInput.addEventListener('input', () => {
+    applyBackgroundColorFromControl('background-color-control-input');
+  });
   renderModeSelect.addEventListener('change', () => {
     currentResidentSurfaceDrawDiagnosticMode();
     syncUrlFromControls();
@@ -4859,6 +5354,10 @@ export async function mountSphPhaseDemoOverlay({
     if (dimensionsEqual(sceneBoxDimsM, nextDims)) {
       scene.setResidentAuthorityHost?.(currentResidentAuthorityHostForScene());
       scene.setSurfaceRadiusScale(blobScaleOf());
+      overlay.__sphSceneBackgroundColor = scene.setBackgroundColor?.(backgroundColorOf(), {
+        reason: `${resetReason}-scene-reused`,
+        refresh: false
+      }) || null;
       scene.resetResidentStateForParticleReset?.({
         reason: `${resetReason}-scene-reused`,
         clearOverlay: true
@@ -4898,10 +5397,19 @@ export async function mountSphPhaseDemoOverlay({
       rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode(),
+      backgroundColor: backgroundColorOf(),
       nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
+      workerOffscreenPresentation: workerOffscreenPresentationEnabled,
+      renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
     overlay.__sphScene = scene;
+    overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
+    overlay.__sphPeerComputeRenderOwnershipPolicy =
+      scene.getPeerComputeRenderOwnershipPolicy?.()
+      || scene.scene?.userData?.sphPeerComputeRenderOwnershipPolicy
+      || initialPeerComputeRenderOwnershipPolicy;
+    overlay.__sphWorkerOffscreenPresentation = scene.getWorkerOffscreenPresentation?.() || null;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
@@ -5272,6 +5780,8 @@ export async function mountSphPhaseDemoOverlay({
   for (const [key, el] of Object.entries(urlControls)) {
     if (key === 'blob') {
       el.addEventListener('change', syncUrlFromControls);
+    } else if (key === 'bg') {
+      el.addEventListener('change', () => applyBackgroundColorFromControl('background-color-control-change'));
     } else {
       el.addEventListener('change', scheduleDemoRebuild);
     }

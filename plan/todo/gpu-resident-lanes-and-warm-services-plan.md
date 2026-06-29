@@ -194,11 +194,12 @@ upload handles in StateManager hot storage and returns the serializable import
 descriptor. The mounted resident ComputeManager path now calls that publication
 surface automatically after StateManager admission when it owns real same-device
 SPH state, SPH thermo, and MLS-MPM mechanics upload handles, and the retained
-import descriptor is bridged onto final G2P reconstruction metadata. The next
-lane slice is to have admitted compact worker-stage outputs consume and
-propagate that source descriptor as their local materialization path, instead
-of falling back to snapshots or full readback. Cross-device retained refs
-remain metadata-only.
+import descriptor is bridged onto final G2P reconstruction metadata. Admitted
+compact worker-stage mechanics outputs now consume and propagate that descriptor
+as their local materialization path: the worker publication, hot-buffer record,
+warm delta, access contract, and continuation plan all preserve the
+same-device source key while keeping worker-owned GPU handles private to the
+worker lane. Cross-device retained refs remain metadata-only.
 
 Status update, 2026-06-14 fused mechanics evidence: a single-substep fused
 P2G/grid-update/G2P WebGPU path now exists behind the explicit
@@ -453,6 +454,65 @@ creates the PeerCompute Worker bridge, runs the mechanics P2G -> grid-update
 `worker-ready` for all three stages. The module keeps raw stage outputs in a
 worker-local lane store and returns clone-safe values/summaries; worker-owned
 WebGPU device/buffer retention remains the next acceptance target.
+
+Status update, 2026-06-20 mounted authority evidence: the real mounted
+`residentStageWorkers=1` path now publishes page-visible authority telemetry
+for the worker-retained mechanics lane. The report includes the PeerCompute
+browser NodeKernel authority host, lane id/state key, mechanics stage lane
+contract, NodeKernel execution path, read/write conflict policy, StateManager
+warm-delta admission, admitted worker-retained hot-buffer record, access
+contract, and same-worker retained-ref continuation plan. This confirms the
+worker lane is supervised and admitted, while preserving the existing blocker:
+worker-owned GPU handles are still not directly renderable by the main-thread
+Three path.
+
+Status update, 2026-06-20 mounted debug byte/copy evidence: mechanics
+stage-lane summaries now include copy-budget fields and retained buffer byte
+lengths when available, and the mounted worker-lane report aggregates no-full
+readback modes, readback-free hot-loop flags, copy-budget presence/status,
+readback counters, and retained worker-stage buffer byte totals. The worker
+module now publishes conservative per-stage copy budgets at the source: zero
+upload/readback for no-full worker stages and retained bytes from clone-safe
+worker buffer byte-length fields. The browser gate requires recorded budgets,
+zero aggregate readback bytes, positive retained-budget bytes, and positive
+retained worker-stage buffer bytes.
+
+Status update, 2026-06-20 native same-device import: the renderer follow-up is
+now on the same-device main-thread route. Native
+`native-webgpu-surface-consumer` selection publishes explicit visible-consumer
+import telemetry for route, thread, engine-owned native WebGPU canvas device
+scope, and readiness. The browser gate requests the native surface consumer,
+keeps no-full resident surface draw buffers and skipped compact summary
+readback, runs a fresh resident batch plus a continued resident batch,
+publishes browser-frame validation evidence through the scene API, and requires
+`same-device-main-thread-import-ready` with monotonic resident step advance.
+This gives the
+worker-retained lane a main-thread render import target without changing the
+worker-retained access contract or promoting worker-owned GPU handles as local
+main-thread buffers.
+
+Status update, 2026-06-20 worker compact same-device materialization: admitted
+mechanics worker compact outputs now propagate
+`sameDeviceRetainedBufferImport` from the resident same-device hot-buffer source
+through the compact candidate and
+`publishWorkerRetainedMechanicsStageOutput()`. The access contract still reports
+`worker-local-source-ready-main-thread-refresh-blocked`,
+`mainThreadGpuHandlesAvailable=false`, zero worker-local main-thread refs, and
+`workerContinuationRequired=true`; its accepted local materialization mode is
+now `same-device-retained-buffer-import` when the source descriptor is present.
+The mounted browser gate and the real browser PeerCompute resident-authority
+gate both require this source key to survive StateManager admission.
+
+Status update, 2026-06-20 worker publication compact refresh bridge: the
+compact refresh executor now forwards an explicit
+`sameDeviceRetainedBufferImport` argument, and the resident authority host
+exposes `refreshWorkerRetainedMechanicsPublicationHotBuffers()`. That bridge
+starts from an admitted worker-retained mechanics publication, extracts its
+compact candidate and same-device source descriptor, and refreshes local
+SPH/MLS-MPM hot buffers through the same zero-upload alias path used by
+compact candidates. Worker-private retained refs still require same-worker
+continuation; only the same-device StateManager source can materialize on the
+main thread.
 
 ## Purpose
 

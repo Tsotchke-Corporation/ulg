@@ -23,6 +23,10 @@ physics loop is incoherent.
 - Do not let renderer cadence decide physics cadence. Physics extraction stages
   can feed rendering, but pressure, interface, gas, and product state cannot
   depend on whether a visible mesh was drawn this frame.
+- Do not count a stale retained Three render-row bridge as live physics motion.
+  Until WebGPU/native direct consumers replace the interim Three particle
+  bridge, explicit Three point/sphere modes must rebuild from fresh render rows
+  on visual refresh.
 - Every major todo item must finish with a dense visual sequence sanity check
   over representative scenarios, not only unit tests. The sequence must capture
   close-spaced frames plus resident diagnostics, visible surface bounds, and
@@ -34,6 +38,122 @@ physics loop is incoherent.
   class is touched.
 
 ## Active Priority Order
+
+Current routing note, 2026-06-29 AKDT follow-up: render ownership is now
+selectable through `peercompute.ulg.render-ownership-policy.v0`, not hardwired
+to one demo flag. PeerCompute/runtime options or local `renderOwnership=...`
+can choose `main-thread-renderer`, `worker-offscreen-render-rows`,
+`worker-owned-resident-render-producer`, or
+`cross-worker-gpubuffer-structured-clone`. The desired next architecture,
+`worker-owned-resident-render-producer`, now selects the worker-owned canvas
+path, runs a worker-local WebGPU producer pass to write the render-row storage
+buffer, and leaves direct retained-`GPUBuffer` handoff `not-requested`.
+Follow-up moved the first worker producer source from decoded visual rows to
+packed resident SPH particle state/thermo plus a compact material/phase color
+table. The benchmark with
+`ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer` now reports
+`worker-offscreen-resident-particle-state-producer-rendered`,
+`producerSourceKind=worker-resident-particle-state`, decoded visual source
+transfer `0`, state source transfer `1312` bytes for the first upload,
+`renderRowsReadbackByteLength=0`, readback mode `no-full-readback`, no
+readback coercion, copied display bytes `0`, and
+`renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree=true`.
+Repeated unchanged-source draws still use the worker-resident source cache and
+drop source transfer to the view matrix only. Follow-up now proves the first
+resident simulation stage movement into the worker-owned device path: the
+presentation worker can run a same-lane `P2G -> gridUpdate -> G2P` mechanics
+resident chain on its own WebGPU device with no-full readback, retained worker
+GPU refs, and satisfied same-worker queue-ordering fences. CPU-visible queue
+fences and sentinel `mapAsync` both fail on this Chromium worker device, so
+same-worker GPU handoff is explicitly recorded as
+`queue-submitted-same-worker-gpu-handoff-no-cpu-fence`. Follow-up completed
+the scheduler integration slice: PeerCompute/render ownership can request this
+path with `presentationWorkerResidentStages=1`, and the scene now automatically
+runs the P2G/grid-update/G2P chain once cloneable resident state and the
+presentation-worker device are ready. The auto status is evidence-only and
+explicitly reports
+`statePromotionStatus=not-promoted-worker-local-output-not-connected-to-visible-render-state`.
+Follow-up now directly consumes the presentation-worker retained G2P output in
+the worker-local render path: the offscreen worker resolves the retained G2P
+state buffer plus lane-retained thermo buffer, binds them in the resident
+particle-state producer, renders on the transferred canvas, and reports
+`producerSourceKind=worker-retained-resident-stage-output` with
+`sourceStateTransferBytes=0` and copied display bytes `0`. Next, define the
+authoritative state promotion/admission contract for that worker-local output,
+or keep it as a PeerCompute-configurable presentation-only mode. Keep the
+direct `GPUBuffer` structured-clone path as an explicit experimental mode only.
+
+Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
+draws compact decoded render-row input. The worker accepts
+`peercompute.ulg.worker-offscreen-render-rows.v0` payloads, uploads them to a
+worker-local WebGPU storage buffer, and draws on the transferred
+`OffscreenCanvas`. Benchmark evidence with `surfaceDraw=three-render-row-points`
+shows `worker-offscreen-render-rows-rendered`, 16 particles, 576 compact input
+bytes, copied display bytes `0`, and frame-copy-back rejected. Treat this as a
+transitional bridge only: in `surfaceDraw=auto`,
+`workerOffscreenPresentation=1` now explicitly forces full render-row readback
+with reason
+`worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback`.
+The next todo slice should remove that forced readback and main-thread
+decoded-row transfer by consuming retained render GPUBuffer state in the worker
+or through a same-device imported draw-buffer route. Follow-up evidence shows
+the direct route is blocked today: the local HTTPS Playwright probe throws
+`DataCloneError` for `GPUBuffer` postMessage to a worker, and benchmark
+telemetry reports
+`worker-offscreen-retained-gpubuffer-handoff-blocked-structured-clone-unavailable`
+even when retained render rows and retained surface buffers are present. This
+is the plan-change point: move resident render production into the worker-owned
+device path, or first create a validated browser-supported same-device GPU
+object transport.
+
+Current routing note, 2026-06-28 AKDT: the zero-copy worker presentation track
+has moved from budget-only instrumentation to an opt-in transferred-canvas
+bridge. `workerOffscreenPresentation=1` creates a displayed canvas layer,
+transfers it with `transferControlToOffscreen`, and has a module worker
+configure WebGPU on the `OffscreenCanvas`. The bridge reports
+`peercompute.ulg.worker-offscreen-presentation.v0`, copied display bytes `0`,
+and `frame-copy-back` rejected. Benchmarks can enable generated scenario URLs
+with `ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1`. Do the next render-worker slice by sending
+retained resident render inputs to this worker-owned canvas. Do not add
+ImageBitmap/readPixels frame shuttles. The tiny benchmark smoke reports
+`worker-offscreen-presentation-ready` for three clears with zero browser
+console issues; a manual headless smoke also showed a transient device-destroy
+after one clear, so persistent live-device rendering still needs validation.
+
+Current routing note, 2026-06-24 AKDT: worker-based offscreen rendering should
+be pursued only as a zero-copy presentation path. The benchmark now reports
+`peercompute.ulg.worker-offscreen-frame-transport-budget.v0`; it marks
+`worker-owned-presented-canvas` / `transferControlToOffscreen` as the preferred
+path and `frame-copy-back` as the rejected path. At `1280x800`, copy-back is
+already `3.91 MiB/frame` and `234.38 MiB/s` at `60 Hz`; high-DPR phone screens
+are worse. The next renderer slice should transfer the display canvas to the
+render worker or fail closed, not send rendered frames back to the main thread.
+
+Current routing note, 2026-06-22 AKDT: true adaptive MLS-MPM is now a separate
+clean-break todo, not part of the immediate water/liquid pressure bugfix. The
+fixed-support initializer has been simplified: requested drop/base edge counts
+stay authoritative, one global particle spacing defines mechanics rest volume
+and visual radius, and material phase density at the selected
+temperature/pressure defines per-particle mass. Blocks are sized from
+`globalParticleSpacingM * particlesPerEdge`, so a `2x2x2` drop/base request
+creates a compact two-cell block instead of a one-meter block snapped to a
+different grid. Same-material/same-temperature roles now share particle radius
+and per-particle mass. Phase-change volume jumps do not auto-create hundreds or
+thousands more fixed-support solver particles; gas expansion remains represented
+by species ledgers/fields until an explicit gas-admission or adaptive
+split/merge policy creates particles. The H2O/H2O fixed-support
+incompressibility slice has a passing `1 +/- 0.005` condensed `J` envelope and
+mounted no-full/sphere browser probes on the live HTTPS server. Water visual
+quality is still open: the sphere diagnostic is visible and uses
+closure-derived PBR, but it remains particle-like rather than a refractive
+merged liquid surface. CPU and GPU P2G/G2P still use a fixed global quadratic
+support stencil. Follow
+`plan/todo/adaptive-mlsmpm-support-radius-and-coarsening-plan.md` only as its
+own follow-up track. The adaptive track must add per-particle support radius,
+normalized variable-support P2G/G2P, conservation-safe split/merge/coarsening,
+and tests for mass, momentum, volume, and energy continuity. A 2x2x2 block may
+simplify to one macro-particle only through that admitted conservation path,
+not through renderer radius changes or role-specific particle spacing.
 
 Current routing note, 2026-06-20 AKDT: compact
 `algorithmMaterialContactRows` now reach the material-interface mechanics path
@@ -77,8 +197,9 @@ Remaining contact-performance work is, if fixed capacity still proves too
 lossy, a prefix-scan compact bin list. Browser summary acceptance now exposes
 the contact-bin grid and overflow diagnostics through mounted
 `sphResidentRenderState` and the long-horizon probe compact diagnostics; the
-mounted derived-material resident render-state Playwright test is green after
-separating material-surface readback readiness from pressure-solver readiness.
+mounted derived-material resident render-state Playwright test now requires a
+ready/submitted enabled contact-bin grid with positive cell/capacity/occupancy
+and index-buffer diagnostics whenever the pressure-interface solver is ready.
 
 Current routing note, 2026-06-20 AKDT: reaction proposal now has the same
 bounded-neighbor shape as contact kinematics. The WebGPU reaction step builds a
@@ -89,9 +210,12 @@ all-particle scan remains a fail-closed fallback for unavailable/invalid bin
 policy. Resident and mounted diagnostics now report
 `reactionProposalNeighborMode`, bin-grid status, cell count, capacity, and
 index-buffer bytes; the Na/H2O resident browser probe is console-clean and
-shows `fixed-capacity-particle-bin-grid` with `343` cells. Remaining reaction
-hot-loop work is prefix-scan/compacted bins only if dense chemistry scenarios
-show fixed-bin overflow, plus broader multi-batch chemistry validation.
+shows `fixed-capacity-particle-bin-grid` with `343` cells. The mounted
+active-metal/H2O Playwright path now also asserts the fixed-capacity bin-grid
+route across Na first/continued/reset passes, K and Cs continued/long-horizon
+passes, and Ca first/continued passes against the live HTTPS server. Remaining
+reaction hot-loop work is prefix-scan/compacted bins only if dense chemistry
+scenarios show fixed-bin overflow.
 
 Current routing note, 2026-06-20 AKDT: reaction-bin exact overflow metadata is
 now available as an explicit debug opt-in, mirroring the contact-bin path. The
@@ -106,20 +230,16 @@ this CPU fence. Browser evidence at
 console-clean, and reports `particle-bin-overflow-readback-completed` with
 overflow count `0`.
 
-Current routing note, 2026-06-20 AKDT: the interim Three render-row bridge no
-longer forces full CPU render-row readback on every no-full visual refresh once
-the requested bridge kind already has visible geometry. The first
-`three-render-row-spheres`/points refresh still forces `full-parity-readback`
-to build CPU-owned Three geometry; subsequent explicit `no-full-readback`
-refreshes retain the previous matching bridge, report
-`resident-render-row-three-bridge-retained-no-full-readback`, and stamp the
-surface draw as stale retained visual evidence rather than current physics
-geometry. Browser evidence at `/tmp/ulg-render-row-retain-browser-probe.json`
-is console-clean and shows `renderRowsReadbackEffectiveMode=no-full-readback`,
-`renderRowsReadbackForcedForThreeBridge=false`, and
-`renderRowsReadbackRetainedPreviousBridge=true`. This is an interim cadence
-reduction only: fresh visible particle motion without CPU row readback still
-requires the native/engine-owned GPU render consumer path.
+Current routing note, 2026-06-20 AKDT: the interim Three render-row bridge must
+prefer visible motion correctness over no-full cadence reduction. A live
+mounted repro showed resident physics advancing while
+`three-render-row-spheres` retained the old bridge and left particles frozen.
+Explicit Three point/sphere modes now force `full-parity-readback` on each
+visual refresh, keep `renderRowsReadbackRetainedPreviousBridge=false`, and
+rebuild CPU-owned Three rows from the current resident physics source. The
+no-full retained-buffer path is still valid for WebGPU/native direct consumers;
+fresh visible particle motion without CPU row readback still requires the
+native/engine-owned GPU render consumer path.
 
 Current routing note, 2026-06-20 AKDT: native/extension marching-cubes surface
 draw now consumes the compact algorithm surface-extraction rows emitted by
@@ -150,12 +270,26 @@ Current routing note, 2026-06-20 AKDT: the native browser console harness is
 clean after the submit-pacing slice, and frame capture can analyze captured PNG
 data in memory without artifact output. Native same-device readback validation
 now fails closed as `browser-frame-validation-required` when runtime pixel
-readback is disabled. The remaining native harness blocker is not WGSL or
-console spam: headless Chromium can destroy the native main-canvas WebGPU
-device after repeated native canvas submits, even in debug clear-only mode.
-The bridge now avoids duplicate bridge-ready RAF renders, bounds submit-fence
-waits, and pauses automatic redraw after a native submit timeout. Continue this
-lane by moving native presentation/physics synchronization into the planned
+readback is disabled. When the native bridge has rendered but local
+Playwright/headless canvas capture returns a transparent-black crop, the probe
+now reports `native-surface-browser-frame-validation-unsupported` and scene
+telemetry reports `browser-frame-validation-capture-unsupported` instead of a
+failed native render. Native performance benchmarks now default their child
+probe viewport to the compositor-stable `320x240` validation size, while
+keeping explicit probe viewport overrides available. The latest tiny native
+benchmark is `probeStatus=good`, marks the same-device main-thread import
+ready, passes browser-frame pixel validation, reports no blocker family, and
+keeps estimated readback bytes at `0`; the 10k-ish native benchmark also passes
+with actual particles `9826`, `probeStatus=good`, same-device import ready,
+pixel validation passed, blocker family `null`, and zero readback bytes. A
+mobile-shaped local benchmark with viewport `390x844`, DPR `2`, and touch
+enabled also passes with the stable native probe viewport, same-device import
+ready, pixel validation passed, blocker family `null`, and zero readback bytes. The
+remaining native harness blocker is not WGSL or console spam: larger/headless
+canvas capture and non-default presentation paths can still return transparent
+black or destroy the native main-canvas WebGPU device after repeated native
+canvas submits. Continue this lane by broadening native/mobile scenario
+coverage and moving presentation/physics synchronization into the planned
 engine/worker ownership split, keeping the consumer engine-integrated and
 fail-closed rather than adding an overlay.
 
@@ -201,9 +335,15 @@ evidence at `/tmp/ulg-native-10k-bench-direct-compact-v2.json` is
 `surfaceDrawRenderBridgeExternalGpuBufferInputLayout=webgpu-marching-cubes-compact-position-rows`,
 `surfaceDrawCompactedVertexRowsBufferByteLength=0`, and
 `surfaceDrawCompactPositionRowsBufferByteLength=2555520` for the same 159,720
-drawn vertices. Continue this lane by fixing native presentation validation and
-renderer/physics synchronization in the engine/worker ownership split; do not
-reintroduce the expanded ULG row buffer for the native hot path.
+drawn vertices. Follow-up validation now accepts the native browser-frame
+surface path on the compositor-stable native validation viewport:
+`/tmp/ulg-native-browser-frame-validation-probe-https-defaultviewport.json` is
+`status=good`, console-clean, uses the HTTPS server on `0.0.0.0`, reports
+`browser-frame-validation-passed`, and marks
+`resident-surface-visible-gpu-consumer-ready` with current compact-position
+native draw pixels. Continue this lane only for broader native/mobile scenario
+coverage and renderer/physics synchronization in the engine/worker ownership
+split; do not reintroduce the expanded ULG row buffer for the native hot path.
 
 Current routing note, 2026-06-20 AKDT: the material JSON bank now has the first
 Phase 2 element crystalline-structure seed checked in and validated. The
@@ -258,10 +398,12 @@ Current routing note, 2026-06-20 AKDT: MLS-MPM packing now emits compact
 Rows carry isovalue policy, smoothing radius, voxel size, normal scale,
 particle radius, support radius, material/phase ids, and crystal packing
 metadata while explicitly reporting
-`rendererAuthority=not-renderer-authoritative-surface-policy-row`. The next
-work is to bind these rows into the actual marching-cubes/native surface
-extraction path and prove browser/pixel validation, not to tune visual
-threshold constants in renderer code.
+`rendererAuthority=not-renderer-authoritative-surface-policy-row`. The no-full
+native marching-cubes render e2e now requires the selected buffer-volume
+descriptor to come from an algorithm surface-policy row with positive
+smoothing/voxel/normal policy values while keeping the direct compact-position
+native draw input. Follow-up surface-policy work should broaden scenario
+coverage and row quality, not tune visual threshold constants in renderer code.
 
 Current routing note, 2026-06-20 AKDT: the variable-scale reaction browser
 coverage now extends K/H2O and Cs/H2O beyond the prior two-pass resident
@@ -269,15 +411,25 @@ sequence, and adds a browser-mounted multivalent alkaline-earth Ca/H2O pass.
 The focused mounted active-metal/H2O Playwright harness runs Na/H2O first pass,
 Na/H2O continuation, Na/H2O reset/post-reset, K/H2O and Cs/H2O first pass plus
 two consecutive no-full resident continuation batches each, then Ca/H2O first
-pass plus one no-full continuation. Each continuation proves resident product
-carry-forward, promoted
+pass plus two no-full continuation batches. Each continuation proves resident
+product carry-forward, promoted
 `gpu-resident-pressure-interface-spatial-gas-ledger` pressure above baseline,
 render-state pressure consumption, G2P/render-row scale policies, support
 radius bounds, and clean WebGPU console output. Evidence:
 `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs --grep "resident active-metal/H2O promotes product gas pressure"`
-passed `1/1` in `5.6m`. Remaining in this lane: broader long-horizon batches
-for non-alkali/multivalent pairs and representative non-water binary products
-once their pressure/product routes have stable browser-ready expectations.
+passed `1/1` in `6.3m` after the Ca long-horizon continuation was added. The
+representative non-water binary browser route now has separate Mg/O2 -> MgO,
+Al/O2 -> Al2O3, and Na/Cl2 -> NaCl coverage: the mounted no-full resident test
+requires a one-reaction binary-ionic table, condensed product term, retained
+resident product event buffer, zero product-gas ledger rows, render-bound
+product events, and decoded `mgo`/`al2o3`/`nacl` render rows. The Al/O2 case
+intentionally uses `dropt=3200` so it clears the current provisional activation
+threshold instead of only proving table construction; `cl2` is now a selectable
+formula material for the mounted UI route. Evidence:
+`NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted non-water binary reactions retain condensed product events" --timeout 540000`
+passed `1/1` in `3.9m`. Remaining broadening in this lane is optional
+additional pair coverage after its UI/product expectations are intentionally
+selected.
 
 Current routing note, 2026-06-20 AKDT: the monolithic CPU MLS-MPM
 H2O/H2O liquid gate regressed after material/spacing work because wall-only
@@ -851,6 +1003,66 @@ surfaces exist in sibling PeerCompute. Next architecture priority is to wire
 ULG to those remote/admission/refresh surfaces deliberately for opt-in
 non-advisory remote resident-stage work, without treating remote retained refs
 as local handles.
+
+Current routing note, 2026-06-20 AKDT: the mounted
+`residentStageWorkers=1` worker-retained lane now exposes the ULG PDF authority
+evidence directly on `overlay.__sphMountedMechanicsStageWorkerLane`. The
+browser gate requires PeerCompute browser NodeKernel authority, the mechanics
+stage lane contract, NodeKernel execution authority, read/write conflict
+policy, StateManager warm-delta admission, the admitted worker-retained
+hot-buffer record, a no-local-buffer worker-retained access contract, and a
+ready same-worker retained-ref continuation plan. This closes the page-visible
+evidence gap for supervised worker publication. It does not make worker-owned
+GPU buffers renderable on the main thread; the remaining implementation is a
+same-device render import or worker-side renderer that respects that access
+contract.
+
+Current routing note, 2026-06-20 AKDT: the same mounted worker-retained report
+now covers the debug-output byte/copy surface for the mechanics worker lane.
+Shared mechanics stage-lane summaries carry copy-budget fields and retained
+buffer byte lengths, and the worker module publishes conservative per-stage
+copy budgets from the source: zero upload/readback for no-full worker stages
+and retained bytes from clone-safe worker buffer byte-length fields. The live
+browser gate requires `stage-copy-budgets-recorded`, aggregate readback bytes
+`0`, positive retained-budget bytes, and positive retained worker-stage buffer
+bytes. The remaining renderer work is still the same-device import or
+worker-side renderer; do not treat these retained-ref byte counters as
+main-thread renderability.
+
+Current routing note, 2026-06-20 AKDT: the worker-retained renderer follow-up
+is taking the same-device main-thread import route. The visible GPU consumer
+now reports `surfaceDrawVisibleGpuConsumerSameDeviceMainThreadImport*` fields
+for native `native-webgpu-surface-consumer` selection, main-thread scope,
+engine-owned native WebGPU canvas device scope, and import readiness. The
+focused HTTPS browser gate requests
+`renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer`, keeps
+no-full resident surface buffers with skipped compact summary readback, runs a
+fresh batch plus a continued resident batch, publishes browser-frame validation
+evidence through the scene API, and requires
+`same-device-main-thread-import-ready` with monotonic resident step advance.
+Keep the Three WebGPU external-buffer
+path fail-closed until its lifetime issue is solved; a worker-side renderer is
+not the current chosen route.
+
+Current routing note, 2026-06-20 AKDT: admitted mechanics worker compact
+outputs now preserve the resident same-device source descriptor as their local
+materialization route. The worker compact candidate, worker-retained
+publication, hot-buffer record, warm delta, access contract, and continuation
+plan all carry the same-device source hot-buffer key when available. This does
+not promote worker-owned GPU handles to main-thread handles:
+`sameDevice=false`, `mainThreadGpuHandlesAvailable=false`, zero worker-local
+main-thread refs, and same-worker retained-ref continuation remain required.
+The browser gates now require `same-device-retained-buffer-import` as the
+accepted materialization mode for those admitted worker outputs.
+
+Current routing note, 2026-06-20 AKDT: the publication-to-refresh bridge is now
+in place for admitted worker mechanics outputs. The compact refresh executor
+honors direct `sameDeviceRetainedBufferImport` arguments, and
+`host.refreshWorkerRetainedMechanicsPublicationHotBuffers()` can start from a
+worker-retained mechanics publication/hot-buffer record, recover its compact
+candidate plus same-device source descriptor, and alias the StateManager hot
+buffers without uploads or readbacks. This is still a same-device source import,
+not a transfer of worker-owned GPU handles to the main thread.
 
 Current routing note, 2026-06-18 AKDT: the browser WGSL parser error in
 `ulg-sph-render-field-surface-summary` is fixed. `active` was renamed to
@@ -2100,10 +2312,13 @@ SPH thermo, and MLS-MPM mechanics upload handles. The execution carries the
 same-device retained-buffer import descriptor and StateManager hot storage
 retains the handles. The descriptor is also bridged onto the final G2P
 reconstruction metadata so compact candidate builders can discover the live
-producer source. The remaining copy-avoidance work is now downstream: admitted
-compact worker-stage outputs must consume/propagate that descriptor instead of
-falling back to snapshots or full readback, while cross-device remote retained
-refs remain metadata-only.
+producer source.
+Worker compact same-device materialization, 2026-06-20 AKDT: admitted mechanics
+worker compact outputs now consume and propagate that descriptor instead of
+falling back to snapshots or full readback. The worker-retained access contract
+keeps worker GPU handles private while declaring
+`same-device-retained-buffer-import` as an accepted local materialization mode.
+Cross-device remote retained refs remain metadata-only.
 The CPU-SPH solid H2O bug report is now pinned and guarded: cold H2O solid
 particles no longer flow through the liquid PBF path, `npm run
 test:physics-atomics` includes a solid H2O invariant, and the recurring visual

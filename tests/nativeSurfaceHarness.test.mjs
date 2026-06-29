@@ -140,6 +140,9 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /presentation-worker-retained-state-promotion-candidate\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-state-promotion-admission\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-state-continuation\.v0/);
+  assert.match(sceneSource, /worker-retained-portable-materialization-contract\.v0/);
+  assert.match(sceneSource, /blocked-portable-compact-buffer-snapshot-required/);
+  assert.match(sceneSource, /worker-retained-gpu-handles-are-not-cross-peer-portable/);
   assert.match(sceneSource, /useWorkerRetainedG2pInput/);
   assert.match(sceneSource, /requireWorkerRunner: false/);
   assert.match(sceneSource, /not-promoted-worker-local-output-awaiting-state-manager-admission/);
@@ -191,6 +194,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionAdmissionCommitted/);
   assert.match(benchmarkSource, /workerOffscreenRetainedStateContinuationStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedStateContinuationApplied/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStateContinuationCrossPeerReplayStatus/);
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);

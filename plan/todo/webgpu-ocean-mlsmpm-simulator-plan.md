@@ -95,8 +95,14 @@ Tactical status, 2026-06-28 AKDT:
   `same-worker-retained-continuation-ready` plan, reruns the
   `P2G -> gridUpdate -> G2P` chain with `useWorkerRetainedG2pInput`, and
   records `applied-worker-retained-g2p-input` on P2G. This is deliberately
-  same-device and same-worker only; portable snapshots for cross-peer replay
-  remain a separate architecture task.
+  same-device and same-worker only. Follow-up added
+  `peercompute.ulg.worker-retained-portable-materialization-contract.v0` so
+  the admission/continuation path now explicitly reports
+  `crossPeerReplayStatus=blocked-portable-compact-buffer-snapshot-required`.
+  Portable snapshots for cross-peer replay remain a separate architecture task
+  that must export compact
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` rows or use a
+  peer-local materialization protocol.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

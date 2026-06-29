@@ -101,8 +101,16 @@ when available. The admitted warm delta lives in
 `ulg-presentation-worker-retained-state-promotion-admissions`, points at a
 worker-retained hot-buffer key, and remains explicit that
 `portableState=false` and `authoritativeStateMutation=false`. The next useful
-architecture slice is consuming that admitted hot-buffer key for same-worker
-continuation, or producing portable snapshots for cross-peer replay.
+follow-up consumed that admitted hot-buffer key on the same presentation-worker
+lane with `useWorkerRetainedG2pInput=true`, completing same-worker retained
+continuation without main-thread `GPUBuffer` import. The remaining
+architecture slice is portable materialization for cross-peer replay: the
+retained access contract now exposes
+`peercompute.ulg.worker-retained-portable-materialization-contract.v0` and
+reports
+`crossPeerReplayStatus=blocked-portable-compact-buffer-snapshot-required`
+until a compact
+`peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` export exists.
 
 Current checkpoint, 2026-06-28 AKDT, follow-up: the
 `worker-owned-resident-render-producer` path now consumes packed resident SPH
@@ -3249,8 +3257,9 @@ physics work:
   worker-private retained refs and consumes the admitted hot-buffer on the same
   presentation-worker lane with `applied-worker-retained-g2p-input`.
 - [ ] Keep portable cross-peer replay separate from same-worker continuation:
-  worker-private GPU refs are not portable state and still need compact
-  snapshots or a peer-local materialization protocol before remote replay.
+  worker-private GPU refs are not portable state. The current retained access
+  contract exposes the blocker explicitly; remote replay still needs compact
+  snapshot export or a peer-local materialization protocol.
 - [ ] Do not revive ImageBitmap/readPixels/frame-copy-back as a display path.
 
 ## Integration Rule

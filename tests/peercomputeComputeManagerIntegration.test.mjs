@@ -91,6 +91,7 @@ import {
   ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE,
   ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA,
   ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
+  ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA,
   ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
   ULG_RESIDENT_LAW_GRAPH_MANIFEST_SCHEMA,
@@ -3485,6 +3486,25 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(publication.workerRetainedAccessContract.mainThreadGpuHandlesAvailable, false);
   assert.equal(publication.workerRetainedAccessContract.workerContinuationRequired, true);
   assert.equal(publication.workerRetainedAccessContract.localMaterializationStatus, 'blocked-worker-private-gpu-handles');
+  assert.equal(publication.workerRetainedAccessContract.portableState, false);
+  assert.equal(publication.workerRetainedAccessContract.portableSnapshotRequired, true);
+  assert.equal(publication.workerRetainedAccessContract.portableSnapshotAvailable, false);
+  assert.equal(
+    publication.workerRetainedAccessContract.requiredPortableSnapshotSchema,
+    ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+  );
+  assert.equal(
+    publication.workerRetainedAccessContract.portableMaterializationContract.schema,
+    ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA
+  );
+  assert.equal(
+    publication.workerRetainedAccessContract.portableMaterializationStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
+  assert.equal(
+    publication.workerRetainedAccessContract.crossPeerReplayStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
   assert.deepEqual(publication.workerRetainedAccessContract.acceptedConsumerModes, [
     'same-worker-lane-retained-buffer-ref'
   ]);
@@ -3505,6 +3525,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.deepEqual(hotRecord.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
   assert.equal(hotRecord.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
   assert.equal(hotRecord.workerRetainedAccessContract.workerContinuationRequired, true);
+  assert.equal(hotRecord.portableSnapshotRequired, true);
+  assert.equal(hotRecord.crossPeerReplayStatus, 'blocked-portable-compact-buffer-snapshot-required');
 
   const warmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications');
   const warmDelta = warmDeltas[publication.commitDeltaTaskId];
@@ -3514,6 +3536,12 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(warmDelta.payload.workerLocal, true);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
+  assert.equal(warmDelta.payload.portableSnapshotRequired, true);
+  assert.equal(warmDelta.payload.portableSnapshotAvailable, false);
+  assert.equal(
+    warmDelta.payload.portableMaterializationStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
 
   assert.equal(typeof host.admitPresentationWorkerRetainedStatePromotionCandidate, 'function');
   const promotionCandidate = {
@@ -3561,6 +3589,24 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(promotionAdmission.hotBufferStored, true);
   assert.equal(promotionAdmission.authoritativeStateMutation, false);
   assert.equal(promotionAdmission.portableState, false);
+  assert.equal(promotionAdmission.portableSnapshotRequired, true);
+  assert.equal(promotionAdmission.portableSnapshotAvailable, false);
+  assert.equal(
+    promotionAdmission.requiredPortableSnapshotSchema,
+    ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+  );
+  assert.equal(
+    promotionAdmission.portableMaterializationContract.schema,
+    ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA
+  );
+  assert.equal(
+    promotionAdmission.crossPeerReplayStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
+  assert.equal(
+    promotionAdmission.crossPeerReplayBlocker,
+    'worker-retained-gpu-handles-are-not-cross-peer-portable'
+  );
   assert.equal(promotionAdmission.continuationRequired, true);
   assert.equal(promotionAdmission.mainThreadGpuBufferImportAvailable, false);
   assert.equal(promotionAdmission.statePromotionStatus, 'admitted-worker-private-retained-ref-descriptor');
@@ -3579,6 +3625,12 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(admissionWarmDelta.payload.status, 'presentation-worker-retained-state-promotion-admitted');
   assert.equal(admissionWarmDelta.payload.hotBufferKey, promotionAdmission.hotBufferKey);
   assert.equal(admissionWarmDelta.payload.portableState, false);
+  assert.equal(admissionWarmDelta.payload.portableSnapshotRequired, true);
+  assert.equal(admissionWarmDelta.payload.portableSnapshotAvailable, false);
+  assert.equal(
+    admissionWarmDelta.payload.crossPeerReplayStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
   assert.equal(admissionWarmDelta.payload.authoritativeStateMutation, false);
   assert.equal(admissionWarmDelta.payload.promotionCandidate.schema, promotionCandidate.schema);
   assert.equal(admissionWarmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
@@ -3592,6 +3644,12 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(promotionContinuationPlan.status, 'same-worker-retained-continuation-ready');
   assert.equal(promotionContinuationPlan.sourceHotBufferKey, promotionAdmission.hotBufferKey);
   assert.equal(promotionContinuationPlan.workerRunnerAvailable, true);
+  assert.equal(promotionContinuationPlan.portableSnapshotRequired, true);
+  assert.equal(promotionContinuationPlan.portableSnapshotAvailable, false);
+  assert.equal(
+    promotionContinuationPlan.crossPeerReplayStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
   assert.deepEqual(promotionContinuationPlan.workerRetainedBufferRefs, promotionCandidate.retainedBufferRefs);
   const rejectedPromotionAdmission = host.admitPresentationWorkerRetainedStatePromotionCandidate({
     candidate: {
@@ -3718,6 +3776,16 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     'same-device-retained-buffer-import-ready'
   );
   assert.equal(sameDevicePublication.workerRetainedAccessContract.localMaterializationBlocker, null);
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.portableSnapshotRequired, true);
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.portableSnapshotAvailable, false);
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.crossPeerReplayStatus,
+    'blocked-portable-compact-buffer-snapshot-required'
+  );
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.portableMaterializationContract.sameDeviceLocalMaterializationAvailable,
+    true
+  );
   assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.acceptedConsumerModes, [
     'same-device-retained-buffer-import',
     'same-worker-lane-retained-buffer-ref'

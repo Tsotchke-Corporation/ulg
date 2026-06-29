@@ -901,6 +901,22 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenRetainedStatePromotionCandidate?.sourceTransferBytes
       ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes
   );
+  const workerOffscreenRetainedStatePromotionCandidatePortableSnapshotRequired =
+    workerOffscreenRetainedStatePromotionCandidate?.portableSnapshotRequired
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidatePortableSnapshotRequired
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidatePortableSnapshotAvailable =
+    workerOffscreenRetainedStatePromotionCandidate?.portableSnapshotAvailable
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidatePortableSnapshotAvailable
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayStatus =
+    workerOffscreenRetainedStatePromotionCandidate?.crossPeerReplayStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayBlocker =
+    workerOffscreenRetainedStatePromotionCandidate?.crossPeerReplayBlocker
+    ?? renderState?.workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayBlocker
+    ?? null;
   const workerOffscreenRetainedStatePromotionAdmission =
     metric?.workerOffscreenRetainedStatePromotionAdmission
     ?? renderState?.workerOffscreenRetainedStatePromotionAdmission
@@ -945,6 +961,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation =
     workerOffscreenRetainedStatePromotionAdmission?.authoritativeStateMutation
     ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotRequired =
+    workerOffscreenRetainedStatePromotionAdmission?.portableSnapshotRequired
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotRequired
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotAvailable =
+    workerOffscreenRetainedStatePromotionAdmission?.portableSnapshotAvailable
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotAvailable
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionPortableMaterializationStatus =
+    workerOffscreenRetainedStatePromotionAdmission?.portableMaterializationStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionPortableMaterializationStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayStatus =
+    workerOffscreenRetainedStatePromotionAdmission?.crossPeerReplayStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayBlocker =
+    workerOffscreenRetainedStatePromotionAdmission?.crossPeerReplayBlocker
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayBlocker
     ?? null;
   const workerOffscreenRetainedStateContinuation =
     metric?.workerOffscreenRetainedStateContinuation
@@ -1002,6 +1038,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const workerOffscreenRetainedStateContinuationAuthoritativeStateMutation =
     workerOffscreenRetainedStateContinuation?.authoritativeStateMutation
     ?? renderState?.workerOffscreenRetainedStateContinuationAuthoritativeStateMutation
+    ?? null;
+  const workerOffscreenRetainedStateContinuationPortableSnapshotRequired =
+    workerOffscreenRetainedStateContinuation?.portableSnapshotRequired
+    ?? renderState?.workerOffscreenRetainedStateContinuationPortableSnapshotRequired
+    ?? null;
+  const workerOffscreenRetainedStateContinuationPortableSnapshotAvailable =
+    workerOffscreenRetainedStateContinuation?.portableSnapshotAvailable
+    ?? renderState?.workerOffscreenRetainedStateContinuationPortableSnapshotAvailable
+    ?? null;
+  const workerOffscreenRetainedStateContinuationPortableMaterializationStatus =
+    workerOffscreenRetainedStateContinuation?.portableMaterializationStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationPortableMaterializationStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationCrossPeerReplayStatus =
+    workerOffscreenRetainedStateContinuation?.crossPeerReplayStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationCrossPeerReplayStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker =
+    workerOffscreenRetainedStateContinuation?.crossPeerReplayBlocker
+    ?? renderState?.workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker
     ?? null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
@@ -1816,6 +1872,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied,
 		    workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes,
 		    workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes,
+		    workerOffscreenRetainedStatePromotionCandidatePortableSnapshotRequired,
+		    workerOffscreenRetainedStatePromotionCandidatePortableSnapshotAvailable,
+		    workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayStatus,
+		    workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayBlocker,
 		    workerOffscreenRetainedStatePromotionAdmission,
 		    workerOffscreenRetainedStatePromotionAdmissionStatus,
 		    workerOffscreenRetainedStatePromotionAdmissionAccepted,
@@ -1826,6 +1886,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStatePromotionAdmissionStatePromotionStatus,
 		    workerOffscreenRetainedStatePromotionAdmissionContinuationRequired,
 		    workerOffscreenRetainedStatePromotionAdmissionPortableState,
+		    workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotRequired,
+		    workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotAvailable,
+		    workerOffscreenRetainedStatePromotionAdmissionPortableMaterializationStatus,
+		    workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayStatus,
+		    workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayBlocker,
 		    workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation,
 		    workerOffscreenRetainedStateContinuation,
 		    workerOffscreenRetainedStateContinuationStatus,
@@ -1840,6 +1905,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStateContinuationChainStatus,
 		    workerOffscreenRetainedStateContinuationBlocker,
 		    workerOffscreenRetainedStateContinuationPortableState,
+		    workerOffscreenRetainedStateContinuationPortableSnapshotRequired,
+		    workerOffscreenRetainedStateContinuationPortableSnapshotAvailable,
+		    workerOffscreenRetainedStateContinuationPortableMaterializationStatus,
+		    workerOffscreenRetainedStateContinuationCrossPeerReplayStatus,
+		    workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker,
 		    workerOffscreenRetainedStateContinuationAuthoritativeStateMutation,
 		    copyBudget: {
 	      schema: 'peercompute.ulg.sph-performance-benchmark-copy-budget.v0',

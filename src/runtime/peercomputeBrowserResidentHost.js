@@ -70,6 +70,7 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA = 'peercompute
 export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0';
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
 export const ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA = 'peercompute.ulg.worker-retained-access-contract.v0';
+export const ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA = 'peercompute.ulg.worker-retained-portable-materialization-contract.v0';
 export const ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA = 'peercompute.ulg.worker-retained-continuation-plan.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
@@ -1807,6 +1808,56 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
   };
 }
 
+function buildWorkerRetainedPortableMaterializationContract({
+  cacheKey = null,
+  stateKey = null,
+  sourceHotBufferKey = null,
+  sourceMode = 'worker-retained-buffer-refs',
+  sourceSchema = null,
+  sourceTaskId = null,
+  sourceNodeId = null,
+  sourceStage = null,
+  workerModuleUrl = null,
+  outputFamilies = [],
+  acceptedLocalMaterializationModes = [],
+  sameDeviceRetainedBufferImportAvailable = false
+} = {}) {
+  const localModes = uniqueStringList(acceptedLocalMaterializationModes);
+  const sameDeviceLocalMaterializationAvailable = sameDeviceRetainedBufferImportAvailable === true
+    || localModes.includes('same-device-retained-buffer-import');
+  return {
+    schema: ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA,
+    status: 'blocked-portable-compact-buffer-snapshot-required',
+    reason: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+    cacheKey,
+    stateKey,
+    sourceHotBufferKey,
+    sourceMode,
+    sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl,
+    portableState: false,
+    portableSnapshotRequired: true,
+    portableSnapshotAvailable: false,
+    requiredSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    requiredMaterializationMode: 'compact-buffer-snapshot',
+    acceptedPortableMaterializationModes: ['compact-buffer-snapshot'],
+    acceptedLocalMaterializationModes: localModes,
+    sameDeviceLocalMaterializationAvailable,
+    sameDeviceRetainedBufferImportAvailable: sameDeviceLocalMaterializationAvailable,
+    localMaterializationCanBypassSnapshot: sameDeviceLocalMaterializationAvailable,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: 'blocked-portable-compact-buffer-snapshot-required',
+    crossPeerReplayBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+    readbackRequiredForPortableSnapshot: true,
+    workerPrivateGpuBufferHandles: true,
+    authoritativeStateMutation: false,
+    outputFamilies: uniqueStringList(outputFamilies)
+  };
+}
+
 function buildWorkerRetainedAccessContract({
   cacheKey = null,
   stateKey = null,
@@ -1841,6 +1892,20 @@ function buildWorkerRetainedAccessContract({
   const acceptedMaterializationModes = sameDevice || sameDeviceMaterializationAvailable
     ? ['same-device-retained-buffer-import']
     : [];
+  const portableMaterializationContract = buildWorkerRetainedPortableMaterializationContract({
+    cacheKey,
+    stateKey,
+    sourceHotBufferKey: hotBufferKey,
+    sourceMode,
+    sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl,
+    outputFamilies,
+    acceptedLocalMaterializationModes: acceptedMaterializationModes,
+    sameDeviceRetainedBufferImportAvailable: sameDeviceMaterializationAvailable || sameDevice
+  });
   return {
     schema: ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
     status: sameDevice
@@ -1881,6 +1946,17 @@ function buildWorkerRetainedAccessContract({
     workerContinuationProtocol: 'same-worker-lane-retained-buffer-ref',
     acceptedConsumerModes,
     acceptedMaterializationModes,
+    portableState: false,
+    portableSnapshotRequired: true,
+    portableSnapshotAvailable: false,
+    requiredPortableSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    portableMaterializationStatus: portableMaterializationContract.status,
+    portableMaterializationBlocker: portableMaterializationContract.crossPeerReplayBlocker,
+    acceptedPortableMaterializationModes: portableMaterializationContract.acceptedPortableMaterializationModes,
+    portableMaterializationContract,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: portableMaterializationContract.crossPeerReplayStatus,
+    crossPeerReplayBlocker: portableMaterializationContract.crossPeerReplayBlocker,
     remoteRetainedRefsUsableLocally: false,
     stateManagerAdmissionRequired: true,
     authoritativeStateMutation: false
@@ -2008,6 +2084,16 @@ export function planWorkerRetainedContinuationFromAccessContract({
     sameDeviceRetainedBufferImportAvailable: contract?.sameDeviceRetainedBufferImportAvailable === true,
     sameDeviceRetainedBufferImport: contract?.sameDeviceRetainedBufferImport || null,
     sameDeviceSourceHotBufferKey: contract?.sameDeviceSourceHotBufferKey || null,
+    portableState: contract?.portableState === true,
+    portableSnapshotRequired: contract?.portableSnapshotRequired === true,
+    portableSnapshotAvailable: contract?.portableSnapshotAvailable === true,
+    requiredPortableSnapshotSchema: contract?.requiredPortableSnapshotSchema || null,
+    portableMaterializationStatus: contract?.portableMaterializationStatus || null,
+    portableMaterializationBlocker: contract?.portableMaterializationBlocker || null,
+    portableMaterializationContract: contract?.portableMaterializationContract || null,
+    crossPeerReplayReady: contract?.crossPeerReplayReady === true,
+    crossPeerReplayStatus: contract?.crossPeerReplayStatus || null,
+    crossPeerReplayBlocker: contract?.crossPeerReplayBlocker || null,
     workerLocal: contract?.workerLocal !== false,
     bufferResidency: contract?.bufferResidency || sourceRecord?.bufferResidency || sourceRecord?.payload?.bufferResidency || null,
     workerContinuationProtocol: contract?.workerContinuationProtocol || null,
@@ -2125,6 +2211,16 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport
   });
   workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
+  workerRetainedBufferImport.portableMaterializationContract =
+    workerRetainedAccessContract.portableMaterializationContract;
+  workerRetainedBufferImport.portableSnapshotRequired =
+    workerRetainedAccessContract.portableSnapshotRequired;
+  workerRetainedBufferImport.portableSnapshotAvailable =
+    workerRetainedAccessContract.portableSnapshotAvailable;
+  workerRetainedBufferImport.crossPeerReplayStatus =
+    workerRetainedAccessContract.crossPeerReplayStatus;
+  workerRetainedBufferImport.crossPeerReplayBlocker =
+    workerRetainedAccessContract.crossPeerReplayBlocker;
   const hotBufferRecord = {
     schema: ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-hot-buffer-source-stored',
@@ -2149,6 +2245,12 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
+    portableMaterializationContract: workerRetainedAccessContract.portableMaterializationContract,
+    portableSnapshotRequired: workerRetainedAccessContract.portableSnapshotRequired,
+    portableSnapshotAvailable: workerRetainedAccessContract.portableSnapshotAvailable,
+    portableMaterializationStatus: workerRetainedAccessContract.portableMaterializationStatus,
+    crossPeerReplayStatus: workerRetainedAccessContract.crossPeerReplayStatus,
+    crossPeerReplayBlocker: workerRetainedAccessContract.crossPeerReplayBlocker,
     compactPublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport,
     workerRetainedAccessContract
@@ -2183,6 +2285,12 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
+    portableMaterializationContract: workerRetainedAccessContract.portableMaterializationContract,
+    portableSnapshotRequired: workerRetainedAccessContract.portableSnapshotRequired,
+    portableSnapshotAvailable: workerRetainedAccessContract.portableSnapshotAvailable,
+    portableMaterializationStatus: workerRetainedAccessContract.portableMaterializationStatus,
+    crossPeerReplayStatus: workerRetainedAccessContract.crossPeerReplayStatus,
+    crossPeerReplayBlocker: workerRetainedAccessContract.crossPeerReplayBlocker,
     outputFamilies,
     compactPublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport,
@@ -2289,6 +2397,14 @@ export function admitPresentationWorkerRetainedStatePromotionCandidate({
     stateManagerAdmissionRequired: true,
     authoritativeStateMutation: false,
     portableState: false,
+    portableSnapshotRequired: true,
+    portableSnapshotAvailable: false,
+    requiredPortableSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    portableMaterializationStatus: 'blocked-portable-compact-buffer-snapshot-required',
+    portableMaterializationBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: 'blocked-portable-compact-buffer-snapshot-required',
+    crossPeerReplayBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
     workerPrivateGpuBufferHandles: true,
     mainThreadGpuBufferImportAvailable: false,
     updatedAtMs: nowMs(),
@@ -2374,6 +2490,29 @@ export function admitPresentationWorkerRetainedStatePromotionCandidate({
     workerRetainedBufferRefs: validation.retainedBufferRefs,
     retainedBufferRefCount: validation.retainedBufferRefs.length,
     outputFamilies,
+    portableMaterializationContract:
+      mechanicsPublication.workerRetainedAccessContract?.portableMaterializationContract || null,
+    portableSnapshotRequired:
+      mechanicsPublication.workerRetainedAccessContract?.portableSnapshotRequired === true,
+    portableSnapshotAvailable:
+      mechanicsPublication.workerRetainedAccessContract?.portableSnapshotAvailable === true,
+    requiredPortableSnapshotSchema:
+      mechanicsPublication.workerRetainedAccessContract?.requiredPortableSnapshotSchema
+      || ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    portableMaterializationStatus:
+      mechanicsPublication.workerRetainedAccessContract?.portableMaterializationStatus
+      || 'blocked-portable-compact-buffer-snapshot-required',
+    portableMaterializationBlocker:
+      mechanicsPublication.workerRetainedAccessContract?.portableMaterializationBlocker
+      || 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+    crossPeerReplayReady:
+      mechanicsPublication.workerRetainedAccessContract?.crossPeerReplayReady === true,
+    crossPeerReplayStatus:
+      mechanicsPublication.workerRetainedAccessContract?.crossPeerReplayStatus
+      || 'blocked-portable-compact-buffer-snapshot-required',
+    crossPeerReplayBlocker:
+      mechanicsPublication.workerRetainedAccessContract?.crossPeerReplayBlocker
+      || 'worker-retained-gpu-handles-are-not-cross-peer-portable',
     promotionCandidate: cloneSerializableValue(candidate),
     mechanicsPublicationCommitDeltaTaskId: mechanicsPublication.commitDeltaTaskId,
     mechanicsPublicationCommitDeltaScope: mechanicsPublication.commitDeltaScope,

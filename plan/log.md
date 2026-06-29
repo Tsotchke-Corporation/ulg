@@ -1,5 +1,61 @@
 # ULG Implementation Log
 
+## 2026-06-29 AKDT - Retained Continuation Portability Contract
+
+Status:
+
+- Added
+  `peercompute.ulg.worker-retained-portable-materialization-contract.v0` to
+  worker-retained access contracts. The contract separates local same-worker
+  retained-buffer consumption from portable cross-peer replay and records
+  `portableSnapshotRequired=true`, `portableSnapshotAvailable=false`, and
+  `crossPeerReplayStatus=blocked-portable-compact-buffer-snapshot-required`
+  for worker-private GPU refs.
+- Mechanics worker-retained publications now carry the portability contract on
+  the worker-retained import, hot-buffer record, warm delta payload, and
+  continuation plan. Same-device local imports can still bypass a snapshot, but
+  they do not make the state portable.
+- Presentation-worker promotion candidates, StateManager admissions, retained
+  continuations, render-state fields, and benchmark summaries now expose the
+  same portable snapshot and cross-peer replay blocker. Same-worker
+  continuation remains complete and non-authoritative.
+- Updated the active todo/plan text to remove stale "next: StateManager
+  admission/same-worker continuation" routing; the remaining architecture slice
+  is compact snapshot export/materialization for cross-peer replay.
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  `node --check src/visualization/sphPhaseScene.js`.
+- PASS:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `27` passing tests.
+- PASS:
+  HTTPS benchmark against `https://127.0.0.1:5173` wrote
+  `/tmp/ulg-presentation-retained-portability-bench.json` with scenario/probe
+  `good`, issues `[]`,
+  `workerOffscreenRetainedStateContinuationStatus=presentation-worker-retained-state-continuation-completed`,
+  `workerOffscreenRetainedStateContinuationApplied=true`,
+  `workerOffscreenRetainedStateContinuationInputStatus=applied-worker-retained-g2p-input`,
+  `workerOffscreenRetainedStateContinuationPortableState=false`,
+  `workerOffscreenRetainedStateContinuationPortableSnapshotRequired=true`,
+  `workerOffscreenRetainedStateContinuationPortableSnapshotAvailable=false`,
+  and
+  `workerOffscreenRetainedStateContinuationCrossPeerReplayStatus=blocked-portable-compact-buffer-snapshot-required`.
+- PASS:
+  Live server check: HTTPS `https://127.0.0.1:5173/` returns HTTP/2 `200`;
+  HTTP `http://127.0.0.1:5174/` returns HTTP/1.1 `200`; both listeners are
+  bound to `0.0.0.0`.
+
+Open:
+
+- Cross-peer replay still needs an actual compact snapshot export/readback or
+  a peer-local materialization protocol. The current slice only makes that
+  boundary explicit and testable while preserving same-worker continuation.
+
 ## 2026-06-29 AKDT - Presentation-Worker Retained State Promotion Candidate
 
 Status:

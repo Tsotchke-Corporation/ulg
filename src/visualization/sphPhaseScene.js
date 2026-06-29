@@ -134,6 +134,10 @@ export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_READY_ST
   'presentation-worker-retained-state-promotion-candidate-ready';
 export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_PENDING_ADMISSION_STATUS =
   'pending-state-manager-admission-worker-local-retained-refs';
+export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
+export const ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA =
+  'peercompute.ulg.worker-retained-portable-materialization-contract.v0';
 
 function normalizeHexColor(value) {
   const raw = String(value ?? '').trim();
@@ -6557,6 +6561,47 @@ export function createSphPhaseScene(container, {
       || renderer.userData.sphWorkerOffscreenRetainedStateContinuation
       || null;
   }
+  function workerRetainedPortableMaterializationStatusFrom(source = null) {
+    const contract = source?.portableMaterializationContract
+      || source?.workerRetainedAccessContract?.portableMaterializationContract
+      || source?.workerRetainedBufferImport?.portableMaterializationContract
+      || source?.workerRetainedBufferImport?.workerRetainedAccessContract?.portableMaterializationContract
+      || null;
+    const status = source?.portableMaterializationStatus
+      || source?.workerRetainedAccessContract?.portableMaterializationStatus
+      || contract?.status
+      || 'blocked-portable-compact-buffer-snapshot-required';
+    const blocker = source?.portableMaterializationBlocker
+      || source?.crossPeerReplayBlocker
+      || source?.workerRetainedAccessContract?.portableMaterializationBlocker
+      || source?.workerRetainedAccessContract?.crossPeerReplayBlocker
+      || contract?.crossPeerReplayBlocker
+      || 'worker-retained-gpu-handles-are-not-cross-peer-portable';
+    return {
+      schema: contract?.schema || ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA,
+      status,
+      portableState: source?.portableState === true || contract?.portableState === true,
+      portableSnapshotRequired: source?.portableSnapshotRequired === true
+        || source?.workerRetainedAccessContract?.portableSnapshotRequired === true
+        || contract?.portableSnapshotRequired === true,
+      portableSnapshotAvailable: source?.portableSnapshotAvailable === true
+        || source?.workerRetainedAccessContract?.portableSnapshotAvailable === true
+        || contract?.portableSnapshotAvailable === true,
+      requiredPortableSnapshotSchema: source?.requiredPortableSnapshotSchema
+        || source?.workerRetainedAccessContract?.requiredPortableSnapshotSchema
+        || contract?.requiredSnapshotSchema
+        || ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      crossPeerReplayReady: source?.crossPeerReplayReady === true
+        || source?.workerRetainedAccessContract?.crossPeerReplayReady === true
+        || contract?.crossPeerReplayReady === true,
+      crossPeerReplayStatus: source?.crossPeerReplayStatus
+        || source?.workerRetainedAccessContract?.crossPeerReplayStatus
+        || contract?.crossPeerReplayStatus
+        || status,
+      crossPeerReplayBlocker: blocker,
+      contract
+    };
+  }
   function buildWorkerOffscreenRetainedStateContinuationSignature(admission = null) {
     if (!admission) return null;
     return [
@@ -6602,29 +6647,41 @@ export function createSphPhaseScene(container, {
   } = {}) {
     if (!admission) return publishWorkerOffscreenRetainedStateContinuationStatus(null);
     const signature = buildWorkerOffscreenRetainedStateContinuationSignature(admission);
-    const base = (status, extra = {}) => ({
-      schema: 'peercompute.ulg.presentation-worker-retained-state-continuation.v0',
-      status,
-      reason,
-      admissionStatus: admission.status || null,
-      admissionCommitted: admission.committed === true,
-      admissionAccepted: admission.accepted === true,
-      candidateStatus: candidate?.status || null,
-      hotBufferKey: admission.hotBufferKey || null,
-      sourceHotBufferKey: admission.hotBufferKey || null,
-      laneId: admission.laneId || null,
-      stateKey: admission.stateKey || null,
-      sourceSignature: admission.sourceSignature || candidate?.sourceSignature || null,
-      sourceMode: 'admitted-worker-retained-g2p-input',
-      continuationProtocol: admission.continuationProtocol || null,
-      authoritativeStateMutation: false,
-      portableState: false,
-      updatedAtMs: nowMs(),
-      scientificValidation: false,
-      sphValidation: false,
-      fullPhysicsValidation: false,
-      ...extra
-    });
+    const base = (status, extra = {}) => {
+      const portableMaterialization = workerRetainedPortableMaterializationStatusFrom(admission);
+      return {
+        schema: 'peercompute.ulg.presentation-worker-retained-state-continuation.v0',
+        status,
+        reason,
+        admissionStatus: admission.status || null,
+        admissionCommitted: admission.committed === true,
+        admissionAccepted: admission.accepted === true,
+        candidateStatus: candidate?.status || null,
+        hotBufferKey: admission.hotBufferKey || null,
+        sourceHotBufferKey: admission.hotBufferKey || null,
+        laneId: admission.laneId || null,
+        stateKey: admission.stateKey || null,
+        sourceSignature: admission.sourceSignature || candidate?.sourceSignature || null,
+        sourceMode: 'admitted-worker-retained-g2p-input',
+        continuationProtocol: admission.continuationProtocol || null,
+        authoritativeStateMutation: false,
+        portableState: portableMaterialization.portableState,
+        portableSnapshotRequired: portableMaterialization.portableSnapshotRequired,
+        portableSnapshotAvailable: portableMaterialization.portableSnapshotAvailable,
+        requiredPortableSnapshotSchema: portableMaterialization.requiredPortableSnapshotSchema,
+        portableMaterializationStatus: portableMaterialization.status,
+        portableMaterializationBlocker: portableMaterialization.crossPeerReplayBlocker,
+        portableMaterializationContract: portableMaterialization.contract,
+        crossPeerReplayReady: portableMaterialization.crossPeerReplayReady,
+        crossPeerReplayStatus: portableMaterialization.crossPeerReplayStatus,
+        crossPeerReplayBlocker: portableMaterialization.crossPeerReplayBlocker,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false,
+        ...extra
+      };
+    };
     if (
       admission.status !== 'presentation-worker-retained-state-promotion-admission-published'
       || admission.committed !== true
@@ -6926,6 +6983,15 @@ export function createSphPhaseScene(container, {
       admissionBridgeSchema: ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA,
       stateManagerAdmissionRequired: true,
       authoritativeStateMutation: false,
+      portableState: false,
+      portableSnapshotRequired: true,
+      portableSnapshotAvailable: false,
+      requiredPortableSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      portableMaterializationStatus: 'blocked-portable-compact-buffer-snapshot-required',
+      portableMaterializationBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+      crossPeerReplayReady: false,
+      crossPeerReplayStatus: 'blocked-portable-compact-buffer-snapshot-required',
+      crossPeerReplayBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
       statePromotionStatus: ready
         ? ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_PENDING_ADMISSION_STATUS
         : 'not-promoted-worker-local-output-awaiting-promotion-prerequisites',
@@ -7085,6 +7151,15 @@ export function createSphPhaseScene(container, {
     const promotionCandidate = currentWorkerOffscreenRetainedStatePromotionCandidate();
     const promotionAdmission = currentWorkerOffscreenRetainedStatePromotionAdmission();
     const retainedStateContinuation = currentWorkerOffscreenRetainedStateContinuationStatus();
+    const promotionCandidatePortable = promotionCandidate
+      ? workerRetainedPortableMaterializationStatusFrom(promotionCandidate)
+      : null;
+    const promotionAdmissionPortable = promotionAdmission
+      ? workerRetainedPortableMaterializationStatusFrom(promotionAdmission)
+      : null;
+    const retainedStateContinuationPortable = retainedStateContinuation
+      ? workerRetainedPortableMaterializationStatusFrom(retainedStateContinuation)
+      : null;
     return {
       workerOffscreenResidentStage: status || null,
       workerOffscreenResidentStageStatus: status?.status ?? null,
@@ -7177,6 +7252,14 @@ export function createSphPhaseScene(container, {
         promotionCandidate?.authoritativeStateMutation ?? null,
       workerOffscreenRetainedStatePromotionCandidateStateManagerAdmissionRequired:
         promotionCandidate?.stateManagerAdmissionRequired ?? null,
+      workerOffscreenRetainedStatePromotionCandidatePortableSnapshotRequired:
+        promotionCandidatePortable?.portableSnapshotRequired ?? null,
+      workerOffscreenRetainedStatePromotionCandidatePortableSnapshotAvailable:
+        promotionCandidatePortable?.portableSnapshotAvailable ?? null,
+      workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayStatus:
+        promotionCandidatePortable?.crossPeerReplayStatus ?? null,
+      workerOffscreenRetainedStatePromotionCandidateCrossPeerReplayBlocker:
+        promotionCandidatePortable?.crossPeerReplayBlocker ?? null,
       workerOffscreenRetainedStatePromotionCandidateSameWorkerGpuHandoff:
         promotionCandidate?.sameWorkerGpuHandoff ?? null,
       workerOffscreenRetainedStatePromotionCandidateSourceStageId:
@@ -7214,6 +7297,16 @@ export function createSphPhaseScene(container, {
         promotionAdmission?.continuationRequired ?? null,
       workerOffscreenRetainedStatePromotionAdmissionPortableState:
         promotionAdmission?.portableState ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotRequired:
+        promotionAdmissionPortable?.portableSnapshotRequired ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionPortableSnapshotAvailable:
+        promotionAdmissionPortable?.portableSnapshotAvailable ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionPortableMaterializationStatus:
+        promotionAdmissionPortable?.status ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayStatus:
+        promotionAdmissionPortable?.crossPeerReplayStatus ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionCrossPeerReplayBlocker:
+        promotionAdmissionPortable?.crossPeerReplayBlocker ?? null,
       workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation:
         promotionAdmission?.authoritativeStateMutation ?? null,
       workerOffscreenRetainedStateContinuation: retainedStateContinuation,
@@ -7241,6 +7334,16 @@ export function createSphPhaseScene(container, {
         retainedStateContinuation?.blocker ?? null,
       workerOffscreenRetainedStateContinuationPortableState:
         retainedStateContinuation?.portableState ?? null,
+      workerOffscreenRetainedStateContinuationPortableSnapshotRequired:
+        retainedStateContinuationPortable?.portableSnapshotRequired ?? null,
+      workerOffscreenRetainedStateContinuationPortableSnapshotAvailable:
+        retainedStateContinuationPortable?.portableSnapshotAvailable ?? null,
+      workerOffscreenRetainedStateContinuationPortableMaterializationStatus:
+        retainedStateContinuationPortable?.status ?? null,
+      workerOffscreenRetainedStateContinuationCrossPeerReplayStatus:
+        retainedStateContinuationPortable?.crossPeerReplayStatus ?? null,
+      workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker:
+        retainedStateContinuationPortable?.crossPeerReplayBlocker ?? null,
       workerOffscreenRetainedStateContinuationAuthoritativeStateMutation:
         retainedStateContinuation?.authoritativeStateMutation ?? null
     };

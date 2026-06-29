@@ -83,8 +83,7 @@ publishes
 `peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0`;
 a ready candidate is still non-mutating and reports
 `statePromotionStatus=pending-state-manager-admission-worker-local-retained-refs`.
-Next, implement StateManager admission for worker-private retained refs, or
-select the now-explicit PeerCompute presentation-only mode with
+The explicit PeerCompute presentation-only mode is selectable with
 `renderOwnership=presentation-worker-retained-output-presentation-only`. That
 mode auto-requests the presentation-worker resident stage chain, resolves to
 the implemented worker-owned producer path, and records
@@ -94,11 +93,17 @@ admission for the ready retained-output promotion candidate:
 `peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0`
 commits warm deltas under
 `ulg-presentation-worker-retained-state-promotion-admissions` and points at a
-worker-retained hot-buffer key for same-worker continuation. This remains
-`portableState=false` and `authoritativeStateMutation=false`; next, consume the
-admitted hot-buffer key for same-worker continuation or create portable
-snapshots for cross-peer replay. Keep the direct `GPUBuffer` structured-clone
-path as an explicit experimental mode only.
+worker-retained hot-buffer key. Follow-up now consumes that admitted hot-buffer
+key on the same presentation-worker lane: the continuation planner accepts the
+StateManager-published worker-retained access contract, reruns
+`P2G -> gridUpdate -> G2P` with `useWorkerRetainedG2pInput=true`, and reports
+`presentation-worker-retained-state-continuation-completed` when the retained
+G2P buffers seed the next pass. This remains `portableState=false` and
+`authoritativeStateMutation=false`. The next cross-peer/remote replay slice is
+not another same-worker continuation change; it must export or otherwise admit
+a compact `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0`
+materialization contract for worker-private GPU refs. Keep the direct
+`GPUBuffer` structured-clone path as an explicit experimental mode only.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

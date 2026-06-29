@@ -90,9 +90,13 @@ Tactical status, 2026-06-28 AKDT:
   `ulg-presentation-worker-retained-state-promotion-admissions`, store a
   worker-retained hot-buffer key, and expose a same-worker continuation
   contract while keeping `portableState=false` and
-  `authoritativeStateMutation=false`. The next architecture task is consuming
-  the admitted hot-buffer key for same-worker continuation, or producing
-  portable snapshots for cross-peer replay.
+  `authoritativeStateMutation=false`. Follow-up now consumes that admitted
+  hot-buffer key on the same presentation-worker lane: the scene derives a
+  `same-worker-retained-continuation-ready` plan, reruns the
+  `P2G -> gridUpdate -> G2P` chain with `useWorkerRetainedG2pInput`, and
+  records `applied-worker-retained-g2p-input` on P2G. This is deliberately
+  same-device and same-worker only; portable snapshots for cross-peer replay
+  remain a separate architecture task.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

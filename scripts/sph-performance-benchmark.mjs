@@ -946,6 +946,63 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenRetainedStatePromotionAdmission?.authoritativeStateMutation
     ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation
     ?? null;
+  const workerOffscreenRetainedStateContinuation =
+    metric?.workerOffscreenRetainedStateContinuation
+    ?? renderState?.workerOffscreenRetainedStateContinuation
+    ?? metric?.rendererInit?.workerOffscreenRetainedStateContinuation
+    ?? null;
+  const workerOffscreenRetainedStateContinuationStatus =
+    workerOffscreenRetainedStateContinuation?.status
+    ?? renderState?.workerOffscreenRetainedStateContinuationStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationHotBufferKey =
+    workerOffscreenRetainedStateContinuation?.hotBufferKey
+    ?? renderState?.workerOffscreenRetainedStateContinuationHotBufferKey
+    ?? null;
+  const workerOffscreenRetainedStateContinuationSourceHotBufferKey =
+    workerOffscreenRetainedStateContinuation?.sourceHotBufferKey
+    ?? renderState?.workerOffscreenRetainedStateContinuationSourceHotBufferKey
+    ?? null;
+  const workerOffscreenRetainedStateContinuationAdmissionStatus =
+    workerOffscreenRetainedStateContinuation?.admissionStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationAdmissionStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationAdmissionCommitted =
+    workerOffscreenRetainedStateContinuation?.admissionCommitted
+    ?? renderState?.workerOffscreenRetainedStateContinuationAdmissionCommitted
+    ?? null;
+  const workerOffscreenRetainedStateContinuationPlanStatus =
+    workerOffscreenRetainedStateContinuation?.continuationPlanStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationPlanStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationUseWorkerRetainedInput =
+    workerOffscreenRetainedStateContinuation?.useWorkerRetainedInput
+    ?? renderState?.workerOffscreenRetainedStateContinuationUseWorkerRetainedInput
+    ?? null;
+  const workerOffscreenRetainedStateContinuationInputStatus =
+    workerOffscreenRetainedStateContinuation?.workerRetainedContinuationInputStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationInputStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationApplied =
+    workerOffscreenRetainedStateContinuation?.workerRetainedContinuationApplied
+    ?? renderState?.workerOffscreenRetainedStateContinuationApplied
+    ?? null;
+  const workerOffscreenRetainedStateContinuationChainStatus =
+    workerOffscreenRetainedStateContinuation?.chainStatus
+    ?? renderState?.workerOffscreenRetainedStateContinuationChainStatus
+    ?? null;
+  const workerOffscreenRetainedStateContinuationBlocker =
+    workerOffscreenRetainedStateContinuation?.blocker
+    ?? renderState?.workerOffscreenRetainedStateContinuationBlocker
+    ?? null;
+  const workerOffscreenRetainedStateContinuationPortableState =
+    workerOffscreenRetainedStateContinuation?.portableState
+    ?? renderState?.workerOffscreenRetainedStateContinuationPortableState
+    ?? null;
+  const workerOffscreenRetainedStateContinuationAuthoritativeStateMutation =
+    workerOffscreenRetainedStateContinuation?.authoritativeStateMutation
+    ?? renderState?.workerOffscreenRetainedStateContinuationAuthoritativeStateMutation
+    ?? null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
   const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
@@ -1770,6 +1827,20 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStatePromotionAdmissionContinuationRequired,
 		    workerOffscreenRetainedStatePromotionAdmissionPortableState,
 		    workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation,
+		    workerOffscreenRetainedStateContinuation,
+		    workerOffscreenRetainedStateContinuationStatus,
+		    workerOffscreenRetainedStateContinuationHotBufferKey,
+		    workerOffscreenRetainedStateContinuationSourceHotBufferKey,
+		    workerOffscreenRetainedStateContinuationAdmissionStatus,
+		    workerOffscreenRetainedStateContinuationAdmissionCommitted,
+		    workerOffscreenRetainedStateContinuationPlanStatus,
+		    workerOffscreenRetainedStateContinuationUseWorkerRetainedInput,
+		    workerOffscreenRetainedStateContinuationInputStatus,
+		    workerOffscreenRetainedStateContinuationApplied,
+		    workerOffscreenRetainedStateContinuationChainStatus,
+		    workerOffscreenRetainedStateContinuationBlocker,
+		    workerOffscreenRetainedStateContinuationPortableState,
+		    workerOffscreenRetainedStateContinuationAuthoritativeStateMutation,
 		    copyBudget: {
 	      schema: 'peercompute.ulg.sph-performance-benchmark-copy-budget.v0',
 	      renderRowsReadbackByteLength,

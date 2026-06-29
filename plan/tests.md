@@ -13319,3 +13319,23 @@ Fixed-support water incompressibility clean break, 2026-06-22 AKDT:
   before completing the first 32-step batch. It did capture nonblank
   sky-blue/grid frames, but it is not an accepted physics gate for this
   scenario.
+
+Presentation-worker retained continuation, 2026-06-29 12:01 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js && node --check scripts/sph-long-horizon-probe.mjs && node --check scripts/sph-performance-benchmark.mjs && node --check tests/nativeSurfaceHarness.test.mjs`
+  - Passed.
+- Focused worker/presentation source and worker-lane tests:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  - Passed: `24/24`.
+- Live HTTPS retained continuation benchmark:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-points ULG_BENCH_OUTPUT=/tmp/ulg-presentation-retained-continuation-bench.json ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  - Passed with scenario `status=good`, `probeStatus=good`,
+    `probeIssues=[]`,
+    `workerOffscreenRetainedStatePromotionAdmissionStatus=presentation-worker-retained-state-promotion-admission-published`,
+    `workerOffscreenRetainedStatePromotionAdmissionCommitted=true`,
+    `workerOffscreenRetainedStateContinuationStatus=presentation-worker-retained-state-continuation-completed`,
+    `workerOffscreenRetainedStateContinuationPlanStatus=same-worker-retained-continuation-ready`,
+    `workerOffscreenRetainedStateContinuationInputStatus=applied-worker-retained-g2p-input`,
+    `workerOffscreenRetainedStateContinuationApplied=true`, and
+    `workerOffscreenRetainedStateContinuationChainStatus=worker-offscreen-mechanics-stage-chain-completed`.

@@ -3242,9 +3242,15 @@ physics work:
   resident stage chain, and the scene exposes
   `runWorkerOffscreenMechanicsStageChainOnPresentationDevice()` as the
   scheduler-facing entrypoint.
-- [ ] Wire automatic hot-loop selection/state promotion to the
+- [x] Wire automatic hot-loop selection/state promotion to the
   policy-selectable presentation-worker stage chain. Keep manual scene calls as
-  diagnostics until that scheduler path is explicit.
+  diagnostics until that scheduler path is explicit. The
+  `presentation-worker-retained-output-presentation-only` policy now admits the
+  worker-private retained refs and consumes the admitted hot-buffer on the same
+  presentation-worker lane with `applied-worker-retained-g2p-input`.
+- [ ] Keep portable cross-peer replay separate from same-worker continuation:
+  worker-private GPU refs are not portable state and still need compact
+  snapshots or a peer-local materialization protocol before remote replay.
 - [ ] Do not revive ImageBitmap/readPixels/frame-copy-back as a display path.
 
 ## Integration Rule

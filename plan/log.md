@@ -32595,3 +32595,48 @@ Validation:
   `surfaceDrawRenderBridgeLastRenderStatus=three-render-row-spheres-submitted`,
   `surfaceDrawRenderBridgeSpherePbrMaterialSource=closure-derived-pbr`, and
   `renderRowsDecodedMaterialPhaseCounts={"h2o|liquid":152}`.
+
+## 2026-06-29 12:01 AKDT - Presentation Worker Retained Continuation
+
+Status:
+
+- Consumed the StateManager-admitted presentation-worker retained hot-buffer on
+  the same presentation-worker lane. Admission now triggers a bounded
+  `peercompute.ulg.presentation-worker-retained-state-continuation.v0` state
+  machine.
+- The scene asks the resident authority host for a
+  `peercompute.ulg.worker-retained-continuation-plan.v0` with
+  `requireWorkerRunner=false`, because the OffscreenCanvas presentation worker
+  is the executor for this lane. The retained refs remain worker-private:
+  `portableState=false`, `authoritativeStateMutation=false`, and no
+  main-thread GPU handle import is implied.
+- The continuation reruns the presentation-worker
+  `P2G -> gridUpdate -> G2P` chain with `useWorkerRetainedG2pInput=true`.
+  P2G now reports `applied-worker-retained-g2p-input`, and the final chain
+  reports `worker-offscreen-mechanics-stage-chain-completed`.
+- The long-horizon probe and performance benchmark now take a final bounded
+  sample when this continuation is in flight, so benchmark artifacts record a
+  terminal applied/blocked status instead of an intermediate running state.
+- This completes same-device, same-worker retained continuation for the
+  presentation path. Portable cross-peer replay remains a separate task that
+  needs compact snapshots or peer-local materialization, not worker-private GPU
+  refs.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/nativeSurfaceHarness.test.mjs`
+- PASS:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  with `24/24` tests passing.
+- PASS:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-points ULG_BENCH_OUTPUT=/tmp/ulg-presentation-retained-continuation-bench.json ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  with scenario `status=good`, `probeStatus=good`, `probeIssues=[]`,
+  `workerOffscreenRetainedStateContinuationStatus=presentation-worker-retained-state-continuation-completed`,
+  `workerOffscreenRetainedStateContinuationInputStatus=applied-worker-retained-g2p-input`,
+  `workerOffscreenRetainedStateContinuationApplied=true`,
+  `workerOffscreenRetainedStateContinuationChainStatus=worker-offscreen-mechanics-stage-chain-completed`,
+  `workerOffscreenRetainedStateContinuationPortableState=false`, and
+  `workerOffscreenRetainedStateContinuationAuthoritativeStateMutation=false`.

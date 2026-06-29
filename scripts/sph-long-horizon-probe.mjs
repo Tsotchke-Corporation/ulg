@@ -2386,6 +2386,8 @@ async function runBrowserProbe({
 		          sceneUserData.sphWorkerOffscreenRetainedStatePromotionCandidate || null,
 		        workerOffscreenRetainedStatePromotionAdmission:
 		          sceneUserData.sphWorkerOffscreenRetainedStatePromotionAdmission || null,
+		        workerOffscreenRetainedStateContinuation:
+		          sceneUserData.sphWorkerOffscreenRetainedStateContinuation || null,
 		        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
@@ -3345,6 +3347,35 @@ async function runBrowserProbe({
       markProbeProgress('sampling-initial-state');
       metrics.push(sample(0, 'initial', 0));
       captureFrame(0, 'initial', metrics.length - 1);
+      const waitForWorkerOffscreenRetainedStateContinuation = async () => {
+        const status = sceneApi.getWorkerOffscreenRetainedStateContinuationStatus?.()
+          || overlay.__sphPhaseScene?.userData?.sphWorkerOffscreenRetainedStateContinuation
+          || null;
+        if (!status || status.inFlight !== true) return status;
+        const waitStarted = performance.now();
+        const timeoutMs = 8000;
+        let current = status;
+        markProbeProgress('worker-retained-state-continuation-wait-started', {
+          status: current.status ?? null,
+          hotBufferKey: current.hotBufferKey ?? null
+        });
+        while (performance.now() - waitStarted < timeoutMs) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          current = sceneApi.getWorkerOffscreenRetainedStateContinuationStatus?.()
+            || overlay.__sphPhaseScene?.userData?.sphWorkerOffscreenRetainedStateContinuation
+            || current;
+          if (current?.inFlight !== true) break;
+        }
+        markProbeProgress('worker-retained-state-continuation-wait-completed', {
+          status: current?.status ?? null,
+          inFlight: current?.inFlight ?? null,
+          chainStatus: current?.chainStatus ?? null,
+          inputStatus: current?.workerRetainedContinuationInputStatus ?? null,
+          applied: current?.workerRetainedContinuationApplied ?? null,
+          elapsedMs: performance.now() - waitStarted
+        });
+        return current;
+      };
       const mountedViewState = overlay.__sphPhaseViewState || null;
       const mechanicsIntegrator = mountedViewState?.gpuMechanics?.integrator
         || overlay.__sphDriver?.demo?.gpuMechanics?.integrator
@@ -3617,6 +3648,15 @@ async function runBrowserProbe({
           captureFrame(batchIndex, 'resident-batch-error', metrics.length - 1);
           break;
         }
+      }
+      const continuationWaitStarted = performance.now();
+      const retainedStateContinuation = await waitForWorkerOffscreenRetainedStateContinuation();
+      if (retainedStateContinuation) {
+        metrics.push(sample(
+          requestedBatches,
+          'resident-batch-retained-continuation',
+          performance.now() - continuationWaitStarted
+        ));
       }
       return {
         schema: 'peercompute.ulg.sph-history-long-horizon-probe.v0',

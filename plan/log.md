@@ -98,6 +98,62 @@ Open:
   architecture change if the presentation-worker output should become
   authoritative simulation state instead of presentation-only output.
 
+## 2026-06-29 AKDT - Presentation-Worker Retained Ref StateManager Admission
+
+Status:
+
+- Added
+  `peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0`
+  for clone-safe StateManager admission of presentation-worker retained G2P
+  output descriptors. The admitted payload stores retained refs, fence/handoff
+  evidence, source signature, hot-buffer key, and a worker-retained access
+  contract; it does not import private worker `GPUBuffer` handles into the main
+  thread.
+- Resident authority hosts now expose
+  `admitPresentationWorkerRetainedStatePromotionCandidate()`. Accepted
+  admissions reuse the existing mechanics worker-retained hot-buffer
+  publication path, commit a separate warm delta in
+  `ulg-presentation-worker-retained-state-promotion-admissions`, and remain
+  explicit about `portableState=false`,
+  `authoritativeStateMutation=false`, and same-worker continuation.
+- The scene now attempts admission when a ready retained-state promotion
+  candidate appears and a resident authority host provides the admission
+  method. Render state, long-horizon probe output, and benchmark summaries
+  flatten `workerOffscreenRetainedStatePromotionAdmission*` fields.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  `node --check scripts/sph-performance-benchmark.mjs`
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained mechanics|native WebGPU probe|render ownership policy"`
+  and
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/offscreenPresentationBridge.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  with `18` and `32` passing tests respectively.
+- PASS:
+  HTTPS benchmark with
+  `ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only`
+  wrote `/tmp/ulg-presentation-retained-admission-bench.json` with
+  scenario/probe `good`, issues `[]`, auto-chain completed, candidate ready,
+  `workerOffscreenRetainedStatePromotionAdmissionStatus=presentation-worker-retained-state-promotion-admission-published`,
+  `Accepted=true`, `Committed=true`, scope
+  `ulg-presentation-worker-retained-state-promotion-admissions`,
+  state promotion status `admitted-worker-private-retained-ref-descriptor`,
+  `ContinuationRequired=true`, `PortableState=false`, and
+  `AuthoritativeStateMutation=false`.
+
+Open:
+
+- The admission is a same-worker retained-ref descriptor. A future slice can
+  schedule the next mechanics step directly from the admitted hot-buffer key,
+  but cross-peer replay still requires portable state snapshots or a remote
+  execution placement that owns compatible worker/device refs.
+
 ## 2026-06-29 AKDT - Presentation-Worker Retained Output Render Consumption
 
 Status:

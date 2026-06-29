@@ -2384,6 +2384,8 @@ async function runBrowserProbe({
 		          sceneUserData.sphWorkerOffscreenResidentStageChainAuto || null,
 		        workerOffscreenRetainedStatePromotionCandidate:
 		          sceneUserData.sphWorkerOffscreenRetainedStatePromotionCandidate || null,
+		        workerOffscreenRetainedStatePromotionAdmission:
+		          sceneUserData.sphWorkerOffscreenRetainedStatePromotionAdmission || null,
 		        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,

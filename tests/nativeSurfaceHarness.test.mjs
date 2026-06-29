@@ -138,6 +138,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /workerOffscreenResidentStageChainAutoStatus/);
   assert.match(sceneSource, /presentation-worker-mechanics-stage-chain-auto\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-state-promotion-candidate\.v0/);
+  assert.match(sceneSource, /presentation-worker-retained-state-promotion-admission\.v0/);
   assert.match(sceneSource, /not-promoted-worker-local-output-awaiting-state-manager-admission/);
   assert.match(sceneSource, /pending-state-manager-admission-worker-local-retained-refs/);
   assert.match(sceneSource, /workerResidentParticleStateProducerColorRows/);
@@ -154,6 +155,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(probeSource, /workerOffscreenResidentStage/);
   assert.match(probeSource, /workerOffscreenResidentStageChainAuto/);
   assert.match(probeSource, /workerOffscreenRetainedStatePromotionCandidate/);
+  assert.match(probeSource, /workerOffscreenRetainedStatePromotionAdmission/);
   assert.match(benchmarkSource, /ULG_BENCH_RENDER_OWNERSHIP/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipPolicyEffectiveMode/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipStatePromotionMode/);
@@ -181,6 +183,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateAdmissionStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionCandidateStatePromotionStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionAdmissionStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRetainedStatePromotionAdmissionCommitted/);
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);

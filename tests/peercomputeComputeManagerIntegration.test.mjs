@@ -87,6 +87,9 @@ import {
   ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA,
+  ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE,
+  ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA,
   ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
   ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
@@ -3442,6 +3445,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
 
   const summary = summarizePeerComputeResidentAuthorityHost(host);
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationReady, true);
+  assert.equal(summary.residentWorkerRetainedMechanicsPublicationRefreshReady, true);
   assert.equal(summary.residentWorkerRetainedContinuationPlannerReady, true);
 
   const candidate = {
@@ -3511,6 +3515,98 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(warmDelta.payload.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
 
+  assert.equal(typeof host.admitPresentationWorkerRetainedStatePromotionCandidate, 'function');
+  const promotionCandidate = {
+    schema: ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA,
+    status: 'presentation-worker-retained-state-promotion-candidate-ready',
+    laneId: 'ulg:test:presentation-worker-promotion-lane',
+    stateKey: 'ulg:test:presentation-worker-promotion-state',
+    sourceSignature: 'ulg:test:presentation-worker-promotion-source-signature',
+    sourceMode: 'scene-cpu-state',
+    sourceStageId: 'g2p',
+    sourceStep: 3,
+    sourceTime: 0.0015,
+    admissionStatus: 'pending-state-manager-admission',
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false,
+    gpuFenceSatisfied: true,
+    gpuFenceStatus: 'gpu-fence-satisfied',
+    queueCompletionStatus: 'queue-submitted-same-worker-gpu-handoff-no-cpu-fence',
+    queueCompletionMethod: 'same-worker-webgpu-queue-in-order',
+    sameWorkerGpuHandoff: true,
+    sourceTransferBytes: 0,
+    sourceStateTransferBytes: 0,
+    retainedBufferRefs: [
+      'ulg-worker:test:presentation-worker:g2p:state',
+      'ulg-worker:test:presentation-worker:g2p:mechanics'
+    ],
+    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics']
+  };
+  const promotionAdmission = host.admitPresentationWorkerRetainedStatePromotionCandidate({
+    candidate: promotionCandidate,
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    taskId: 'ulg:test:presentation-worker-retained-state-admission'
+  });
+  assert.equal(
+    promotionAdmission.schema,
+    ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    promotionAdmission.status,
+    'presentation-worker-retained-state-promotion-admission-published'
+  );
+  assert.equal(promotionAdmission.accepted, true);
+  assert.equal(promotionAdmission.committed, true);
+  assert.equal(promotionAdmission.hotBufferStored, true);
+  assert.equal(promotionAdmission.authoritativeStateMutation, false);
+  assert.equal(promotionAdmission.portableState, false);
+  assert.equal(promotionAdmission.continuationRequired, true);
+  assert.equal(promotionAdmission.mainThreadGpuBufferImportAvailable, false);
+  assert.equal(promotionAdmission.statePromotionStatus, 'admitted-worker-private-retained-ref-descriptor');
+  assert.equal(promotionAdmission.mechanicsPublicationCommitDeltaScope, 'ulg-worker-retained-mechanics-publications');
+  assert.deepEqual(promotionAdmission.workerRetainedBufferRefs, promotionCandidate.retainedBufferRefs);
+  assert.equal(promotionAdmission.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
+  assert.equal(promotionAdmission.workerRetainedAccessContract.workerContinuationRequired, true);
+  const admissionWarmDeltas = host.stateManager.getWarmDeltas(
+    ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE
+  );
+  const admissionWarmDelta = admissionWarmDeltas[promotionAdmission.commitDeltaTaskId];
+  assert.equal(
+    admissionWarmDelta.payload.schema,
+    ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA
+  );
+  assert.equal(admissionWarmDelta.payload.status, 'presentation-worker-retained-state-promotion-admitted');
+  assert.equal(admissionWarmDelta.payload.hotBufferKey, promotionAdmission.hotBufferKey);
+  assert.equal(admissionWarmDelta.payload.portableState, false);
+  assert.equal(admissionWarmDelta.payload.authoritativeStateMutation, false);
+  assert.equal(admissionWarmDelta.payload.promotionCandidate.schema, promotionCandidate.schema);
+  assert.equal(admissionWarmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
+  const promotionContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: promotionAdmission.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: 'ulg:test:presentation-worker-promotion-continuation-lane',
+    requestedStateKey: 'ulg:test:presentation-worker-promotion-continuation-state'
+  });
+  assert.equal(promotionContinuationPlan.status, 'same-worker-retained-continuation-ready');
+  assert.equal(promotionContinuationPlan.sourceHotBufferKey, promotionAdmission.hotBufferKey);
+  assert.equal(promotionContinuationPlan.workerRunnerAvailable, true);
+  assert.deepEqual(promotionContinuationPlan.workerRetainedBufferRefs, promotionCandidate.retainedBufferRefs);
+  const rejectedPromotionAdmission = host.admitPresentationWorkerRetainedStatePromotionCandidate({
+    candidate: {
+      ...promotionCandidate,
+      gpuFenceSatisfied: false
+    }
+  });
+  assert.equal(
+    rejectedPromotionAdmission.status,
+    'presentation-worker-retained-state-promotion-admission-rejected'
+  );
+  assert.equal(rejectedPromotionAdmission.accepted, false);
+  assert.equal(rejectedPromotionAdmission.committed, false);
+  assert.deepEqual(rejectedPromotionAdmission.issues, ['gpu-fence-unsatisfied']);
+
   assert.equal(typeof host.planWorkerRetainedContinuation, 'function');
   const continuationPlan = host.planWorkerRetainedContinuation({
     hotBufferKey: publication.hotBufferKey,
@@ -3543,6 +3639,126 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(blockedContinuationPlan.status, 'blocked-worker-retained-continuation');
   assert.equal(blockedContinuationPlan.blocker, 'worker-retained-continuation-output-family-mismatch');
   assert.deepEqual(blockedContinuationPlan.missingOutputFamilies, ['resident-product-mass']);
+
+  const sameDeviceSourceHotBufferKey = 'ulg:test:mechanics-publication-same-device-source';
+  host.stateManager.setHotBuffer(sameDeviceSourceHotBufferKey, {
+    schema: ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_RESULT_SCHEMA,
+    status: 'hot-buffer-source-stored',
+    hotBufferKey: sameDeviceSourceHotBufferKey,
+    sameDevice: true,
+    retainedBufferRefs: [
+      `${sameDeviceSourceHotBufferKey}:sph-state-buffer`,
+      `${sameDeviceSourceHotBufferKey}:sph-thermo-buffer`,
+      `${sameDeviceSourceHotBufferKey}:mls-mpm-mechanics-buffer`
+    ],
+    localBufferRefs: [
+      `${sameDeviceSourceHotBufferKey}:sph-state-buffer`,
+      `${sameDeviceSourceHotBufferKey}:sph-thermo-buffer`,
+      `${sameDeviceSourceHotBufferKey}:mls-mpm-mechanics-buffer`
+    ]
+  });
+  const sameDeviceRetainedBufferImport = {
+    schema: ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA,
+    status: 'same-device-retained-buffer-source-ready',
+    cacheKey: 'ulg:test:mechanics-publication-same-device-cache',
+    stateKey: 'ulg:test:mechanics-publication-same-device-state',
+    sourceHotBufferKey: sameDeviceSourceHotBufferKey,
+    sameDevice: true,
+    retainedBufferRefs: [
+      `${sameDeviceSourceHotBufferKey}:sph-state-buffer`,
+      `${sameDeviceSourceHotBufferKey}:sph-thermo-buffer`,
+      `${sameDeviceSourceHotBufferKey}:mls-mpm-mechanics-buffer`
+    ],
+    localBufferRefs: [
+      `${sameDeviceSourceHotBufferKey}:sph-state-buffer`,
+      `${sameDeviceSourceHotBufferKey}:sph-thermo-buffer`,
+      `${sameDeviceSourceHotBufferKey}:mls-mpm-mechanics-buffer`
+    ],
+    copyMode: 'zero-copy-local-hot-buffer-source'
+  };
+  const sameDeviceCandidate = {
+    ...candidate,
+    cacheKey: 'ulg:test:mechanics-publication-same-device-cache',
+    stateKey: 'ulg:test:mechanics-publication-same-device-state',
+    sameDeviceRetainedBufferImport
+  };
+  const sameDevicePublication = host.publishWorkerRetainedMechanicsStageOutput({
+    candidate: sameDeviceCandidate,
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:mechanics-stage-plan:same-device',
+    sourceStage: 'g2p'
+  });
+  assert.equal(sameDevicePublication.status, 'worker-retained-mechanics-output-published');
+  assert.equal(sameDevicePublication.sameDevice, false);
+  assert.equal(sameDevicePublication.workerRetainedBufferImport.sameDevice, false);
+  assert.equal(sameDevicePublication.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(sameDevicePublication.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
+  assert.equal(
+    sameDevicePublication.sameDeviceRetainedBufferImport.schema,
+    ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA
+  );
+  assert.equal(
+    sameDevicePublication.workerRetainedBufferImport.sameDeviceRetainedBufferImport.sourceHotBufferKey,
+    sameDeviceSourceHotBufferKey
+  );
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.status,
+    'worker-local-source-ready-main-thread-refresh-blocked'
+  );
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.mainThreadGpuHandlesAvailable, false);
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.workerContinuationRequired, true);
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.sameDeviceSourceHotBufferKey,
+    sameDeviceSourceHotBufferKey
+  );
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.localMaterializationStatus,
+    'same-device-retained-buffer-import-ready'
+  );
+  assert.equal(sameDevicePublication.workerRetainedAccessContract.localMaterializationBlocker, null);
+  assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.acceptedConsumerModes, [
+    'same-device-retained-buffer-import',
+    'same-worker-lane-retained-buffer-ref'
+  ]);
+  assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.acceptedMaterializationModes, [
+    'same-device-retained-buffer-import'
+  ]);
+  assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.localBufferRefs, []);
+
+  const sameDeviceHotRecord = host.stateManager.getHotBuffer(sameDevicePublication.hotBufferKey);
+  assert.equal(sameDeviceHotRecord.sameDevice, false);
+  assert.equal(sameDeviceHotRecord.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(sameDeviceHotRecord.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
+  assert.equal(
+    sameDeviceHotRecord.workerRetainedAccessContract.localMaterializationStatus,
+    'same-device-retained-buffer-import-ready'
+  );
+
+  const sameDeviceWarmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications');
+  const sameDeviceWarmDelta = sameDeviceWarmDeltas[sameDevicePublication.commitDeltaTaskId];
+  assert.equal(sameDeviceWarmDelta.payload.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(sameDeviceWarmDelta.payload.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
+  assert.deepEqual(sameDeviceWarmDelta.payload.workerRetainedAccessContract.acceptedMaterializationModes, [
+    'same-device-retained-buffer-import'
+  ]);
+
+  const sameDeviceContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: sameDevicePublication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    requestedLaneId: 'ulg:test:mechanics-publication-lane:same-device',
+    requestedStateKey: 'ulg:test:mechanics-publication-state:same-device'
+  });
+  assert.equal(sameDeviceContinuationPlan.status, 'same-worker-retained-continuation-ready');
+  assert.equal(sameDeviceContinuationPlan.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(sameDeviceContinuationPlan.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
+  assert.deepEqual(sameDeviceContinuationPlan.acceptedMaterializationModes, [
+    'same-device-retained-buffer-import'
+  ]);
+  assert.equal(sameDeviceContinuationPlan.mainThreadGpuHandlesAvailable, false);
+  assert.equal(sameDeviceContinuationPlan.workerContinuationRequired, true);
 });
 
 test('ULG resident authority host admits worker-retained reaction/product output descriptors', async (t) => {
@@ -4919,6 +5135,79 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   assert.equal(retainedImportHotBuffer.sameDeviceAliasOf, liveSourcePublication.hotBufferKey);
   assert.strictEqual(retainedImportHotBuffer.sphUpload, liveSourceHotBuffer.sphUpload);
   assert.strictEqual(retainedImportHotBuffer.mlsMpmUpload, liveSourceHotBuffer.mlsMpmUpload);
+
+  const retainedImportArgumentDevice = createFakeWebGpuUploadDevice();
+  const retainedImportArgumentExecutor = createUlgSphMlsMpmCompactHotBufferRefreshExecutor({
+    device: retainedImportArgumentDevice,
+    hotBufferKeyPrefix: 'same-device-retained-import-argument-test'
+  });
+  const retainedImportArgumentResult = await retainedImportArgumentExecutor({
+    cacheKey: graph.cacheKey,
+    stateManager: host.stateManager,
+    compactCandidateAuthority: {
+      compactCandidate: compactMechanicsSeed.compactMechanicsStageSeed
+    },
+    sameDeviceRetainedBufferImport: liveSourcePublication.sameDeviceRetainedBufferImport
+  });
+  assert.equal(retainedImportArgumentResult.status, 'ulg-sph-mls-mpm-same-device-retained-buffer-imported');
+  assert.equal(retainedImportArgumentResult.sameDeviceAliasOf, liveSourcePublication.hotBufferKey);
+  assert.equal(retainedImportArgumentResult.copyMode, 'zero-copy-local-hot-buffer-alias');
+  assert.equal(retainedImportArgumentDevice.createdBuffers.length, 0);
+  assert.equal(retainedImportArgumentDevice.writes.length, 0);
+
+  const workerRefreshCandidate = {
+    ...compactMechanicsSeedWithSameDeviceSource.compactMechanicsStageSeed,
+    schema: 'peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0',
+    candidateStatus: 'worker-retained-compact-publication-candidate-ready',
+    cacheKey: graph.cacheKey,
+    stateKey: graph.stateSeedPayload.stateKey,
+    workerRetainedBufferRefs: [
+      'ulg-worker:test:refresh:g2p:state',
+      'ulg-worker:test:refresh:g2p:mechanics'
+    ],
+    retainedBufferRefs: [
+      'ulg-worker:test:refresh:g2p:state',
+      'ulg-worker:test:refresh:g2p:mechanics'
+    ],
+    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    sameDeviceRetainedBufferImport: liveSourcePublication.sameDeviceRetainedBufferImport
+  };
+  const workerRefreshPublication = host.publishWorkerRetainedMechanicsStageOutput({
+    candidate: workerRefreshCandidate,
+    workerRunner: { id: 'same-device-refresh-worker-runner' },
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:worker-retained-refresh:mechanics-stage-plan',
+    sourceStage: 'g2p'
+  });
+  assert.equal(workerRefreshPublication.sameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(
+    workerRefreshPublication.workerRetainedAccessContract.localMaterializationStatus,
+    'same-device-retained-buffer-import-ready'
+  );
+  const workerPublicationRefreshDevice = createFakeWebGpuUploadDevice();
+  const workerPublicationRefresh = host.refreshWorkerRetainedMechanicsPublicationHotBuffers({
+    device: workerPublicationRefreshDevice,
+    publication: workerRefreshPublication,
+    hotBufferKeyPrefix: 'worker-retained-same-device-refresh-test'
+  });
+  assert.equal(workerPublicationRefresh.status, 'ulg-sph-mls-mpm-same-device-retained-buffer-imported');
+  assert.equal(workerPublicationRefresh.refreshed, true);
+  assert.equal(workerPublicationRefresh.workerRetainedRefreshSourceMode, 'worker-retained-mechanics-publication');
+  assert.equal(workerPublicationRefresh.workerPublicationHotBufferKey, workerRefreshPublication.hotBufferKey);
+  assert.equal(workerPublicationRefresh.workerPublicationSameDeviceRetainedBufferImportAvailable, true);
+  assert.equal(
+    workerPublicationRefresh.workerPublicationSameDeviceSourceHotBufferKey,
+    liveSourcePublication.hotBufferKey
+  );
+  assert.equal(workerPublicationRefresh.sameDeviceAliasOf, liveSourcePublication.hotBufferKey);
+  assert.equal(workerPublicationRefresh.copyMode, 'zero-copy-local-hot-buffer-alias');
+  assert.equal(workerPublicationRefreshDevice.createdBuffers.length, 0);
+  assert.equal(workerPublicationRefreshDevice.writes.length, 0);
+  const workerPublicationRefreshHotBuffer = host.stateManager.getHotBuffer(workerPublicationRefresh.hotBufferKey);
+  assert.equal(workerPublicationRefreshHotBuffer.sourceMode, 'same-device-retained-buffer-import');
+  assert.equal(workerPublicationRefreshHotBuffer.sameDeviceAliasOf, liveSourcePublication.hotBufferKey);
+  assert.strictEqual(workerPublicationRefreshHotBuffer.sphUpload, liveSourceHotBuffer.sphUpload);
+  assert.strictEqual(workerPublicationRefreshHotBuffer.mlsMpmUpload, liveSourceHotBuffer.mlsMpmUpload);
 
   const originalSubmitTaskGraph = host.nodeKernel.submitTaskGraph;
   const originalCommitRemoteTaskGraphCompactCandidate = host.nodeKernel.commitRemoteTaskGraphCompactCandidate;

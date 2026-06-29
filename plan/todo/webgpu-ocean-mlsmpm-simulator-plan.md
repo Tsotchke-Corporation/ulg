@@ -84,9 +84,15 @@ Tactical status, 2026-06-28 AKDT:
   auto-requests this retained G2P chain, resolves to the implemented
   worker-owned resident producer path, and reports
   `statePromotionMode=presentation-only` with
-  `authoritativeStateMutationExpected=false`. The remaining architecture task
-  is StateManager admission for worker-private retained refs if that output
-  should become authoritative simulation state.
+  `authoritativeStateMutationExpected=false`. Follow-up added
+  `peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0`;
+  ready promotion candidates commit warm deltas under
+  `ulg-presentation-worker-retained-state-promotion-admissions`, store a
+  worker-retained hot-buffer key, and expose a same-worker continuation
+  contract while keeping `portableState=false` and
+  `authoritativeStateMutation=false`. The next architecture task is consuming
+  the admitted hot-buffer key for same-worker continuation, or producing
+  portable snapshots for cross-peer replay.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

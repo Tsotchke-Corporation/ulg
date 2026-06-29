@@ -6380,6 +6380,7 @@ export function createSphPhaseScene(container, {
   let workerOffscreenResidentStageChainAutoSignature = null;
   let workerOffscreenResidentStageChainAutoCompletedSignature = null;
   let workerOffscreenResidentStageChainAutoSequence = 0;
+  let workerOffscreenRetainedStatePromotionAdmissionSignature = null;
   function publishWorkerOffscreenRetainedGpuBufferHandoffStatus(status = null) {
     const nextStatus = status
       || workerOffscreenPresentationBridge?.retainedGpuBufferHandoffStatus
@@ -6416,6 +6417,11 @@ export function createSphPhaseScene(container, {
     scene.userData.sphWorkerOffscreenRetainedStatePromotionCandidate = candidate;
     renderer.userData.sphWorkerOffscreenRetainedStatePromotionCandidate = candidate;
     return candidate;
+  }
+  function publishWorkerOffscreenRetainedStatePromotionAdmission(admission = null) {
+    scene.userData.sphWorkerOffscreenRetainedStatePromotionAdmission = admission;
+    renderer.userData.sphWorkerOffscreenRetainedStatePromotionAdmission = admission;
+    return admission;
   }
   function publishWorkerOffscreenPresentationStatus(status = null) {
     const nextStatus = status || workerOffscreenPresentationBridge?.status || null;
@@ -6532,6 +6538,97 @@ export function createSphPhaseScene(container, {
       || renderer.userData.sphWorkerOffscreenRetainedStatePromotionCandidate
       || null;
   }
+  function currentWorkerOffscreenRetainedStatePromotionAdmission() {
+    return scene.userData.sphWorkerOffscreenRetainedStatePromotionAdmission
+      || renderer.userData.sphWorkerOffscreenRetainedStatePromotionAdmission
+      || null;
+  }
+  function buildWorkerOffscreenRetainedStatePromotionAdmissionSignature(candidate = null) {
+    if (!candidate) return null;
+    return [
+      candidate.schema || 'schema-unknown',
+      candidate.status || 'status-unknown',
+      candidate.laneId || 'lane-unknown',
+      candidate.stateKey || 'state-unknown',
+      candidate.sourceSignature || 'source-unknown',
+      candidate.sourceStageId || 'stage-unknown',
+      candidate.retainedBufferRefCount ?? 'refs-unknown',
+      candidate.gpuFenceSatisfied === true ? 'fence-ok' : 'fence-missing',
+      candidate.sameWorkerGpuHandoff === true ? 'handoff-ok' : 'handoff-missing'
+    ].join('|');
+  }
+  function maybeAdmitWorkerOffscreenRetainedStatePromotionCandidate({
+    candidate = currentWorkerOffscreenRetainedStatePromotionCandidate(),
+    reason = 'worker-offscreen-retained-state-promotion-candidate'
+  } = {}) {
+    if (candidate?.status !== ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_READY_STATUS) {
+      workerOffscreenRetainedStatePromotionAdmissionSignature = null;
+      return publishWorkerOffscreenRetainedStatePromotionAdmission(null);
+    }
+    const signature = buildWorkerOffscreenRetainedStatePromotionAdmissionSignature(candidate);
+    const currentAdmission = currentWorkerOffscreenRetainedStatePromotionAdmission();
+    if (
+      signature
+      && workerOffscreenRetainedStatePromotionAdmissionSignature === signature
+      && currentAdmission?.committed === true
+    ) {
+      return currentAdmission;
+    }
+    const host = resolveSceneResidentAuthorityHost();
+    if (typeof host?.admitPresentationWorkerRetainedStatePromotionCandidate !== 'function') {
+      workerOffscreenRetainedStatePromotionAdmissionSignature = signature;
+      return publishWorkerOffscreenRetainedStatePromotionAdmission({
+        schema: 'peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0',
+        status: 'presentation-worker-retained-state-promotion-admission-blocked-host-unavailable',
+        accepted: false,
+        committed: false,
+        reason,
+        blocker: 'resident-authority-host-admission-method-unavailable',
+        candidateSignature: signature,
+        stateManagerAdmissionRequired: true,
+        authoritativeStateMutation: false,
+        portableState: false,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+    try {
+      const admission = host.admitPresentationWorkerRetainedStatePromotionCandidate({
+        candidate,
+        workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+        sourceTaskId: candidate.sourceSignature || candidate.chainAutoStatus || null,
+        taskId: `ulg:presentation-worker-retained-state-promotion:${candidate.stateKey || candidate.sourceSignature || signature}`
+      });
+      workerOffscreenRetainedStatePromotionAdmissionSignature = signature;
+      return publishWorkerOffscreenRetainedStatePromotionAdmission({
+        ...admission,
+        reason,
+        candidateSignature: signature
+      });
+    } catch (error) {
+      workerOffscreenRetainedStatePromotionAdmissionSignature = signature;
+      return publishWorkerOffscreenRetainedStatePromotionAdmission({
+        schema: 'peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0',
+        status: 'presentation-worker-retained-state-promotion-admission-failed',
+        accepted: false,
+        committed: false,
+        reason,
+        blocker: 'resident-authority-host-admission-threw',
+        candidateSignature: signature,
+        errorName: error instanceof Error ? error.name : null,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        stateManagerAdmissionRequired: true,
+        authoritativeStateMutation: false,
+        portableState: false,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+  }
   function refreshWorkerOffscreenRetainedStatePromotionCandidate({
     reason = 'worker-offscreen-retained-state-promotion-refresh',
     chainAutoStatus = scene.userData.sphWorkerOffscreenResidentStageChainAuto || null,
@@ -6544,6 +6641,7 @@ export function createSphPhaseScene(container, {
       || chain?.status === 'worker-offscreen-mechanics-stage-chain-completed'
     );
     if (!chainCompleted) {
+      publishWorkerOffscreenRetainedStatePromotionAdmission(null);
       return publishWorkerOffscreenRetainedStatePromotionCandidate(null);
     }
     const renderRows = currentWorkerOffscreenRenderRowsStatus();
@@ -6579,7 +6677,7 @@ export function createSphPhaseScene(container, {
         : (!fenceSatisfied
           ? 'worker-resident-stage-gpu-fence-required'
           : 'same-worker-gpu-handoff-required'));
-    return publishWorkerOffscreenRetainedStatePromotionCandidate({
+    const published = publishWorkerOffscreenRetainedStatePromotionCandidate({
       schema: ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA,
       status,
       reason,
@@ -6626,6 +6724,11 @@ export function createSphPhaseScene(container, {
       sphValidation: false,
       fullPhysicsValidation: false
     });
+    maybeAdmitWorkerOffscreenRetainedStatePromotionCandidate({
+      candidate: published,
+      reason
+    });
+    return published;
   }
   function workerOffscreenRenderRowsRenderStateFields() {
     const status = currentWorkerOffscreenRenderRowsStatus();
@@ -6742,6 +6845,7 @@ export function createSphPhaseScene(container, {
     const chainStatus = scene.userData.sphWorkerOffscreenResidentStageChain || null;
     const chainAutoStatus = scene.userData.sphWorkerOffscreenResidentStageChainAuto || null;
     const promotionCandidate = currentWorkerOffscreenRetainedStatePromotionCandidate();
+    const promotionAdmission = currentWorkerOffscreenRetainedStatePromotionAdmission();
     return {
       workerOffscreenResidentStage: status || null,
       workerOffscreenResidentStageStatus: status?.status ?? null,
@@ -6847,7 +6951,32 @@ export function createSphPhaseScene(container, {
       workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes:
         promotionCandidate?.sourceStateTransferBytes ?? null,
       workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes:
-        promotionCandidate?.sourceTransferBytes ?? null
+        promotionCandidate?.sourceTransferBytes ?? null,
+      workerOffscreenRetainedStatePromotionAdmission: promotionAdmission,
+      workerOffscreenRetainedStatePromotionAdmissionStatus:
+        promotionAdmission?.status ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionAccepted:
+        promotionAdmission?.accepted ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionCommitted:
+        promotionAdmission?.committed ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionReason:
+        promotionAdmission?.reason ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionBlocker:
+        promotionAdmission?.blocker ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionScope:
+        promotionAdmission?.commitDeltaScope ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionTaskId:
+        promotionAdmission?.commitDeltaTaskId ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionHotBufferKey:
+        promotionAdmission?.hotBufferKey ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionStatePromotionStatus:
+        promotionAdmission?.statePromotionStatus ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionContinuationRequired:
+        promotionAdmission?.continuationRequired ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionPortableState:
+        promotionAdmission?.portableState ?? null,
+      workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation:
+        promotionAdmission?.authoritativeStateMutation ?? null
     };
   }
   function refreshWorkerOffscreenRetainedGpuBufferHandoff({

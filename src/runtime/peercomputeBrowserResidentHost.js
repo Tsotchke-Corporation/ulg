@@ -73,6 +73,12 @@ export const ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA = 'peercompute.ulg.worke
 export const ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA = 'peercompute.ulg.worker-retained-continuation-plan.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0';
+export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE =
+  'ulg-presentation-worker-retained-state-promotion-admissions';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
 export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0';
@@ -2195,6 +2201,199 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     status: 'worker-retained-mechanics-output-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+function validatePresentationWorkerRetainedStatePromotionCandidate(candidate = null) {
+  const issues = [];
+  if (!candidate || typeof candidate !== 'object') {
+    return {
+      accepted: false,
+      issues: ['candidate-not-object'],
+      reason: 'candidate-not-object',
+      retainedBufferRefs: [],
+      outputFamilies: []
+    };
+  }
+  if (candidate.schema !== ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA) {
+    issues.push('unexpected-candidate-schema');
+  }
+  if (candidate.status !== 'presentation-worker-retained-state-promotion-candidate-ready') {
+    issues.push('candidate-not-ready');
+  }
+  if (candidate.gpuFenceSatisfied !== true) {
+    issues.push('gpu-fence-unsatisfied');
+  }
+  if (candidate.sameWorkerGpuHandoff !== true) {
+    issues.push('same-worker-gpu-handoff-required');
+  }
+  if (candidate.authoritativeStateMutation === true) {
+    issues.push('authoritative-state-mutation-not-allowed-for-worker-private-refs');
+  }
+  if (candidate.stateManagerAdmissionRequired === false) {
+    issues.push('state-manager-admission-not-required-by-candidate');
+  }
+  if (candidate.sourceStageId && candidate.sourceStageId !== 'g2p') {
+    issues.push('source-stage-not-g2p');
+  }
+  const retainedBufferRefs = uniqueStringList(
+    candidate.workerRetainedBufferRefs || candidate.retainedBufferRefs || []
+  );
+  if (retainedBufferRefs.length === 0) {
+    issues.push('retained-buffer-refs-missing');
+  }
+  const outputFamilies = uniqueStringList(
+    candidate.outputFamilies || ['sph-particle-state', 'mls-mpm-mechanics']
+  );
+  return {
+    accepted: issues.length === 0,
+    issues,
+    reason: issues[0] || null,
+    retainedBufferRefs,
+    outputFamilies
+  };
+}
+
+export function admitPresentationWorkerRetainedStatePromotionCandidate({
+  stateManager = null,
+  nodeKernel = null,
+  candidate = null,
+  workerRunner = null,
+  workerModuleUrl = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  sourceTaskId = null,
+  sourceNodeId = 'presentation-worker-retained-state-promotion',
+  scope = ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE,
+  taskId = null,
+  version = null,
+  mechanicsPublicationScope = 'ulg-worker-retained-mechanics-publications',
+  mechanicsPublicationTaskId = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('admitPresentationWorkerRetainedStatePromotionCandidate requires StateManager hot storage and commitDelta');
+  }
+  const validation = validatePresentationWorkerRetainedStatePromotionCandidate(candidate);
+  const committedAt = Date.now();
+  const base = {
+    schema: ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA,
+    accepted: validation.accepted,
+    reason: validation.reason,
+    issues: [...validation.issues],
+    committed: false,
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false,
+    portableState: false,
+    workerPrivateGpuBufferHandles: true,
+    mainThreadGpuBufferImportAvailable: false,
+    updatedAtMs: nowMs(),
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (!validation.accepted) {
+    return {
+      ...base,
+      status: 'presentation-worker-retained-state-promotion-admission-rejected'
+    };
+  }
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    candidate.cacheKey || candidate.sourceSignature || candidate.laneId || null
+  );
+  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const sourceStage = normalizeString(candidate.sourceStageId, 'g2p');
+  const outputFamilies = validation.outputFamilies;
+  const mechanicsCandidate = {
+    ...cloneSerializableValue(candidate),
+    schema: candidate.schema,
+    candidateStatus: candidate.status,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    workerRetainedBufferRefs: validation.retainedBufferRefs,
+    retainedBufferRefs: validation.retainedBufferRefs,
+    outputFamilies
+  };
+  const mechanicsPublication = publishUlgMechanicsWorkerRetainedHotBufferSource({
+    stateManager,
+    nodeKernel,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey,
+    hotBufferKeyPrefix:
+      hotBufferKeyPrefix || 'ulg:presentation-worker-retained-state-promotion-hot-buffer',
+    candidate: mechanicsCandidate,
+    workerRunner,
+    workerModuleUrl,
+    sourceTaskId: sourceTaskId || candidate.sourceSignature || candidate.chainAutoStatus || null,
+    sourceNodeId,
+    sourceStage,
+    scope: mechanicsPublicationScope,
+    taskId: mechanicsPublicationTaskId
+  });
+  const deltaScope = normalizeString(scope, ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-presentation-worker-retained-state-promotion-admission:${resolvedCacheKey || resolvedStateKey || mechanicsPublication.hotBufferKey}`
+  );
+  const payload = {
+    ...base,
+    status: 'presentation-worker-retained-state-promotion-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    laneId: candidate.laneId || null,
+    sourceSignature: candidate.sourceSignature || null,
+    sourceMode: candidate.sourceMode || null,
+    sourceStageId: sourceStage,
+    sourceStep: candidate.sourceStep ?? null,
+    sourceTime: candidate.sourceTime ?? null,
+    committedAt,
+    promotionMode: 'worker-private-retained-ref-descriptor',
+    admissionMode: 'state-manager-warm-delta-plus-hot-buffer-ref',
+    statePromotionStatus: 'admitted-worker-private-retained-ref-descriptor',
+    statePromotionReason:
+      'StateManager admitted clone-safe worker-retained refs; GPU buffers remain private to the presentation worker lane',
+    continuationRequired: true,
+    continuationProtocol: 'same-worker-lane-retained-buffer-ref',
+    sameWorkerGpuHandoff: true,
+    gpuFenceSatisfied: true,
+    gpuFenceStatus: candidate.gpuFenceStatus || null,
+    queueCompletionStatus: candidate.queueCompletionStatus || null,
+    queueCompletionMethod: candidate.queueCompletionMethod || null,
+    sourceTransferBytes: candidate.sourceTransferBytes ?? null,
+    sourceStateTransferBytes: candidate.sourceStateTransferBytes ?? null,
+    retainedBufferRefs: validation.retainedBufferRefs,
+    workerRetainedBufferRefs: validation.retainedBufferRefs,
+    retainedBufferRefCount: validation.retainedBufferRefs.length,
+    outputFamilies,
+    promotionCandidate: cloneSerializableValue(candidate),
+    mechanicsPublicationCommitDeltaTaskId: mechanicsPublication.commitDeltaTaskId,
+    mechanicsPublicationCommitDeltaScope: mechanicsPublication.commitDeltaScope,
+    hotBufferKey: mechanicsPublication.hotBufferKey,
+    workerRetainedBufferImport: mechanicsPublication.workerRetainedBufferImport,
+    workerRetainedAccessContract: mechanicsPublication.workerRetainedAccessContract
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'presentation-worker-retained-state-promotion-admission-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(mechanicsPublication.hotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
     commitDeltaScope: deltaScope,
     commitDeltaTimestamp: committedAt
@@ -5510,6 +5709,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    admitPresentationWorkerRetainedStatePromotionCandidate(options = {}) {
+      return admitPresentationWorkerRetainedStatePromotionCandidate({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     refreshWorkerRetainedMechanicsPublicationHotBuffers(options = {}) {
       return refreshUlgSphMlsMpmHotBuffersFromWorkerRetainedMechanicsPublication({
         stateManager,
@@ -6272,6 +6478,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
+    residentPresentationWorkerRetainedStateAdmissionReady:
+      typeof host?.admitPresentationWorkerRetainedStatePromotionCandidate === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:
       typeof host?.refreshWorkerRetainedMechanicsPublicationHotBuffers === 'function',
     residentWorkerRetainedContinuationPlannerReady: typeof host?.planWorkerRetainedContinuation === 'function',

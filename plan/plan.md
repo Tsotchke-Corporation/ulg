@@ -93,6 +93,17 @@ presentation-worker resident stage chain, resolves to the implemented
 the mode completes the auto G2P chain and publishes the retained-output
 promotion candidate with zero source/state transfer bytes.
 
+Follow-up checkpoint, 2026-06-29 AKDT: presentation-worker retained G2P output
+now has a StateManager admission contract:
+`peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0`.
+The scene admits ready promotion candidates through the resident authority host
+when available. The admitted warm delta lives in
+`ulg-presentation-worker-retained-state-promotion-admissions`, points at a
+worker-retained hot-buffer key, and remains explicit that
+`portableState=false` and `authoritativeStateMutation=false`. The next useful
+architecture slice is consuming that admitted hot-buffer key for same-worker
+continuation, or producing portable snapshots for cross-peer replay.
+
 Current checkpoint, 2026-06-28 AKDT, follow-up: the
 `worker-owned-resident-render-producer` path now consumes packed resident SPH
 particle state/thermo plus a compact material/phase color table instead of

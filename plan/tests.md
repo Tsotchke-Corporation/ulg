@@ -117,6 +117,20 @@ Focused checks:
     `peerComputeRenderOwnershipPresentationWorkerResidentStagesReady=true`,
     `peerComputeRenderOwnershipStatePromotionMode=presentation-only`, and
     `peerComputeRenderOwnershipAuthoritativeStateMutationExpected=false`.
+  - Retained-ref admission benchmark artifact
+    `/tmp/ulg-presentation-retained-admission-bench.json` completed as
+    scenario/probe `good`, issues `[]`, auto-chain completed, candidate ready,
+    `workerOffscreenRetainedStatePromotionAdmissionStatus=presentation-worker-retained-state-promotion-admission-published`,
+    accepted/committed `true`, scope
+    `ulg-presentation-worker-retained-state-promotion-admissions`,
+    state promotion status `admitted-worker-private-retained-ref-descriptor`,
+    continuation required `true`, portable state `false`, and authoritative
+    mutation `false`.
+  - PeerCompute StateManager integration now asserts
+    `admitPresentationWorkerRetainedStatePromotionCandidate()` writes the
+    retained-state promotion admission warm delta, stores a worker-retained
+    hot-buffer key, rejects unsatisfied fence evidence, and produces a
+    same-worker continuation plan from the admitted hot-buffer key.
   - Benchmark artifact
     `/tmp/ulg-auto-presentation-worker-chain-bench.json` completed with suite
     `status=complete`, scenario/probe `good`, auto-chain completed,

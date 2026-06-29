@@ -901,6 +901,51 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenRetainedStatePromotionCandidate?.sourceTransferBytes
       ?? renderState?.workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes
   );
+  const workerOffscreenRetainedStatePromotionAdmission =
+    metric?.workerOffscreenRetainedStatePromotionAdmission
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmission
+    ?? metric?.rendererInit?.workerOffscreenRetainedStatePromotionAdmission
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionStatus =
+    workerOffscreenRetainedStatePromotionAdmission?.status
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionAccepted =
+    workerOffscreenRetainedStatePromotionAdmission?.accepted
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionAccepted
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionCommitted =
+    workerOffscreenRetainedStatePromotionAdmission?.committed
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionCommitted
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionScope =
+    workerOffscreenRetainedStatePromotionAdmission?.commitDeltaScope
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionScope
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionTaskId =
+    workerOffscreenRetainedStatePromotionAdmission?.commitDeltaTaskId
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionTaskId
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionHotBufferKey =
+    workerOffscreenRetainedStatePromotionAdmission?.hotBufferKey
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionHotBufferKey
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionStatePromotionStatus =
+    workerOffscreenRetainedStatePromotionAdmission?.statePromotionStatus
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionStatePromotionStatus
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionContinuationRequired =
+    workerOffscreenRetainedStatePromotionAdmission?.continuationRequired
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionContinuationRequired
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionPortableState =
+    workerOffscreenRetainedStatePromotionAdmission?.portableState
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionPortableState
+    ?? null;
+  const workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation =
+    workerOffscreenRetainedStatePromotionAdmission?.authoritativeStateMutation
+    ?? renderState?.workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation
+    ?? null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
   const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
@@ -1714,6 +1759,17 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStatePromotionCandidateGpuFenceSatisfied,
 		    workerOffscreenRetainedStatePromotionCandidateSourceStateTransferBytes,
 		    workerOffscreenRetainedStatePromotionCandidateSourceTransferBytes,
+		    workerOffscreenRetainedStatePromotionAdmission,
+		    workerOffscreenRetainedStatePromotionAdmissionStatus,
+		    workerOffscreenRetainedStatePromotionAdmissionAccepted,
+		    workerOffscreenRetainedStatePromotionAdmissionCommitted,
+		    workerOffscreenRetainedStatePromotionAdmissionScope,
+		    workerOffscreenRetainedStatePromotionAdmissionTaskId,
+		    workerOffscreenRetainedStatePromotionAdmissionHotBufferKey,
+		    workerOffscreenRetainedStatePromotionAdmissionStatePromotionStatus,
+		    workerOffscreenRetainedStatePromotionAdmissionContinuationRequired,
+		    workerOffscreenRetainedStatePromotionAdmissionPortableState,
+		    workerOffscreenRetainedStatePromotionAdmissionAuthoritativeStateMutation,
 		    copyBudget: {
 	      schema: 'peercompute.ulg.sph-performance-benchmark-copy-budget.v0',
 	      renderRowsReadbackByteLength,

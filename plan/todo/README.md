@@ -89,8 +89,16 @@ select the now-explicit PeerCompute presentation-only mode with
 mode auto-requests the presentation-worker resident stage chain, resolves to
 the implemented worker-owned producer path, and records
 `statePromotionMode=presentation-only` with
-`authoritativeStateMutationExpected=false`. Keep the direct `GPUBuffer`
-structured-clone path as an explicit experimental mode only.
+`authoritativeStateMutationExpected=false`. Follow-up added StateManager
+admission for the ready retained-output promotion candidate:
+`peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0`
+commits warm deltas under
+`ulg-presentation-worker-retained-state-promotion-admissions` and points at a
+worker-retained hot-buffer key for same-worker continuation. This remains
+`portableState=false` and `authoritativeStateMutation=false`; next, consume the
+admitted hot-buffer key for same-worker continuation or create portable
+snapshots for cross-peer replay. Keep the direct `GPUBuffer` structured-clone
+path as an explicit experimental mode only.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

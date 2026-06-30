@@ -33363,3 +33363,40 @@ Next:
   reducing cold shader/pipeline compile latency in the first material-interface
   refresh, lifting source-local diagnostics into benchmark summaries, and then
   continuing toward resident pressure-interface force coupling.
+
+## 2026-06-30 AKDT - Material Interface Source Diagnostics in Probes
+
+Status:
+
+- The long-horizon probe now samples compact resident material-interface state,
+  including source-local source-field counters and render-field skip status.
+- The SPH performance benchmark now publishes
+  `peercompute.ulg.sph-performance-material-interface-source-field.v0` per
+  scenario. It distinguishes real source-local field extraction from
+  intentional skips such as the `three-render-row-spheres` bridge.
+- The benchmark URL builder accepts
+  `ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES` so diagnostic runs can override
+  the PeerCompute-configurable warmup frame count.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: smoke benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, `probeIssues=[]`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+  The material-interface summary reported
+  `status=render-field-skipped-three-render-row-spheres` and
+  `materialInterfaceStatus=material-interface-field-skipped-three-render-row-spheres`,
+  confirming the PBR sphere fast path bypasses the surface-field producer
+  intentionally.
+
+Next:
+
+- For source-field performance numbers, run the benchmark with a surface-field
+  use case instead of `three-render-row-spheres`. Then continue into cold
+  shader/pipeline compile latency and resident pressure-interface force
+  coupling.

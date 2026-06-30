@@ -31,6 +31,7 @@ test('native WebGPU probe and benchmark flatten validation scope diagnostics', (
 
 test('performance benchmark reports worker offscreen frame transport budget', () => {
   const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
 
   assert.match(
     benchmarkSource,
@@ -66,6 +67,36 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
     benchmarkSource,
     /workerOffscreenPresentationRequested/,
     'benchmark report should record whether worker-offscreen presentation was requested'
+  );
+  assert.match(
+    benchmarkSource,
+    /peercompute\.ulg\.sph-performance-material-interface-source-field\.v0/,
+    'benchmark scenarios should publish material-interface source-field diagnostics'
+  );
+  assert.match(
+    benchmarkSource,
+    /interfaceSourceFieldSourceLocalEstimatedCellVisits/,
+    'benchmark should lift source-local material-interface work estimates'
+  );
+  assert.match(
+    benchmarkSource,
+    /materialInterfaceStatus/,
+    'benchmark should distinguish source-field diagnostics from intentional material-interface skips'
+  );
+  assert.match(
+    benchmarkSource,
+    /ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES/,
+    'benchmark should let source-field diagnostics runs disable interface warmup'
+  );
+  assert.match(
+    probeSource,
+    /residentMaterialInterfaceState/,
+    'long-horizon probe should sample compact resident material-interface state'
+  );
+  assert.match(
+    probeSource,
+    /sourceRenderFieldStatus/,
+    'long-horizon probe should preserve render-field skip status for material-interface diagnostics'
   );
 });
 

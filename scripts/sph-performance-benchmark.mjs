@@ -49,6 +49,19 @@ const retainedCompactSnapshotExportRequested = ['1', 'true', 'yes', 'on'].includ
   String(process.env.ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT || '').toLowerCase()
 );
 const renderOwnershipMode = String(process.env.ULG_BENCH_RENDER_OWNERSHIP || '').trim();
+const residentInterfaceRefreshWarmupFrames = Number.isFinite(Number(
+  process.env.ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES
+    ?? process.env.ULG_BENCH_RESIDENT_INTERFACE_REFRESH_WARMUP_FRAMES
+))
+  && Number(
+    process.env.ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES
+      ?? process.env.ULG_BENCH_RESIDENT_INTERFACE_REFRESH_WARMUP_FRAMES
+  ) >= 0
+  ? Math.round(Number(
+    process.env.ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES
+      ?? process.env.ULG_BENCH_RESIDENT_INTERFACE_REFRESH_WARMUP_FRAMES
+  ))
+  : null;
 const isMobile = ['1', 'true', 'yes', 'on'].includes(String(process.env.ULG_BENCH_IS_MOBILE || '').toLowerCase());
 const hasTouch = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ULG_BENCH_HAS_TOUCH || (isMobile ? '1' : '')).toLowerCase()
@@ -152,6 +165,9 @@ function scenarioUrlForCount(targetCount) {
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
     ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
+    ...(residentInterfaceRefreshWarmupFrames != null
+      ? { residentInterfaceRefreshWarmupFrames: String(residentInterfaceRefreshWarmupFrames) }
+      : {}),
     ...(measureGpuQueueFence ? { residentQueueFence: '1' } : {}),
     lawt: lawThermal ? '1' : '0',
     lawr: lawReactions ? '1' : '0',
@@ -198,6 +214,21 @@ function lastMetricWithRenderState(result) {
     if (metrics[index]?.renderState) return metrics[index];
   }
   return metrics.length ? metrics[metrics.length - 1] : null;
+}
+
+function lastMetricWithMaterialInterfaceState(result) {
+  const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
+  for (let index = metrics.length - 1; index >= 0; index -= 1) {
+    const metric = metrics[index];
+    if (
+      metric?.residentMaterialInterfaceState
+      || metric?.materialInterfaceField
+      || metric?.renderState?.materialInterfaceField
+    ) {
+      return metric;
+    }
+  }
+  return null;
 }
 
 function numberOrNull(value) {
@@ -362,6 +393,13 @@ function firstDefinedMetricValue(...values) {
   return null;
 }
 
+function firstNonNullMetricValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return null;
+}
+
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
   const metrics = Array.isArray(result?.timeline?.metrics) ? result.timeline.metrics : [];
@@ -370,6 +408,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const metric = lastMetricWithRenderState(result);
   const renderState = metric?.renderState || null;
   const surfaceDraw = metric?.surfaceDraw || null;
+  const materialMetric = lastMetricWithMaterialInterfaceState(result) || metric;
+  const materialRenderState = materialMetric?.renderState || null;
+  const materialInterfaceField =
+    materialRenderState?.materialInterfaceField
+    ?? materialMetric?.materialInterfaceField
+    ?? materialMetric?.residentMaterialInterfaceState
+    ?? renderState?.materialInterfaceField
+    ?? metric?.materialInterfaceField
+    ?? metric?.residentMaterialInterfaceState
+    ?? null;
   const probeResidentBatchTiming = metric?.probeResidentBatchTiming || null;
   const probeResidentBatchResidentStepsAwaitMs = numberOrNull(
     probeResidentBatchTiming?.residentStepsAwaitMs
@@ -1730,6 +1778,135 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderState?.renderRefreshRenderStateAssemblyMs
       ?? renderRefreshStageMs?.renderStateAssemblyMs
   );
+  const materialInterfaceStatus = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'status'),
+    ownMetricValue(materialRenderState, 'materialInterfaceFieldStatus'),
+    ownMetricValue(renderState, 'materialInterfaceFieldStatus')
+  );
+  const materialInterfaceReason = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'reason'),
+    ownMetricValue(materialRenderState, 'materialInterfaceFieldReason'),
+    ownMetricValue(renderState, 'materialInterfaceFieldReason')
+  );
+  const sourceRenderFieldStatus = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'sourceRenderFieldStatus'),
+    ownMetricValue(materialRenderState, 'sourceRenderFieldStatus'),
+    ownMetricValue(renderState, 'sourceRenderFieldStatus')
+  );
+  const sourceRenderFieldSchema = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'sourceRenderFieldSchema'),
+    ownMetricValue(materialRenderState, 'sourceRenderFieldSchema'),
+    ownMetricValue(renderState, 'sourceRenderFieldSchema')
+  );
+  const sourceRenderFieldReadback = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'sourceRenderFieldReadback'),
+    ownMetricValue(materialRenderState, 'sourceRenderFieldReadback'),
+    ownMetricValue(renderState, 'sourceRenderFieldReadback')
+  );
+  const sourceRenderFieldReadbackMode = firstDefinedMetricValue(
+    ownMetricValue(materialInterfaceField, 'sourceRenderFieldReadbackMode'),
+    ownMetricValue(materialRenderState, 'sourceRenderFieldReadbackMode'),
+    ownMetricValue(renderState, 'sourceRenderFieldReadbackMode')
+  );
+  const materialInterfaceSourceField = {
+    schema: 'peercompute.ulg.sph-performance-material-interface-source-field.v0',
+    status: firstNonNullMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldStatus'),
+      ownMetricValue(materialInterfaceField, 'sourceFieldStatus'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldStatus'),
+      ownMetricValue(renderState, 'interfaceSourceFieldStatus'),
+      sourceRenderFieldStatus,
+      materialInterfaceStatus
+    ),
+    materialInterfaceStatus,
+    materialInterfaceReason,
+    sourceRenderFieldSchema,
+    sourceRenderFieldStatus,
+    sourceRenderFieldReadback,
+    sourceRenderFieldReadbackMode,
+    sourceFieldSchema: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSchema'),
+      ownMetricValue(materialInterfaceField, 'sourceFieldSchema'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSchema'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSchema')
+    ),
+    backend: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldBackend'),
+      ownMetricValue(materialInterfaceField, 'sourceFieldBackend'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldBackend'),
+      ownMetricValue(renderState, 'interfaceSourceFieldBackend')
+    ),
+    kernelScope: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldKernelScope'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldKernelScope'),
+      ownMetricValue(renderState, 'interfaceSourceFieldKernelScope')
+    ),
+    sourceLocal: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSourceLocal'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSourceLocal'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSourceLocal')
+    ),
+    sourceCount: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSourceLocalSourceCount'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSourceLocalSourceCount'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSourceLocalSourceCount')
+    )),
+    estimatedCellVisits: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSourceLocalEstimatedCellVisits'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSourceLocalEstimatedCellVisits'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSourceLocalEstimatedCellVisits')
+    )),
+    denseCellParticlePairs: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldDenseCellParticlePairs'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldDenseCellParticlePairs'),
+      ownMetricValue(renderState, 'interfaceSourceFieldDenseCellParticlePairs')
+    )),
+    estimatedVisitRatio: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSourceLocalEstimatedVisitRatio'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSourceLocalEstimatedVisitRatio'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSourceLocalEstimatedVisitRatio')
+    )),
+    densityScale: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSourceLocalDensityScale'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldSourceLocalDensityScale'),
+      ownMetricValue(renderState, 'interfaceSourceFieldSourceLocalDensityScale')
+    )),
+    queueCompletionStatus: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldQueueCompletionStatus'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldQueueCompletionStatus'),
+      ownMetricValue(renderState, 'interfaceSourceFieldQueueCompletionStatus')
+    ),
+    queueCompletionMethod: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldQueueCompletionMethod'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldQueueCompletionMethod'),
+      ownMetricValue(renderState, 'interfaceSourceFieldQueueCompletionMethod')
+    ),
+    rowsBufferBorrowed: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldRowsBufferBorrowed'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldRowsBufferBorrowed'),
+      ownMetricValue(renderState, 'interfaceSourceFieldRowsBufferBorrowed')
+    ),
+    rowsBufferReused: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'interfaceSourceFieldRowsBufferReused'),
+      ownMetricValue(materialRenderState, 'interfaceSourceFieldRowsBufferReused'),
+      ownMetricValue(renderState, 'interfaceSourceFieldRowsBufferReused')
+    ),
+    renderFieldReadback: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'renderFieldReadback'),
+      ownMetricValue(materialRenderState, 'renderFieldReadback'),
+      ownMetricValue(renderState, 'renderFieldReadback')
+    ),
+    renderRowsReadback: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'renderRowsReadback'),
+      ownMetricValue(materialRenderState, 'renderRowsReadback'),
+      ownMetricValue(renderState, 'renderRowsReadback')
+    ),
+    candidateReadbackMode: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'candidateReadbackMode'),
+      ownMetricValue(materialRenderState, 'candidateReadbackMode'),
+      ownMetricValue(renderState, 'candidateReadbackMode')
+    )
+  };
   const estimatedReadbackBytesPerBatch = sumKnownNumbers([
     renderRowsReadbackByteLength,
     surfaceDrawSummaryReadbackByteLength
@@ -1920,6 +2097,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderRefreshPressureInterfaceMs,
     renderRefreshWorkerOffscreenRenderRowsMs,
     renderRefreshRenderStateAssemblyMs,
+    materialInterfaceSourceField,
     dispatchTopologyStatus: dispatchTopology?.status ?? null,
     dispatchesPerSubstep: dispatchTopology?.dispatchesPerSubstep ?? null,
     totalDispatches: dispatchTopology?.totalDispatches ?? null,

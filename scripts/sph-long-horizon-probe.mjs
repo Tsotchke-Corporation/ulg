@@ -2315,6 +2315,11 @@ async function runBrowserProbe({
         const sceneUserData = sceneApi?.scene?.userData || {};
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+        const residentMaterialInterfaceState =
+          overlay.__sphResidentMaterialInterfaceState
+          || sceneUserData.sphResidentMaterialInterfaceState
+          || renderState?.materialInterfaceField
+          || null;
         const mechanicsMaterialPhaseUpload = sceneApi.getMlsMpmMechanicsMaterialPhaseUpload?.()
           || sceneUserData.mlsMpmMechanicsMaterialPhaseUpload
           || null;
@@ -2397,6 +2402,63 @@ async function runBrowserProbe({
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
         nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
+        residentMaterialInterfaceState: residentMaterialInterfaceState ? {
+          schema: residentMaterialInterfaceState.schema ?? null,
+          status: residentMaterialInterfaceState.status ?? null,
+          reason: residentMaterialInterfaceState.reason ?? null,
+          sourceRenderFieldSchema:
+            residentMaterialInterfaceState.sourceRenderFieldSchema ?? null,
+          sourceRenderFieldStatus:
+            residentMaterialInterfaceState.sourceRenderFieldStatus ?? null,
+          sourceRenderFieldReadback:
+            residentMaterialInterfaceState.sourceRenderFieldReadback ?? null,
+          sourceRenderFieldReadbackMode:
+            residentMaterialInterfaceState.sourceRenderFieldReadbackMode ?? null,
+          interfaceSourceFieldSchema:
+            residentMaterialInterfaceState.interfaceSourceFieldSchema
+            ?? residentMaterialInterfaceState.sourceFieldSchema
+            ?? null,
+          interfaceSourceFieldStatus:
+            residentMaterialInterfaceState.interfaceSourceFieldStatus
+            ?? residentMaterialInterfaceState.sourceFieldStatus
+            ?? null,
+          interfaceSourceFieldBackend:
+            residentMaterialInterfaceState.interfaceSourceFieldBackend
+            ?? residentMaterialInterfaceState.sourceFieldBackend
+            ?? null,
+          interfaceSourceFieldKernelScope:
+            residentMaterialInterfaceState.interfaceSourceFieldKernelScope ?? null,
+          interfaceSourceFieldSourceLocal:
+            residentMaterialInterfaceState.interfaceSourceFieldSourceLocal ?? null,
+          interfaceSourceFieldSourceLocalSourceCount: finiteOrNull(
+            residentMaterialInterfaceState.interfaceSourceFieldSourceLocalSourceCount
+          ),
+          interfaceSourceFieldSourceLocalEstimatedCellVisits: finiteOrNull(
+            residentMaterialInterfaceState.interfaceSourceFieldSourceLocalEstimatedCellVisits
+          ),
+          interfaceSourceFieldDenseCellParticlePairs: finiteOrNull(
+            residentMaterialInterfaceState.interfaceSourceFieldDenseCellParticlePairs
+          ),
+          interfaceSourceFieldSourceLocalEstimatedVisitRatio: finiteOrNull(
+            residentMaterialInterfaceState.interfaceSourceFieldSourceLocalEstimatedVisitRatio
+          ),
+          interfaceSourceFieldSourceLocalDensityScale: finiteOrNull(
+            residentMaterialInterfaceState.interfaceSourceFieldSourceLocalDensityScale
+          ),
+          interfaceSourceFieldQueueCompletionStatus:
+            residentMaterialInterfaceState.interfaceSourceFieldQueueCompletionStatus ?? null,
+          interfaceSourceFieldQueueCompletionMethod:
+            residentMaterialInterfaceState.interfaceSourceFieldQueueCompletionMethod ?? null,
+          interfaceSourceFieldRowsBufferBorrowed:
+            residentMaterialInterfaceState.interfaceSourceFieldRowsBufferBorrowed ?? null,
+          interfaceSourceFieldRowsBufferReused:
+            residentMaterialInterfaceState.interfaceSourceFieldRowsBufferReused ?? null,
+          renderFieldReadback: residentMaterialInterfaceState.renderFieldReadback ?? null,
+          renderRowsReadback: residentMaterialInterfaceState.renderRowsReadback ?? null,
+          candidateReadbackMode: residentMaterialInterfaceState.candidateReadbackMode ?? null,
+          readySurfaceCount: finiteOrNull(residentMaterialInterfaceState.readySurfaceCount),
+          elementCount: finiteOrNull(residentMaterialInterfaceState.elementCount)
+        } : null,
         probeResidentBatchTiming: overlay.__sphProbeResidentBatchTiming || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
         renderModeSelection: overlay.__sphRenderModeSelection || null,

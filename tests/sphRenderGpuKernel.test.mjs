@@ -1388,6 +1388,57 @@ test('SPH physics material interface WebGPU wrapper consumes retained field buff
   assert.equal(sourceField.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
 });
 
+test('SPH physics material interface can publish GPU-resident summary without candidate readback', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const field = twoSurfaceRenderField();
+  const candidateField = deriveSphMaterialInterfaceCandidateField(field);
+  const { device, bindGroups, dispatches, copies } = fakeSurfaceDrawDevice({
+    drawRows: candidateField.candidateRows,
+    compactedVertexRows: new Float32Array()
+  });
+  const sourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable: field.surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback',
+    source: 'resident-physics-loop-material-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+    device,
+    renderField: sourceField,
+    source: 'resident-physics-loop-material-interface-refresh',
+    sourceCadence: 'resident-step-completed',
+    candidateReadbackMode: 'gpu-resident-summary'
+  });
+
+  assert.equal(interfaceField.schema, 'peercompute.ulg.sph-material-interface-field.v0');
+  assert.equal(interfaceField.status, 'material-interface-field-gpu-resident-summary-pending');
+  assert.equal(interfaceField.backend, 'webgpu-gpu-resident-summary');
+  assert.equal(interfaceField.sourceFieldSchema, 'peercompute.ulg.sph-material-interface-source-field.v0');
+  assert.equal(interfaceField.sourceFieldRowsBufferBound, true);
+  assert.equal(interfaceField.sourceSurfaceBufferBound, true);
+  assert.equal(interfaceField.candidateReadback, false);
+  assert.equal(interfaceField.candidateReadbackMode, 'gpu-resident-summary');
+  assert.equal(interfaceField.candidateMetadataReadback, false);
+  assert.equal(interfaceField.activeCandidateCountPending, true);
+  assert.equal(interfaceField.pressureInterfaceProducer, false);
+  assert.equal(interfaceField.forceCouplingStatus, 'blocked-gpu-resident-pressure-interface-consumer-required');
+  assert.equal(interfaceField.elementCount, 0);
+  assert.equal(interfaceField.queueCompletionStatus, 'not-submitted-gpu-resident-summary');
+  assert.equal(bindGroups.length, 1);
+  assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [
+    Math.ceil(Math.max(1, field.surfaceTable.maxFieldCellCount) / 64)
+  ]);
+  assert.equal(copies.length, 0);
+  sourceField.destroyMaterialInterfaceSourceFieldBuffers();
+  sourceField.releaseMaterialInterfaceSourceFieldLeases();
+  sourceField.destroyMaterialInterfaceSourceFieldBuffers();
+});
+
 test('SPH physics material interface skips oversized visual-cadence candidate readback before allocation', async () => {
   const totalFieldCells = Math.ceil(
     (SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT + 1)

@@ -128,6 +128,7 @@ const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const MATERIAL_INTERFACE_DENSE_CANDIDATE_READBACK_MODE = 'dense-readback';
 const MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE = 'compact-active-readback';
+const MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE = 'gpu-resident-summary';
 const SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS = 'fixed-cell-slots';
 const SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT = 'atomic-compact';
 const PHASE_NAMES_BY_ID = Object.freeze(Object.fromEntries(
@@ -868,6 +869,93 @@ function skippedPhysicsMaterialInterfaceField({
     surfaceAreaDerivation: 'candidate-readback-skipped-budget-or-device-limit',
     physicsStage: 'material-interface-extraction',
     pressureInterfaceProducer: false,
+    scientificValidation: false,
+    sphValidation: false,
+    forceCouplingValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function gpuResidentSummaryPhysicsMaterialInterfaceField({
+  sourceField,
+  sourceRenderField,
+  resolvedFieldRowsBuffer,
+  resolvedSurfaceBuffer,
+  source,
+  sourceCadence,
+  candidateRowsByteLength,
+  candidateReadbackByteBudget,
+  candidateReadbackMode,
+  compactCandidateCapacity = null
+}) {
+  const surfaceCount = sourceRenderField?.surfaceTable?.surfaceCount
+    ?? sourceRenderField?.surfaceCount
+    ?? 0;
+  const candidateCount = Math.max(0, Math.round(finiteNumber(sourceRenderField?.totalFieldCells, 0))) * 3;
+  const compactCapacity = compactMaterialInterfaceCandidateCapacity({
+    candidateCount,
+    surfaceCount,
+    compactCandidateCapacity
+  });
+  const candidateCompactRowsByteLength = compactCapacity
+    * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  return {
+    schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
+    status: 'material-interface-field-gpu-resident-summary-pending',
+    reason: 'candidate rows remain GPU-resident; CPU material-interface elements require compact readback or a GPU pressure consumer',
+    backend: 'webgpu-gpu-resident-summary',
+    authority: 'resident-physics-material-interface-extractor',
+    source,
+    sourceCadence,
+    sourceFieldSchema: sourceField?.schema ?? null,
+    sourceFieldStatus: sourceField?.status ?? null,
+    sourceFieldBackend: sourceField?.backend ?? null,
+    sourceFieldPipelineCacheStatus: sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? sourceField?.pipelineCacheStatus
+      ?? null,
+    sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
+    sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+    sourceRenderFieldPipelineCacheStatus: sourceRenderField?.pipelineCacheStatus
+      ?? sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? null,
+    sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
+    sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
+    sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
+    surfaceCount,
+    readySurfaceCount: 0,
+    totalSurfaceAreaM2: 0,
+    candidateCount,
+    activeCandidateCount: 0,
+    activeCandidateCountPending: true,
+    candidateBackend: 'gpu-resident-summary',
+    candidateReadback: false,
+    candidateReadbackMode,
+    candidateRowsByteLength,
+    candidateDenseRowsByteLength: candidateRowsByteLength,
+    candidateCompactRowsByteLength,
+    candidateCompactCapacity: compactCapacity,
+    candidateCompactOverflowCount: 0,
+    candidateCompactFallbackStatus: null,
+    candidateMetadataReadback: false,
+    candidateReadbackByteBudget,
+    candidatePipelineCacheStatus: null,
+    elementCount: 0,
+    elementLayout: [...SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT],
+    elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+    elementRows: new Float32Array(),
+    elements: [],
+    forceCouplingStatus: 'blocked-gpu-resident-pressure-interface-consumer-required',
+    surfaces: [],
+    queueCompletionStatus: 'not-submitted-gpu-resident-summary',
+    queueCompletionMethod: null,
+    normalDerivation: 'gpu-resident-candidate-summary-pending',
+    surfaceAreaDerivation: 'gpu-resident-candidate-summary-pending',
+    physicsStage: 'material-interface-extraction',
+    pressureInterfaceProducer: false,
+    gpuAuthoritativeState: true,
+    gpuResidentMaterialInterfaceSummary: true,
+    gpuResidentMaterialInterfaceSummaryPending: true,
     scientificValidation: false,
     sphValidation: false,
     forceCouplingValidation: false,
@@ -5550,8 +5638,28 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
   const normalizedCandidateReadbackMode =
     candidateReadbackMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
       ? MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
+      : (candidateReadbackMode === MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE
+          ? MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE
+          : MATERIAL_INTERFACE_DENSE_CANDIDATE_READBACK_MODE);
+  if (normalizedCandidateReadbackMode === MATERIAL_INTERFACE_GPU_RESIDENT_SUMMARY_MODE) {
+    return gpuResidentSummaryPhysicsMaterialInterfaceField({
+      sourceField,
+      sourceRenderField,
+      resolvedFieldRowsBuffer,
+      resolvedSurfaceBuffer,
+      source,
+      sourceCadence,
+      candidateRowsByteLength,
+      candidateReadbackByteBudget,
+      candidateReadbackMode: normalizedCandidateReadbackMode,
+      compactCandidateCapacity
+    });
+  }
+  const normalizedReadbackCandidateMode =
+    normalizedCandidateReadbackMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
+      ? MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
       : MATERIAL_INTERFACE_DENSE_CANDIDATE_READBACK_MODE;
-  const candidateReadbackBlocker = normalizedCandidateReadbackMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
+  const candidateReadbackBlocker = normalizedReadbackCandidateMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE
     ? null
     : materialInterfaceCandidateReadbackBlocker({
       device,
@@ -5569,11 +5677,11 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
       candidateRowsByteLength,
       candidateReadbackByteBudget,
       candidateReadbackBlocker,
-      candidateReadbackMode: normalizedCandidateReadbackMode
+      candidateReadbackMode: normalizedReadbackCandidateMode
     });
   }
   let candidateField = null;
-  if (normalizedCandidateReadbackMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE) {
+  if (normalizedReadbackCandidateMode === MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE) {
     candidateField = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
       device,
       renderField: sourceRenderField,
@@ -5599,7 +5707,7 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
           candidateRowsByteLength,
           candidateReadbackByteBudget,
           candidateReadbackBlocker: fallbackBlocker,
-          candidateReadbackMode: normalizedCandidateReadbackMode,
+          candidateReadbackMode: normalizedReadbackCandidateMode,
           compactCandidateField: candidateField
         });
       }

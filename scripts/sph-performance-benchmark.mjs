@@ -118,6 +118,18 @@ const measureGpuQueueFence = booleanEnv(
 const materialInterfaceDiagnosticRequested =
   booleanEnv('ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC', false)
   || booleanEnv('ULG_BENCH_FORCE_MATERIAL_INTERFACE_REFRESH', false);
+const materialInterfaceCandidateReadbackModeEnv = String(
+  process.env.ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE
+    || process.env.ULG_BENCH_MATERIAL_INTERFACE_READBACK_MODE
+    || ''
+).toLowerCase();
+const materialInterfaceCandidateReadbackMode = [
+  'compact-active-readback',
+  'dense-readback',
+  'gpu-resident-summary'
+].includes(materialInterfaceCandidateReadbackModeEnv)
+  ? materialInterfaceCandidateReadbackModeEnv
+  : 'compact-active-readback';
 const requireActiveGridGate = booleanEnv(
   'ULG_BENCH_REQUIRE_ACTIVE_GRID',
   probeMode === 'direct-resident' && fuseResidentMechanicsActiveGrid
@@ -2545,6 +2557,7 @@ async function main() {
       ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE: activeGridDispatchPlanRefreshMode,
       ULG_PROBE_MEASURE_GPU_QUEUE_FENCE: measureGpuQueueFence ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC: materialInterfaceDiagnosticRequested ? '1' : '0',
+      ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE: materialInterfaceCandidateReadbackMode,
       ...(fusedActiveGridSafetyCells ? {
         ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS: String(fusedActiveGridSafetyCells)
       } : {}),
@@ -2608,6 +2621,7 @@ async function main() {
     },
     surfaceDrawMode,
     materialInterfaceDiagnosticRequested,
+    materialInterfaceCandidateReadbackMode,
     fusedResidentMechanicsSequence: fuseResidentMechanicsSequence,
     fusedResidentMechanicsActiveGrid: fuseResidentMechanicsActiveGrid,
     activeGridDispatchPlanRefreshMode,

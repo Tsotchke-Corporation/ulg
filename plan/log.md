@@ -33486,3 +33486,55 @@ Next:
   extraction/readback. The next performance slice should reduce or bypass the
   CPU compact-candidate readback, likely by carrying candidate/pressure
   interface consumption GPU-resident.
+
+## 2026-06-30 AKDT - Readback-Free Material Interface Diagnostic Mode
+
+Status:
+
+- Added `gpu-resident-summary` as an explicit material-interface candidate
+  readback policy. It returns the normal material-interface schema with
+  `material-interface-field-gpu-resident-summary-pending`, marks CPU pressure
+  force coupling blocked until a GPU pressure consumer exists, and performs no
+  compact candidate row/metadata readback.
+- Kept `compact-active-readback` as the default for physics-ready material
+  interface refreshes, so the existing pressure-coupled path still gets CPU
+  `elements` and `surfaces` when it asks for them.
+- Exposed the policy through
+  `ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE` and
+  `ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE`; benchmark artifacts
+  now record the selected mode.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: direct probe
+  `ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary`
+  for worker-owned sphere presentation. Result: status `good`,
+  timeline `complete`, no issues. Warm diagnostic batch reported
+  `materialInterfaceDiagnosticMs=2.0`, `refreshTotalMs=1.9`,
+  `refreshRenderRowsMs=0.5`, `refreshSourceFieldMs=0.4`, and
+  `refreshCandidateFieldMs=0.1`.
+- PASS: benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, probe `good`,
+  `probeIssues=[]`, `residentStageMs=3.1`, `renderRefreshTotalMs=16.2`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+  Material-interface summary reported
+  `materialInterfaceStatus=material-interface-field-gpu-resident-summary-pending`,
+  `candidateReadbackMode=gpu-resident-summary`,
+  `renderFieldReadback=false`, `renderRowsReadback=false`,
+  `refreshTotalMs=3.7`, `refreshRenderRowsMs=0.6`,
+  `refreshSourceFieldMs=0.7`, and `refreshCandidateFieldMs=0.1`.
+
+Next:
+
+- This removes the diagnostic readback fence from the interactive sphere path.
+  It is not a full pressure-force solution: physically coupled pressure still
+  needs either compact readback or a GPU-resident pressure consumer that reads
+  the candidate/source field directly.

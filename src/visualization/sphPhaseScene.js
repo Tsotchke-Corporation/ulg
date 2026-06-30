@@ -9427,7 +9427,8 @@ export function createSphPhaseScene(container, {
     materialProperties = currentMaterialProperties,
     gasPressureSummary = null,
     source = 'resident-physics-material-interface-extractor',
-    sourceCadence = 'resident-step-completed'
+    sourceCadence = 'resident-step-completed',
+    candidateReadbackMode = 'compact-active-readback'
   } = {}) {
     const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
     const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
@@ -9638,7 +9639,7 @@ export function createSphPhaseScene(container, {
         renderField: interfaceSourceField,
         source,
         sourceCadence,
-        candidateReadbackMode: 'compact-active-readback'
+        candidateReadbackMode
       });
       materialInterfaceRefreshStageMs.candidateFieldMs = nowMs() - candidateFieldStartedAtMs;
       materialInterfaceRefreshStageMs.totalMs = nowMs() - refreshStartedAtMs;

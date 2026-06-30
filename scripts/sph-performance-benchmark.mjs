@@ -449,6 +449,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const probeResidentBatchViewportRafMs = numberOrNull(
     probeResidentBatchTiming?.viewportRafMs
   );
+  const probeResidentBatchViewportSignal = probeResidentBatchTiming?.viewportSignal ?? null;
+  const probeResidentBatchViewportRafSkipped = probeResidentBatchTiming?.viewportRafSkipped === true;
+  const probeResidentBatchViewportWorkerOffscreenStatus =
+    probeResidentBatchTiming?.viewportWorkerOffscreenStatus ?? null;
+  const probeResidentBatchViewportWorkerOffscreenFrameCount = numberOrNull(
+    probeResidentBatchTiming?.viewportWorkerOffscreenFrameCount
+  );
+  const probeResidentBatchViewportWorkerOffscreenReadyFrameCount = numberOrNull(
+    probeResidentBatchTiming?.viewportWorkerOffscreenReadyFrameCount
+  );
   const probeResidentBatchNativeSurfaceValidationWaitMs = numberOrNull(
     probeResidentBatchTiming?.nativeSurfaceValidationWaitMs
   );
@@ -560,7 +570,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ? Math.max(0, probeBatchWallMs - probeEngineBatchMs)
     : null;
   const probeWallRafDominated = Boolean(
-    probeResidentBatchViewportRafMs !== null
+    !probeResidentBatchViewportRafSkipped
+    && probeResidentBatchViewportSignal !== 'worker-offscreen-presented-canvas'
+    && probeResidentBatchViewportRafMs !== null
     && probeBatchWallMs
     && probeResidentBatchViewportRafMs >= 250
     && probeResidentBatchViewportRafMs >= probeBatchWallMs * 0.5
@@ -574,13 +586,18 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
         : (probeEngineShare !== null && probeEngineShare >= 0.5
           ? 'probe-wall-dominated-by-engine-work'
           : 'probe-wall-mixed')),
-    benchmarkWallIncludesBrowserRaf: true,
+    benchmarkWallIncludesBrowserRaf: !probeResidentBatchViewportRafSkipped,
+    viewportSignal: probeResidentBatchViewportSignal,
+    viewportRafSkipped: probeResidentBatchViewportRafSkipped,
     benchmarkWallRateSource: 'probe-total-before-sample',
     engineRateSource: 'resident-step-plus-render-refresh-minus-browser-raf-wait',
     totalBeforeSampleMs: probeBatchWallMs,
     meanBatchMs,
     engineBatchMs: probeEngineBatchMs,
     browserRafMs: probeResidentBatchViewportRafMs,
+    viewportWorkerOffscreenStatus: probeResidentBatchViewportWorkerOffscreenStatus,
+    viewportWorkerOffscreenFrameCount: probeResidentBatchViewportWorkerOffscreenFrameCount,
+    viewportWorkerOffscreenReadyFrameCount: probeResidentBatchViewportWorkerOffscreenReadyFrameCount,
     viewportRefreshMs: probeResidentBatchViewportRefreshMs,
     viewportNonRafMs: probeResidentBatchViewportNonRafMs,
     nativeSurfaceValidationWaitMs: probeResidentBatchNativeSurfaceValidationWaitMs,
@@ -2131,6 +2148,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     probeResidentBatchMaterialInterfaceDiagnosticMs,
     probeResidentBatchViewportRefreshMs,
     probeResidentBatchViewportRafMs,
+    probeResidentBatchViewportSignal,
+    probeResidentBatchViewportRafSkipped,
+    probeResidentBatchViewportWorkerOffscreenStatus,
+    probeResidentBatchViewportWorkerOffscreenFrameCount,
+    probeResidentBatchViewportWorkerOffscreenReadyFrameCount,
     probeResidentBatchViewportNonRafMs,
     probeResidentBatchNativeSurfaceValidationWaitMs,
     probeResidentBatchTotalBeforeSampleMs,

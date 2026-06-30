@@ -33538,3 +33538,40 @@ Next:
   It is not a full pressure-force solution: physically coupled pressure still
   needs either compact readback or a GPU-resident pressure consumer that reads
   the candidate/source field directly.
+
+## 2026-06-30 AKDT - Worker Offscreen Viewport Signal Attribution
+
+Status:
+
+- Changed the long-horizon probe viewport wait to use the worker-offscreen
+  presentation frame signal when the visible path is the zero-copy
+  `worker-owned-presented-canvas` route.
+- The probe still uses main-thread RAF for normal main-thread rendering paths,
+  but no longer charges a slow browser RAF wait against worker-owned
+  OffscreenCanvas presentation.
+- Lifted `viewportSignal`, `viewportRafSkipped`, and worker frame counters into
+  benchmark wall-time attribution and scenario summaries.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, probe `good`,
+  `probeIssues=[]`, `residentStageMs=3.2`, `renderRefreshTotalMs=8.2`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+  Wall attribution changed from browser-RAF dominated to
+  `probe-wall-dominated-by-engine-work`; `benchmarkWallIncludesBrowserRaf=false`,
+  `viewportSignal=worker-offscreen-presented-canvas`,
+  `viewportRafSkipped=true`, `probeBatchWallMs=43.2`,
+  `probeEngineBatchMs=42.4`, `probeWallStepsPerSecond=185.2`, and
+  `probeEngineStepsPerSecond=188.7`.
+
+Next:
+
+- Remaining worker-owned sphere-path time is now real engine/probe work rather
+  than artificial RAF wait. The next performance slices should target
+  resident-step/render-refresh costs and worker source transfer/cache behavior.

@@ -2277,6 +2277,55 @@ async function runBrowserProbe({
         });
         return snapshot;
       };
+      const workerOffscreenViewportSnapshot = () => {
+        overlay.__sphResidentRenderState =
+          sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState;
+        const presentation = sceneApi.getWorkerOffscreenPresentation?.() || null;
+        const workerRows = presentation?.workerOffscreenRenderRows
+          || overlay.__sphResidentRenderState?.workerOffscreenRenderRows
+          || null;
+        return {
+          status: workerRows?.status
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsStatus
+            ?? null,
+          displayHandoff: workerRows?.displayHandoff
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsDisplayHandoff
+            ?? presentation?.displayHandoff
+            ?? null,
+          frameCopyBackRejected: workerRows?.frameCopyBackRejected
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsFrameCopyBackRejected
+            ?? presentation?.frameCopyBackRejected
+            ?? null,
+          workerReady: workerRows?.workerReady
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsWorkerReady
+            ?? presentation?.workerReady
+            ?? null,
+          contextStatus: workerRows?.contextStatus
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsContextStatus
+            ?? presentation?.contextStatus
+            ?? null,
+          frameCount: Number(
+            workerRows?.frameCount
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsFrameCount
+            ?? presentation?.frameCount
+            ?? 0
+          ) || 0,
+          readyFrameCount: Number(
+            workerRows?.readyFrameCount
+            ?? overlay.__sphResidentRenderState?.workerOffscreenRenderRowsReadyFrameCount
+            ?? presentation?.readyFrameCount
+            ?? 0
+          ) || 0
+        };
+      };
+      const workerOffscreenViewportPresented = (snapshot = workerOffscreenViewportSnapshot()) => (
+        snapshot.status === 'worker-offscreen-resident-particle-state-producer-rendered'
+        && snapshot.displayHandoff === 'transferControlToOffscreen'
+        && snapshot.frameCopyBackRejected === true
+        && snapshot.workerReady === true
+        && snapshot.contextStatus === 'webgpu-context-ready'
+        && snapshot.readyFrameCount > 0
+      );
       const shouldRunAnomalyRowReadback = (metric) => {
         if (!requestedAnomalyRowReadback) return false;
         if (!sceneApi?.refreshSphResidentRenderState) return false;
@@ -3795,17 +3844,34 @@ async function runBrowserProbe({
               markProbeProgress('resident-render-refresh-viewport-started', { batchIndex });
               const viewportRefreshStartedAtMs = performance.now();
               sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-render-refresh' });
-              const viewportRafStartedAtMs = performance.now();
-              await new Promise((resolve) => requestAnimationFrame(resolve));
-              probeResidentBatchTiming.viewportRafMs =
-                performance.now() - viewportRafStartedAtMs;
+              const workerViewportSnapshot = workerOffscreenViewportSnapshot();
+              if (workerOffscreenViewportPresented(workerViewportSnapshot)) {
+                probeResidentBatchTiming.viewportSignal = 'worker-offscreen-presented-canvas';
+                probeResidentBatchTiming.viewportRafSkipped = true;
+                probeResidentBatchTiming.viewportRafMs = 0;
+                probeResidentBatchTiming.viewportWorkerOffscreenStatus = workerViewportSnapshot.status;
+                probeResidentBatchTiming.viewportWorkerOffscreenFrameCount = workerViewportSnapshot.frameCount;
+                probeResidentBatchTiming.viewportWorkerOffscreenReadyFrameCount =
+                  workerViewportSnapshot.readyFrameCount;
+              } else {
+                probeResidentBatchTiming.viewportSignal = 'main-thread-raf';
+                probeResidentBatchTiming.viewportRafSkipped = false;
+                const viewportRafStartedAtMs = performance.now();
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+                probeResidentBatchTiming.viewportRafMs =
+                  performance.now() - viewportRafStartedAtMs;
+              }
               const nativeSurfaceValidationStartedAtMs = performance.now();
               await waitForNativeSurfaceValidation(batchIndex);
               probeResidentBatchTiming.nativeSurfaceValidationWaitMs =
                 performance.now() - nativeSurfaceValidationStartedAtMs;
               probeResidentBatchTiming.viewportRefreshMs =
                 performance.now() - viewportRefreshStartedAtMs;
-              markProbeProgress('resident-render-refresh-viewport-completed', { batchIndex });
+              markProbeProgress('resident-render-refresh-viewport-completed', {
+                batchIndex,
+                viewportSignal: probeResidentBatchTiming.viewportSignal ?? null,
+                viewportRafSkipped: probeResidentBatchTiming.viewportRafSkipped ?? false
+              });
             }
           }
           if (

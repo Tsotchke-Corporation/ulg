@@ -141,7 +141,16 @@ Tactical status, 2026-06-28 AKDT:
   `acceptedLocalMaterializationModes=[same-worker-lane-retained-buffer-ref]`,
   `sameWorkerLocalMaterializationAvailable=true`, and
   `localMaterializationCanBypassSnapshot=true` while cross-peer replay remains
-  blocked on the portable snapshot/publication path.
+  blocked for same-worker-only refs. Follow-up completed the
+  compact-candidate portable snapshot path for producers that already provide
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0`: the mechanics
+  compact seed validates and clones SPH state, SPH thermo, and MLS-MPM
+  mechanics rows, records
+  `localRefreshContract.status=validated-compact-buffer-snapshot-ready`,
+  sets `portableSnapshotAvailable=true`, and the compact refresh executor can
+  rebuild peer-local hot GPU buffers from the seed without an out-of-band
+  snapshot injection. This does not re-enable presentation-worker `mapAsync`
+  export as the default path on the current device.
   Follow-up also added a presentation-only fast path for visible retained
   output: once the worker has rendered a retained G2P frame, main-thread
   resident render refresh publishes

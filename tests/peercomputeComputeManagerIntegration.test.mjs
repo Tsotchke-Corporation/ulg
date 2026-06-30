@@ -5056,6 +5056,84 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   const snapshotMlsMpmPacked = buildMlsMpmGpuParticleBuffers(graph.stateSeedPayload.state, {
     materialProperties: graph.stateSeedPayload.materialProperties || {}
   });
+  const compactSnapshotStep = graph.stateSeedPayload.step + 1;
+  const compactSnapshotTime = graph.stateSeedPayload.time + (graph.stateSeedPayload.state.gpuMechanics?.dt ?? 5e-4);
+  const compactBufferSnapshot = {
+    schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    cacheKey: graph.cacheKey,
+    stateKey: graph.stateSeedPayload.stateKey,
+    particleCount: graph.stateSeedPayload.state.particles.length,
+    step: compactSnapshotStep,
+    time: compactSnapshotTime,
+    sphState: snapshotSphPacked.state,
+    sphThermo: snapshotSphPacked.thermo,
+    mlsMpmMechanics: snapshotMlsMpmPacked.mechanics
+  };
+  const compactMechanicsSeedWithSnapshot = runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode({
+    stateSeedPayload: graph.stateSeedPayload,
+    sourceNodeId: 'ulg-sph-mls-mpm-mechanics-g2p',
+    mechanicsG2pResult: {
+      computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+      status: 'reconstructed',
+      backend: 'webgpu',
+      readbackMode: 'no-full-readback',
+      fullReadbackPerformed: false,
+      normalHotLoopReadbackFree: true,
+      particleCount: graph.stateSeedPayload.state.particles.length,
+      step: compactSnapshotStep,
+      time: compactSnapshotTime,
+      stateBufferByteLength: graph.stateSeedPayload.state.particles.length
+        * SPH_GPU_PARTICLE_STATE_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT,
+      mechanicsBufferByteLength: graph.stateSeedPayload.state.particles.length
+        * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT,
+      compactBufferSnapshot,
+      mechanicsG2pStageTaskEvidence: {
+        outputBuffersRetained: true
+      },
+      gpuFence: {
+        fenceSatisfied: true
+      },
+      dt: graph.stateSeedPayload.state.gpuMechanics?.dt ?? 5e-4
+    }
+  });
+  const compactSnapshotCandidate = compactMechanicsSeedWithSnapshot.compactMechanicsStageSeed;
+  const compactSnapshotByteLength = snapshotSphPacked.state.byteLength
+    + snapshotSphPacked.thermo.byteLength
+    + snapshotMlsMpmPacked.mechanics.byteLength;
+  assert.equal(
+    compactSnapshotCandidate.compactBufferSnapshot.schema,
+    ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+  );
+  assert.equal(compactSnapshotCandidate.compactBufferSnapshotValidationStatus, 'validated-compact-buffer-snapshot-ready');
+  assert.equal(compactSnapshotCandidate.outputBuffers.compactBufferSnapshotAvailable, true);
+  assert.equal(compactSnapshotCandidate.outputBuffers.compactBufferSnapshotByteLength, compactSnapshotByteLength);
+  assert.equal(compactSnapshotCandidate.portableSnapshotAvailable, true);
+  assert.equal(compactSnapshotCandidate.crossPeerReplayReady, true);
+  assert.equal(compactSnapshotCandidate.crossPeerReplayBlocker, null);
+  assert.equal(compactSnapshotCandidate.localRefreshRequired, true);
+  assert.equal(
+    compactSnapshotCandidate.localRefreshContract.status,
+    'validated-compact-buffer-snapshot-ready'
+  );
+  assert.equal(compactSnapshotCandidate.localRefreshContract.localSourceRequired, false);
+  assert.deepEqual(compactSnapshotCandidate.localRefreshContract.availableLocalSources, [
+    {
+      mode: 'validated-compact-buffer-snapshot',
+      schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      particleCount: graph.stateSeedPayload.state.particles.length,
+      byteLength: compactSnapshotByteLength,
+      portableSnapshotAvailable: true
+    }
+  ]);
+  assert.notEqual(compactSnapshotCandidate.hash, compactMechanicsSeed.compactMechanicsStageSeed.hash);
+  assert.notStrictEqual(compactSnapshotCandidate.compactBufferSnapshot.sphState, snapshotSphPacked.state);
+  assert.notStrictEqual(compactSnapshotCandidate.compactBufferSnapshot.sphThermo, snapshotSphPacked.thermo);
+  assert.notStrictEqual(compactSnapshotCandidate.compactBufferSnapshot.mlsMpmMechanics, snapshotMlsMpmPacked.mechanics);
+  assert.deepEqual([...compactSnapshotCandidate.compactBufferSnapshot.sphState], [...snapshotSphPacked.state]);
+  assert.deepEqual([...compactSnapshotCandidate.compactBufferSnapshot.sphThermo], [...snapshotSphPacked.thermo]);
+  assert.deepEqual([...compactSnapshotCandidate.compactBufferSnapshot.mlsMpmMechanics], [...snapshotMlsMpmPacked.mechanics]);
   const compactSnapshotDevice = createFakeWebGpuUploadDevice();
   const compactSnapshotExecutor = createUlgSphMlsMpmCompactHotBufferRefreshExecutor({
     device: compactSnapshotDevice,
@@ -5065,26 +5143,13 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
     cacheKey: graph.cacheKey,
     stateManager: host.stateManager,
     compactCandidateAuthority: {
-      compactCandidate: {
-        ...compactMechanicsSeed.compactMechanicsStageSeed,
-        compactBufferSnapshot: {
-          schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
-          cacheKey: graph.cacheKey,
-          stateKey: graph.stateSeedPayload.stateKey,
-          particleCount: graph.stateSeedPayload.state.particles.length,
-          step: graph.stateSeedPayload.step,
-          time: graph.stateSeedPayload.time,
-          sphState: snapshotSphPacked.state,
-          sphThermo: snapshotSphPacked.thermo,
-          mlsMpmMechanics: snapshotMlsMpmPacked.mechanics
-        }
-      }
+      compactCandidate: compactSnapshotCandidate
     }
   });
   assert.equal(compactSnapshotResult.status, 'ulg-sph-mls-mpm-compact-snapshot-hot-buffer-refresh-executed');
   assert.equal(compactSnapshotResult.sourceMode, 'compact-buffer-snapshot');
   assert.equal(compactSnapshotResult.sourceSchema, ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA);
-  assert.equal(compactSnapshotResult.compactCandidateHash, compactMechanicsSeed.compactMechanicsStageSeed.hash);
+  assert.equal(compactSnapshotResult.compactCandidateHash, compactSnapshotCandidate.hash);
   assert.deepEqual(compactSnapshotResult.localBufferRefs, [
     `${compactSnapshotResult.hotBufferKey}:sph-state-buffer`,
     `${compactSnapshotResult.hotBufferKey}:sph-thermo-buffer`,

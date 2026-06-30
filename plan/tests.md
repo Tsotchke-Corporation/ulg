@@ -13339,3 +13339,24 @@ Presentation-worker retained continuation, 2026-06-29 12:01 AKDT:
     `workerOffscreenRetainedStateContinuationInputStatus=applied-worker-retained-g2p-input`,
     `workerOffscreenRetainedStateContinuationApplied=true`, and
     `workerOffscreenRetainedStateContinuationChainStatus=worker-offscreen-mechanics-stage-chain-completed`.
+
+Compact candidate portable snapshot propagation, 2026-06-30 12:05 AKDT:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- Syntax:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- PeerCompute compact candidate integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `18/18`. Covers no-snapshot compact candidate blocking,
+    producer-supplied compact snapshot validation/clone, compact refresh from
+    the seed-owned snapshot, same-device retained-buffer import, and source
+    descriptor propagation.
+- Related retained-output/ownership bundle:
+  `node --test tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  - Passed: `109/109`.
+- Diff hygiene:
+  `git diff --check`
+  - Passed.

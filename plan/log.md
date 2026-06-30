@@ -33660,3 +33660,34 @@ Next:
   primary performance path except as a fallback. Cross-peer portability remains
   blocked on compact snapshot/materialization, which should stay separate from
   the local same-worker path.
+
+## 2026-06-30 AKDT - Compact Candidate Portable Snapshot Propagation
+
+Status:
+
+- Mechanics G2P compact candidates now preserve a producer-supplied
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` after schema,
+  particle-count, and row-length validation.
+- The compact seed advertises the snapshot as
+  `validated-compact-buffer-snapshot-ready`, sets
+  `portableSnapshotAvailable=true`, keeps `localRefreshRequired=true`, and lets
+  the compact hot-buffer refresh executor materialize peer-local GPU buffers
+  without an out-of-band snapshot injection.
+- The no-snapshot compact path remains fail-closed with
+  `blocked-compact-candidate-local-source-required`.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `git diff --check`
+- PASS:
+  `node --test tests/offscreenPresentationBridge.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  with `109/109` passing.
+
+Next:
+
+- Commit this compact replay contract slice before continuing to the next todo
+  item.

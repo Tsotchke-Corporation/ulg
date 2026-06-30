@@ -1396,6 +1396,13 @@ surface, and no visual issues.
   `same-device-local-source-ready`, includes the source hot-buffer key in the
   compact hash, and can be imported without the executor caller manually
   attaching the descriptor.
+  Producer-supplied compact snapshots now flow through the mechanics compact
+  seed as first-class portable replay material: a
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` is schema- and
+  length-validated, cloned into the compact candidate, advertised as
+  `validated-compact-buffer-snapshot-ready`, and then consumed directly by the
+  compact hot-buffer refresh executor without the caller manually injecting a
+  snapshot.
   ULG exposes `refreshRemoteCompactCandidateHotBuffers()`, can opt into
   `attemptCompactCandidateRefresh`, and now has a default compact executor
   contract that reports `blocked-compact-candidate-local-source-required`

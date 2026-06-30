@@ -133,8 +133,18 @@ listed as an accepted local materialization mode:
 `localMaterializationStatus=same-worker-lane-retained-buffer-ref-ready`,
 `acceptedLocalMaterializationModes=[same-worker-lane-retained-buffer-ref]`,
 `sameWorkerLocalMaterializationAvailable=true`, and
-`localMaterializationCanBypassSnapshot=true`; portable cross-peer replay remains
-blocked on the separate compact snapshot/GPU-side publication path.
+`localMaterializationCanBypassSnapshot=true`. The same-worker bypass remains
+local-only, but follow-up completed the compact-candidate portable snapshot
+contract: when a mechanics G2P result carries a
+`peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0`, the compact
+seed now validates and clones the SPH state, SPH thermo, and MLS-MPM mechanics
+rows, advertises
+`localRefreshContract.status=validated-compact-buffer-snapshot-ready`, sets
+`portableSnapshotAvailable=true`, and lets the compact refresh executor rebuild
+peer-local hot GPU buffers without the caller manually attaching a snapshot.
+This closes the PeerCompute candidate replay contract for producer-supplied
+snapshots; presentation-worker `mapAsync` snapshot export remains bypassed on
+this device unless a producer supplies a valid portable snapshot.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

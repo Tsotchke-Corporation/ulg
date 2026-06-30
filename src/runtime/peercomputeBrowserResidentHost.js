@@ -390,8 +390,85 @@ function mechanicsStageCompactOutputAvailable(mechanicsG2pResult = {}) {
       || mechanicsG2pResult?.mechanicsBuffer
       || finiteSeedNumber(mechanicsG2pResult?.stateBufferByteLength, 0) > 0
       || finiteSeedNumber(mechanicsG2pResult?.mechanicsBufferByteLength, 0) > 0
+      || mechanicsG2pResult?.compactBufferSnapshot
       || mechanicsG2pResult?.mechanicsG2pStageTaskEvidence?.outputBuffersRetained === true
   );
+}
+
+function normalizeMechanicsCompactBufferSnapshot({
+  snapshot = null,
+  cacheKey = null,
+  stateKey = null,
+  particleCount = 0,
+  step = 0,
+  time = 0
+} = {}) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return {
+      status: 'compact-buffer-snapshot-unavailable',
+      reason: 'mechanics-result-did-not-include-compact-buffer-snapshot',
+      compactBufferSnapshot: null
+    };
+  }
+  if (snapshot.schema !== ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA) {
+    return {
+      status: 'invalid-compact-buffer-snapshot',
+      reason: `compact-buffer-snapshot-schema-mismatch:${snapshot.schema || 'missing'}`,
+      compactBufferSnapshot: null
+    };
+  }
+  const resolvedParticleCount = Math.max(0, Math.trunc(finiteSeedNumber(snapshot.particleCount, particleCount)));
+  if (resolvedParticleCount !== particleCount) {
+    return {
+      status: 'invalid-compact-buffer-snapshot',
+      reason: `compact-buffer-snapshot-particle-count-mismatch:${resolvedParticleCount}:${particleCount}`,
+      compactBufferSnapshot: null
+    };
+  }
+  try {
+    const sphState = snapshotFloat32Array(
+      snapshot.sphState || snapshot.sphStateRows || snapshot.state,
+      resolvedParticleCount * SPH_GPU_PARTICLE_STATE_FLOATS,
+      'sphState'
+    );
+    const sphThermo = snapshotFloat32Array(
+      snapshot.sphThermo || snapshot.sphThermoRows || snapshot.thermo,
+      resolvedParticleCount * SPH_GPU_PARTICLE_THERMO_FLOATS,
+      'sphThermo'
+    );
+    const mlsMpmMechanics = snapshotFloat32Array(
+      snapshot.mlsMpmMechanics || snapshot.mlsMpmMechanicsRows || snapshot.mechanics,
+      resolvedParticleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+      'mlsMpmMechanics'
+    );
+    return {
+      status: 'validated-compact-buffer-snapshot-ready',
+      reason: 'compact-candidate-carries-validated-portable-buffer-snapshot',
+      compactBufferSnapshot: {
+        schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+        status: snapshot.status || 'validated-compact-buffer-snapshot-ready',
+        cacheKey: normalizeString(snapshot.cacheKey, cacheKey),
+        stateKey: normalizeString(snapshot.stateKey, stateKey),
+        particleCount: resolvedParticleCount,
+        step: finiteSeedNumber(snapshot.step, step),
+        time: finiteSeedNumber(snapshot.time, time),
+        dimension: finiteSeedNumber(snapshot.dimension, 3),
+        smoothingLengthM: finiteSeedNumber(snapshot.smoothingLengthM, 0),
+        sphState,
+        sphThermo,
+        mlsMpmMechanics
+      },
+      byteLength: bufferByteLength(sphState)
+        + bufferByteLength(sphThermo)
+        + bufferByteLength(mlsMpmMechanics)
+    };
+  } catch (error) {
+    return {
+      status: 'invalid-compact-buffer-snapshot',
+      reason: error instanceof Error ? error.message : 'compact-buffer-snapshot-validation-failed',
+      compactBufferSnapshot: null
+    };
+  }
 }
 
 function buildCompactMechanicsStageSeedCandidate({
@@ -433,6 +510,19 @@ function buildCompactMechanicsStageSeedCandidate({
       || sameDeviceRetainedBufferImport?.hotBufferRecordKey,
     null
   );
+  const compactSnapshotValidation = normalizeMechanicsCompactBufferSnapshot({
+    snapshot: mechanicsG2pResult?.compactBufferSnapshot,
+    cacheKey: initialPayload.cacheKey,
+    stateKey: initialPayload.stateKey,
+    particleCount,
+    step,
+    time
+  });
+  const hasValidatedCompactBufferSnapshot = Boolean(
+    compactSnapshotValidation.status === 'validated-compact-buffer-snapshot-ready'
+    && compactSnapshotValidation.compactBufferSnapshot
+  );
+  const compactBufferSnapshotByteLength = finiteSeedNumber(compactSnapshotValidation.byteLength, 0);
   const gpuFenceSatisfied = mechanicsG2pResult?.gpuFence?.fenceSatisfied === true
     || mechanicsG2pResult?.gpuFenceReport?.fenceSatisfied === true
     || false;
@@ -452,6 +542,8 @@ function buildCompactMechanicsStageSeedCandidate({
     stateBufferByteLength,
     mechanicsBufferByteLength,
     sameDeviceSourceHotBufferKey,
+    compactBufferSnapshotStatus: compactSnapshotValidation.status,
+    compactBufferSnapshotByteLength,
     gpuFenceSatisfied
   });
   const hasSameDeviceLocalSource = Boolean(
@@ -459,6 +551,26 @@ function buildCompactMechanicsStageSeedCandidate({
     && sameDeviceRetainedBufferImport.sameDevice === true
     && sameDeviceSourceHotBufferKey
   );
+  const availableLocalSources = [
+    ...(hasSameDeviceLocalSource ? [
+      {
+        mode: 'same-device-retained-buffer-import',
+        schema: sameDeviceRetainedBufferImport.schema || ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA,
+        sourceHotBufferKey: sameDeviceSourceHotBufferKey,
+        sameDevice: true
+      }
+    ] : []),
+    ...(hasValidatedCompactBufferSnapshot ? [
+      {
+        mode: 'validated-compact-buffer-snapshot',
+        schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+        particleCount,
+        byteLength: compactBufferSnapshotByteLength,
+        portableSnapshotAvailable: true
+      }
+    ] : [])
+  ];
+  const localSourceReady = hasSameDeviceLocalSource || hasValidatedCompactBufferSnapshot;
   return {
     schema: ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_MECHANICS_STAGE_COMPACT_SEED_SCHEMA,
     status: 'mechanics-stage-compact-output-ready',
@@ -480,8 +592,10 @@ function buildCompactMechanicsStageSeedCandidate({
       stateBufferRetained: Boolean(mechanicsG2pResult?.stateBuffer || stateBufferByteLength > 0),
       mechanicsBufferRetained: Boolean(mechanicsG2pResult?.mechanicsBuffer || mechanicsBufferByteLength > 0),
       sameDeviceRetainedBufferImportAvailable: hasSameDeviceLocalSource,
+      compactBufferSnapshotAvailable: hasValidatedCompactBufferSnapshot,
       stateBufferByteLength,
-      mechanicsBufferByteLength
+      mechanicsBufferByteLength,
+      compactBufferSnapshotByteLength
     },
     ...(hasSameDeviceLocalSource ? {
       sameDeviceRetainedBufferImport: {
@@ -491,14 +605,21 @@ function buildCompactMechanicsStageSeedCandidate({
         sameDevice: true
       }
     } : {}),
+    ...(hasValidatedCompactBufferSnapshot ? {
+      compactBufferSnapshot: compactSnapshotValidation.compactBufferSnapshot
+    } : {}),
     localRefreshContract: {
       schema: ULG_REMOTE_TASK_GRAPH_COMPACT_LOCAL_REFRESH_CONTRACT_SCHEMA,
       status: hasSameDeviceLocalSource
         ? 'same-device-local-source-ready'
-        : 'local-source-materialization-required',
+        : (hasValidatedCompactBufferSnapshot
+            ? 'validated-compact-buffer-snapshot-ready'
+            : 'local-source-materialization-required'),
       reason: hasSameDeviceLocalSource
         ? 'compact-candidate-carries-explicit-same-device-local-source'
-        : 'compact-candidate-carries-remote-retained-refs-not-local-buffer-handles',
+        : (hasValidatedCompactBufferSnapshot
+            ? compactSnapshotValidation.reason
+            : 'compact-candidate-carries-remote-retained-refs-not-local-buffer-handles'),
       sourceMode: 'compact-candidate',
       requiredStateFamilies: resolvedStateFamilies,
       requiredLocalSources: [
@@ -520,19 +641,25 @@ function buildCompactMechanicsStageSeedCandidate({
         'validated-compact-buffer-snapshot',
         'validated-local-state-seed'
       ],
-      availableLocalSources: hasSameDeviceLocalSource
-        ? [
-            {
-              mode: 'same-device-retained-buffer-import',
-              schema: sameDeviceRetainedBufferImport.schema || ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA,
-              sourceHotBufferKey: sameDeviceSourceHotBufferKey,
-              sameDevice: true
-            }
-          ]
-        : [],
+      availableLocalSources,
       remoteRetainedRefsUsableLocally: false,
-      localSourceRequired: !hasSameDeviceLocalSource
+      localSourceRequired: !localSourceReady,
+      portableSnapshotAvailable: hasValidatedCompactBufferSnapshot
     },
+    compactBufferSnapshotValidationStatus: compactSnapshotValidation.status,
+    compactBufferSnapshotValidationReason: compactSnapshotValidation.reason,
+    portableSnapshotRequired: true,
+    portableSnapshotAvailable: hasValidatedCompactBufferSnapshot,
+    portableSnapshotSchema: hasValidatedCompactBufferSnapshot
+      ? ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+      : null,
+    crossPeerReplayStatus: hasValidatedCompactBufferSnapshot
+      ? 'validated-compact-buffer-snapshot-ready'
+      : 'blocked-portable-compact-buffer-snapshot-required',
+    crossPeerReplayReady: hasValidatedCompactBufferSnapshot,
+    crossPeerReplayBlocker: hasValidatedCompactBufferSnapshot
+      ? null
+      : 'compact-buffer-snapshot-required-for-cross-peer-replay',
     gpuFenceSatisfied,
     fullReadbackPerformed: mechanicsG2pResult?.fullReadbackPerformed === true,
     normalHotLoopReadbackFree: mechanicsG2pResult?.normalHotLoopReadbackFree === true,

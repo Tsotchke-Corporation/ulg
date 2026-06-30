@@ -33309,3 +33309,57 @@ Next:
   visible frame is no longer blocked by render-row extraction or optical
   lookup, but the pipelined material-interface job still uses the coarse
   field-cells-by-particles source-field algorithm.
+
+## 2026-06-30 AKDT - Source-Local Material Interface Source Field
+
+Status:
+
+- Added a resident source-local material-interface source-field builder:
+  `peercompute.ulg.sph-material-interface-source-local-field.v0`.
+- The new path dispatches over particles/product events and surfaces, splats
+  only local support cells into a quantized atomic density buffer, then resolves
+  that density into the existing `vec4<f32>` render-field row layout. The
+  downstream compact material-interface candidate extractor stays unchanged.
+- The resident material-interface refresh now uses this source-local builder
+  instead of the full visual render-field splat. It keeps the pooled
+  source-field rows buffer and the no-fence same-queue handoff.
+- Published diagnostics:
+  `interfaceSourceFieldBackend`,
+  `interfaceSourceFieldSourceLocal`,
+  `interfaceSourceFieldSourceLocalEstimatedCellVisits`,
+  `interfaceSourceFieldDenseCellParticlePairs`,
+  `interfaceSourceFieldSourceLocalEstimatedVisitRatio`, and
+  `interfaceSourceFieldSourceLocalSourceCount`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/sphMaterialInterfaceSourceFieldLocalGpu.test.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "material-interface source field"`
+- LIVE HTTPS H2O/H2O worker-owned sphere probe:
+  `status=material-interface-field-ready`,
+  `interfaceSourceFieldBackend=webgpu-source-local`,
+  `interfaceSourceFieldSourceLocal=true`, `sourceCount=1024`,
+  `estimatedCellVisits=384000`,
+  `denseCellParticlePairs=6749184`, visit ratio `0.0569`,
+  `queueCompletionStatus=queue-submitted-gpu-handoff-no-cpu-fence`,
+  `renderFieldReadback=false`, `renderRowsReadback=false`,
+  `candidateReadbackMode=compact-active-readback`, and elapsed refresh
+  about `204 ms` after warm pipeline/cache.
+- PASS: smoke benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, `probeIssues=[]`,
+  `probeEngineBatchMs=89.9`, `residentStageMs=7.6`,
+  `residentStageStepsPerSecond=131.6`, `renderRowsMs=0`,
+  `opticalLookupMs=0`, `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+
+Next:
+
+- The source-field algorithmic bottleneck is no longer the old dense
+  cell-by-particle visual render-field scan. Remaining work should focus on
+  reducing cold shader/pipeline compile latency in the first material-interface
+  refresh, lifting source-local diagnostics into benchmark summaries, and then
+  continuing toward resident pressure-interface force coupling.

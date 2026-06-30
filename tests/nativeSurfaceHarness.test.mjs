@@ -104,6 +104,26 @@ test('resident material interface seeds surface table before full render-row rea
   );
   assert.match(
     sceneSource,
+    /buildSphMaterialInterfaceSourceFieldLocalWebGpu/,
+    'material-interface source-field extraction should use the source-local builder'
+  );
+  assert.match(
+    sceneSource,
+    /interfaceSourceFieldSourceLocalEstimatedCellVisits/,
+    'material-interface diagnostics should expose source-local work estimates'
+  );
+  assert.match(
+    sceneSource,
+    /interfaceSourceFieldDenseCellParticlePairs/,
+    'compact material-interface summaries should retain source-local dense comparison estimates'
+  );
+  const sourceLocalSource = readRepoFile('src/runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js');
+  assert.match(sourceLocalSource, /SPH_MATERIAL_INTERFACE_SOURCE_LOCAL_SCHEMA/);
+  assert.match(sourceLocalSource, /array<atomic<u32>>/);
+  assert.match(sourceLocalSource, /atomicAdd/);
+  assert.match(sourceLocalSource, /atomicLoad/);
+  assert.match(
+    sceneSource,
     /materialInterfaceSurfaceTableTotalFieldCells/,
     'material-interface diagnostics should expose the coarse table cell count'
   );

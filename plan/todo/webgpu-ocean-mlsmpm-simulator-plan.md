@@ -159,8 +159,7 @@ Tactical status, 2026-06-28 AKDT:
   presentation path. A fresh HTTPS H2O/H2O worker-owned sphere probe now shows
   early frames within the first 650 ms, `renderRowsMs=0`,
   `opticalLookupMs=0`, `renderRefreshTotalMs` around `8-9 ms`, and worker
-  ready frames advancing immediately. Remaining work is the sparse/source-local
-  material-interface builder.
+  ready frames advancing immediately.
 - Follow-up on the worker-owned H2O/H2O sphere scenario found the remaining
   material-interface freshness bottleneck was the dense visual render-field
   table, not the full render-row readback fallback. A direct HTTPS timing check
@@ -201,6 +200,19 @@ Tactical status, 2026-06-28 AKDT:
   `miCells=4000&miRes=12` override reached `3993` cells and roughly
   `283-352 ms` while still producing material-interface rows. Treat this as a
   bounded tactical policy until the sparse/source-local field builder lands.
+- Follow-up landed the source-local material-interface source-field builder.
+  The resident material-interface refresh now dispatches over
+  particles/product events and surfaces, splats only local support cells into a
+  quantized atomic density buffer, resolves that into the existing field-row
+  layout, and then reuses the existing compact candidate extractor. A live
+  HTTPS H2O/H2O worker-owned sphere refresh reports
+  `interfaceSourceFieldBackend=webgpu-source-local`,
+  `interfaceSourceFieldSourceLocal=true`, `sourceCount=1024`,
+  `estimatedCellVisits=384000`, `denseCellParticlePairs=6749184`,
+  `estimatedVisitRatio=0.0569`, `renderFieldReadback=false`,
+  `renderRowsReadback=false`, compact candidate readback, and about `204 ms`
+  warm refresh time. The worker-owned smoke benchmark remains `good` with
+  `estimatedReadbackBytesPerStep=0`.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,
@@ -1213,6 +1225,15 @@ Interim status, 2026-06-18 AKDT:
   path shows early `renderRefreshTotalMs` around `8-9 ms`,
   `renderRowsMs=0`, `opticalLookupMs=0`, no render-row readback, and worker
   frames advancing immediately.
+- 2026-06-30 source-local material-interface source field: resident
+  material-interface refresh now uses
+  `peercompute.ulg.sph-material-interface-source-local-field.v0`, a
+  particle/product-event-local atomic density splat plus resolve pass that
+  feeds the existing compact candidate extractor. Live HTTPS H2O/H2O
+  worker-owned sphere evidence reports `webgpu-source-local`,
+  `384000` estimated local cell visits versus `6749184` old dense
+  cell-particle pairs, no render-row/render-field readback, and about
+  `204 ms` warm source-interface refresh.
 
 ## ULG-Specific Constraints
 

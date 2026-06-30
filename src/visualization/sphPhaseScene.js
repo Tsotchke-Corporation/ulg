@@ -83,7 +83,6 @@ import {
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
   buildSphRenderMaterialMap,
-  buildSphMaterialInterfaceSourceFieldWebGpu,
   buildSphPhysicsMaterialInterfaceFieldWebGpu,
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderSurfaceVerticesWebGpu,
@@ -95,6 +94,9 @@ import {
   summarizeSphResidentParticleUploadWebGpu,
   summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
+import {
+  buildSphMaterialInterfaceSourceFieldLocalWebGpu
+} from '../runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js';
 import {
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
   createUlgWebGpuMarchingCubesExtensionAdapter,
@@ -3167,6 +3169,19 @@ function compactMaterialInterfaceFieldSummary(field = null) {
     sourceRenderFieldReadbackMode: field.sourceRenderFieldReadbackMode ?? null,
     interfaceSourceFieldSchema: field.interfaceSourceFieldSchema ?? field.sourceFieldSchema ?? null,
     interfaceSourceFieldStatus: field.interfaceSourceFieldStatus ?? field.sourceFieldStatus ?? null,
+    interfaceSourceFieldBackend: field.interfaceSourceFieldBackend ?? field.sourceFieldBackend ?? null,
+    interfaceSourceFieldKernelScope: field.interfaceSourceFieldKernelScope ?? null,
+    interfaceSourceFieldSourceLocal: Boolean(field.interfaceSourceFieldSourceLocal),
+    interfaceSourceFieldSourceLocalEstimatedCellVisits:
+      field.interfaceSourceFieldSourceLocalEstimatedCellVisits ?? null,
+    interfaceSourceFieldDenseCellParticlePairs:
+      field.interfaceSourceFieldDenseCellParticlePairs ?? null,
+    interfaceSourceFieldSourceLocalEstimatedVisitRatio:
+      field.interfaceSourceFieldSourceLocalEstimatedVisitRatio ?? null,
+    interfaceSourceFieldSourceLocalSourceCount:
+      field.interfaceSourceFieldSourceLocalSourceCount ?? null,
+    interfaceSourceFieldSourceLocalDensityScale:
+      field.interfaceSourceFieldSourceLocalDensityScale ?? null,
     interfaceSourceFieldQueueCompletionStatus: field.interfaceSourceFieldQueueCompletionStatus ?? null,
     interfaceSourceFieldQueueCompletionMethod: field.interfaceSourceFieldQueueCompletionMethod ?? null,
     interfaceSourceFieldRowsBufferBorrowed: Boolean(field.interfaceSourceFieldRowsBufferBorrowed),
@@ -9581,7 +9596,7 @@ export function createSphPhaseScene(container, {
           device: resolvedDeviceResult.device,
           surfaceTable: materialInterfaceSurfaceTable
         });
-      interfaceSourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
+      interfaceSourceField = await buildSphMaterialInterfaceSourceFieldLocalWebGpu({
         device: resolvedDeviceResult.device,
         renderRows: renderRowsExecution.renderRows,
         renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
@@ -9637,6 +9652,20 @@ export function createSphPhaseScene(container, {
       materialInterfaceField.residentSurfaceTableTotalFieldCells = surfaceTable.totalFieldCells ?? 0;
       materialInterfaceField.interfaceSourceFieldSchema = interfaceSourceField.schema;
       materialInterfaceField.interfaceSourceFieldStatus = interfaceSourceField.status;
+      materialInterfaceField.interfaceSourceFieldBackend = interfaceSourceField.backend ?? null;
+      materialInterfaceField.interfaceSourceFieldKernelScope = interfaceSourceField.kernelScope ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceLocal =
+        Boolean(interfaceSourceField.sourceLocalSourceField);
+      materialInterfaceField.interfaceSourceFieldSourceLocalEstimatedCellVisits =
+        interfaceSourceField.sourceLocalEstimatedCellVisits ?? null;
+      materialInterfaceField.interfaceSourceFieldDenseCellParticlePairs =
+        interfaceSourceField.sourceLocalDenseCellParticlePairs ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceLocalEstimatedVisitRatio =
+        interfaceSourceField.sourceLocalEstimatedVisitRatio ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceLocalSourceCount =
+        interfaceSourceField.sourceLocalSourceCount ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceLocalDensityScale =
+        interfaceSourceField.sourceLocalDensityScale ?? null;
       materialInterfaceField.interfaceSourceFieldQueueCompletionStatus = interfaceSourceField.queueCompletionStatus ?? null;
       materialInterfaceField.interfaceSourceFieldQueueCompletionMethod = interfaceSourceField.queueCompletionMethod ?? null;
       materialInterfaceField.renderFieldReadback = Boolean(interfaceSourceField.sourceRenderFieldReadback);

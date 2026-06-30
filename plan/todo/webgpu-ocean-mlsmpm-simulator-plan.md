@@ -138,6 +138,19 @@ Tactical status, 2026-06-28 AKDT:
   interface extractor; the next slice should make interface extraction
   GPU-local and sparse rather than scanning every particle against every field
   cell.
+- Follow-up compacted the material-interface candidate readback itself. The
+  resident scene now opts into `compact-active-readback`, where the WebGPU
+  candidate shader atomically appends only active crossing faces and reads
+  compact metadata before row readback. The H2O/H2O worker-owned sphere probe
+  mapped `768` compact candidate bytes for `12` active rows instead of the
+  `3025920`-byte dense candidate table (`candidateCount=47280`,
+  `candidateDenseRowsByteLength=3025920`,
+  `candidateCompactRowsByteLength=768`). The remaining steady refresh is still
+  around `1.2 s`, so the current bottleneck has moved upstream to
+  `buildSphMaterialInterfaceSourceFieldWebGpu()`'s
+  coarse-field-cells-by-particles splat. Next performance work should replace
+  that with a sparse/source-local or particle-to-field resident builder rather
+  than further candidate-readback tuning.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

@@ -3675,6 +3675,134 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphMaterialInterfaceCompactCandidatesWgsl = `
+struct InterfaceCandidateParams {
+  surface_count: u32,
+  total_field_cells: u32,
+  candidate_count: u32,
+  _pad0: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  isolation_scale: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> interface_candidates: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: InterfaceCandidateParams;
+@group(0) @binding(4) var<storage, read_write> compact_metadata: array<atomic<u32>>;
+
+fn compact_surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn compact_surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn compact_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn compact_write_candidate(row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, row3: vec4<f32>) {
+  let compact_index = atomicAdd(&compact_metadata[0], 1u);
+  let capacity = atomicLoad(&compact_metadata[2]);
+  if (compact_index >= capacity) {
+    atomicAdd(&compact_metadata[1], 1u);
+    return;
+  }
+  let base = compact_index * 4u;
+  interface_candidates[base] = row0;
+  interface_candidates[base + 1u] = row1;
+  interface_candidates[base + 2u] = row2;
+  interface_candidates[base + 3u] = row3;
+}
+
+fn compact_physical_coord_m(coord: f32, resolution: u32) -> f32 {
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  return ((((coord + 0.5) / f32(resolution)) - params.field_padding) * max(params.ref_edge_m, 1.0e-12)) / span;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let local_candidate_index = global_id.x;
+  let surface_index = global_id.y;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let s0 = compact_surface_row0(surface_index);
+  let s1 = compact_surface_row1(surface_index);
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  let cell_index = local_candidate_index / 3u;
+  let axis = local_candidate_index - cell_index * 3u;
+  if (cell_index >= field_cell_count) {
+    return;
+  }
+
+  let resolution = max(u32(s1.x), 1u);
+  let xy_count = resolution * resolution;
+  let z = cell_index / xy_count;
+  let rem = cell_index - z * xy_count;
+  let y = rem / resolution;
+  let x = rem - y * resolution;
+
+  var nx = x;
+  var ny = y;
+  var nz = z;
+  if (axis == 0u) {
+    nx = x + 1u;
+  } else if (axis == 1u) {
+    ny = y + 1u;
+  } else {
+    nz = z + 1u;
+  }
+  if (nx >= resolution || ny >= resolution || nz >= resolution) {
+    return;
+  }
+
+  let value = render_field_cells[field_offset + cell_index].x;
+  let neighbor = render_field_cells[field_offset + compact_field_index_3d(nx, ny, nz, resolution)].x;
+  let isolation = s1.y * params.isolation_scale;
+  let inside = value >= isolation;
+  let neighbor_inside = neighbor >= isolation;
+  if (inside == neighbor_inside) {
+    return;
+  }
+
+  var sign = -1.0;
+  if (inside) {
+    sign = 1.0;
+  }
+  var normal = vec3<f32>(0.0, 0.0, 0.0);
+  if (axis == 0u) {
+    normal.x = sign;
+  } else if (axis == 1u) {
+    normal.y = sign;
+  } else {
+    normal.z = sign;
+  }
+
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  let cell_size_m = max(params.ref_edge_m, 1.0e-12) / (span * f32(resolution));
+  let area_m2 = cell_size_m * cell_size_m;
+  let centroid = vec3<f32>(
+    compact_physical_coord_m((f32(x) + f32(nx)) * 0.5, resolution),
+    compact_physical_coord_m((f32(y) + f32(ny)) * 0.5, resolution),
+    compact_physical_coord_m((f32(z) + f32(nz)) * 0.5, resolution)
+  );
+  let normal_area = normal * area_m2;
+  compact_write_candidate(
+    vec4<f32>(f32(surface_index), s0.x, s0.y, f32(axis)),
+    vec4<f32>(centroid, area_m2),
+    vec4<f32>(normal, normal_area.x),
+    vec4<f32>(normal_area.y, normal_area.z, sign, 1.0)
+  );
+}
+`;
+
 export const sphRenderMarchingCubeCellsWgsl = `
 struct MarchingCubesCandidateParams {
   surface_count: u32,

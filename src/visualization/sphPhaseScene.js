@@ -9447,7 +9447,8 @@ export function createSphPhaseScene(container, {
         device: resolvedDeviceResult.device,
         renderField: interfaceSourceField,
         source,
-        sourceCadence
+        sourceCadence,
+        candidateReadbackMode: 'compact-active-readback'
       });
       materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
       materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
@@ -20995,7 +20996,8 @@ export function createSphPhaseScene(container, {
               fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer || null,
               surfaceBuffer: renderFieldExecution.surfaceBuffer || null,
               source: 'resident-render-refresh-physics-material-interface-extractor',
-              sourceCadence: 'visual-render-refresh'
+              sourceCadence: 'visual-render-refresh',
+              candidateReadbackMode: 'compact-active-readback'
             });
             materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
             materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;

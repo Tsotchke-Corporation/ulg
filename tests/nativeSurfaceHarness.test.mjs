@@ -108,6 +108,25 @@ test('resident material interface seeds surface table before full render-row rea
   );
 });
 
+test('resident material interface uses compact active-candidate readback', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const kernelSource = readRepoFile('src/runtime/sph/sphRenderGpuKernel.js');
+  const wgslSource = readRepoFile('ulg-gpu-abi/src/wgsl.js');
+
+  assert.match(kernelSource, /buildSphMaterialInterfaceCompactCandidateFieldWebGpu/);
+  assert.match(kernelSource, /sphMaterialInterfaceCompactCandidatesWgsl/);
+  assert.match(kernelSource, /compact-active-render-field-cell-axis-triplets/);
+  assert.match(kernelSource, /candidateCompactRowsByteLength/);
+  assert.match(wgslSource, /sphMaterialInterfaceCompactCandidatesWgsl/);
+  assert.match(wgslSource, /atomicAdd\(&compact_metadata\[0\], 1u\)/);
+  assert.match(wgslSource, /@group\(0\) @binding\(4\) var<storage, read_write> compact_metadata/);
+  assert.match(
+    sceneSource,
+    /buildSphPhysicsMaterialInterfaceFieldWebGpu\(\{[\s\S]*candidateReadbackMode: 'compact-active-readback'/,
+    'resident scene should opt into compact active-candidate readback for material-interface refresh'
+  );
+});
+
 test('worker offscreen presentation path requires transferred canvas ownership', () => {
   const bridgeSource = readRepoFile('src/visualization/offscreenPresentationBridge.js');
   const workerSource = readRepoFile('src/services/ulgOffscreenRender.worker.js');

@@ -32917,3 +32917,42 @@ Next:
   for fresh pressure coupling every visual frame. The next performance slice
   should make material-interface extraction sparse/GPU-local instead of
   scanning every particle for every coarse field cell.
+
+## 2026-06-29 23:45 AKDT - Compact Material-Interface Candidate Readback
+
+Status:
+
+- Added a WebGPU compact material-interface candidate shader that appends only
+  active crossing faces with an atomic counter and reads a 16-byte metadata
+  buffer before reading candidate rows.
+- Kept the dense candidate readback path as the default/fallback. The mounted
+  resident material-interface and visual full-readback call sites now opt into
+  `candidateReadbackMode='compact-active-readback'`.
+- Published diagnostics for dense candidate bytes, compact candidate bytes,
+  compact capacity/overflow, metadata readback, and backend/mode selection.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs`
+- PASS: `node --test tests/abi.test.mjs`
+- LIVE:
+  `https://100.86.83.35:5173/?drop=h2o&base=h2o&dropn=10&basen=10&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&residentActiveGrid=1&workerOffscreenPresentation=1&lawt=0&lawr=0&lawv=0&lawst=0&surfaceDraw=three-render-row-spheres&blob=1&bg=%2387ceeb`
+  reached `backend=webgpu-compact-candidate-readback`,
+  `candidateReadbackMode=compact-active-readback`, `candidateCount=47280`,
+  `activeCandidateCount=12`, `candidateDenseRowsByteLength=3025920`,
+  `candidateCompactRowsByteLength=768`, `renderRowsReadback=false`,
+  `renderFieldReadback=false`, and
+  `queueCompletionStatus=compact-readback-map-completed`.
+
+Next:
+
+- The compact path removes the dense candidate-table map, but steady
+  material-interface refresh is still around `1.2 s` because
+  `buildSphMaterialInterfaceSourceFieldWebGpu()` still splats every coarse
+  field cell against every particle. The next performance slice should target
+  a sparse/source-local material-interface source-field builder or a resident
+  particle-to-field splat, not more candidate-readback tuning.

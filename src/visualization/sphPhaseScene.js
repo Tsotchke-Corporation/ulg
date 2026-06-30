@@ -8614,6 +8614,8 @@ export function createSphPhaseScene(container, {
   async function refreshOpticalGpuLookup({
     preferWebGpu = preferWebGpuOpticalLookup,
     force = false,
+    skipWhenNoDrawTargets = false,
+    skipForWorkerOwnedParticleStatePresentation = false,
     navigatorRef: overrideNavigatorRef = navigatorRef,
     device = null,
     deviceResult = null,
@@ -8624,14 +8626,101 @@ export function createSphPhaseScene(container, {
     const currentTable = opticalGpuTable;
     const currentLookup = opticalGpuLookup;
     const signature = currentLookup.signature;
+    const targetSignature = currentOpticalGpuDrawTargetSignature();
+    const noDrawTargets = targetSignature === 'no-optical-gpu-draw-targets';
+    const cachedExecution = currentLookup.execution;
     if (
       !force
-      && currentLookup.execution?.signature === signature
+      && cachedExecution?.signature === signature
+      && !(cachedExecution.opticalLookupSkippedNoDrawTargets && !noDrawTargets)
+      && !(cachedExecution.opticalLookupSkippedWorkerOwnedPresentation && !skipForWorkerOwnedParticleStatePresentation)
     ) {
       return currentLookup;
     }
+    if (skipForWorkerOwnedParticleStatePresentation) {
+      const execution = {
+        schema: 'peercompute.ulg.optical-gpu-lookup-execution.v0',
+        lookupResultSchema: currentLookup.lookup?.schema ?? null,
+        backend: 'skipped-worker-owned-particle-state-presentation',
+        status: 'optical-gpu-lookup-skipped-worker-owned-particle-state-presentation',
+        reason: 'worker-owned particle-state producer owns the visible canvas; main-thread optical draw-target updates are not on the presentation path',
+        signature,
+        targetSignature,
+        queryCount: 0,
+        outputs: new Float32Array(),
+        opticalLookupSkippedWorkerOwnedPresentation: true,
+        webgpuStatus: {
+          status: 'not-requested',
+          reason: 'worker-owned particle-state presentation path'
+        },
+        scientificValidation: false,
+        fullPhysicsValidation: false
+      };
+      opticalGpuLookup = {
+        ...currentLookup,
+        execution
+      };
+      scene.userData.opticalGpuLookup = opticalGpuLookup;
+      scene.userData.opticalGpuLookupExecution = execution;
+      scene.userData.opticalGpuLookupDrawState = {
+        schema: 'peercompute.ulg.optical-gpu-draw-state.v0',
+        sourceExecutionSchema: execution.schema,
+        sourceExecutionSignature: signature,
+        backend: execution.backend,
+        status: 'optical-gpu-draw-state-skipped-worker-owned-presentation',
+        appliedCount: 0,
+        targetSignature,
+        targetCount: targetSignature === 'no-optical-gpu-draw-targets'
+          ? 0
+          : targetSignature.split('|').length,
+        rows: [],
+        scientificValidation: false,
+        fullPhysicsValidation: false
+      };
+      return opticalGpuLookup;
+    }
     if (!force && pendingOpticalGpuLookup?.signature === signature) {
       return pendingOpticalGpuLookup.promise;
+    }
+    if (skipWhenNoDrawTargets && noDrawTargets) {
+      const execution = {
+        schema: 'peercompute.ulg.optical-gpu-lookup-execution.v0',
+        lookupResultSchema: currentLookup.lookup?.schema ?? null,
+        backend: 'skipped-no-draw-targets',
+        status: 'optical-gpu-lookup-skipped-no-draw-targets',
+        reason: 'worker-owned presentation path has no main-thread optical draw targets',
+        signature,
+        targetSignature,
+        queryCount: 0,
+        outputs: new Float32Array(),
+        opticalLookupSkippedNoDrawTargets: true,
+        webgpuStatus: {
+          status: 'not-requested',
+          reason: 'no main-thread optical draw targets'
+        },
+        scientificValidation: false,
+        fullPhysicsValidation: false
+      };
+      opticalGpuLookup = {
+        ...currentLookup,
+        execution
+      };
+      scene.userData.opticalGpuLookup = opticalGpuLookup;
+      scene.userData.opticalGpuLookupExecution = execution;
+      scene.userData.opticalGpuLookupDrawState = {
+        schema: 'peercompute.ulg.optical-gpu-draw-state.v0',
+        sourceExecutionSchema: execution.schema,
+        sourceExecutionSignature: signature,
+        backend: execution.backend,
+        status: 'optical-gpu-draw-state-skipped-no-targets',
+        appliedCount: 0,
+        targetSignature,
+        targetCount: 0,
+        rows: [],
+        scientificValidation: false,
+        fullPhysicsValidation: false
+      };
+      return opticalGpuLookup;
     }
     const promise = (async () => {
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
@@ -20771,6 +20860,9 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackModeCoercionReason,
         retainPreviousThreeRenderRowBridgeNoFull
       } = renderRowReadbackPlan;
+      const skipRenderRowsExtractionForWorkerOwnedParticleStatePresentation = Boolean(
+        renderRowReadbackPlan.workerOwnedResidentParticleStateProducerPresentationOnly
+      );
       const requestedSurfaceDrawDiagnosticMaxFieldCells = Math.max(
         1,
         Math.round(Number(surfaceDrawDiagnosticMaxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT)
@@ -20789,9 +20881,51 @@ export function createSphPhaseScene(container, {
       markSphResidentRenderProgress('resident-render-rows-started', {
         stage: 'render-rows',
         particleCount: nextSphParticleState.particleCount,
-        readbackMode: requestedRenderRowsReadbackMode
+        readbackMode: requestedRenderRowsReadbackMode,
+        skipRenderRowsExtractionForWorkerOwnedParticleStatePresentation
       });
-      renderRowsExecution = await timedExtractRenderRowsForMode(requestedRenderRowsReadbackMode);
+      if (skipRenderRowsExtractionForWorkerOwnedParticleStatePresentation) {
+        renderRowsExecution = {
+          schema: 'peercompute.ulg.sph-gpu-render-rows.v0',
+          backend: 'worker-owned-resident-particle-state-producer',
+          status: 'render-rows-skipped-worker-owned-particle-state-producer',
+          reason: 'worker-owned presentation renders directly from resident SPH particle state and thermo rows',
+          particleCount: nextSphParticleState.particleCount,
+          rowLayout: [],
+          rowStrideFloats: 0,
+          renderRowByteLength: 0,
+          renderRows: new Float32Array(),
+          renderRowsReadback: false,
+          renderRowsReadbackByteLength: 0,
+          renderRowsBufferRetained: false,
+          renderRowsBufferByteLength: 0,
+          renderRowsGpuHandoffCopy: false,
+          renderRowsHandoffMode: 'worker-owned-resident-particle-state-producer',
+          readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
+          queueCompletionStatus: 'render-row-extraction-skipped',
+          queueCompletionMethod: 'worker-owned-resident-particle-state-producer',
+          compactRenderReadback: false,
+          normalHotLoopReadbackFree: true,
+          workerOwnedResidentParticleStateProducerPresentationOnly: true,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false,
+          destroyRenderRowsBuffer() {}
+        };
+        renderRefreshIncrementStage('renderRowsMs', 0);
+        markSphResidentRenderProgress(
+          'resident-render-rows-skipped-worker-owned-particle-state-producer',
+          {
+            stage: 'render-rows',
+            particleCount: renderRowsExecution.particleCount,
+            readbackMode: renderRowsExecution.readbackMode,
+            queueCompletionStatus: renderRowsExecution.queueCompletionStatus
+          }
+        );
+      } else {
+        renderRowsExecution = await timedExtractRenderRowsForMode(requestedRenderRowsReadbackMode);
+      }
       applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
       markSphResidentRenderProgress('resident-render-rows-complete', {
         stage: 'render-rows',
@@ -22452,6 +22586,12 @@ export function createSphPhaseScene(container, {
       const opticalLookupStartedAtMs = nowMs();
       await refreshOpticalGpuLookup({
         preferWebGpu,
+        skipWhenNoDrawTargets: Boolean(
+          sphResidentSurfaceDraw?.workerOwnedResidentParticleStateProducerPresentationOnly
+        ),
+        skipForWorkerOwnedParticleStatePresentation: Boolean(
+          sphResidentSurfaceDraw?.workerOwnedResidentParticleStateProducerPresentationOnly
+        ),
         navigatorRef: overrideNavigatorRef,
         device,
         deviceResult: resolvedDeviceResult

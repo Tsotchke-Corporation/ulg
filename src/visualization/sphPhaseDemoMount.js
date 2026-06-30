@@ -195,6 +195,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'residentInterfaceRefreshMode',
   'residentInterfaceRefresh',
   'residentPostStepInterfaceRefresh',
+  'residentInterfaceRefreshWarmupFrames',
+  'residentInterfaceWarmupFrames',
   'renderer',
   'rendererPresentation',
   'rendererPresentationUnsafe',
@@ -1956,6 +1958,11 @@ export async function mountSphPhaseDemoOverlay({
     const number = Math.round(Number(value));
     return Number.isFinite(number) && number > 0 ? number : null;
   }
+  function nonNegativeIntegerUrlParam(value) {
+    if (value == null || value === '') return null;
+    const number = Math.round(Number(value));
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
   function positiveNumberUrlParam(value) {
     if (value == null || value === '') return null;
     const number = Number(value);
@@ -2177,6 +2184,12 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('residentPostStepInterfaceRefresh')
     ?? null
   );
+  const residentInterfaceRefreshWarmupFrames = nonNegativeIntegerUrlParam(
+    initialHash.get('residentInterfaceRefreshWarmupFrames')
+      ?? initialQuery.get('residentInterfaceRefreshWarmupFrames')
+      ?? initialHash.get('residentInterfaceWarmupFrames')
+      ?? initialQuery.get('residentInterfaceWarmupFrames')
+  );
   const residentComputeManagerMode = (
     initialHash.get('residentComputeManagerMode')
     ?? initialQuery.get('residentComputeManagerMode')
@@ -2245,6 +2258,7 @@ export async function mountSphPhaseDemoOverlay({
     residentStepsPerScheduleMax,
     residentParticleBridgeTargetBatchTimeS,
     residentInterfaceRefreshMode,
+    residentInterfaceRefreshWarmupFrames,
     residentComputeManagerMode,
     useCase: renderOwnershipUseCase,
     source: rawRenderOwnershipMode
@@ -3373,7 +3387,10 @@ export async function mountSphPhaseDemoOverlay({
     skippedRenderReadbacks: 0,
     residentInterfaceRefreshes: 0,
     skippedResidentInterfaceRefreshes: 0,
+    deferredResidentInterfaceRefreshes: 0,
     residentInterfaceRefreshMode: initialPeerComputeRenderOwnershipPolicy?.residentInterfaceRefreshMode ?? null,
+    residentInterfaceRefreshWarmupFrames:
+      initialPeerComputeRenderOwnershipPolicy?.residentInterfaceRefreshWarmupFrames ?? 0,
     residentInterfaceRefreshPending: false,
     accumulatedSubvisibleMotionM: 0,
     subvisibleMotionBurstCount: 0,
@@ -4557,6 +4574,15 @@ export async function mountSphPhaseDemoOverlay({
 
   function startResidentInterfaceRefresh(context) {
     const mode = currentResidentInterfaceRefreshMode();
+    const policy = currentPeerComputeRenderOwnershipPolicy();
+    const warmupFrames = Math.max(
+      0,
+      Math.round(Number(
+        policy?.residentInterfaceRefreshWarmupFrames
+          ?? policy?.residentPlaybackCadencePolicy?.interfaceRefreshWarmupFrames
+          ?? 0
+      ) || 0)
+    );
     if (mode === 'disabled') {
       overlay.__sphResidentInterfaceRefresh = {
         schema: 'peercompute.ulg.sph-demo-resident-interface-refresh.v0',
@@ -4572,6 +4598,7 @@ export async function mountSphPhaseDemoOverlay({
       };
       updateResidentPerf({
         residentInterfaceRefreshMode: mode,
+        residentInterfaceRefreshWarmupFrames: warmupFrames,
         residentInterfaceRefreshPending: false
       });
       return null;
@@ -4603,6 +4630,39 @@ export async function mountSphPhaseDemoOverlay({
       });
       return pendingResidentInterfaceRefreshPromise;
     }
+    const residentSubmissionCount = Math.max(0, Math.round(Number(residentPerf.residentSubmissions) || 0));
+    if (mode === 'pipelined' && warmupFrames > 0 && residentSubmissionCount < warmupFrames) {
+      overlay.__sphResidentInterfaceRefresh = {
+        schema: 'peercompute.ulg.sph-demo-resident-interface-refresh.v0',
+        status: 'resident-interface-refresh-deferred-for-presentation-warmup',
+        mode,
+        scheduleToken: context.scheduleToken,
+        generation: context.generation,
+        reason: 'initial worker-owned presentation frames are prioritized before cold material/pressure interface refresh',
+        residentSubmissionCount,
+        residentInterfaceRefreshWarmupFrames: warmupFrames,
+        updatedAtMs: performance.now(),
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      updateResidentPerf({
+        deferredResidentInterfaceRefreshes: (residentPerf.deferredResidentInterfaceRefreshes || 0) + 1,
+        residentInterfaceRefreshMode: mode,
+        residentInterfaceRefreshWarmupFrames: warmupFrames,
+        residentInterfaceRefreshPending: false
+      });
+      publishResidentStageOrderTrace({
+        status: 'resident-interface-refresh-deferred-for-presentation-warmup',
+        mode,
+        scheduleToken: context.scheduleToken,
+        generation: context.generation,
+        residentSubmissionCount,
+        residentInterfaceRefreshWarmupFrames: warmupFrames
+      });
+      return null;
+    }
     const token = residentInterfaceRefreshToken + 1;
     residentInterfaceRefreshToken = token;
     let promise = null;
@@ -4622,6 +4682,7 @@ export async function mountSphPhaseDemoOverlay({
     pendingResidentInterfaceRefreshPromise = promise;
     updateResidentPerf({
       residentInterfaceRefreshMode: mode,
+      residentInterfaceRefreshWarmupFrames: warmupFrames,
       residentInterfaceRefreshPending: true,
       residentInterfaceRefreshToken: token
     });

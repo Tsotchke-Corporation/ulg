@@ -149,8 +149,18 @@ Tactical status, 2026-06-28 AKDT:
   `probe-wall-dominated-by-browser-raf`, with about `3.42 s` of RAF wait
   versus about `86 ms` of engine-visible work. Copy-back budget estimates now
   use the configured presentation target FPS instead of the throttled headless
-  wall refresh rate. Remaining work is the real cold first worker-owned render
-  refresh and the sparse/source-local material-interface builder.
+  wall refresh rate.
+  Follow-up completed the cold first worker-owned render refresh slice. The
+  worker-owned particle-state presentation path no longer extracts visual
+  render rows just to feed a main-thread bridge, and the mounted scheduler can
+  defer the first pipelined material/pressure interface refresh for a
+  PeerCompute-configurable warmup frame count. The first render refresh also
+  skips main-thread optical lookup work for the worker-owned particle-state
+  presentation path. A fresh HTTPS H2O/H2O worker-owned sphere probe now shows
+  early frames within the first 650 ms, `renderRowsMs=0`,
+  `opticalLookupMs=0`, `renderRefreshTotalMs` around `8-9 ms`, and worker
+  ready frames advancing immediately. Remaining work is the sparse/source-local
+  material-interface builder.
 - Follow-up on the worker-owned H2O/H2O sphere scenario found the remaining
   material-interface freshness bottleneck was the dense visual render-field
   table, not the full render-row readback fallback. A direct HTTPS timing check
@@ -1193,6 +1203,16 @@ Interim status, 2026-06-18 AKDT:
   with zero estimated readback bytes per step. This is an allocation/fence
   cleanup, not the sparse/source-local builder; the shader still scales with
   coarse field cells times particles.
+- 2026-06-30 worker-owned cold-start presentation: interactive worker-owned
+  particle-state presentation now skips the legacy visual render-row
+  extraction and main-thread optical lookup path, because the transferred
+  worker canvas is the visible renderer. PeerCompute/runtime policy exposes
+  `residentInterfaceRefreshWarmupFrames` so same-device interactive playback
+  can show initial frames before launching the pipelined material/pressure
+  interface refresh. Live HTTPS evidence on the H2O/H2O worker-owned sphere
+  path shows early `renderRefreshTotalMs` around `8-9 ms`,
+  `renderRowsMs=0`, `opticalLookupMs=0`, no render-row readback, and worker
+  frames advancing immediately.
 
 ## ULG-Specific Constraints
 

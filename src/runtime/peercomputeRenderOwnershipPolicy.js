@@ -46,6 +46,12 @@ function normalizePositiveInteger(value, fallback = null) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
+function normalizeNonNegativeInteger(value, fallback = 0) {
+  if (value == null || value === '') return fallback;
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
 function normalizePositiveNumber(value, fallback = null) {
   if (value == null || value === '') return fallback;
   const number = Number(value);
@@ -171,6 +177,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   residentStepsPerScheduleMax = null,
   residentParticleBridgeTargetBatchTimeS = null,
   residentInterfaceRefreshMode = null,
+  residentInterfaceRefreshWarmupFrames = null,
   residentComputeManagerMode = null,
   upgradeWorkerOffscreenRenderRowsWhenReady = false,
   allowTransitionalRenderRows = true,
@@ -407,6 +414,24 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       : null),
     defaultResidentInterfaceRefreshMode
   );
+  const defaultResidentInterfaceRefreshWarmupFrames = (
+    residentInterfaceRefreshModeResolved === 'pipelined'
+    && (
+      interactiveWorkerPresentationPlayback
+      || interactivePresentationPlayback
+      || sameDeviceInteractivePlayback
+    )
+  )
+    ? 8
+    : 0;
+  const residentInterfaceRefreshWarmupFramesResolved = normalizeNonNegativeInteger(
+    residentInterfaceRefreshWarmupFrames
+      ?? policy.residentInterfaceRefreshWarmupFrames
+      ?? policy.residentInterfaceWarmupFrames
+      ?? policy.residentPlaybackCadencePolicy?.interfaceRefreshWarmupFrames
+      ?? policy.residentPlaybackCadencePolicy?.residentInterfaceRefreshWarmupFrames,
+    defaultResidentInterfaceRefreshWarmupFrames
+  );
   const policyResidentComputeManagerModeExplicit = Boolean(
     policy.residentComputeManagerModeExplicit
     || policy.residentPlaybackCadencePolicy?.computeManagerModeExplicit
@@ -551,6 +576,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     residentParticleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
     residentInterfaceRefreshMode: residentInterfaceRefreshModeResolved,
     residentInterfaceRefreshModeExplicit,
+    residentInterfaceRefreshWarmupFrames: residentInterfaceRefreshWarmupFramesResolved,
     residentComputeManagerMode: residentComputeManagerModeResolved,
     residentComputeManagerModeExplicit,
     residentPlaybackCadencePolicy: {
@@ -561,6 +587,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       particleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
       interfaceRefreshMode: residentInterfaceRefreshModeResolved,
       interfaceRefreshModeExplicit: residentInterfaceRefreshModeExplicit,
+      interfaceRefreshWarmupFrames: residentInterfaceRefreshWarmupFramesResolved,
       computeManagerMode: residentComputeManagerModeResolved,
       computeManagerModeExplicit: residentComputeManagerModeExplicit,
       peercomputeConfigurable: true,

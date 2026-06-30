@@ -43,6 +43,8 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.residentStepsPerScheduleMax, 1);
   assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
+  assert.equal(policy.residentInterfaceRefreshWarmupFrames, 8);
+  assert.equal(policy.residentPlaybackCadencePolicy.interfaceRefreshWarmupFrames, 8);
   assert.equal(policy.residentComputeManagerMode, 'direct');
   assert.equal(policy.residentComputeManagerModeExplicit, false);
 });
@@ -271,8 +273,32 @@ test('render ownership policy keeps retained presentation batch cadence configur
   assert.equal(overridePolicy.residentParticleBridgeTargetBatchTimeS, 0.2);
   assert.equal(overridePolicy.residentInterfaceRefreshMode, 'blocking');
   assert.equal(overridePolicy.residentInterfaceRefreshModeExplicit, true);
+  assert.equal(overridePolicy.residentInterfaceRefreshWarmupFrames, 0);
   assert.equal(overridePolicy.residentComputeManagerMode, 'direct');
   assert.equal(overridePolicy.residentComputeManagerModeExplicit, true);
+});
+
+test('render ownership policy lets PeerCompute configure pipelined interface warmup frames', () => {
+  const defaultPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    workerOffscreenPresentationRequested: true
+  });
+  const disabledWarmup = resolvePeerComputeRenderOwnershipPolicy({
+    workerOffscreenPresentationRequested: true,
+    residentInterfaceRefreshWarmupFrames: 0
+  });
+  const explicitPeerPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: {
+      requestedMode: 'worker-owned-resident-render-producer',
+      residentInterfaceRefreshMode: 'pipelined',
+      residentInterfaceRefreshWarmupFrames: 12
+    },
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(defaultPolicy.residentInterfaceRefreshWarmupFrames, 8);
+  assert.equal(disabledWarmup.residentInterfaceRefreshWarmupFrames, 0);
+  assert.equal(explicitPeerPolicy.residentInterfaceRefreshWarmupFrames, 12);
+  assert.equal(explicitPeerPolicy.residentPlaybackCadencePolicy.interfaceRefreshWarmupFrames, 12);
 });
 
 test('render ownership policy makes retained compact snapshot export opt-in', () => {

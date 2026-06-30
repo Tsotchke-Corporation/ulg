@@ -33256,3 +33256,56 @@ Next:
   cells times particles. The next substantive performance slice should be the
   sparse/source-local material-interface builder or particle-owned interface
   extraction.
+
+## 2026-06-30 AKDT - Worker-Owned First Frame Fast Path
+
+Status:
+
+- Added `residentInterfaceRefreshWarmupFrames` to
+  `peercompute.ulg.render-ownership-policy.v0` and the resident playback
+  cadence policy. Interactive worker/same-device presentation defaults to
+  `8`; PeerCompute/runtime policy or URL parameters can set it, including `0`
+  to disable the deferral.
+- The mounted scheduler now reports
+  `resident-interface-refresh-deferred-for-presentation-warmup` and defers the
+  first pipelined material/pressure interface refresh until the warmup frame
+  count is reached. This keeps the cold material-interface job off the first
+  visible frames without disabling the later physics-interface refresh.
+- The worker-owned resident particle-state presentation path now skips the
+  legacy visual render-row extraction. It publishes
+  `render-rows-skipped-worker-owned-particle-state-producer`, keeps
+  `renderRowsReadback=false`, and relies on the presentation worker to draw
+  from SPH state/thermo rows.
+- The same presentation path skips main-thread optical lookup work because the
+  transferred worker canvas owns visible presentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "worker-owned particle-state"`
+- LIVE HTTPS H2O/H2O worker-owned sphere probe:
+  after 650 ms, `residentSubmissions=3`,
+  `deferredResidentInterfaceRefreshes=3`, `lastRenderReadbackMs=8.8`,
+  `renderRefreshTotalMs=8.7`, `renderRowsMs=0`, `opticalLookupMs=0`,
+  `renderRowsReadback=false`, `rowByteLength=0`, and worker ready frames `6`.
+  After another 1.8 s, worker ready frames reached `65`, render refresh was
+  about `12.4 ms`, and the material-interface refresh was running pipelined
+  rather than blocking visible frames.
+- PASS: smoke benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, `probeIssues=[]`,
+  `probeEngineBatchMs=98.7`, `residentStageMs=7.4`,
+  `residentStageStepsPerSecond=135.1`,
+  `renderRefreshTotalMs=22.6`, `renderRowsMs=0`, `opticalLookupMs=0`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+
+Next:
+
+- Continue with the sparse/source-local material-interface builder. The first
+  visible frame is no longer blocked by render-row extraction or optical
+  lookup, but the pipelined material-interface job still uses the coarse
+  field-cells-by-particles source-field algorithm.

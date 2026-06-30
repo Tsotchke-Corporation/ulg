@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
+  SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   SPH_SCENE_MAX_DEVICE_PIXEL_RATIO,
   SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
@@ -37,6 +38,7 @@ import {
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
+  normalizeSphSceneBackgroundColorHex,
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
@@ -77,6 +79,7 @@ import {
   surfaceObjectRenderOrder,
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial,
+  summarizeRenderRowSphereBridgeMaterial,
   stabilizeSurfaceMeshMaterialForRenderer,
   createThreeWebGpuResidentBridgeMaterialProxy,
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
@@ -84,6 +87,7 @@ import {
 } from '../src/visualization/sphPhaseScene.js';
 import {
   GPU_PHASE_IDS,
+  OPTICAL_GPU_RECORD_LAYOUT,
   stableOpticalMaterialId
 } from '../src/runtime/material/opticalGpuBuffers.js';
 import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
@@ -93,6 +97,26 @@ import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+
+function srgbToLinear(value) {
+  const v = Math.max(0, Math.min(1, Number(value)));
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
+function opticalRecordField(table, record, fieldName) {
+  const fieldIndex = (table.recordLayout || OPTICAL_GPU_RECORD_LAYOUT)
+    .findIndex((entry) => String(entry).split(':')[0] === fieldName);
+  assert.ok(fieldIndex >= 0, `missing optical record field ${fieldName}`);
+  return table.records[(record.recordIndex * table.recordStrideFloats) + fieldIndex];
+}
+
+test('SPH scene background color defaults to sky blue and normalizes URL hex values', () => {
+  assert.equal(SPH_SCENE_BACKGROUND_COLOR_DEFAULT, '#87ceeb');
+  assert.equal(normalizeSphSceneBackgroundColorHex(null), '#87ceeb');
+  assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
+  assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
+  assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
   const batches = createContinuousSurfaceBatches({
@@ -958,6 +982,44 @@ test('SPH phase renderer derives same-material render domains from domain counts
   );
 });
 
+test('continuous liquid surfaces use macro-spacing continuity radius for coarse particles', () => {
+  const positions = [];
+  const colors = [];
+  const materials = [];
+  const radii = [];
+  for (const x of [2.25, 2.75]) {
+    for (const y of [2.75, 3.25]) {
+      for (const z of [2.25, 2.75]) {
+        positions.push(x, y, z);
+        colors.push(0.3, 0.55, 1);
+        materials.push({
+          material: 'h2o',
+          phase: 'liquid',
+          renderKey: 'h2o',
+          renderDomainId: 2,
+          renderDomainKey: 'drop',
+          initialParticleSpacingM: 0.5,
+          particleRadiusM: 0.1125
+        });
+        radii.push(0.1125);
+      }
+    }
+  }
+
+  const [batch] = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array(positions),
+    colorsRgb: new Float32Array(colors),
+    materials,
+    particleRadiiM: new Float32Array(radii),
+    smoothingLengthM: 0.45
+  });
+
+  assert.equal(batch.surfaceKey, 'h2o|h2o|liquid|domain:drop');
+  assert.equal(batch.count, 8);
+  assert.equal(Number(batch.surfaceRadiusM.toFixed(4)), 0.25);
+});
+
 test('SPH resident material seed surfaces preserve domains without CPU geometry', () => {
   const batches = createResidentMaterialSeedSurfaceBatches({
     materials: [
@@ -1347,6 +1409,93 @@ test('SPH phase renderer derives optical GPU lookup rows for active surface batc
   assert.equal(lookup.cpuReference.outputs[lookup.lookup.outputStrideFloats + 11], 1);
 });
 
+test('SPH phase renderer feeds material-bank display PBR into surface optical rows', () => {
+  const goldSrgb = [0.974261208026, 0.437181207287, 0.095032056649];
+  const warmInputTable = {
+    schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
+    status: 'material-bank-gpu-warm-input-table-ready',
+    rowLayout: [
+      'materialId:f32',
+      'atomicNumber:f32',
+      'temperatureK:f32',
+      'pressurePa:f32',
+      'targetNeighborCount:f32',
+      'phaseCount:f32',
+      'baseColorSrgbR:f32',
+      'baseColorSrgbG:f32',
+      'baseColorSrgbB:f32',
+      'metalness:f32',
+      'roughness:f32',
+      'ior:f32',
+      'strictSourceOfTruth:f32',
+      'status:f32',
+      'pad0:f32',
+      'pad1:f32'
+    ],
+    rowStrideFloats: 16,
+    rowCount: 1,
+    rows: Float32Array.from([
+      stableOpticalMaterialId('Au'),
+      79,
+      293.15,
+      101325,
+      64,
+      2,
+      ...goldSrgb,
+      1,
+      0.32,
+      1,
+      0,
+      1,
+      0,
+      0
+    ]),
+    metadata: [{
+      role: 'drop',
+      material: 'Au',
+      requestedMaterial: 'Au',
+      materialId: stableOpticalMaterialId('Au'),
+      atomicNumber: 79,
+      status: 'ready'
+    }]
+  };
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 2.8, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      1.0, 0.8, 0.4,
+      1.0, 0.8, 0.4
+    ]),
+    materials: [
+      { material: 'Au', phase: 'solid', renderKey: 'Au' },
+      { material: 'Au', phase: 'solid', renderKey: 'Au' }
+    ]
+  });
+  const table = createOpticalGpuTableForSurfaceBatches(batches, {
+    materialProperties: {
+      Au: {
+        conductionElectronDensityPerM3: 5.9e28,
+        opticalInterbandOscillators: []
+      }
+    },
+    materialPropertyBankGpuWarmInputTable: warmInputTable
+  });
+  const goldRecord = table.recordMetadata.find((record) => record.material === 'Au');
+
+  assert.equal(table.recordCount, 1);
+  assert.equal(table.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
+  assert.equal(goldRecord.displayPbrSource, 'material-bank-pbr-warm-input');
+  assert.ok(goldRecord.closurePbr.baseColorSrgb.some((value, index) => Math.abs(value - goldSrgb[index]) > 0.1));
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearR') - srgbToLinear(goldSrgb[0])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearG') - srgbToLinear(goldSrgb[1])) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'baseColorLinearB') - srgbToLinear(goldSrgb[2])) < 1e-6);
+  assert.equal(opticalRecordField(table, goldRecord, 'metalness'), 1);
+  assert.ok(Math.abs(opticalRecordField(table, goldRecord, 'roughness') - 0.32) < 1e-6);
+});
+
 test('SPH renderer keeps condensed transmissive H2O geometrically visible', () => {
   const waterOptics = {
     material: 'h2o',
@@ -1648,7 +1797,7 @@ test('SPH Three render-row particle modes force initial fresh physics readback',
   );
 });
 
-test('SPH Three render-row particle modes retain previous bridge on no-full refresh', () => {
+test('SPH Three render-row particle modes keep fresh physics readback on repeated no-full refreshes', () => {
   const retained = resolveResidentRenderRowBridgeReadbackPlan({
     requestedRenderRowsReadbackMode: 'no-full-readback',
     useThreeRenderRowBridge: true,
@@ -1656,12 +1805,12 @@ test('SPH Three render-row particle modes retain previous bridge on no-full refr
   });
 
   assert.equal(retained.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
-  assert.equal(retained.requestedRenderRowsReadbackMode, 'no-full-readback');
-  assert.equal(retained.retainPreviousThreeRenderRowBridgeNoFull, true);
-  assert.equal(retained.freshPhysicsReadbackRequired, false);
+  assert.equal(retained.requestedRenderRowsReadbackMode, 'full-parity-readback');
+  assert.equal(retained.retainPreviousThreeRenderRowBridgeNoFull, false);
+  assert.equal(retained.freshPhysicsReadbackRequired, true);
   assert.equal(
     retained.renderRowsReadbackModeCoercionReason,
-    'three-render-row-bridge-retains-previous-no-full-readback'
+    'three-render-row-bridge-requires-fresh-physics-readback'
   );
 
   const webgpu = resolveResidentRenderRowBridgeReadbackPlan({
@@ -1672,6 +1821,69 @@ test('SPH Three render-row particle modes retain previous bridge on no-full refr
   assert.equal(webgpu.requestedRenderRowsReadbackMode, 'no-full-readback');
   assert.equal(webgpu.webGpuOverlayNoFullReadback, true);
   assert.equal(webgpu.retainPreviousThreeRenderRowBridgeNoFull, false);
+});
+
+test('SPH worker offscreen presentation forces transitional render-row readback', () => {
+  const workerPlan = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useWorkerOffscreenPresentation: true
+  });
+
+  assert.equal(workerPlan.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
+  assert.equal(workerPlan.requestedRenderRowsReadbackMode, 'full-parity-readback');
+  assert.equal(workerPlan.workerOffscreenPresentationReadbackRequired, true);
+  assert.equal(workerPlan.freshPhysicsReadbackRequired, true);
+  assert.equal(
+    workerPlan.renderRowsReadbackModeCoercionReason,
+    'worker-offscreen-render-rows-transitional-bridge-requires-fresh-physics-readback'
+  );
+
+  const overlayPlan = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useWorkerOffscreenPresentation: true,
+    useWebGpuRenderRowOverlayBridge: true
+  });
+
+  assert.equal(overlayPlan.requestedRenderRowsReadbackMode, 'no-full-readback');
+  assert.equal(overlayPlan.workerOffscreenPresentationReadbackRequired, false);
+  assert.equal(overlayPlan.freshPhysicsReadbackRequired, false);
+  assert.equal(overlayPlan.webGpuOverlayNoFullReadback, true);
+});
+
+test('SPH presentation-worker retained output preserves no-full readback when the worker frame is ready', () => {
+  const plan = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useThreeRenderRowBridge: true,
+    useWorkerOffscreenPresentation: true,
+    usePresentationWorkerRetainedOutputPresentationOnly: true,
+    workerOffscreenRetainedStageOutputAvailable: true
+  });
+
+  assert.equal(plan.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
+  assert.equal(plan.requestedRenderRowsReadbackMode, 'no-full-readback');
+  assert.equal(plan.workerOffscreenPresentationReadbackRequired, false);
+  assert.equal(plan.presentationWorkerRetainedOutputPresentationOnlyReadbackFree, true);
+  assert.equal(plan.freshPhysicsReadbackRequired, false);
+  assert.equal(plan.renderRowsReadbackModeCoercionReason, null);
+});
+
+test('SPH worker-owned particle-state producer preserves no-full render-row readback', () => {
+  const plan = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useThreeRenderRowBridge: true,
+    useWorkerOffscreenPresentation: true,
+    useWorkerOwnedResidentRenderProducer: true,
+    useWorkerOwnedResidentParticleStateProducer: true
+  });
+
+  assert.equal(plan.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
+  assert.equal(plan.requestedRenderRowsReadbackMode, 'no-full-readback');
+  assert.equal(plan.renderRowsReadbackModeCoercionReason, null);
+  assert.equal(plan.freshPhysicsReadbackRequired, false);
+  assert.equal(plan.workerOffscreenPresentationReadbackRequired, false);
+  assert.equal(plan.workerOwnedResidentRenderProducerReadbackRequired, false);
+  assert.equal(plan.workerOwnedResidentParticleStateProducerReadbackFree, true);
+  assert.equal(plan.workerOwnedResidentParticleStateProducerPresentationOnly, true);
 });
 
 test('SPH resident overlay policy chooses no-full-readback only when overlay is available', () => {
@@ -1891,7 +2103,7 @@ test('SPH render-row sphere bridge stabilizes transmissive PBR for mobile proxy 
   assert.ok(material.version > previousVersion);
 });
 
-test('SPH render-row sphere bridge brightens dark transmissive proxy materials on mobile', () => {
+test('SPH render-row sphere bridge preserves valid dark transmissive PBR materials', () => {
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0.015, 0.018, 0.02),
     transmission: 0.92,
@@ -1910,10 +2122,50 @@ test('SPH render-row sphere bridge brightens dark transmissive proxy materials o
     fallbackColorSrgb: [0.44, 0.76, 0.91]
   });
 
-  assert.equal(material.transmission, 0);
-  assert.ok(material.opacity >= 0.72);
-  assert.ok(material.color.r + material.color.g + material.color.b > 0.4);
-  assert.equal(material.userData.renderRowSphereFallbackReason, 'transmissive-proxy-low-luminance');
+  assert.equal(material.transmission, 0.92);
+  assert.ok(material.thickness > 0);
+  assert.equal(material.transparent, true);
+  assert.ok(material.color.r + material.color.g + material.color.b > 0.04);
+  assert.equal(material.userData.renderRowSphereTransmissionProxy, false);
+  assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
+  assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
+});
+
+test('SPH render-row sphere bridge preserves pale liquid transmissive PBR', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.94, 0.98, 1),
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0.88,
+    thickness: 0.4,
+    transparent: true,
+    opacity: 0.16
+  });
+  material.userData.optical = {
+    material: 'h2o',
+    phase: 'liquid',
+    baseColorSrgb: [0.94, 0.98, 1],
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0.88,
+    opacity: 0.16,
+    vertexColorPolicyId: 1,
+    status: 1,
+    renderModel: 'molecular-transparent-beer-lambert-pbr'
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    fallbackColorSrgb: [0.44, 0.76, 0.91]
+  });
+
+  assert.equal(material.transmission, 0.88);
+  assert.ok(material.thickness > 0);
+  assert.equal(material.transparent, true);
+  assert.equal(material.userData.renderRowSphereTransmissionProxy, false);
+  assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
+  assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
+  assert.ok(material.color.b >= material.color.r);
 });
 
 test('SPH render-row sphere bridge uses closure-derived visible proxy for metallic particles', () => {
@@ -1921,6 +2173,7 @@ test('SPH render-row sphere bridge uses closure-derived visible proxy for metall
     color: new THREE.Color(0.02, 0.018, 0.016),
     metalness: 1,
     roughness: 0.06,
+    ior: 0,
     transmission: 0,
     transparent: false,
     opacity: 1
@@ -1931,6 +2184,7 @@ test('SPH render-row sphere bridge uses closure-derived visible proxy for metall
     baseColorSrgb: [1, 0.945, 0.923],
     metalness: 1,
     roughness: 0.32,
+    ior: 0,
     transmission: 0,
     vertexColorPolicyId: 1,
     status: 1,
@@ -1943,13 +2197,124 @@ test('SPH render-row sphere bridge uses closure-derived visible proxy for metall
   });
 
   assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, true);
+  assert.equal(material.userData.renderRowSphereMetallicDisplayProxy, true);
   assert.equal(material.userData.renderRowSphereOriginalMetalness, 1);
-  assert.equal(material.userData.renderRowSphereFallbackReason, 'metallic-sphere-visibility-proxy');
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'metallic-sphere-low-luminance-pbr-color');
   assert.deepEqual(material.userData.renderRowSphereFallbackColor, [0.99, 0.94, 0.92]);
-  assert.ok(material.metalness <= 0.58);
-  assert.ok(material.roughness >= 0.34);
-  assert.ok(material.envMapIntensity >= 1.45);
+  assert.equal(material.metalness, 1);
+  assert.ok(material.roughness >= 0.5);
+  assert.ok(material.envMapIntensity >= 1.8);
+  assert.ok(material.ior >= 1);
+  assert.equal(material.userData.renderRowSphereOriginalIor, 0);
+  assert.ok(material.emissive.r + material.emissive.g + material.emissive.b > 0);
+  assert.equal(material.userData.renderRowSphereMetallicDisplayEmissiveFill, 0.04);
   assert.ok(material.color.r + material.color.g + material.color.b > 0.6);
+});
+
+test('SPH render-row sphere bridge material summary exposes live PBR proxy values', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.02, 0.018, 0.016),
+    metalness: 1,
+    roughness: 0.06,
+    ior: 0,
+    transmission: 0,
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'Fe',
+    phase: 'solid',
+    baseColorSrgb: [0.66, 0.62, 0.56],
+    metalness: 1,
+    roughness: 0.32,
+    ior: 0,
+    transmission: 0,
+    status: 1,
+    renderModel: 'conductor-drude-free-electron'
+  };
+  const mesh = {
+    count: 3,
+    material,
+    userData: {
+      surfaceKey: 'fe|fe|solid|domain:drop',
+      materialKey: 'Fe',
+      renderKey: 'Fe',
+      phase: 'solid',
+      pointCount: 3,
+      renderDomainId: 2,
+      renderDomainKey: 'drop',
+      renderRowSpherePbrMaterialSource: 'closure-derived-pbr',
+      renderRowSphereClosurePbr: true
+    }
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'Fe', renderKey: 'Fe', phase: 'solid' },
+    fallbackColorSrgb: [0.66, 0.62, 0.56]
+  });
+  const summary = summarizeRenderRowSphereBridgeMaterial(mesh, material);
+
+  assert.equal(summary.materialKey, 'Fe');
+  assert.equal(summary.pointCount, 3);
+  assert.equal(summary.renderRowSphereClosurePbr, true);
+  assert.equal(summary.renderRowSphereMetallicVisibilityProxy, true);
+  assert.equal(summary.renderRowSphereMetallicDisplayProxy, true);
+  assert.equal(summary.renderRowSphereFallbackReason, 'metallic-sphere-low-luminance-pbr-color');
+  assert.ok(summary.colorLuminance > 0.04);
+  assert.ok(summary.emissiveLuminance > 0);
+  assert.ok(summary.ior >= 1);
+  assert.equal(summary.renderRowSphereOriginalIor, 0);
+  assert.equal(summary.opticalMetalness, 1);
+  assert.equal(summary.metalness, 1);
+  assert.ok(summary.roughness >= 0.5);
+  assert.ok(summary.envMapIntensity >= 1.8);
+});
+
+test('SPH render-row sphere bridge preserves gold hue and original metalness for valid conductor PBR', () => {
+  const goldColor = new THREE.Color();
+  goldColor.setRGB(1, 0.862, 0.586, THREE.LinearSRGBColorSpace);
+  const material = new THREE.MeshPhysicalMaterial({
+    color: goldColor,
+    metalness: 1,
+    roughness: 0.32,
+    ior: 0,
+    transmission: 0,
+    transparent: false,
+    opacity: 1
+  });
+  material.userData.optical = {
+    material: 'Au',
+    phase: 'solid',
+    baseColorSrgb: [1, 0.936, 0.789],
+    metalness: 1,
+    roughness: 0.32,
+    ior: 0,
+    transmission: 0,
+    status: 1,
+    renderModel: 'conductor-drude-lorentz-relativistic-interband'
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'Au', renderKey: 'Au', phase: 'solid' },
+    fallbackColorSrgb: [1, 0.936, 0.789]
+  });
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'Au', renderKey: 'Au', phase: 'solid' },
+    fallbackColorSrgb: [1, 0.936, 0.789]
+  });
+
+  assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, true);
+  assert.equal(material.userData.renderRowSphereMetallicDisplayProxy, true);
+  assert.equal(material.userData.renderRowSphereOriginalMetalness, 1);
+  assert.equal(material.userData.renderRowSphereOriginalRoughness, 0.32);
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'metallic-sphere-renderer-safe-pbr');
+  assert.equal(material.metalness, 1);
+  assert.ok(material.roughness >= 0.5);
+  assert.ok(material.envMapIntensity >= 1.8);
+  assert.ok(material.ior >= 1);
+  assert.ok(material.emissive.r + material.emissive.g + material.emissive.b > 0);
+  assert.ok(material.color.g > material.color.b);
+  assert.ok(material.color.b < 0.7);
 });
 
 test('SPH render-row sphere bridge leaves non-metal particle PBR out of metallic proxy', () => {
@@ -1983,7 +2348,7 @@ test('SPH render-row sphere bridge leaves non-metal particle PBR out of metallic
   assert.equal(material.metalness, 0);
 });
 
-test('SPH render-row sphere bridge keeps air particle PBR visible without metallic fallback', () => {
+test('SPH render-row sphere bridge preserves transparent air particle PBR without metallic fallback', () => {
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0.94, 0.97, 1),
     metalness: 0,
@@ -2015,9 +2380,11 @@ test('SPH render-row sphere bridge keeps air particle PBR visible without metall
   assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
   assert.equal(material.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(material.metalness, 0);
-  assert.equal(material.transmission, 0);
-  assert.equal(material.thickness, 0);
-  assert.ok(material.opacity >= 0.66);
+  assert.equal(material.transmission, 0.9995);
+  assert.ok(material.thickness > 0);
+  assert.equal(material.transparent, true);
+  assert.equal(material.opacity, 0.0006);
+  assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(material.color.r + material.color.g + material.color.b > 2.4);
 });
 
@@ -2200,12 +2567,13 @@ test('SPH Three WebGPU render-row sphere proxy keeps sodium closure PBR visible'
   assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
   assert.equal(proxy.userData.renderRowSphereClosurePbr, true);
   assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, true);
-  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'metallic-sphere-visibility-proxy');
+  assert.equal(proxy.userData.renderRowSphereMetallicDisplayProxy, true);
+  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'metallic-sphere-low-luminance-pbr-color');
   assert.deepEqual(proxy.userData.surfaceMaterialFallbackColor, [0.99, 0.94, 0.92]);
   assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 0.6);
 });
 
-test('SPH Three WebGPU render-row sphere proxy keeps air closure PBR visible', () => {
+test('SPH Three WebGPU render-row sphere proxy preserves transparent air closure metadata', () => {
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(0.94, 0.97, 1),
     metalness: 0,
@@ -2242,12 +2610,13 @@ test('SPH Three WebGPU render-row sphere proxy keeps air closure PBR visible', (
 
   assert.equal(proxy.type, 'MeshBasicMaterial');
   assert.equal(proxy.transparent, true);
-  assert.ok(proxy.opacity >= 0.66);
+  assert.equal(proxy.opacity, 0.0006);
   assert.equal(proxy.userData.renderRowSphereMaterialRendererProxy, true);
   assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
   assert.equal(proxy.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, undefined);
   assert.equal(proxy.userData.renderRowSphereFallbackReason, undefined);
+  assert.equal(proxy.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 2.4);
 });
 
@@ -2607,6 +2976,20 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   );
   assert.equal(nativePixelBlocked.runtimeConsumerReady, true);
   assert.equal(nativePixelBlocked.renderBridgeBound, true);
+  assert.equal(nativePixelBlocked.sameDeviceMainThreadImportSelected, true);
+  assert.equal(
+    nativePixelBlocked.sameDeviceMainThreadImportRoute,
+    'native-webgpu-surface-consumer'
+  );
+  assert.equal(nativePixelBlocked.sameDeviceMainThreadImportThread, 'main-thread');
+  assert.equal(
+    nativePixelBlocked.sameDeviceMainThreadImportDeviceScope,
+    'engine-owned-native-webgpu-canvas-device'
+  );
+  assert.equal(
+    nativePixelBlocked.sameDeviceMainThreadImportStatus,
+    'same-device-main-thread-import-awaiting-pixel-validation'
+  );
 
   const nativeBrowserFrameValidationRequired = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2633,6 +3016,37 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     'browser-frame-validation-required'
   );
   assert.equal(nativeBrowserFrameValidationRequired.nativeSurfaceConsumerTextureReadbackUnavailable, false);
+
+  const nativeBrowserFrameCaptureUnsupported = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerDeviceMapSmokeStatus: 'passed',
+      nativeSurfaceConsumerRenderedFrameCount: 1,
+      nativeSurfaceConsumerPixelValidationReason:
+        'browser-frame playwright-canvas-center-crop returned transparent black for a rendered native WebGPU canvas'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'unsupported'
+  });
+  assert.equal(nativeBrowserFrameCaptureUnsupported.ready, false);
+  assert.equal(
+    nativeBrowserFrameCaptureUnsupported.status,
+    'resident-surface-visible-gpu-consumer-blocked-pixel-validation'
+  );
+  assert.equal(
+    nativeBrowserFrameCaptureUnsupported.nativeSurfaceConsumerValidationBlockerFamily,
+    'browser-frame-validation-capture-unsupported'
+  );
+  assert.equal(
+    nativeBrowserFrameCaptureUnsupported.sameDeviceMainThreadImportStatus,
+    'same-device-main-thread-import-awaiting-pixel-validation'
+  );
 
   const nativePendingValidationWithFrame = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2789,6 +3203,9 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(validated.ready, true);
   assert.equal(validated.status, 'resident-surface-visible-gpu-consumer-ready');
   assert.equal(validated.pixelValidated, true);
+  assert.equal(validated.sameDeviceMainThreadImportSelected, false);
+  assert.equal(validated.sameDeviceMainThreadImportRoute, null);
+  assert.equal(validated.sameDeviceMainThreadImportStatus, null);
 
   const nativeValidated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
@@ -2806,6 +3223,11 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativeValidated.ready, true);
   assert.equal(nativeValidated.status, 'resident-surface-visible-gpu-consumer-ready');
   assert.equal(nativeValidated.pixelValidated, true);
+  assert.equal(nativeValidated.sameDeviceMainThreadImportSelected, true);
+  assert.equal(
+    nativeValidated.sameDeviceMainThreadImportStatus,
+    'same-device-main-thread-import-ready'
+  );
 
   const renderFieldBlocked = resolveResidentSurfaceVisibleGpuConsumer({
     handoff: resolveResidentSurfaceBufferHandoff({

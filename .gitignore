@@ -4,6 +4,12 @@ dist/
 coverage/
 test-results/
 playwright-report/
+/artifacts/
+/.agents/
+/.codex/
+/.claude/settings.local.json
+/.icc/ulg_arch_summary.md
+/.icc/ulg_status.json
 *.log
 *.swp
 public/service-assets/**

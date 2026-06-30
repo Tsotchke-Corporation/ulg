@@ -4056,9 +4056,25 @@ test('MLS-MPM resident steps expose WebGPU-Ocean hot-loop budget diagnostics', a
   assert.equal(budget.status, 'webgpu-ocean-hot-loop-no-readback-budget');
   assert.equal(budget.normalHotLoopReadbackFree, true);
   assert.equal(budget.noSummaryReadback, true);
+  assert.equal(budget.activeGridPlanOnlySummary, false);
   assert.equal(budget.compactSummaryStepCount, 0);
   assert.equal(budget.readbackBytes, 0);
   assert.equal(budget.compactSummaryBytes, 0);
+
+  const planOnlyBudget = summarizeMlsMpmResidentHotLoopBudget({
+    ...options,
+    stepCount: 4,
+    compactSummaryMode: 'active-grid-plan-only'
+  });
+
+  assert.equal(planOnlyBudget.compactSummaryMode, 'plan-only');
+  assert.equal(planOnlyBudget.status, 'webgpu-ocean-hot-loop-active-grid-plan-only-budget');
+  assert.equal(planOnlyBudget.normalHotLoopReadbackFree, true);
+  assert.equal(planOnlyBudget.noSummaryReadback, true);
+  assert.equal(planOnlyBudget.activeGridPlanOnlySummary, true);
+  assert.equal(planOnlyBudget.compactSummaryStepCount, 0);
+  assert.equal(planOnlyBudget.readbackBytes, 0);
+  assert.equal(planOnlyBudget.compactSummaryBytes, 0);
 
   const activeGridTask = createMlsMpmResidentStepsComputeTask({
     ...options,
@@ -4083,6 +4099,26 @@ test('MLS-MPM resident steps expose WebGPU-Ocean hot-loop budget diagnostics', a
   assert.equal(activeGridTask.lawGraphNode.hotLoopBudget.status, 'webgpu-ocean-hot-loop-no-readback-budget');
   assert.equal(activeGridTask.data.hotLoopBudget.copyBudget.readbackBytes, 0);
   assert.equal(activeGridTask.gpuResidentLane.copyBudget.readbackBytes, 0);
+
+  const planOnlyTask = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-hot-loop-plan-only-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    domainKey: 'ulg:test-domain',
+    stepCount: 4,
+    compactSummaryMode: 'plan-only',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true
+  });
+
+  assert.equal(planOnlyTask.data.compactSummaryMode, 'plan-only');
+  assert.equal(planOnlyTask.webgpu.hotLoopBudget.status, 'webgpu-ocean-hot-loop-active-grid-plan-only-budget');
+  assert.equal(planOnlyTask.webgpu.hotLoopBudget.activeGridPlanOnlySummary, true);
+  assert.equal(planOnlyTask.webgpu.hotLoopBudget.readbackBytes, 0);
+  assert.equal(planOnlyTask.gpuResidentLane.residentSequenceLaneContract.compactSummaryMode, 'plan-only');
 });
 
 test('MLS-MPM resident steps compute task blocks fused sequence when sidecars require per-step ordering', async () => {
@@ -5941,8 +5977,8 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(Number.isFinite(execution.finalStep.stageTiming.queueFenceMs.fusedMechanicsSequence), true);
   assert.equal(execution.fusedResidentSequence.queueFenceRequested, true);
   assert.equal(execution.fusedResidentSequence.queueFenceStatus, 'complete');
-  assert.equal(execution.stepSummaries[0].compactSummaryAvailable, false);
-  assert.equal(execution.stepSummaries[1].compactSummaryAvailable, false);
+  assert.equal(execution.stepSummaries[0].compactSummaryAvailable ?? false, false);
+  assert.equal(execution.stepSummaries[1].compactSummaryAvailable ?? false, false);
   assert.equal(device.submissions.length, 2);
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
@@ -6592,6 +6628,92 @@ test('MLS-MPM resident steps can defer active-grid plan-only summary until final
     execution.nextSphParticleState.residentActiveGridDispatchPlanHint.status,
     'active-grid-summary-dispatch-plan-hint-ready'
   );
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM resident steps compactSummaryMode plan-only preserves active-grid hints without readback', async () => {
+  const buffers = manualBuffers({
+    position: [1.25, 1.25, 1.25],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const thermalInputs = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'active-grid-plan-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    activeGridSafetyCells: 1,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    thermalStepRunner(args) {
+      thermalInputs.push({
+        sourceStateBuffer: args.sourceStateBuffer?.label ?? null,
+        readbackMode: args.readbackMode
+      });
+      const index = thermalInputs.length;
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer(`plan-only-thermal-state-${index}`),
+        thermoBuffer: tracker.buffer(`plan-only-thermal-thermo-${index}`),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(execution.compactSummaryMode, 'plan-only');
+  assert.equal(execution.fusedResidentSequencePreflight.fallbackMode, 'per-step-fused-mechanics-active-grid');
+  assert.equal(execution.stepSummaries.length, 2);
+  assert.equal(execution.stepSummaries[0].compactSummaryAvailable ?? false, false);
+  assert.equal(execution.stepSummaries[1].compactSummaryAvailable ?? false, false);
+  assert.equal(execution.stepSummaries[0].stageTiming.compactSummaryRequested ?? false, false);
+  assert.equal(execution.stepSummaries[0].stageTiming.activeGridDispatchPlanOnlyRequested ?? false, false);
+  assert.equal(
+    execution.stepSummaries[0].stageTiming.activeGridDispatchPlanRefreshSkippedReason,
+    'active-grid-plan-refresh-deferred-until-final-step'
+  );
+  assert.equal(execution.finalStep.stageTiming.compactSummaryRequested, false);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanOnlyRequested, true);
+  assert.equal(execution.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(execution.finalStep.compactGpuSummary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(execution.finalStep.compactGpuSummary.timing.mapAsyncWaitMs, null);
+  assert.equal(
+    execution.nextSphParticleState.residentActiveGridDispatchPlanHint.status,
+    'active-grid-summary-dispatch-plan-hint-ready'
+  );
+  assert.equal(thermalInputs.length, 2);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

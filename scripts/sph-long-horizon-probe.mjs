@@ -5816,7 +5816,7 @@ function analyzeTimeline(timeline, {
     .filter(Number.isFinite);
   const maxSpeedObservedMPerS = maxSpeedSeries.length ? Math.max(...maxSpeedSeries) : null;
   const maxDisplacementObservedM = maxDisplacementSeries.length ? Math.max(...maxDisplacementSeries) : null;
-  const compactSummaryDisabled = timeline?.compactSummaryMode === 'none' || metrics.some((metric) => (
+  const compactSummaryDisabled = ['none', 'plan-only'].includes(timeline?.compactSummaryMode) || metrics.some((metric) => (
     metric?.residentStep?.stageTiming?.compactSummaryRequested === false
     || metric?.residentSteps?.finalStepStageTiming?.compactSummaryRequested === false
   ));
@@ -7253,7 +7253,7 @@ async function main() {
     process.env.ULG_PROBE_COMPACT_SUMMARY_SCOPE,
     readbackMode === 'no-full-readback' ? 'particle-visual' : 'full'
   );
-  const compactSummaryMode = ['none', 'final-only', 'every-step'].includes(
+  const compactSummaryMode = ['none', 'plan-only', 'final-only', 'every-step'].includes(
     String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE || '').toLowerCase()
   )
     ? String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE).toLowerCase()
@@ -7270,7 +7270,7 @@ async function main() {
     process.env.ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE
       ?? process.env.ULG_PROBE_RESIDENT_ACTIVE_GRID_PLAN_REFRESH
       ?? process.env.ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH,
-    compactSummaryMode === 'none' ? 'final-only' : 'every-step'
+    ['none', 'plan-only'].includes(compactSummaryMode) ? 'final-only' : 'every-step'
   );
   const measureGpuQueueFence = booleanEnv(
     process.env.ULG_PROBE_MEASURE_GPU_QUEUE_FENCE

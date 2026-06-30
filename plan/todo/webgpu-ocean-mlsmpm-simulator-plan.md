@@ -1313,6 +1313,14 @@ Interim status, 2026-06-18 AKDT:
   fallback instead of a failed fused-sequence request. This does not implement
   thermal-aware multi-step fusion; it makes that remaining plan boundary
   explicit and measurable.
+- 2026-06-30 active-grid plan-only summary mode: no-full resident stepping now
+  accepts `compactSummaryMode=plan-only` to keep final active-grid dispatch-plan
+  hints while skipping compact-summary readback. The sidecar fallback benchmark
+  now avoids the prior final `mapAsync` stall (`residentStageMs=5.3`,
+  compact readback bytes `0`, compact summary `mapAsyncWaitMs=null`) while
+  still marking the fused sequence sidecar-blocked. The larger boundary remains
+  a real sidecar-aware fused sequence or Ocean-tiled P2G; this is a hot-loop
+  readback cleanup, not physics validation.
 
 ## ULG-Specific Constraints
 

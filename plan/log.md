@@ -33775,3 +33775,55 @@ Next:
 - Commit this sidecar preflight slice. The next performance boundary remains a
   real thermal/reaction-aware fused sequence or the larger Ocean-tiled P2G
   backend; this change only makes the current fallback explicit and measurable.
+
+## 2026-06-30 AKDT - Plan-Only Active-Grid Summary Mode
+
+Status:
+
+- Added `compactSummaryMode=plan-only` for no-full MLS-MPM resident stepping.
+  It preserves final-step active-grid dispatch-plan hints while skipping the
+  compact summary readback path entirely.
+- Aliases `active-grid-plan-only`, `dispatch-plan-only`, and
+  `no-readback-plan` normalize to the same mode so PeerCompute and benchmark
+  callers can request the policy without depending on a UI-specific name.
+- Hot-loop budget diagnostics now report
+  `webgpu-ocean-hot-loop-active-grid-plan-only-budget` with
+  `activeGridPlanOnlySummary=true`, zero compact summary steps, zero compact
+  summary bytes, and zero readback bytes.
+- Sidecar-blocked fused-sequence fallback still lands on
+  `per-step-fused-mechanics-active-grid`; this slice removes the previous
+  final compact-summary mapAsync stall from that fallback, but it does not
+  implement the larger thermal/reaction-aware fused sequence.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `68/68` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: VPN server reachability check:
+  `https://100.86.83.35:5173/` returned HTTP 200, `http://100.86.83.35:5174/`
+  returned HTTP 200, and both listeners were bound to `0.0.0.0`.
+- PASS: live HTTPS benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-plan-only-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  `residentStageMs=5.3`, `residentStageStepsPerSecond=188.68`,
+  `fusedResidentSequencePreflightStatus=blocked-fused-resident-sequence`,
+  fallback `per-step-fused-mechanics-active-grid`, blockers
+  `[thermal-sidecar]`, `queueFenceBypassedBySidecarFallback=true`,
+  compact-summary `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  The nested two-step direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`, so this is performance
+  evidence only, not physics/readiness validation.
+
+Next:
+
+- Commit this plan-only summary slice. The next performance boundary remains a
+  true sidecar-aware fused resident sequence or the larger Ocean-tiled P2G
+  backend.

@@ -93,7 +93,7 @@ const lawThermal = booleanEnv('ULG_BENCH_LAW_THERMAL', probeMode !== 'direct-res
 const lawReactions = booleanEnv('ULG_BENCH_LAW_REACTIONS', true);
 const lawViscosity = booleanEnv('ULG_BENCH_LAW_VISCOSITY', true);
 const lawSurfaceTension = booleanEnv('ULG_BENCH_LAW_SURFACE_TENSION', false);
-const compactSummaryMode = ['none', 'final-only', 'every-step'].includes(
+const compactSummaryMode = ['none', 'plan-only', 'final-only', 'every-step'].includes(
   String(process.env.ULG_BENCH_COMPACT_SUMMARY_MODE || '').toLowerCase()
 )
   ? String(process.env.ULG_BENCH_COMPACT_SUMMARY_MODE).toLowerCase()
@@ -105,7 +105,7 @@ const activeGridPlanRefreshModeEnv = String(
 ).toLowerCase();
 const activeGridDispatchPlanRefreshMode = ['none', 'final-only', 'every-step'].includes(activeGridPlanRefreshModeEnv)
   ? activeGridPlanRefreshModeEnv
-  : (compactSummaryMode === 'none' ? 'final-only' : 'every-step');
+  : (['none', 'plan-only'].includes(compactSummaryMode) ? 'final-only' : 'every-step');
 const fuseResidentMechanicsSequence = !['0', 'false', 'off', 'no'].includes(
   String(process.env.ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE || '1').toLowerCase()
 );

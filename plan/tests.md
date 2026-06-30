@@ -13417,3 +13417,45 @@ Fused sequence sidecar preflight contract, 2026-06-30 12:31 AKDT:
     fallback `per-step-fused-mechanics-active-grid`, blockers
     `[thermal-sidecar]`, active-grid requirement satisfied, and queue-fence
     gate bypassed by sidecar fallback.
+
+Plan-only active-grid summary mode, 2026-06-30 13:45 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Syntax:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- Focused resident MLS-MPM:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `68/68`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `18/18`.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `11/11`.
+- Diff hygiene:
+  `git diff --check`
+  - Passed.
+- VPN server reachability:
+  `curl -k -I --max-time 10 https://100.86.83.35:5173/ && curl -I --max-time 10 http://100.86.83.35:5174/ && ss -ltnp '( sport = :5173 or sport = :5174 )'`
+  - Passed: HTTPS 5173 returned HTTP 200, HTTP 5174 returned HTTP 200, and
+    both listeners were bound to `0.0.0.0`.
+- Live HTTPS sidecar plan-only benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-plan-only-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, suite gate
+    `pass`, scenario `good`, `residentStageMs=5.3`,
+    `residentStageStepsPerSecond=188.68`, preflight fallback
+    `per-step-fused-mechanics-active-grid`, queue-fence gate bypassed by the
+    sidecar fallback, `compactSummaryTiming.mapAsyncWaitMs=null`, and compact
+    readback byte length `0`.
+  - Caveat: the nested two-step direct probe status was `bad` with issues
+    `missing-max-speed` and `no-positive-displacement`, so this run validates
+    the hot-loop/readback policy rather than physics motion quality.

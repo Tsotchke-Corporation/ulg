@@ -118,6 +118,7 @@ const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY = 'final-only';
+export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY = 'plan-only';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE = 'none';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
@@ -186,6 +187,14 @@ export function normalizeMlsMpmResidentCompactSummaryMode(value) {
     return MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY;
   }
   if (
+    mode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY
+    || mode === 'active-grid-plan-only'
+    || mode === 'dispatch-plan-only'
+    || mode === 'no-readback-plan'
+  ) {
+    return MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY;
+  }
+  if (
     mode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
     || mode === 'skip'
     || mode === 'disabled'
@@ -217,8 +226,14 @@ function compactSummaryStepCountForMode({
 } = {}) {
   if (readbackMode !== NO_FULL_READBACK_MODE) return 0;
   if (compactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE) return 0;
+  if (compactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY) return 0;
   if (compactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY) return 1;
   return Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+}
+
+function compactSummaryModeRequestsReadback(mode) {
+  return mode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+    && mode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY;
 }
 const ULG_LAW_GRAPH_NODE_TASK_REF_SCHEMA = 'peercompute.ulg.law-graph-node-task-ref.v0';
 const PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA = 'peercompute.compute.gpu-fence-report.v0';
@@ -4344,10 +4359,14 @@ export function summarizeMlsMpmResidentHotLoopBudget({
   const activeGridEnabled = activeGridDispatchPolicy?.enabled === true;
   const noFullReadback = normalizedReadbackMode === NO_FULL_READBACK_MODE;
   const noSummaryReadback = noFullReadback
-    && normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE;
+    && !compactSummaryModeRequestsReadback(normalizedCompactSummaryMode);
+  const activeGridPlanOnlySummary = noFullReadback
+    && normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_PLAN_ONLY;
   const status = noFullReadback
     ? (noSummaryReadback
-        ? 'webgpu-ocean-hot-loop-no-readback-budget'
+        ? (activeGridPlanOnlySummary
+            ? 'webgpu-ocean-hot-loop-active-grid-plan-only-budget'
+            : 'webgpu-ocean-hot-loop-no-readback-budget')
         : 'webgpu-ocean-hot-loop-compact-summary-budget')
     : 'full-readback-transition-budget';
   return {
@@ -4359,6 +4378,7 @@ export function summarizeMlsMpmResidentHotLoopBudget({
     compactSummaryStepCount: summarizedStepCount,
     normalHotLoopReadbackFree: noFullReadback,
     noSummaryReadback,
+    activeGridPlanOnlySummary,
     activeGridEnabled,
     activeGridDispatchPolicyStatus: activeGridDispatchPolicy?.promotionStatus || null,
     activeGridDispatchPlanRefreshMode:
@@ -13746,9 +13766,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       cflFactor: args.cflFactor,
       internalPressureScale: args.internalPressureScale,
       stepCount: count,
-      summaryRunner: resolvedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
-        ? null
-        : (args.summaryRunner ?? runMlsMpmResidentSummaryWebGpu),
+      summaryRunner: compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
+        ? (args.summaryRunner ?? runMlsMpmResidentSummaryWebGpu)
+        : null,
       compactSummaryScope: resolvedCompactSummaryScope,
       cohortRanges: args.cohortRanges ?? null,
       sourceSlot,
@@ -13776,7 +13796,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       summary.fusedResidentSequence = true;
       summary.fusedResidentSequenceStepCount = count;
       summary.compactSummaryMode = resolvedCompactSummaryMode;
-      summary.compactSummaryAvailable = resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+      summary.compactSummaryAvailable = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
         && index === count - 1;
       return summary;
     });
@@ -13829,7 +13849,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   }
 
   for (let index = 0; index < count; index += 1) {
-    const summarizeStep = resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+    const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
     markSequenceProgress('resident-sequence-step-started', {
       stepIndex: index,
@@ -13982,7 +14002,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu({
   markSequenceProgress('mechanics-only-sequence-started');
 
   for (let index = 0; index < count; index += 1) {
-    const summarizeStep = resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+    const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
     markSequenceProgress('mechanics-only-sequence-step-started', {
       stepIndex: index,

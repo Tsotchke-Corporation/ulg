@@ -1059,6 +1059,56 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     workerOffscreenRetainedStateContinuation?.crossPeerReplayBlocker
     ?? renderState?.workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker
     ?? null;
+  const workerOffscreenRetainedCompactSnapshot =
+    metric?.workerOffscreenRetainedCompactSnapshot
+    ?? renderState?.workerOffscreenRetainedCompactSnapshot
+    ?? metric?.rendererInit?.workerOffscreenRetainedCompactSnapshot
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotStatus =
+    workerOffscreenRetainedCompactSnapshot?.status
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotStatus
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotReason =
+    workerOffscreenRetainedCompactSnapshot?.reason
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotReason
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotSchema =
+    workerOffscreenRetainedCompactSnapshot?.compactBufferSnapshot?.schema
+    ?? workerOffscreenRetainedCompactSnapshot?.compactBufferSnapshotSchema
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotSchema
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotAvailable =
+    workerOffscreenRetainedCompactSnapshot?.portableSnapshotAvailable
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotAvailable
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotCrossPeerReplayReady =
+    workerOffscreenRetainedCompactSnapshot?.crossPeerReplayReady
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotCrossPeerReplayReady
+    ?? null;
+  const workerOffscreenRetainedCompactSnapshotParticleCount = numberOrNull(
+    workerOffscreenRetainedCompactSnapshot?.particleCount
+      ?? renderState?.workerOffscreenRetainedCompactSnapshotParticleCount
+  );
+  const workerOffscreenRetainedCompactSnapshotReadbackByteLength = numberOrNull(
+    workerOffscreenRetainedCompactSnapshot?.readbackByteLength
+      ?? renderState?.workerOffscreenRetainedCompactSnapshotReadbackByteLength
+  );
+  const workerOffscreenRetainedCompactSnapshotSphStateByteLength = numberOrNull(
+    workerOffscreenRetainedCompactSnapshot?.sphStateByteLength
+      ?? renderState?.workerOffscreenRetainedCompactSnapshotSphStateByteLength
+  );
+  const workerOffscreenRetainedCompactSnapshotSphThermoByteLength = numberOrNull(
+    workerOffscreenRetainedCompactSnapshot?.sphThermoByteLength
+      ?? renderState?.workerOffscreenRetainedCompactSnapshotSphThermoByteLength
+  );
+  const workerOffscreenRetainedCompactSnapshotMlsMpmMechanicsByteLength = numberOrNull(
+    workerOffscreenRetainedCompactSnapshot?.mlsMpmMechanicsByteLength
+      ?? renderState?.workerOffscreenRetainedCompactSnapshotMlsMpmMechanicsByteLength
+  );
+  const workerOffscreenRetainedCompactSnapshotErrorMessage =
+    workerOffscreenRetainedCompactSnapshot?.errorMessage
+    ?? renderState?.workerOffscreenRetainedCompactSnapshotErrorMessage
+    ?? null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
   const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
@@ -1911,6 +1961,18 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 		    workerOffscreenRetainedStateContinuationCrossPeerReplayStatus,
 		    workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker,
 		    workerOffscreenRetainedStateContinuationAuthoritativeStateMutation,
+		    workerOffscreenRetainedCompactSnapshot,
+		    workerOffscreenRetainedCompactSnapshotStatus,
+		    workerOffscreenRetainedCompactSnapshotReason,
+		    workerOffscreenRetainedCompactSnapshotSchema,
+		    workerOffscreenRetainedCompactSnapshotAvailable,
+		    workerOffscreenRetainedCompactSnapshotCrossPeerReplayReady,
+		    workerOffscreenRetainedCompactSnapshotParticleCount,
+		    workerOffscreenRetainedCompactSnapshotReadbackByteLength,
+		    workerOffscreenRetainedCompactSnapshotSphStateByteLength,
+		    workerOffscreenRetainedCompactSnapshotSphThermoByteLength,
+		    workerOffscreenRetainedCompactSnapshotMlsMpmMechanicsByteLength,
+		    workerOffscreenRetainedCompactSnapshotErrorMessage,
 		    copyBudget: {
 	      schema: 'peercompute.ulg.sph-performance-benchmark-copy-budget.v0',
 	      renderRowsReadbackByteLength,

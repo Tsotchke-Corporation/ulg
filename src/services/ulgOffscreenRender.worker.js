@@ -9,6 +9,10 @@ const RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA =
   'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0';
 const PRESENTATION_WORKER_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
+const PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
+const REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 const DEFAULT_PRESENTATION_WORKER_RESIDENT_STAGE_TIMEOUT_MS = 30_000;
 const RESIDENT_RENDER_PRODUCER_TRANSPORT = 'worker-owned-resident-render-producer';
 const RESIDENT_PARTICLE_STATE_TRANSPORT = 'worker-resident-particle-state-transfer';
@@ -71,6 +75,7 @@ let residentParticleStateProducerStateRowsByteLength = 0;
 let residentParticleStateProducerThermoRowsByteLength = 0;
 let residentParticleStateProducerColorRowsByteLength = 0;
 let residentStageRunnerModulePromise = null;
+let retainedCompactSnapshotStatus = null;
 
 function nowMs() {
   return typeof self.performance?.now === 'function' ? self.performance.now() : Date.now();
@@ -194,6 +199,34 @@ function publishResidentStageStatus({
     workerOffscreenResidentStage: residentStageStatus
   });
   return residentStageStatus;
+}
+
+function publishRetainedCompactSnapshotStatus(nextStatus = {}) {
+  const status = {
+    schema: PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+    status: 'worker-retained-compact-snapshot-export-status',
+    compactBufferSnapshotSchema: REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    workerDeviceSource: 'offscreen-presentation-worker-device',
+    workerDeviceProvided: Boolean(device),
+    portableSnapshotAvailable: false,
+    crossPeerReplayReady: false,
+    readbackByteLength: 0,
+    updatedAtMs: nowMs(),
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false,
+    ...nextStatus
+  };
+  retainedCompactSnapshotStatus = status;
+  publish({
+    status: status.status,
+    reason: status.reason || null,
+    workerReady: Boolean(device && context),
+    workerDeviceSource: status.workerDeviceSource,
+    workerDeviceProvided: status.workerDeviceProvided,
+    workerOffscreenRetainedCompactSnapshot: status
+  });
+  return status;
 }
 
 function timeoutResidentStage(promise, timeoutMs) {
@@ -596,6 +629,105 @@ async function runResidentStageOnPresentationDevice(data = {}) {
       startedAtMs,
       timeoutMs,
       error
+    });
+  }
+}
+
+async function exportRetainedCompactSnapshotFromPresentationDevice(data = {}) {
+  if (!device || !context) {
+    return publishRetainedCompactSnapshotStatus({
+      status: 'presentation-worker-retained-compact-snapshot-export-blocked-webgpu-unavailable',
+      reason: 'presentation worker WebGPU device/context is unavailable',
+      laneId: data.laneId || null,
+      stateKey: data.stateKey || null,
+      workerDeviceProvided: false
+    });
+  }
+  const startedAtMs = nowMs();
+  const timeoutMs = residentStageTimeoutMs(data);
+  let runner = null;
+  try {
+    runner = await residentStageRunnerModule();
+  } catch (error) {
+    return publishRetainedCompactSnapshotStatus({
+      status: 'presentation-worker-retained-compact-snapshot-export-failed',
+      reason: 'mechanics resident stage runner import failed',
+      laneId: data.laneId || null,
+      stateKey: data.stateKey || null,
+      elapsedMs: Math.max(0, nowMs() - startedAtMs),
+      timeoutMs,
+      ...compactError(error)
+    });
+  }
+  if (typeof runner.exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot !== 'function') {
+    return publishRetainedCompactSnapshotStatus({
+      status: 'presentation-worker-retained-compact-snapshot-export-blocked-runner-unavailable',
+      reason: 'mechanics resident stage compact snapshot exporter is unavailable in presentation worker',
+      laneId: data.laneId || null,
+      stateKey: data.stateKey || null,
+      elapsedMs: Math.max(0, nowMs() - startedAtMs),
+      timeoutMs
+    });
+  }
+  publishRetainedCompactSnapshotStatus({
+    status: 'presentation-worker-retained-compact-snapshot-export-started',
+    reason: data.reason || 'export-retained-compact-snapshot',
+    laneId: data.laneId || null,
+    stateKey: data.stateKey || null,
+    cacheKey: data.cacheKey || null,
+    sourceStageId: data.sourceStageId || 'g2p',
+    timeoutMs
+  });
+  try {
+    const result = await timeoutResidentStage(
+      runner.exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot({
+        device,
+        laneId: data.laneId || null,
+        stateKey: data.stateKey || null,
+        cacheKey: data.cacheKey || null,
+        sourceStageId: data.sourceStageId || 'g2p',
+        particleCount: data.particleCount ?? null,
+        stateStrideFloats: data.stateStrideFloats ?? null,
+        thermoStrideFloats: data.thermoStrideFloats ?? null,
+        mechanicsStrideFloats: data.mechanicsStrideFloats ?? null,
+        step: data.step ?? null,
+        time: data.time ?? null,
+        dimension: data.dimension ?? 3,
+        smoothingLengthM: data.smoothingLengthM ?? 0
+      }),
+      timeoutMs
+    );
+    const exported = result?.status === 'worker-retained-compact-snapshot-exported'
+      && result?.compactBufferSnapshot?.schema === REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA;
+    return publishRetainedCompactSnapshotStatus({
+      ...result,
+      schema: PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+      status: exported
+        ? 'presentation-worker-retained-compact-snapshot-exported'
+        : 'presentation-worker-retained-compact-snapshot-export-blocked',
+      reason: result?.reason || data.reason || 'export-retained-compact-snapshot',
+      laneId: result?.laneId ?? data.laneId ?? null,
+      stateKey: result?.stateKey ?? data.stateKey ?? null,
+      cacheKey: result?.cacheKey ?? data.cacheKey ?? null,
+      sourceStageId: result?.sourceStageId ?? data.sourceStageId ?? 'g2p',
+      elapsedMs: Math.max(0, nowMs() - startedAtMs),
+      timeoutMs,
+      portableSnapshotAvailable: exported,
+      crossPeerReplayReady: exported
+    });
+  } catch (error) {
+    return publishRetainedCompactSnapshotStatus({
+      status: error?.message?.includes('timed out')
+        ? 'presentation-worker-retained-compact-snapshot-export-timeout'
+        : 'presentation-worker-retained-compact-snapshot-export-failed',
+      reason: data.reason || 'export-retained-compact-snapshot',
+      laneId: data.laneId || null,
+      stateKey: data.stateKey || null,
+      cacheKey: data.cacheKey || null,
+      sourceStageId: data.sourceStageId || 'g2p',
+      elapsedMs: Math.max(0, nowMs() - startedAtMs),
+      timeoutMs,
+      ...compactError(error)
     });
   }
 }
@@ -1712,6 +1844,10 @@ self.onmessage = (event) => {
     }
     if (data.type === 'run-resident-stage-on-presentation-device') {
       await runResidentStageOnPresentationDevice(data);
+      return;
+    }
+    if (data.type === 'export-retained-compact-snapshot') {
+      await exportRetainedCompactSnapshotFromPresentationDevice(data);
       return;
     }
     if (data.type === 'dispose') {

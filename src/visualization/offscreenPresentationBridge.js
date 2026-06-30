@@ -29,6 +29,10 @@ export const ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA =
   'peercompute.ulg.presentation-worker-resident-stage.v0';
 export const ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT =
   'offscreen-presentation-worker-device';
+export const ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
+export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -410,7 +414,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
   onStatus = null,
   onRenderRowsStatus = null,
   onRetainedGpuBufferHandoffStatus = null,
-  onResidentStageStatus = null
+  onResidentStageStatus = null,
+  onRetainedCompactSnapshotStatus = null
 } = {}) {
   const documentRef = container?.ownerDocument || windowRef?.document || globalThis.document || null;
   let currentBackgroundColor = backgroundColor;
@@ -456,6 +461,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     renderRowsStatus: null,
     retainedGpuBufferHandoffStatus: null,
     residentStageStatus: null,
+    retainedCompactSnapshotStatus: null,
     residentRenderProducerSourceCacheKey: null,
     residentRenderProducerSourceParticleCount: 0,
     residentRenderProducerSourceStrideFloats: 0,
@@ -572,6 +578,32 @@ export function createUlgWorkerOffscreenPresentationBridge({
       };
       this.residentStageStatus = status;
       onResidentStageStatus?.(status);
+      return status;
+    },
+    publishRetainedCompactSnapshotStatus(nextStatus = {}) {
+      const status = {
+        schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+        status: 'presentation-worker-retained-compact-snapshot-export-status',
+        compactBufferSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+        displayTransport: requested ? ULG_WORKER_OFFSCREEN_PRESENTATION_TRANSPORT : null,
+        displayHandoff: requested ? ULG_WORKER_OFFSCREEN_PRESENTATION_HANDOFF : null,
+        rejectedTransport: ULG_WORKER_OFFSCREEN_REJECTED_TRANSPORT,
+        frameCopyBackRejected: true,
+        copiedBytesPerFrame: 0,
+        copiedBytesPerSecond: 0,
+        canvasTransferred: Boolean(this.status?.canvasTransferred),
+        workerReady: Boolean(this.status?.workerReady),
+        portableSnapshotAvailable: false,
+        crossPeerReplayReady: false,
+        readbackByteLength: 0,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false,
+        ...nextStatus
+      };
+      this.retainedCompactSnapshotStatus = status;
+      onRetainedCompactSnapshotStatus?.(status);
       return status;
     },
     resolveRetainedGpuBufferHandoff(next = {}) {
@@ -1056,6 +1088,69 @@ export function createUlgWorkerOffscreenPresentationBridge({
         workerDeviceProvided: true
       });
     },
+    exportRetainedCompactSnapshot({
+      laneId = null,
+      stateKey = null,
+      cacheKey = null,
+      sourceStageId = 'g2p',
+      particleCount = null,
+      stateStrideFloats = null,
+      thermoStrideFloats = null,
+      mechanicsStrideFloats = null,
+      step = null,
+      time = null,
+      dimension = 3,
+      smoothingLengthM = 0,
+      timeoutMs = null,
+      reason = 'export-retained-compact-snapshot'
+    } = {}) {
+      if (!requested) {
+        return this.publishRetainedCompactSnapshotStatus({
+          status: 'presentation-worker-retained-compact-snapshot-export-not-requested',
+          reason,
+          inputTransport: null
+        });
+      }
+      if (!this.worker) {
+        return this.publishRetainedCompactSnapshotStatus({
+          status: 'presentation-worker-retained-compact-snapshot-export-blocked-worker-unavailable',
+          reason,
+          laneId,
+          stateKey,
+          workerReady: false
+        });
+      }
+      const message = {
+        type: 'export-retained-compact-snapshot',
+        schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+        laneId,
+        stateKey,
+        cacheKey,
+        sourceStageId,
+        particleCount,
+        stateStrideFloats,
+        thermoStrideFloats,
+        mechanicsStrideFloats,
+        step,
+        time,
+        dimension,
+        smoothingLengthM,
+        timeoutMs,
+        reason
+      };
+      this.worker.postMessage?.(message);
+      return this.publishRetainedCompactSnapshotStatus({
+        status: 'presentation-worker-retained-compact-snapshot-export-submit-posted',
+        reason,
+        laneId,
+        stateKey,
+        cacheKey,
+        sourceStageId,
+        particleCount,
+        workerDeviceSource: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT,
+        workerDeviceProvided: true
+      });
+    },
     dispose() {
       this.worker?.postMessage?.({ type: 'dispose', reason: 'scene-dispose' });
       this.worker?.terminate?.();
@@ -1111,6 +1206,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
         === ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA
       ) {
         bridge.publishResidentStageStatus(data.workerOffscreenResidentStage);
+      }
+      if (
+        data.workerOffscreenRetainedCompactSnapshot?.schema
+        === ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA
+      ) {
+        bridge.publishRetainedCompactSnapshotStatus(data.workerOffscreenRetainedCompactSnapshot);
       }
       publish({
         ...data,

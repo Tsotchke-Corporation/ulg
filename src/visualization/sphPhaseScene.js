@@ -138,6 +138,8 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
   'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 export const ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA =
   'peercompute.ulg.worker-retained-portable-materialization-contract.v0';
+export const ULG_PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
+  'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 
 function normalizeHexColor(value) {
   const raw = String(value ?? '').trim();
@@ -6389,6 +6391,7 @@ export function createSphPhaseScene(container, {
   let workerOffscreenRetainedStateContinuationSignature = null;
   let workerOffscreenRetainedStateContinuationCompletedSignature = null;
   let workerOffscreenRetainedStateContinuationSequence = 0;
+  let workerOffscreenRetainedCompactSnapshotExportSignature = null;
   function publishWorkerOffscreenRetainedGpuBufferHandoffStatus(status = null) {
     const nextStatus = status
       || workerOffscreenPresentationBridge?.retainedGpuBufferHandoffStatus
@@ -6407,6 +6410,15 @@ export function createSphPhaseScene(container, {
     refreshWorkerOffscreenRetainedStatePromotionCandidate({
       reason: 'worker-offscreen-resident-stage-status'
     });
+    return nextStatus;
+  }
+  function publishWorkerOffscreenRetainedCompactSnapshotStatus(status = null) {
+    const nextStatus = status
+      || workerOffscreenPresentationBridge?.retainedCompactSnapshotStatus
+      || currentWorkerOffscreenPresentationStatus()?.workerOffscreenRetainedCompactSnapshot
+      || null;
+    scene.userData.sphWorkerOffscreenRetainedCompactSnapshot = nextStatus;
+    renderer.userData.sphWorkerOffscreenRetainedCompactSnapshot = nextStatus;
     return nextStatus;
   }
   function publishWorkerOffscreenRenderRowsStatus(status = null) {
@@ -6561,6 +6573,12 @@ export function createSphPhaseScene(container, {
       || renderer.userData.sphWorkerOffscreenRetainedStateContinuation
       || null;
   }
+  function currentWorkerOffscreenRetainedCompactSnapshotStatus() {
+    return scene.userData.sphWorkerOffscreenRetainedCompactSnapshot
+      || renderer.userData.sphWorkerOffscreenRetainedCompactSnapshot
+      || workerOffscreenPresentationBridge?.retainedCompactSnapshotStatus
+      || null;
+  }
   function workerRetainedPortableMaterializationStatusFrom(source = null) {
     const contract = source?.portableMaterializationContract
       || source?.workerRetainedAccessContract?.portableMaterializationContract
@@ -6601,6 +6619,74 @@ export function createSphPhaseScene(container, {
       crossPeerReplayBlocker: blocker,
       contract
     };
+  }
+  function maybeRequestWorkerOffscreenRetainedCompactSnapshotExport({
+    admission = currentWorkerOffscreenRetainedStatePromotionAdmission(),
+    continuationStatus = currentWorkerOffscreenRetainedStateContinuationStatus(),
+    reason = 'presentation-worker-retained-continuation-compact-snapshot-export'
+  } = {}) {
+    if (
+      continuationStatus?.status !== 'presentation-worker-retained-state-continuation-completed'
+      || continuationStatus?.workerRetainedContinuationApplied !== true
+      || !admission?.laneId
+      || !admission?.stateKey
+    ) {
+      return currentWorkerOffscreenRetainedCompactSnapshotStatus();
+    }
+    const signature = [
+      admission.hotBufferKey || 'hot-buffer-unknown',
+      admission.laneId || 'lane-unknown',
+      admission.stateKey || 'state-unknown',
+      continuationStatus.sequence ?? 'sequence-unknown',
+      continuationStatus.chainStatus || 'chain-unknown'
+    ].join('|');
+    const current = currentWorkerOffscreenRetainedCompactSnapshotStatus();
+    if (
+      workerOffscreenRetainedCompactSnapshotExportSignature === signature
+      && current
+      && /exported|started|submit-posted|blocked|failed|timeout/.test(String(current.status || ''))
+    ) {
+      return current;
+    }
+    if (typeof workerOffscreenPresentationBridge?.exportRetainedCompactSnapshot !== 'function') {
+      workerOffscreenRetainedCompactSnapshotExportSignature = signature;
+      return publishWorkerOffscreenRetainedCompactSnapshotStatus({
+        schema: ULG_PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA,
+        status: 'presentation-worker-retained-compact-snapshot-export-blocked-bridge-unavailable',
+        reason,
+        laneId: admission.laneId || null,
+        stateKey: admission.stateKey || null,
+        cacheKey: admission.cacheKey || null,
+        sourceStageId: 'g2p',
+        portableSnapshotAvailable: false,
+        crossPeerReplayReady: false,
+        compactBufferSnapshot: null,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+    const currentSphState = sphGpuParticleState || scene.userData.sphGpuParticleState || null;
+    const currentMlsState = mlsMpmGpuParticleState || scene.userData.mlsMpmGpuParticleState || null;
+    workerOffscreenRetainedCompactSnapshotExportSignature = signature;
+    const submitted = workerOffscreenPresentationBridge.exportRetainedCompactSnapshot({
+      laneId: admission.laneId,
+      stateKey: admission.stateKey,
+      cacheKey: admission.cacheKey || admission.sourceSignature || admission.hotBufferKey || null,
+      sourceStageId: 'g2p',
+      particleCount: currentSphState?.particleCount ?? currentMlsState?.particleCount ?? null,
+      stateStrideFloats: currentSphState?.stateStrideFloats ?? 8,
+      thermoStrideFloats: currentSphState?.thermoStrideFloats ?? 12,
+      mechanicsStrideFloats: currentMlsState?.mechanicsStrideFloats ?? null,
+      step: continuationStatus.chain?.sourceStep ?? currentSphState?.step ?? currentMlsState?.step ?? null,
+      time: continuationStatus.chain?.sourceTime ?? currentSphState?.time ?? currentMlsState?.time ?? null,
+      dimension: currentSphState?.dimension ?? 3,
+      smoothingLengthM: currentSphState?.smoothingLengthM ?? 0,
+      timeoutMs: 7000,
+      reason
+    });
+    return publishWorkerOffscreenRetainedCompactSnapshotStatus(submitted);
   }
   function buildWorkerOffscreenRetainedStateContinuationSignature(admission = null) {
     if (!admission) return null;
@@ -6783,7 +6869,7 @@ export function createSphPhaseScene(container, {
       if (completed && applied) {
         workerOffscreenRetainedStateContinuationCompletedSignature = signature;
       }
-      return publishWorkerOffscreenRetainedStateContinuationStatus(base(
+      const continuationStatus = publishWorkerOffscreenRetainedStateContinuationStatus(base(
         completed && applied
           ? 'presentation-worker-retained-state-continuation-completed'
           : 'presentation-worker-retained-state-continuation-blocked',
@@ -6804,6 +6890,14 @@ export function createSphPhaseScene(container, {
             : (chainStatus?.blocker || chainStatus?.workerRetainedContinuationInputStatus || 'retained-continuation-not-applied')
         }
       ));
+      if (completed && applied) {
+        maybeRequestWorkerOffscreenRetainedCompactSnapshotExport({
+          admission,
+          continuationStatus,
+          reason: 'presentation-worker-retained-continuation-completed'
+        });
+      }
+      return continuationStatus;
     }).catch((error) => publishWorkerOffscreenRetainedStateContinuationStatus(base(
       'presentation-worker-retained-state-continuation-failed',
       {
@@ -7151,6 +7245,7 @@ export function createSphPhaseScene(container, {
     const promotionCandidate = currentWorkerOffscreenRetainedStatePromotionCandidate();
     const promotionAdmission = currentWorkerOffscreenRetainedStatePromotionAdmission();
     const retainedStateContinuation = currentWorkerOffscreenRetainedStateContinuationStatus();
+    const retainedCompactSnapshot = currentWorkerOffscreenRetainedCompactSnapshotStatus();
     const promotionCandidatePortable = promotionCandidate
       ? workerRetainedPortableMaterializationStatusFrom(promotionCandidate)
       : null;
@@ -7345,7 +7440,32 @@ export function createSphPhaseScene(container, {
       workerOffscreenRetainedStateContinuationCrossPeerReplayBlocker:
         retainedStateContinuationPortable?.crossPeerReplayBlocker ?? null,
       workerOffscreenRetainedStateContinuationAuthoritativeStateMutation:
-        retainedStateContinuation?.authoritativeStateMutation ?? null
+        retainedStateContinuation?.authoritativeStateMutation ?? null,
+      workerOffscreenRetainedCompactSnapshot: retainedCompactSnapshot,
+      workerOffscreenRetainedCompactSnapshotStatus:
+        retainedCompactSnapshot?.status ?? null,
+      workerOffscreenRetainedCompactSnapshotReason:
+        retainedCompactSnapshot?.reason ?? null,
+      workerOffscreenRetainedCompactSnapshotSchema:
+        retainedCompactSnapshot?.compactBufferSnapshot?.schema
+        || retainedCompactSnapshot?.compactBufferSnapshotSchema
+        || null,
+      workerOffscreenRetainedCompactSnapshotAvailable:
+        retainedCompactSnapshot?.portableSnapshotAvailable ?? null,
+      workerOffscreenRetainedCompactSnapshotCrossPeerReplayReady:
+        retainedCompactSnapshot?.crossPeerReplayReady ?? null,
+      workerOffscreenRetainedCompactSnapshotParticleCount:
+        retainedCompactSnapshot?.particleCount ?? null,
+      workerOffscreenRetainedCompactSnapshotReadbackByteLength:
+        retainedCompactSnapshot?.readbackByteLength ?? null,
+      workerOffscreenRetainedCompactSnapshotSphStateByteLength:
+        retainedCompactSnapshot?.sphStateByteLength ?? null,
+      workerOffscreenRetainedCompactSnapshotSphThermoByteLength:
+        retainedCompactSnapshot?.sphThermoByteLength ?? null,
+      workerOffscreenRetainedCompactSnapshotMlsMpmMechanicsByteLength:
+        retainedCompactSnapshot?.mlsMpmMechanicsByteLength ?? null,
+      workerOffscreenRetainedCompactSnapshotErrorMessage:
+        retainedCompactSnapshot?.errorMessage ?? null
     };
   }
   function refreshWorkerOffscreenRetainedGpuBufferHandoff({
@@ -7526,7 +7646,8 @@ export function createSphPhaseScene(container, {
     onStatus: publishWorkerOffscreenPresentationStatus,
     onRenderRowsStatus: publishWorkerOffscreenRenderRowsStatus,
     onRetainedGpuBufferHandoffStatus: publishWorkerOffscreenRetainedGpuBufferHandoffStatus,
-    onResidentStageStatus: publishWorkerOffscreenResidentStageStatus
+    onResidentStageStatus: publishWorkerOffscreenResidentStageStatus,
+    onRetainedCompactSnapshotStatus: publishWorkerOffscreenRetainedCompactSnapshotStatus
   });
   publishWorkerOffscreenPresentationStatus();
   function rendererBackendName() {
@@ -23777,6 +23898,9 @@ export function createSphPhaseScene(container, {
     },
     getWorkerOffscreenRetainedStateContinuationStatus() {
       return currentWorkerOffscreenRetainedStateContinuationStatus();
+    },
+    getWorkerOffscreenRetainedCompactSnapshotStatus() {
+      return currentWorkerOffscreenRetainedCompactSnapshotStatus();
     },
     refreshViewportAndOverlay,
     dispose,

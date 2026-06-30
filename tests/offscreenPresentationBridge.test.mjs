@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   createUlgWorkerOffscreenPresentationBridge,
   ULG_WORKER_OFFSCREEN_PRESENTATION_HANDOFF,
+  ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+  ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
   ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_SCHEMA,
   ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT,
   ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
@@ -392,6 +394,106 @@ test('worker offscreen bridge can submit resident stage work to the presentation
     'worker-offscreen-resident-stage-on-presentation-device-completed'
   );
   assert.deepEqual(bridge.residentStageStatus.residentStageRetainedBufferRefs, ['sph-state-buffer']);
+});
+
+test('worker offscreen bridge can request retained compact snapshot export', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      this.listeners = [];
+      worker = this;
+    }
+
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    emit(data) {
+      for (const listener of this.listeners) listener({ data });
+    }
+
+    terminate() {}
+  }
+
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() {
+      return { offscreen: true };
+    }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) {
+      child.parentNode = this;
+    },
+    ownerDocument: {
+      createElement(name) {
+        assert.equal(name, 'canvas');
+        return canvas;
+      }
+    }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    retainedGpuBufferHandoffRequested: false,
+    container,
+    width: 64,
+    height: 64,
+    devicePixelRatio: 1,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+
+  const submitted = bridge.exportRetainedCompactSnapshot({
+    laneId: 'ulg:test:presentation-worker-lane',
+    stateKey: 'ulg:test:presentation-worker-state',
+    cacheKey: 'ulg:test:presentation-worker-cache',
+    particleCount: 2,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    mechanicsStrideFloats: 24,
+    reason: 'unit-test-retained-snapshot'
+  });
+  const message = worker.messages.at(-1)?.data;
+
+  assert.equal(submitted.schema, ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA);
+  assert.equal(submitted.status, 'presentation-worker-retained-compact-snapshot-export-submit-posted');
+  assert.equal(submitted.workerDeviceProvided, true);
+  assert.equal(message.type, 'export-retained-compact-snapshot');
+  assert.equal(message.schema, ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA);
+  assert.equal(message.laneId, 'ulg:test:presentation-worker-lane');
+  assert.equal(message.stateKey, 'ulg:test:presentation-worker-state');
+  assert.equal(message.cacheKey, 'ulg:test:presentation-worker-cache');
+  assert.equal(message.particleCount, 2);
+
+  worker.emit({
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    workerOffscreenRetainedCompactSnapshot: {
+      schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+      status: 'presentation-worker-retained-compact-snapshot-exported',
+      compactBufferSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      portableSnapshotAvailable: true,
+      crossPeerReplayReady: true,
+      readbackByteLength: 256
+    }
+  });
+
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.status,
+    'presentation-worker-retained-compact-snapshot-exported'
+  );
+  assert.equal(bridge.retainedCompactSnapshotStatus.portableSnapshotAvailable, true);
+  assert.equal(bridge.retainedCompactSnapshotStatus.readbackByteLength, 256);
 });
 
 test('worker offscreen retained GPUBuffer handoff fails closed before plan change', () => {

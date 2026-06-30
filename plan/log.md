@@ -32696,3 +32696,55 @@ Validation:
   `workerOffscreenRetainedStateContinuationChainStatus=worker-offscreen-mechanics-stage-chain-completed`,
   `workerOffscreenRetainedStateContinuationPortableState=false`, and
   `workerOffscreenRetainedStateContinuationAuthoritativeStateMutation=false`.
+
+## 2026-06-29 17:55 AKDT - Retained Compact Snapshot Export Blocker
+
+Status:
+
+- Wired presentation-worker retained compact snapshot export through the scene,
+  offscreen presentation bridge, offscreen worker, and mechanics resident-stage
+  worker.
+- Added the portable snapshot schema
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` and the
+  presentation-worker status
+  `peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0`.
+- The benchmark/probe now waits for a terminal retained compact snapshot status
+  after same-worker retained continuation completes, and reports snapshot
+  availability, cross-peer replay readiness, byte counts, and any readback
+  error.
+- Live browser evidence shows a real blocker, not a race: continuation completes
+  and applies, but snapshot export reports
+  `presentation-worker-retained-compact-snapshot-export-blocked` with
+  `worker-retained-compact-snapshot-readback-failed`.
+- The failing buffer is now identified as `sph-state`. Sequential readback did
+  not fix it; Chromium still reports
+  `Failed to execute 'mapAsync' on 'GPUBuffer': A valid external Instance reference no longer exists.`
+- This is a plan boundary for portable cross-peer replay. Next slice should
+  choose between retaining export-owned clone buffers inside the presentation
+  worker before stage-output lifetimes can expire, or avoiding worker
+  `mapAsync` by publishing a GPU-side materialization contract.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`
+- PASS: `node --check src/services/ulgOffscreenRender.worker.js`
+- PASS: `node --check src/visualization/offscreenPresentationBridge.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `git diff --check`
+- PASS:
+  `node --test tests/offscreenPresentationBridge.test.mjs tests/nativeSurfaceHarness.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  with `25/25` tests passing.
+- LIVE BLOCKED:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-points ULG_BENCH_OUTPUT=/tmp/ulg-presentation-retained-snapshot-export-bench.json ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  with scenario `status=good`, `probeStatus=good`,
+  `workerOffscreenRetainedStateContinuationStatus=presentation-worker-retained-state-continuation-completed`,
+  `workerOffscreenRetainedStateContinuationApplied=true`,
+  `workerOffscreenRetainedCompactSnapshotStatus=presentation-worker-retained-compact-snapshot-export-blocked`,
+  `workerOffscreenRetainedCompactSnapshotReason=worker-retained-compact-snapshot-readback-failed`,
+  `workerOffscreenRetainedCompactSnapshotAvailable=false`,
+  `workerOffscreenRetainedCompactSnapshotCrossPeerReplayReady=false`,
+  `workerOffscreenRetainedCompactSnapshotParticleCount=16`,
+  `workerOffscreenRetainedCompactSnapshotReadbackByteLength=0`, and
+  `workerOffscreenRetainedCompactSnapshotErrorMessage="sph-state readback failed: Failed to execute 'mapAsync' on 'GPUBuffer': A valid external Instance reference no longer exists."`.

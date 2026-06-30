@@ -8,12 +8,21 @@ import {
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmMechanicsP2gStageComputeTask
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS
+} from '../runtime/sph/sphGpuBuffers.js';
 import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA =
   'peercompute.ulg.mechanics-resident-stage-worker-retained-particle-state.v0';
+export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
+  'peercompute.ulg.mechanics-resident-stage-worker-retained-compact-snapshot-export.v0';
+export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA =
+  'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const GPU_BUFFER_USAGE = {
@@ -71,6 +80,8 @@ function getLaneRecord(payload = {}) {
       retainedThermoBufferByteLength: 0,
       retainedThermoBufferSourceStage: null,
       retainedThermoBufferSeededFromCpu: false,
+      retainedThermoBufferCopySrc: false,
+      retainedThermoSnapshotRows: null,
       nextBufferOrdinal: 1
     };
     retainedLanes.set(key, record);
@@ -126,6 +137,69 @@ function positiveByteLength(...values) {
     if (Number.isFinite(number) && number > 0) return Math.round(number);
   }
   return 0;
+}
+
+function cloneFloat32Rows(value, expectedLength = null) {
+  if (!(ArrayBuffer.isView(value) || value instanceof ArrayBuffer || Array.isArray(value))) {
+    return null;
+  }
+  let rows;
+  if (value instanceof Float32Array) {
+    rows = new Float32Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    rows = new Float32Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  } else if (value instanceof ArrayBuffer) {
+    rows = new Float32Array(value.slice(0));
+  } else {
+    rows = new Float32Array(value);
+  }
+  if (expectedLength != null && rows.length < expectedLength) return null;
+  return expectedLength != null && rows.length !== expectedLength
+    ? new Float32Array(rows.slice(0, expectedLength))
+    : rows;
+}
+
+async function readWorkerGpuBufferFloat32({
+  device,
+  sourceBuffer,
+  byteLength,
+  floatLength,
+  label
+} = {}) {
+  const resolvedByteLength = positiveByteLength(byteLength, floatLength * Float32Array.BYTES_PER_ELEMENT);
+  const resolvedFloatLength = Math.max(0, Math.floor(Number(floatLength) || 0));
+  if (!device?.createBuffer || !device?.createCommandEncoder || typeof device?.queue?.submit !== 'function') {
+    throw new Error(`${label || 'retained-buffer'} readback requires a WebGPU device`);
+  }
+  if (!sourceBuffer || resolvedByteLength <= 0 || resolvedFloatLength <= 0) {
+    throw new Error(`${label || 'retained-buffer'} readback requires a retained source buffer`);
+  }
+  let readbackBuffer = null;
+  try {
+    readbackBuffer = device.createBuffer({
+      label: `ulg-worker-retained-compact-snapshot-${label || 'buffer'}-readback`,
+      size: Math.max(4, resolvedByteLength),
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const encoder = device.createCommandEncoder({
+      label: `ulg-worker-retained-compact-snapshot-${label || 'buffer'}`
+    });
+    encoder.copyBufferToBuffer(sourceBuffer, 0, readbackBuffer, 0, Math.max(4, resolvedByteLength));
+    device.queue.submit([encoder.finish()]);
+    await readbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    const mapped = readbackBuffer.getMappedRange(0, Math.max(4, resolvedByteLength));
+    const rows = new Float32Array(mapped.slice(0, resolvedFloatLength * Float32Array.BYTES_PER_ELEMENT));
+    readbackBuffer.unmap();
+    return rows;
+  } catch (error) {
+    throw new Error(`${label || 'retained-buffer'} readback failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`);
+  } finally {
+    try {
+      readbackBuffer?.destroy?.();
+    } catch {}
+  }
 }
 
 function workerStageRetainedByteLength(result = {}) {
@@ -366,7 +440,7 @@ function writeWorkerStorageBuffer(device, label, data) {
   const buffer = device.createBuffer({
     label,
     size: byteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
@@ -488,8 +562,204 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     thermoBufferByteLength: resolvedThermoByteLength,
     mechanicsBufferByteLength: positiveByteLength(source.mechanicsBufferByteLength),
     retainedThermoBufferSourceStage: record.retainedThermoBufferSourceStage || null,
-    retainedThermoBufferSeededFromCpu: record.retainedThermoBufferSeededFromCpu === true
+    retainedThermoBufferSeededFromCpu: record.retainedThermoBufferSeededFromCpu === true,
+    retainedThermoBufferCopySrc: record.retainedThermoBufferCopySrc === true
   };
+}
+
+function blockedRetainedCompactSnapshotExport({
+  reason,
+  laneId = null,
+  stateKey = null,
+  sourceStageId = 'g2p',
+  retained = null,
+  error = null
+} = {}) {
+  return {
+    schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA,
+    status: 'worker-retained-compact-snapshot-export-blocked',
+    reason,
+    laneId: normalizeString(laneId, null),
+    stateKey: normalizeString(stateKey, null),
+    sourceStageId,
+    retainedParticleStateStatus: retained?.status || null,
+    particleCount: retained?.particleCount ?? null,
+    stateBufferRetained: Boolean(retained?.sourceStateBuffer),
+    thermoBufferRetained: Boolean(retained?.sourceThermoBuffer),
+    mechanicsBufferRetained: Boolean(retained?.sourceMechanicsBuffer),
+    retainedThermoBufferCopySrc: retained?.retainedThermoBufferCopySrc ?? null,
+    retainedThermoBufferSeededFromCpu: retained?.retainedThermoBufferSeededFromCpu ?? null,
+    compactBufferSnapshot: null,
+    portableSnapshotAvailable: false,
+    crossPeerReplayReady: false,
+    errorName: error instanceof Error ? error.name : null,
+    errorMessage: error instanceof Error ? error.message : (error ? String(error) : null)
+  };
+}
+
+export async function exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot({
+  device = null,
+  laneId = null,
+  stateKey = null,
+  cacheKey = null,
+  sourceStageId = 'g2p',
+  particleCount = null,
+  stateStrideFloats = null,
+  thermoStrideFloats = null,
+  mechanicsStrideFloats = null,
+  step = null,
+  time = null,
+  dimension = 3,
+  smoothingLengthM = 0
+} = {}) {
+  const retained = resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+    laneId,
+    stateKey,
+    particleCount,
+    stateStrideFloats,
+    thermoStrideFloats,
+    sourceStageId
+  });
+  if (retained.status !== 'worker-retained-particle-state-ready') {
+    return blockedRetainedCompactSnapshotExport({
+      reason: retained.status || 'worker-retained-particle-state-required',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained
+    });
+  }
+  if (!device?.createBuffer || !device?.createCommandEncoder || typeof device?.queue?.submit !== 'function') {
+    return blockedRetainedCompactSnapshotExport({
+      reason: 'worker-retained-compact-snapshot-export-requires-webgpu-device',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained
+    });
+  }
+  if (!retained.sourceMechanicsBuffer) {
+    return blockedRetainedCompactSnapshotExport({
+      reason: 'worker-retained-compact-snapshot-mechanics-buffer-required',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained
+    });
+  }
+  const resolvedParticleCount = Math.max(0, Math.floor(Number(retained.particleCount) || 0));
+  const resolvedStateStrideFloats = Math.max(1, Math.floor(Number(
+    stateStrideFloats ?? retained.stateStrideFloats ?? SPH_GPU_PARTICLE_STATE_FLOATS
+  ) || SPH_GPU_PARTICLE_STATE_FLOATS));
+  const resolvedThermoStrideFloats = Math.max(1, Math.floor(Number(
+    thermoStrideFloats ?? retained.thermoStrideFloats ?? SPH_GPU_PARTICLE_THERMO_FLOATS
+  ) || SPH_GPU_PARTICLE_THERMO_FLOATS));
+  const resolvedMechanicsStrideFloats = Math.max(1, Math.floor(Number(
+    mechanicsStrideFloats ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+  ) || MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS));
+  if (
+    resolvedStateStrideFloats !== SPH_GPU_PARTICLE_STATE_FLOATS
+    || resolvedThermoStrideFloats !== SPH_GPU_PARTICLE_THERMO_FLOATS
+    || resolvedMechanicsStrideFloats !== MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+  ) {
+    return blockedRetainedCompactSnapshotExport({
+      reason: 'worker-retained-compact-snapshot-stride-mismatch',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained
+    });
+  }
+  const expectedStateFloats = resolvedParticleCount * SPH_GPU_PARTICLE_STATE_FLOATS;
+  const expectedThermoFloats = resolvedParticleCount * SPH_GPU_PARTICLE_THERMO_FLOATS;
+  const expectedMechanicsFloats = resolvedParticleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  const key = laneKeyForParts({ laneId, stateKey });
+  const record = retainedLanes.get(key);
+  try {
+    const sphState = await readWorkerGpuBufferFloat32({
+      device,
+      sourceBuffer: retained.sourceStateBuffer,
+      byteLength: expectedStateFloats * Float32Array.BYTES_PER_ELEMENT,
+      floatLength: expectedStateFloats,
+      label: 'sph-state'
+    });
+    const mlsMpmMechanics = await readWorkerGpuBufferFloat32({
+      device,
+      sourceBuffer: retained.sourceMechanicsBuffer,
+      byteLength: expectedMechanicsFloats * Float32Array.BYTES_PER_ELEMENT,
+      floatLength: expectedMechanicsFloats,
+      label: 'mls-mpm-mechanics'
+    });
+    let sphThermo = cloneFloat32Rows(record?.retainedThermoSnapshotRows, expectedThermoFloats);
+    let thermoSource = sphThermo ? 'worker-retained-thermo-cpu-shadow' : null;
+    if (!sphThermo && record?.retainedThermoBufferCopySrc === true) {
+      sphThermo = await readWorkerGpuBufferFloat32({
+        device,
+        sourceBuffer: retained.sourceThermoBuffer,
+        byteLength: expectedThermoFloats * Float32Array.BYTES_PER_ELEMENT,
+        floatLength: expectedThermoFloats,
+        label: 'sph-thermo'
+      });
+      thermoSource = 'worker-retained-thermo-gpu-readback';
+    }
+    if (!sphThermo) {
+      return blockedRetainedCompactSnapshotExport({
+        reason: 'worker-retained-compact-snapshot-thermo-source-unavailable',
+        laneId,
+        stateKey,
+        sourceStageId,
+        retained
+      });
+    }
+    const resolvedStep = Number.isFinite(Number(step)) ? Number(step) : null;
+    const resolvedTime = Number.isFinite(Number(time)) ? Number(time) : null;
+    const compactBufferSnapshot = {
+      schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+      status: 'compact-buffer-snapshot-exported-from-worker-retained-state',
+      cacheKey: normalizeString(cacheKey, null),
+      stateKey: normalizeString(stateKey, null),
+      laneId: normalizeString(laneId, null),
+      sourceStageId,
+      particleCount: resolvedParticleCount,
+      step: resolvedStep,
+      time: resolvedTime,
+      dimension: Number.isFinite(Number(dimension)) ? Number(dimension) : 3,
+      smoothingLengthM: Number.isFinite(Number(smoothingLengthM)) ? Number(smoothingLengthM) : 0,
+      sphState,
+      sphThermo,
+      mlsMpmMechanics
+    };
+    const byteLength = sphState.byteLength + sphThermo.byteLength + mlsMpmMechanics.byteLength;
+    return {
+      schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA,
+      status: 'worker-retained-compact-snapshot-exported',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      cacheKey: normalizeString(cacheKey, null),
+      sourceStageId,
+      particleCount: resolvedParticleCount,
+      compactBufferSnapshot,
+      compactBufferSnapshotSchema: compactBufferSnapshot.schema,
+      portableSnapshotAvailable: true,
+      crossPeerReplayReady: true,
+      readbackByteLength: byteLength,
+      sphStateByteLength: sphState.byteLength,
+      sphThermoByteLength: sphThermo.byteLength,
+      mlsMpmMechanicsByteLength: mlsMpmMechanics.byteLength,
+      thermoSource,
+      retainedThermoBufferCopySrc: record?.retainedThermoBufferCopySrc === true,
+      retainedThermoBufferSeededFromCpu: record?.retainedThermoBufferSeededFromCpu === true
+    };
+  } catch (error) {
+    return blockedRetainedCompactSnapshotExport({
+      reason: 'worker-retained-compact-snapshot-readback-failed',
+      laneId,
+      stateKey,
+      sourceStageId,
+      retained,
+      error
+    });
+  }
 }
 
 function retainedThermalOutput(record) {
@@ -552,7 +822,8 @@ function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) 
       thermoBuffer: record.retainedThermoBuffer,
       sourceStage: record.retainedThermoBufferSourceStage || 'worker-retained-lane',
       thermoBufferByteLength: record.retainedThermoBufferByteLength || data?.sphParticleState?.thermo?.byteLength || null,
-      seededFromCpu: record.retainedThermoBufferSeededFromCpu === true
+      seededFromCpu: record.retainedThermoBufferSeededFromCpu === true,
+      copySrc: record.retainedThermoBufferCopySrc === true
     };
   }
   const uploadedThermoBuffer = data?.sphParticleUpload?.status === 'webgpu-uploaded'
@@ -563,12 +834,15 @@ function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) 
     record.retainedThermoBufferByteLength = data?.sphParticleState?.thermo?.byteLength || 0;
     record.retainedThermoBufferSourceStage = 'input-upload';
     record.retainedThermoBufferSeededFromCpu = false;
+    record.retainedThermoBufferCopySrc = false;
+    record.retainedThermoSnapshotRows = cloneFloat32Rows(data?.sphParticleState?.thermo);
     return {
       status: 'worker-retained-thermo-ready',
       thermoBuffer: record.retainedThermoBuffer,
       sourceStage: record.retainedThermoBufferSourceStage,
       thermoBufferByteLength: record.retainedThermoBufferByteLength || null,
-      seededFromCpu: false
+      seededFromCpu: false,
+      copySrc: false
     };
   }
   const device = workerDeviceResult?.device || data?.deviceResult?.device || null;
@@ -591,12 +865,15 @@ function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) 
   record.retainedThermoBufferByteLength = thermo?.byteLength || 0;
   record.retainedThermoBufferSourceStage = 'cpu-seed';
   record.retainedThermoBufferSeededFromCpu = true;
+  record.retainedThermoBufferCopySrc = true;
+  record.retainedThermoSnapshotRows = cloneFloat32Rows(thermo);
   return {
     status: 'worker-retained-thermo-ready',
     thermoBuffer: record.retainedThermoBuffer,
     sourceStage: record.retainedThermoBufferSourceStage,
     thermoBufferByteLength: record.retainedThermoBufferByteLength || null,
-    seededFromCpu: true
+    seededFromCpu: true,
+    copySrc: true
   };
 }
 
@@ -625,7 +902,8 @@ function applyWorkerRetainedThermoInput({ stageId, data, record, workerDeviceRes
     stageId,
     sourceStage: thermo.sourceStage,
     thermoBufferByteLength: thermo.thermoBufferByteLength,
-    seededFromCpu: thermo.seededFromCpu
+    seededFromCpu: thermo.seededFromCpu,
+    thermoBufferCopySrc: thermo.copySrc === true
   };
 }
 
@@ -636,6 +914,8 @@ function recordWorkerRetainedThermoOutput({ stageId, rawResult, record }) {
   record.retainedThermoBufferByteLength = source.thermoBufferByteLength || record.retainedThermoBufferByteLength || 0;
   record.retainedThermoBufferSourceStage = stageId;
   record.retainedThermoBufferSeededFromCpu = false;
+  record.retainedThermoBufferCopySrc = true;
+  record.retainedThermoSnapshotRows = null;
   return {
     status: 'adopted-worker-retained-thermo-output',
     stageId,
@@ -690,7 +970,8 @@ function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDev
     mechanicsBufferByteLength: source.mechanicsBufferByteLength ?? null,
     thermoBufferRetained: true,
     thermoBufferSourceStage: thermo.sourceStage,
-    thermoBufferSeededFromCpu: thermo.seededFromCpu
+    thermoBufferSeededFromCpu: thermo.seededFromCpu,
+    thermoBufferCopySrc: thermo.copySrc === true
   };
 }
 

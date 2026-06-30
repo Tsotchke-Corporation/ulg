@@ -103,6 +103,15 @@ Tactical status, 2026-06-28 AKDT:
   that must export compact
   `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` rows or use a
   peer-local materialization protocol.
+  Follow-up wired that compact snapshot export request through the scene,
+  offscreen presentation bridge, and mechanics worker, and the benchmark now
+  waits for a terminal snapshot status. Browser evidence currently blocks at
+  `worker-retained-compact-snapshot-readback-failed`: Chromium rejects
+  `mapAsync` on the retained `sph-state` readback buffer with
+  `A valid external Instance reference no longer exists`. The next slice is a
+  plan decision: either make the presentation worker retain export-owned clone
+  buffers before stage outputs can expire, or bypass worker `mapAsync` with a
+  GPU-side publication/materialization path.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

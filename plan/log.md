@@ -32815,3 +32815,58 @@ Caveat:
   main-thread visible surface samples. That is a probe contract mismatch for
   this presentation-worker-owned fast path; the hot-path telemetry above shows
   zero readback and preserved worker presentation.
+
+## 2026-06-29 22:20 AKDT - Worker-Owned Presentation Cadence
+
+Status:
+
+- Found the slideshow root cause after the worker-owned particle-state
+  presentation path was selected: resident MLS-MPM compute was fast
+  (`lastResidentMs` around 200-275 ms and WebGPU stage time around 2-12 ms),
+  but the mounted scheduler awaited post-step material/pressure interface
+  refresh before scheduling the next batch.
+- The hidden blocker was material-interface extraction. Live HTTPS telemetry on
+  `https://100.86.83.35:5173/` showed
+  `lastResidentMaterialInterfaceRefreshMs` around 13-15 s while pressure
+  refresh was only around 15 ms.
+- Added policy-controlled resident interface refresh mode:
+  `blocking`, `pipelined`, or `disabled`. Main-thread/transitional paths keep
+  the old blocking default; ready worker-owned resident producer presentation
+  defaults to `pipelined`. Explicit peercompute/user overrides stay explicit,
+  while local defaults no longer stick across scene readiness upgrades.
+- Pipelined mode starts the same material/pressure refresh in the background
+  and coalesces additional requests while one is pending. The resident physics
+  and render refresh loop now continues using the latest available pressure
+  interface state instead of idling the GPU for the slow material extraction.
+- Cleared the stale readback diagnostic for the worker-owned particle-state
+  path. `renderRowsReadbackCoercionReason` is now null when the visible bridge
+  is `worker-owned-resident-particle-state-producer`, and render state exposes
+  `surfaceDrawWorkerOwnedResidentParticleStateProducerPresentationOnly`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs tests/offscreenPresentationBridge.test.mjs`
+  with `29/29` tests passing.
+- LIVE:
+  `https://100.86.83.35:5173/?drop=h2o&base=h2o&dropn=10&basen=10&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&residentActiveGrid=1&workerOffscreenPresentation=1&lawt=0&lawr=0&lawv=0&lawst=0&surfaceDraw=three-render-row-spheres&blob=1`
+  reached `residentInterfaceRefreshMode=pipelined`,
+  `surfaceDrawStatus=resident-render-worker-owned-particle-state-producer-presented`,
+  `visibleBridge=worker-owned-resident-particle-state-producer`,
+  `renderRowsReadback=false`, `renderRowsReadbackCoercionReason=null`,
+  `residentSubmissions=86` by about 33 s, `residentFps` around 31-36,
+  `renderFps` around 29-44, and hot-loop `lastResidentCycleMs` around
+  80-145 ms after startup.
+
+Next:
+
+- Material-interface extraction is still too slow for physical pressure
+  coupling freshness. It no longer blocks animation, but the next physics
+  optimization should replace the render-row/full-readback surface-table seed
+  in `refreshSphResidentMaterialInterfaceState()` with a GPU-resident
+  particle/material interface extraction path.

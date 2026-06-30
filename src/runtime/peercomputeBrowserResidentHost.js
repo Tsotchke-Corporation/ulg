@@ -6612,6 +6612,16 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       host?.renderOwnershipPolicy?.presentationWorkerResidentStagesPending ?? null,
     renderOwnershipPresentationWorkerResidentStageTransport:
       host?.renderOwnershipPolicy?.presentationWorkerResidentStageTransport ?? null,
+    renderOwnershipResidentPlaybackUseCase:
+      host?.renderOwnershipPolicy?.residentPlaybackUseCase ?? null,
+    renderOwnershipResidentStepsPerScheduleOverride:
+      host?.renderOwnershipPolicy?.residentStepsPerScheduleOverride ?? null,
+    renderOwnershipResidentStepsPerScheduleMax:
+      host?.renderOwnershipPolicy?.residentStepsPerScheduleMax ?? null,
+    renderOwnershipResidentParticleBridgeTargetBatchTimeS:
+      host?.renderOwnershipPolicy?.residentParticleBridgeTargetBatchTimeS ?? null,
+    renderOwnershipResidentInterfaceRefreshMode:
+      host?.renderOwnershipPolicy?.residentInterfaceRefreshMode ?? null,
     renderOwnershipTransitionalRenderRowsActive:
       host?.renderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,

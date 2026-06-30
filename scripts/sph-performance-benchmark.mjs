@@ -492,6 +492,31 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? renderState?.peerComputeRenderOwnershipPresentationWorkerResidentStageTransport
     ?? metric?.rendererInit?.peerComputeRenderOwnershipPresentationWorkerResidentStageTransport
     ?? null;
+  const peerComputeRenderOwnershipResidentPlaybackUseCase =
+    peerComputeRenderOwnershipPolicy?.residentPlaybackUseCase
+    ?? renderState?.peerComputeRenderOwnershipResidentPlaybackUseCase
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentPlaybackUseCase
+    ?? null;
+  const peerComputeRenderOwnershipResidentStepsPerScheduleOverride = numberOrNull(
+    peerComputeRenderOwnershipPolicy?.residentStepsPerScheduleOverride
+      ?? renderState?.peerComputeRenderOwnershipResidentStepsPerScheduleOverride
+      ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentStepsPerScheduleOverride
+  );
+  const peerComputeRenderOwnershipResidentStepsPerScheduleMax = numberOrNull(
+    peerComputeRenderOwnershipPolicy?.residentStepsPerScheduleMax
+      ?? renderState?.peerComputeRenderOwnershipResidentStepsPerScheduleMax
+      ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentStepsPerScheduleMax
+  );
+  const peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS = numberOrNull(
+    peerComputeRenderOwnershipPolicy?.residentParticleBridgeTargetBatchTimeS
+      ?? renderState?.peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS
+      ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS
+  );
+  const peerComputeRenderOwnershipResidentInterfaceRefreshMode =
+    peerComputeRenderOwnershipPolicy?.residentInterfaceRefreshMode
+    ?? renderState?.peerComputeRenderOwnershipResidentInterfaceRefreshMode
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentInterfaceRefreshMode
+    ?? null;
   const peerComputeRenderOwnershipTransitionalRenderRowsActive =
     peerComputeRenderOwnershipPolicy?.transitionalRenderRowsActive
     ?? renderState?.peerComputeRenderOwnershipTransitionalRenderRowsActive
@@ -1851,6 +1876,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesReady,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesPending,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStageTransport,
+	    peerComputeRenderOwnershipResidentPlaybackUseCase,
+	    peerComputeRenderOwnershipResidentStepsPerScheduleOverride,
+	    peerComputeRenderOwnershipResidentStepsPerScheduleMax,
+	    peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS,
+	    peerComputeRenderOwnershipResidentInterfaceRefreshMode,
 	    peerComputeRenderOwnershipTransitionalRenderRowsActive,
 	    workerOffscreenRenderRows,
 	    workerOffscreenRenderRowsStatus,

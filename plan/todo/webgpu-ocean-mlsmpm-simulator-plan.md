@@ -1085,6 +1085,16 @@ Interim status, 2026-06-18 AKDT:
   retained WebGPU draw state is intentionally unavailable. Skip diagnostics stay
   separate, which keeps the browser reset harness console-clean while avoiding
   another overlay or full-readback renderer path.
+- 2026-06-29 worker-owned presentation cadence update: ready worker-owned
+  resident producer presentation now defaults post-step material/pressure
+  interface refresh to `pipelined` instead of blocking the next resident batch.
+  Live HTTPS probe evidence moved the mounted H2O/H2O worker-owned sphere path
+  from slideshow cadence to roughly 31-36 resident/physics FPS after startup.
+  The remaining bottleneck is not MLS-MPM compute; it is material-interface
+  extraction, which still takes around 13-15 s because it seeds its surface
+  table through render-row/full-readback work. Next slice should build a
+  GPU-resident particle/material interface extraction path so pressure coupling
+  freshness is not gated by a CPU/readback surface-table seed.
 
 ## ULG-Specific Constraints
 

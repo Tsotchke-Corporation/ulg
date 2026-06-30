@@ -787,26 +787,43 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
     workerOwnedResidentRenderProducerBridge
     && !workerOwnedResidentParticleStateProducerBridge
   );
+  const workerOwnedResidentParticleStatePresentationOnlyBridge = Boolean(
+    effectiveThreeBridge
+    && workerOffscreenPresentationBridge
+    && workerOwnedResidentParticleStateProducerBridge
+  );
   const workerOffscreenRenderRowsTransferBridge = Boolean(
     workerOffscreenPresentationBridge
     && !presentationWorkerRetainedOutputPresentationOnlyBridge
     && !workerOwnedResidentParticleStateProducerBridge
   );
-  const retainPreviousThreeRenderRowBridgeNoFull = false;
+  const retainPreviousThreeRenderRowBridgeNoFull = Boolean(
+    workerOwnedResidentParticleStatePresentationOnlyBridge
+    && previousThreeRenderRowBridgeVisible
+    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+  );
   let requestedRenderRowsReadbackModeResolved = requestedRenderRowsReadbackModeFromCaller;
   if (webGpuOverlayBridge) {
     requestedRenderRowsReadbackModeResolved = RESIDENT_NO_FULL_READBACK_MODE;
   } else if (
-    effectiveThreeBridge
-    || workerOffscreenRenderRowsTransferBridge
-    || workerOwnedResidentRenderRowsSourceTransferBridge
+    !retainPreviousThreeRenderRowBridgeNoFull
+    && !workerOwnedResidentParticleStatePresentationOnlyBridge
+    && (
+      effectiveThreeBridge
+      || workerOffscreenRenderRowsTransferBridge
+      || workerOwnedResidentRenderRowsSourceTransferBridge
+    )
   ) {
     requestedRenderRowsReadbackModeResolved = RESIDENT_FULL_READBACK_MODE;
   }
   let renderRowsReadbackModeCoercionReason = null;
   if (retainPreviousThreeRenderRowBridgeNoFull) {
     renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-retains-previous-no-full-readback';
-  } else if (effectiveThreeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE) {
+  } else if (
+    effectiveThreeBridge
+    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+    && !workerOwnedResidentParticleStatePresentationOnlyBridge
+  ) {
     renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-requires-fresh-physics-readback';
   } else if (
     workerOwnedResidentRenderRowsSourceTransferBridge
@@ -833,7 +850,8 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
     freshPhysicsReadbackRequired:
       (effectiveThreeBridge || workerOffscreenRenderRowsTransferBridge || workerOwnedResidentRenderRowsSourceTransferBridge)
       && !webGpuOverlayBridge
-      && !retainPreviousThreeRenderRowBridgeNoFull,
+      && !retainPreviousThreeRenderRowBridgeNoFull
+      && !workerOwnedResidentParticleStatePresentationOnlyBridge,
     webGpuOverlayNoFullReadback: webGpuOverlayBridge,
     presentationWorkerRetainedOutputPresentationOnlyReadbackFree:
       presentationWorkerRetainedOutputPresentationOnlyBridge,
@@ -842,7 +860,9 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
     workerOwnedResidentRenderProducerReadbackRequired:
       workerOwnedResidentRenderRowsSourceTransferBridge && !webGpuOverlayBridge,
     workerOwnedResidentParticleStateProducerReadbackFree:
-      workerOwnedResidentParticleStateProducerBridge && !webGpuOverlayBridge
+      workerOwnedResidentParticleStateProducerBridge && !webGpuOverlayBridge,
+    workerOwnedResidentParticleStateProducerPresentationOnly:
+      workerOwnedResidentParticleStatePresentationOnlyBridge
   };
 }
 
@@ -6302,6 +6322,7 @@ export function createSphPhaseScene(container, {
         || null,
       workerOffscreenPresentationRequested: workerOffscreenPresentation,
       workerOwnedResidentProducerReady: true,
+      upgradeWorkerOffscreenRenderRowsWhenReady: true,
       workerOwnedResidentProducerSourceTransferRequiredOverride: true,
       source: 'sph-phase-scene'
     });
@@ -6496,6 +6517,8 @@ export function createSphPhaseScene(container, {
         policy?.retainedCompactSnapshotExportRequested ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerRequested:
         policy?.workerOwnedResidentProducerRequested ?? null,
+      peerComputeRenderOwnershipWorkerOffscreenRenderRowsUpgradedToWorkerOwnedResidentProducer:
+        policy?.workerOffscreenRenderRowsUpgradedToWorkerOwnedResidentProducer ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerPending:
         policy?.workerOwnedResidentProducerPending ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired:
@@ -6516,6 +6539,16 @@ export function createSphPhaseScene(container, {
         policy?.presentationWorkerResidentStagesPending ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStageTransport:
         policy?.presentationWorkerResidentStageTransport ?? null,
+      peerComputeRenderOwnershipResidentPlaybackUseCase:
+        policy?.residentPlaybackUseCase ?? null,
+      peerComputeRenderOwnershipResidentStepsPerScheduleOverride:
+        policy?.residentStepsPerScheduleOverride ?? null,
+      peerComputeRenderOwnershipResidentStepsPerScheduleMax:
+        policy?.residentStepsPerScheduleMax ?? null,
+      peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS:
+        policy?.residentParticleBridgeTargetBatchTimeS ?? null,
+      peerComputeRenderOwnershipResidentInterfaceRefreshMode:
+        policy?.residentInterfaceRefreshMode ?? null,
       peerComputeRenderOwnershipTransitionalRenderRowsActive:
         policy?.transitionalRenderRowsActive ?? null,
       peerComputeRenderOwnershipFrameCopyBackRejected:
@@ -20892,7 +20925,77 @@ export function createSphPhaseScene(container, {
       }
       }
       if (renderFieldSource === 'resident-gpu-render-field') {
-        if (shouldUseResidentRenderRowBridge) {
+        const shouldUseWorkerOwnedParticleStatePresentationOnly = Boolean(
+          shouldUseResidentRenderRowBridge
+          && renderRowReadbackPlan.workerOwnedResidentParticleStateProducerPresentationOnly
+          && !hasRenderRowsReadback
+        );
+        if (shouldUseWorkerOwnedParticleStatePresentationOnly) {
+          renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+            status: 'released-after-worker-owned-particle-state-producer'
+          });
+          renderFieldExecution?.destroyRenderFieldBuffers?.({
+            releaseLeases: true,
+            reason: 'worker-owned-particle-state-producer-presentation-cleanup'
+          });
+          nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
+            'worker-owned resident particle-state producer owns the presented canvas; main-thread Three render-row readback skipped',
+            { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
+          );
+          nextResidentSurfaceDraw.status = 'resident-render-worker-owned-particle-state-producer-presented';
+          nextResidentSurfaceDraw.diagnosticOnly = false;
+          nextResidentSurfaceDraw.diagnosticMode = requestedSurfaceDrawDiagnosticMode;
+          nextResidentSurfaceDraw.requestedDiagnosticMode = rawSurfaceDrawDiagnosticMode;
+          nextResidentSurfaceDraw.diagnosticFallbackReason =
+            'worker-owned resident particle-state producer is the visible presentation path';
+          nextResidentSurfaceDraw.activeSurfaceCount = 0;
+          nextResidentSurfaceDraw.vertexCount = nextSphParticleState?.particleCount ?? 0;
+          nextResidentSurfaceDraw.triangleCount = 0;
+          nextResidentSurfaceDraw.renderFieldBufferMode = 'released-after-worker-owned-particle-state-producer';
+          nextResidentSurfaceDraw.visibleRendererBridge = 'worker-owned-resident-particle-state-producer';
+          nextResidentSurfaceDraw.visibleRenderSource = 'worker-owned-resident-particle-state-producer';
+          nextResidentSurfaceDraw.surfaceDrawReadback = false;
+          nextResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
+          nextResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
+          nextResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
+          nextResidentSurfaceDraw.renderBridgeSchema = null;
+          nextResidentSurfaceDraw.renderBridgeStatus = 'worker-owned-resident-particle-state-producer-pending';
+          nextResidentSurfaceDraw.renderBridgeReason =
+            'presentation worker will render directly from the resident particle state transfer';
+          nextResidentSurfaceDraw.renderBridgeFrameCount = currentWorkerOffscreenPresentationStatus()?.frameCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeLastRenderStatus =
+            currentWorkerOffscreenRenderRowsStatus()?.status ?? null;
+          nextResidentSurfaceDraw.renderBridgeThreeMeshCount = 0;
+          nextResidentSurfaceDraw.renderBridgeThreeGeometryByteLength = 0;
+          nextResidentSurfaceDraw.renderBridgeEngineIntegration = 'worker-owned-presented-canvas';
+          nextResidentSurfaceDraw.renderBridgeReused = false;
+          nextResidentSurfaceDraw.renderBridgeUpdateCount = 0;
+          nextResidentSurfaceDraw.renderBridgeRenderRowsBufferRetained = false;
+          nextResidentSurfaceDraw.renderBridgeRenderRowsBufferByteLength = 0;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderingPolicy = null;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderCount = 0;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderSurfaceIndices = [];
+          nextResidentSurfaceDraw.renderBridgeDrawOrderIndirectOffsets = [];
+          nextResidentSurfaceDraw.renderBridgeParticleRenderMode = 'worker-owned-particle-state';
+          nextResidentSurfaceDraw.renderBridgeSphereSizingMode = null;
+          nextResidentSurfaceDraw.renderBridgeSphereVariableSize = false;
+          nextResidentSurfaceDraw.renderBridgeSpherePbrMaterialSource = null;
+          nextResidentSurfaceDraw.renderBridgeSphereClosurePbr = false;
+          nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = null;
+          nextResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = false;
+          nextResidentSurfaceDraw.renderRowsReadbackRequestedMode = requestedRenderRowsReadbackModeFromCaller;
+          nextResidentSurfaceDraw.renderRowsReadbackEffectiveMode = requestedRenderRowsReadbackMode;
+          nextResidentSurfaceDraw.renderRowsReadbackCoercionReason = renderRowsReadbackModeCoercionReason;
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = false;
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForWorkerOffscreenPresentation = false;
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForWorkerOwnedResidentProducer = false;
+          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = false;
+          nextResidentSurfaceDraw.workerOwnedResidentParticleStateProducerPresentationOnly = true;
+          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
+            renderRowsExecution.particleScaleStability ?? null;
+          nextResidentSurfaceDraw.renderRowsParticleScaleStabilityStatus =
+            renderRowsExecution.particleScaleStability?.status ?? null;
+        } else if (shouldUseResidentRenderRowBridge) {
           renderFieldExecution?.releaseRenderFieldBufferLeases?.({
             status: shouldUseWebGpuRenderRowOverlayBridge
               ? 'retained-for-webgpu-render-row-overlay'
@@ -21970,6 +22073,9 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree: Boolean(
           renderRowReadbackPlan.workerOwnedResidentParticleStateProducerReadbackFree
         ),
+        renderRowsReadbackWorkerOwnedResidentParticleStateProducerPresentationOnly: Boolean(
+          renderRowReadbackPlan.workerOwnedResidentParticleStateProducerPresentationOnly
+        ),
         presentationWorkerRetainedOutputPresentationOnlyReadbackFree: Boolean(
           renderRowReadbackPlan.presentationWorkerRetainedOutputPresentationOnlyReadbackFree
         ),
@@ -22258,6 +22364,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: sphResidentSurfaceDraw?.surfaceDrawSummaryReadbackByteLength ?? 0,
+        surfaceDrawWorkerOwnedResidentParticleStateProducerPresentationOnly: Boolean(
+          sphResidentSurfaceDraw?.workerOwnedResidentParticleStateProducerPresentationOnly
+        ),
         surfaceDrawGpuOnlyHandoff: Boolean(sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoff),
         surfaceDrawGpuOnlyHandoffStatus: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoffStatus ?? null,
         surfaceDrawGpuOnlyHandoffReason: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyHandoffReason ?? null,

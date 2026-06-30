@@ -40,6 +40,26 @@ function normalizeBoolean(value, fallback = false) {
   return fallback;
 }
 
+function normalizePositiveInteger(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function normalizePositiveNumber(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function normalizeResidentInterfaceRefreshMode(value, fallback = 'blocking') {
+  const normalized = normalizeString(value, fallback)?.toLowerCase();
+  if (normalized === 'pipeline' || normalized === 'pipelined' || normalized === 'async') return 'pipelined';
+  if (normalized === 'blocking' || normalized === 'sync' || normalized === 'synchronous') return 'blocking';
+  if (normalized === 'disabled' || normalized === 'off' || normalized === 'none') return 'disabled';
+  return fallback;
+}
+
 export function normalizePeerComputeRenderOwnershipMode(value, fallback = ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.AUTO) {
   const normalized = normalizeString(value, fallback)?.toLowerCase();
   if (!normalized) return fallback;
@@ -119,6 +139,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   workerOffscreenPresentationRequested = false,
   retainedGpuBufferHandoffRequested = null,
   retainedCompactSnapshotExportRequested = null,
+  residentStepsPerScheduleOverride = null,
+  residentStepsPerScheduleMax = null,
+  residentParticleBridgeTargetBatchTimeS = null,
+  residentInterfaceRefreshMode = null,
+  upgradeWorkerOffscreenRenderRowsWhenReady = false,
   allowTransitionalRenderRows = true,
   workerOwnedResidentProducerReady = false,
   workerOwnedResidentProducerSourceTransferRequiredOverride = null,
@@ -137,6 +162,8 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     'presentationOwnershipMode',
     'inputTransport'
   ]) || requestedMode;
+  const normalizedUseCase = normalizeString(policy.useCase, useCase);
+  const normalizedUseCaseKey = normalizedUseCase?.toLowerCase() || null;
   let requested = normalizePeerComputeRenderOwnershipMode(rawRequestedMode, null);
   const policyPresentationWorkerPresentationOnlyRequested = normalizeBoolean(
     policy.presentationWorkerRetainedOutputPresentationOnly
@@ -195,6 +222,16 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     policy.workerOwnedResidentProducerReady ?? policy.targetImplementationReady,
     false
   );
+  const upgradeImplicitWorkerOffscreenRenderRows = Boolean(
+    upgradeWorkerOffscreenRenderRowsWhenReady
+    && targetImplementationReady
+    && requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS
+    && !configuredByPeerCompute
+    && policy.source !== 'sph-phase-demo-url'
+  );
+  const workerOwnedResidentProducerSelected = Boolean(
+    workerOwnedResidentProducerRequested || upgradeImplicitWorkerOffscreenRenderRows
+  );
   const transitionalRenderRowsAllowed = normalizeBoolean(
     policy.allowTransitionalRenderRows,
     allowTransitionalRenderRows
@@ -208,7 +245,9 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS
     : (presentationWorkerRetainedOutputPresentationOnlyRequested
       ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
-      : requested);
+      : (upgradeImplicitWorkerOffscreenRenderRows
+        ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+        : requested));
   const retainedHandoffRequested = retainedGpuBufferHandoffRequested == null
     ? normalizeBoolean(
       policy.retainedGpuBufferHandoffRequested
@@ -230,7 +269,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   const renderRowsTransferRequested =
     effectiveMode === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS;
   const workerOwnedResidentProducerSourceTransferRequired = Boolean(
-    workerOwnedResidentProducerRequested
+    workerOwnedResidentProducerSelected
     && targetImplementationReady
     && normalizeBoolean(
       workerOwnedResidentProducerSourceTransferRequiredOverride
@@ -243,7 +282,72 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     && workerPresentationRequested
     && targetImplementationReady
   );
-  const inputTransport = workerOwnedResidentProducerRequested && targetImplementationReady
+  const throughputPlaybackRequested = [
+    'throughput',
+    'benchmark',
+    'batch',
+    'offline',
+    'bulk'
+  ].includes(normalizedUseCaseKey);
+  const interactivePresentationPlayback = Boolean(
+    presentationWorkerRetainedOutputPresentationOnlyRequested
+    && !throughputPlaybackRequested
+  );
+  const interactiveWorkerPresentationPlayback = Boolean(
+    workerPresentationRequested
+    && !throughputPlaybackRequested
+  );
+  const residentStepOverride = normalizePositiveInteger(
+    residentStepsPerScheduleOverride
+      ?? policy.residentStepsPerScheduleOverride
+      ?? policy.residentStepsPerSchedule
+      ?? policy.residentVisualStepsPerSchedule
+      ?? policy.presentationStepsPerSchedule,
+    null
+  );
+  const residentStepMax = normalizePositiveInteger(
+    residentStepsPerScheduleMax
+      ?? policy.residentStepsPerScheduleMax
+      ?? policy.residentMaxStepsPerSchedule
+      ?? policy.residentVisualStepsPerScheduleMax
+      ?? policy.presentationStepsPerScheduleMax,
+    interactiveWorkerPresentationPlayback ? 4 : null
+  );
+  const residentTargetBatchTimeS = normalizePositiveNumber(
+    residentParticleBridgeTargetBatchTimeS
+      ?? policy.residentParticleBridgeTargetBatchTimeS
+      ?? policy.residentVisualTargetBatchTimeS
+      ?? policy.presentationTargetBatchTimeS,
+    null
+  );
+  const policyResidentInterfaceRefreshModeExplicit = Boolean(
+    policy.residentInterfaceRefreshModeExplicit
+    || policy.residentPlaybackCadencePolicy?.interfaceRefreshModeExplicit
+    || (
+      configuredByPeerCompute
+      && (
+        policy.residentInterfaceRefreshMode != null
+        || policy.residentPostStepInterfaceRefreshMode != null
+        || policy.interfaceRefreshMode != null
+      )
+    )
+  );
+  const residentInterfaceRefreshModeExplicit = Boolean(
+    residentInterfaceRefreshMode != null
+    || policyResidentInterfaceRefreshModeExplicit
+  );
+  const residentInterfaceRefreshModeResolved = normalizeResidentInterfaceRefreshMode(
+    residentInterfaceRefreshMode
+      ?? (policyResidentInterfaceRefreshModeExplicit
+        ? (
+          policy.residentInterfaceRefreshMode
+          ?? policy.residentPostStepInterfaceRefreshMode
+          ?? policy.interfaceRefreshMode
+        )
+        : null),
+    workerOwnedResidentProducerSelected && targetImplementationReady ? 'pipelined' : 'blocking'
+  );
+  const inputTransport = workerOwnedResidentProducerSelected && targetImplementationReady
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
     : (crossWorkerGpuBufferHandoffRequested
       ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.CROSS_WORKER_GPU_BUFFER_STRUCTURED_CLONE
@@ -268,9 +372,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   } else if (presentationWorkerRetainedOutputPresentationOnlyRequested) {
     status = 'render-ownership-presentation-worker-retained-output-presentation-only-pending';
     reason = 'presentation-worker retained output mode is selected but presentation-worker resident stages are not ready';
-  } else if (workerOwnedResidentProducerRequested && targetImplementationReady) {
+  } else if (workerOwnedResidentProducerSelected && targetImplementationReady) {
     status = 'render-ownership-worker-owned-resident-producer-ready';
-    reason = 'PeerCompute selected a worker-owned resident render producer';
+    reason = upgradeImplicitWorkerOffscreenRenderRows
+      ? 'implicit worker offscreen presentation upgraded to the ready worker-owned resident render producer'
+      : 'PeerCompute selected a worker-owned resident render producer';
   } else if (workerOwnedResidentProducerRequested) {
     status = transitionalRenderRowsActive
       ? 'render-ownership-worker-owned-resident-producer-pending-transitional-render-rows'
@@ -288,7 +394,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     status,
     reason,
     source: policy.source || source,
-    useCase: normalizeString(policy.useCase, useCase),
+    useCase: normalizedUseCase,
     configuredByPeerCompute,
     requestedMode: requested,
     effectiveMode,
@@ -309,8 +415,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     retainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
     presentationWorkerRetainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
     portableSnapshotExportRequested: compactSnapshotExportRequested,
-    workerOwnedResidentProducerRequested,
+    workerOwnedResidentProducerRequested: workerOwnedResidentProducerSelected,
+    workerOwnedResidentProducerExplicitlyRequested: workerOwnedResidentProducerRequested,
     workerOwnedResidentProducerReady: targetImplementationReady,
+    workerOffscreenRenderRowsUpgradedToWorkerOwnedResidentProducer:
+      upgradeImplicitWorkerOffscreenRenderRows,
     workerOwnedResidentProducerPending:
       workerOwnedResidentProducerRequested && !targetImplementationReady,
     workerOwnedResidentProducerSourceTransferRequired,
@@ -335,6 +444,33 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     presentationWorkerResidentStageTransport: presentationWorkerResidentStageChainReady
       ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.PRESENTATION_WORKER_RESIDENT_STAGE_CHAIN
       : null,
+    residentPlaybackUseCase: throughputPlaybackRequested
+      ? 'throughput'
+      : (interactivePresentationPlayback
+        ? 'interactive-presentation'
+        : (interactiveWorkerPresentationPlayback ? 'interactive-worker-presentation' : (normalizedUseCaseKey || null))),
+    residentStepsPerScheduleOverride: residentStepOverride,
+    residentStepsPerScheduleMax: residentStepMax,
+    residentParticleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
+    residentInterfaceRefreshMode: residentInterfaceRefreshModeResolved,
+    residentInterfaceRefreshModeExplicit,
+    residentPlaybackCadencePolicy: {
+      schema: 'peercompute.ulg.resident-playback-cadence-policy.v0',
+      useCase: throughputPlaybackRequested
+        ? 'throughput'
+        : (interactivePresentationPlayback
+          ? 'interactive-presentation'
+          : (interactiveWorkerPresentationPlayback ? 'interactive-worker-presentation' : (normalizedUseCaseKey || null))),
+      stepsPerScheduleOverride: residentStepOverride,
+      stepsPerScheduleMax: residentStepMax,
+      particleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
+      interfaceRefreshMode: residentInterfaceRefreshModeResolved,
+      interfaceRefreshModeExplicit: residentInterfaceRefreshModeExplicit,
+      peercomputeConfigurable: true,
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    },
     transitionalRenderRowsAllowed,
     transitionalRenderRowsActive,
     requiresFreshPhysicsReadback:

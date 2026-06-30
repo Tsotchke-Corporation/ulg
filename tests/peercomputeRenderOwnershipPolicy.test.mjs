@@ -22,6 +22,8 @@ test('render ownership policy defaults to main-thread presentation', () => {
   assert.equal(policy.retainedCompactSnapshotExportRequested, false);
   assert.equal(policy.displayTransport, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.MAIN_THREAD_DOM_CANVAS);
   assert.equal(policy.frameCopyBackRejected, true);
+  assert.equal(policy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
 });
 
 test('render ownership policy maps local worker canvas requests to transitional render rows', () => {
@@ -37,6 +39,64 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.renderRowsTransferRequested, true);
   assert.equal(policy.retainedGpuBufferHandoffRequested, false);
   assert.equal(policy.configuredByPeerCompute, false);
+  assert.equal(policy.residentPlaybackUseCase, 'interactive-worker-presentation');
+  assert.equal(policy.residentStepsPerScheduleMax, 4);
+  assert.equal(policy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
+});
+
+test('render ownership policy upgrades implicit local worker presentation when the producer is ready', () => {
+  const policy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: {
+      schema: ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
+      source: 'sph-phase-demo',
+      requestedMode: 'worker-offscreen-render-rows',
+      workerOffscreenPresentationRequested: true
+    },
+    workerOwnedResidentProducerReady: true,
+    upgradeWorkerOffscreenRenderRowsWhenReady: true
+  });
+
+  assert.equal(policy.requestedMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS);
+  assert.equal(
+    policy.effectiveMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(policy.workerOwnedResidentProducerRequested, true);
+  assert.equal(policy.workerOwnedResidentProducerExplicitlyRequested, false);
+  assert.equal(policy.workerOffscreenRenderRowsUpgradedToWorkerOwnedResidentProducer, true);
+  assert.equal(policy.renderRowsTransferRequested, false);
+  assert.equal(
+    policy.inputTransport,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(policy.status, 'render-ownership-worker-owned-resident-producer-ready');
+  assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(policy.residentPlaybackCadencePolicy.interfaceRefreshMode, 'pipelined');
+  assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
+});
+
+test('render ownership policy does not preserve local default interface mode as an explicit override', () => {
+  const initialPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    workerOffscreenPresentationRequested: true,
+    source: 'sph-phase-demo'
+  });
+  const sceneReadyPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: initialPolicy,
+    workerOffscreenPresentationRequested: true,
+    workerOwnedResidentProducerReady: true,
+    upgradeWorkerOffscreenRenderRowsWhenReady: true,
+    source: 'sph-phase-scene'
+  });
+
+  assert.equal(initialPolicy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(initialPolicy.residentInterfaceRefreshModeExplicit, false);
+  assert.equal(
+    sceneReadyPolicy.effectiveMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(sceneReadyPolicy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(sceneReadyPolicy.residentInterfaceRefreshModeExplicit, false);
 });
 
 test('render ownership policy lets PeerCompute select worker-owned resident producer per use case', () => {
@@ -96,6 +156,7 @@ test('render ownership policy selects worker-owned producer when the local capab
   assert.equal(policy.workerOwnedResidentProducerSourceTransferRequired, true);
   assert.equal(policy.requiresFreshPhysicsReadback, true);
   assert.equal(policy.retainedGpuBufferHandoffRequested, false);
+  assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
 });
 
 test('render ownership policy can request presentation-worker resident stages per use case', () => {
@@ -145,6 +206,38 @@ test('render ownership policy exposes presentation-worker retained output as pre
   assert.equal(policy.presentationWorkerRetainedOutputPresentationOnlyReady, true);
   assert.equal(policy.statePromotionMode, 'presentation-only');
   assert.equal(policy.authoritativeStateMutationExpected, false);
+  assert.equal(policy.residentPlaybackUseCase, 'interactive-presentation');
+  assert.equal(policy.residentStepsPerScheduleMax, 4);
+  assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(policy.residentPlaybackCadencePolicy.stepsPerScheduleMax, 4);
+  assert.equal(policy.residentPlaybackCadencePolicy.peercomputeConfigurable, true);
+});
+
+test('render ownership policy keeps retained presentation batch cadence configurable by use case', () => {
+  const throughputPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'presentation-worker-retained-output-presentation-only',
+    useCase: 'throughput',
+    workerOwnedResidentProducerReady: true
+  });
+  const overridePolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: {
+      requestedMode: 'presentation-worker-retained-output-presentation-only',
+      residentStepsPerSchedule: 9,
+      residentParticleBridgeTargetBatchTimeS: 0.2,
+      residentInterfaceRefreshMode: 'blocking'
+    },
+    residentStepsPerScheduleMax: 6,
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(throughputPolicy.residentPlaybackUseCase, 'throughput');
+  assert.equal(throughputPolicy.residentStepsPerScheduleMax, null);
+  assert.equal(overridePolicy.residentPlaybackUseCase, 'interactive-presentation');
+  assert.equal(overridePolicy.residentStepsPerScheduleOverride, 9);
+  assert.equal(overridePolicy.residentStepsPerScheduleMax, 6);
+  assert.equal(overridePolicy.residentParticleBridgeTargetBatchTimeS, 0.2);
+  assert.equal(overridePolicy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(overridePolicy.residentInterfaceRefreshModeExplicit, true);
 });
 
 test('render ownership policy makes retained compact snapshot export opt-in', () => {
@@ -209,4 +302,7 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipRetainedCompactSnapshotExportRequested, true);
   assert.equal(summary.renderOwnershipStatePromotionMode, 'presentation-only');
   assert.equal(summary.renderOwnershipAuthoritativeStateMutationExpected, false);
+  assert.equal(summary.renderOwnershipResidentPlaybackUseCase, 'interactive-presentation');
+  assert.equal(summary.renderOwnershipResidentStepsPerScheduleMax, 4);
+  assert.equal(summary.renderOwnershipResidentInterfaceRefreshMode, 'pipelined');
 });

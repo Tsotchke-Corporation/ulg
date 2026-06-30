@@ -33034,3 +33034,43 @@ Next:
   still poor, the next implementation slice should build the resident
   material-interface source field from sparse/source-local particle ownership
   instead of scanning every coarse field cell over every particle.
+
+## 2026-06-30 00:27 AKDT - Worker-Owned Probe Visibility Gate
+
+Status:
+
+- Fixed the long-horizon probe/benchmark interpretation for the worker-owned
+  resident particle-state producer. That path renders particles through a
+  transferred worker canvas, so it should not be treated as a missing Three.js
+  surface mesh when `surfaceDraw=three-render-row-spheres` is backed by the
+  worker-owned producer.
+- Added explicit worker-owned visibility evidence:
+  `workerOffscreenResidentParticleStateVisible`,
+  `workerOffscreenResidentParticleStateVisibleSampleCount`, and
+  `validWorkerOwnedResidentParticleStateProducer`.
+- The probe now uses that evidence for no-readback visible-output and H2O/H2O
+  attribution, while still requiring the zero-copy path:
+  `displayHandoff=transferControlToOffscreen`,
+  `frameCopyBackRejected=true`, `workerReady=true`, WebGPU context ready,
+  positive particle count, and positive ready-frame count.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: short worker-offscreen benchmark:
+  `ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: `scenarioStatus=good`, `probeStatus=good`, `probeIssues=[]`,
+  `residentStageMs=7.4`, `residentStageStepsPerSecond=135.1`,
+  `residentInterfaceRefreshMode=pipelined`,
+  `validWorkerOwnedResidentParticleStateProducer=true`,
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`,
+  `surfaceDrawVertexCount=1024`, `estimatedReadbackBytesPerStep=0`.
+
+Next:
+
+- This fixes benchmark trust for the worker-owned sphere path; it does not fix
+  the remaining slow material-interface source-field algorithm. Continue with
+  sparse/source-local material-interface extraction or device-side particle
+  ownership for the next substantive performance slice.

@@ -5740,6 +5740,77 @@ function analyzeTimeline(timeline, {
     ? dropMaxSpeedSeries[dropMaxSpeedSeries.length - 1]
     : null;
   const minActiveGridNodeCount = activeNodeSeries.length ? Math.min(...activeNodeSeries) : null;
+  const workerOffscreenRenderRowsEvidence = (metric) => {
+    const workerRows = metric?.workerOffscreenRenderRows
+      ?? metric?.renderState?.workerOffscreenRenderRows
+      ?? metric?.rendererInit?.workerOffscreenRenderRows
+      ?? null;
+    return {
+      status: workerRows?.status
+        ?? metric?.renderState?.workerOffscreenRenderRowsStatus
+        ?? metric?.surfaceDraw?.renderBridgeLastRenderStatus
+        ?? metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus
+        ?? null,
+      displayHandoff: workerRows?.displayHandoff
+        ?? metric?.renderState?.workerOffscreenRenderRowsDisplayHandoff
+        ?? metric?.workerOffscreenPresentation?.displayHandoff
+        ?? metric?.renderState?.workerOffscreenPresentationDisplayHandoff
+        ?? null,
+      frameCopyBackRejected: workerRows?.frameCopyBackRejected
+        ?? metric?.renderState?.workerOffscreenRenderRowsFrameCopyBackRejected
+        ?? metric?.workerOffscreenPresentation?.frameCopyBackRejected
+        ?? metric?.renderState?.workerOffscreenPresentationFrameCopyBackRejected
+        ?? null,
+      workerReady: workerRows?.workerReady
+        ?? metric?.renderState?.workerOffscreenRenderRowsWorkerReady
+        ?? metric?.workerOffscreenPresentation?.workerReady
+        ?? metric?.renderState?.workerOffscreenPresentationWorkerReady
+        ?? null,
+      contextStatus: workerRows?.contextStatus
+        ?? metric?.renderState?.workerOffscreenRenderRowsContextStatus
+        ?? metric?.workerOffscreenPresentation?.contextStatus
+        ?? metric?.renderState?.workerOffscreenPresentationContextStatus
+        ?? null,
+      particleCount: finiteMetric(
+        workerRows?.particleCount
+        ?? metric?.renderState?.workerOffscreenRenderRowsParticleCount
+        ?? metric?.surfaceDraw?.vertexCount
+        ?? metric?.renderState?.surfaceDrawVertexCount
+      ),
+      readyFrameCount: finiteMetric(
+        workerRows?.readyFrameCount
+        ?? metric?.renderState?.workerOffscreenRenderRowsReadyFrameCount
+        ?? metric?.workerOffscreenPresentation?.readyFrameCount
+        ?? metric?.renderState?.workerOffscreenPresentationReadyFrameCount
+      )
+    };
+  };
+  const workerOffscreenResidentParticleStateVisible = (metric) => {
+    const evidence = workerOffscreenRenderRowsEvidence(metric);
+    return evidence.status === 'worker-offscreen-resident-particle-state-producer-rendered'
+      && evidence.displayHandoff === 'transferControlToOffscreen'
+      && evidence.frameCopyBackRejected === true
+      && evidence.workerReady === true
+      && evidence.contextStatus === 'webgpu-context-ready'
+      && Number(evidence.particleCount) > 0
+      && Number(evidence.readyFrameCount) > 0;
+  };
+  const renderStateHasH2oEvidence = (renderState = null) => {
+    if (!renderState) return false;
+    const keys = [
+      ...(Array.isArray(renderState.materialKeys) ? renderState.materialKeys : []),
+      ...Object.keys(renderState.renderRowsDecodedMaterialPhaseCounts || {}),
+      ...Object.keys(renderState.renderRowsDecodedMaterialPhaseDomainCounts || {})
+    ];
+    return keys.some((key) => String(key || '').toLowerCase().includes('h2o'));
+  };
+  const workerOffscreenResidentParticleStateH2oVisible = (metric) => (
+    workerOffscreenResidentParticleStateVisible(metric)
+    && (
+      expectedLiquidH2oSameMaterial
+      || renderStateHasH2oEvidence(metric?.renderState)
+    )
+  );
   const residentOverlayVisible = (metric) => {
     const bridge = metric?.surfaceDraw?.visibleRendererBridge
       ?? metric?.renderState?.surfaceDrawVisibleRendererBridge
@@ -5875,7 +5946,8 @@ function analyzeTimeline(timeline, {
       )
       && residentSurfaceVisibleGpuConsumerReady(metric)
       && (activeSurfaceCount > 0 || vertexCount > 0);
-    return webGpuIndirectOverlayVisible
+    return workerOffscreenResidentParticleStateVisible(metric)
+      || webGpuIndirectOverlayVisible
       || threeRenderRowPointsVisible
       || webGpuRenderRowOverlayVisible
       || nativeWebGpuSurfaceConsumerVisible;
@@ -5907,8 +5979,13 @@ function analyzeTimeline(timeline, {
     ?? null
   );
   const residentOverlayH2oVisible = (metric) => residentOverlayVisible(metric)
-    && Array.isArray(metric?.renderState?.materialKeys)
-    && metric.renderState.materialKeys.some((key) => String(key || '').toLowerCase().includes('h2o'));
+    && (
+      workerOffscreenResidentParticleStateH2oVisible(metric)
+      || (
+        Array.isArray(metric?.renderState?.materialKeys)
+        && metric.renderState.materialKeys.some((key) => String(key || '').toLowerCase().includes('h2o'))
+      )
+    );
   const residentRenderFieldSummaryH2oVisible = (metric) => residentRenderFieldSummaryVisible(metric)
     && Array.isArray(metric?.renderState?.renderFieldSurfaceSummarySurfaces)
     && metric.renderState.renderFieldSurfaceSummarySurfaces.some((surface) => (
@@ -5923,6 +6000,12 @@ function analyzeTimeline(timeline, {
     || residentOverlayVisible(metric)
     || residentRenderFieldSummaryVisible(metric)
   )).length;
+  const workerOffscreenResidentParticleStateVisibleSampleCount =
+    metrics.filter(workerOffscreenResidentParticleStateVisible).length;
+  const workerOffscreenResidentParticleStateReadyFrameCount = metrics
+    .map((metric) => workerOffscreenRenderRowsEvidence(metric).readyFrameCount)
+    .filter(Number.isFinite)
+    .reduce((max, value) => Math.max(max, value), 0);
   const residentSurfaceBufferHandoffSampleCount = metrics.filter((metric) => (
     residentSurfaceBufferHandoffReady(metric)
   )).length;
@@ -5993,14 +6076,21 @@ function analyzeTimeline(timeline, {
     ))
   );
   const residentNoReadbackRenderSourceEvidenceAvailable = Boolean(
-    residentSurfaceBufferHandoffProbe
-    && compactSummaryDisabled
-    && residentRenderSourceCurrentSampleCount > 0
-    && residentRenderSourceStaleSampleCount === 0
-    && residentRenderSourceTimeAdvanced
-    && (
-      residentSurfaceVisibleGpuConsumerInputReadySampleCount > 0
-      || residentSurfaceBufferHandoffSampleCount > 0
+    (
+      residentSurfaceBufferHandoffProbe
+      && compactSummaryDisabled
+      && residentRenderSourceCurrentSampleCount > 0
+      && residentRenderSourceStaleSampleCount === 0
+      && residentRenderSourceTimeAdvanced
+      && (
+        residentSurfaceVisibleGpuConsumerInputReadySampleCount > 0
+        || residentSurfaceBufferHandoffSampleCount > 0
+      )
+    )
+    || (
+      compactSummaryDisabled
+      && workerOffscreenResidentParticleStateVisibleSampleCount > 0
+      && workerOffscreenResidentParticleStateReadyFrameCount > 0
     )
   );
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
@@ -6829,7 +6919,9 @@ function analyzeTimeline(timeline, {
     residentSurfaceVisibleGpuConsumerInputReadySampleCount,
     residentSurfaceVisibleGpuConsumerAccepted,
     h2oVisibleSurfaceSampleCount,
-    residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length
+    residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length,
+    workerOffscreenResidentParticleStateVisibleSampleCount,
+    workerOffscreenResidentParticleStateReadyFrameCount
   };
 }
 

@@ -233,6 +233,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(probeSource, /peerComputeRenderOwnershipPolicy/);
   assert.match(probeSource, /workerOffscreenPresentation: sceneUserData\.sphWorkerOffscreenPresentation/);
   assert.match(probeSource, /workerOffscreenRenderRows: sceneUserData\.sphWorkerOffscreenRenderRows/);
+  assert.match(probeSource, /workerOffscreenResidentParticleStateVisible/);
+  assert.match(probeSource, /workerOffscreenResidentParticleStateVisibleSampleCount/);
   assert.match(probeSource, /workerOffscreenResidentStage/);
   assert.match(probeSource, /workerOffscreenResidentStageChainAuto/);
   assert.match(probeSource, /workerOffscreenRetainedStatePromotionCandidate/);
@@ -256,6 +258,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRenderRowsRetainedParticleStateStatus/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsRetainedStageOutputPreserved/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput/);
+  assert.match(benchmarkSource, /validWorkerOwnedResidentParticleStateProducer/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageStatus/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageTimeoutMs/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageErrorMessage/);

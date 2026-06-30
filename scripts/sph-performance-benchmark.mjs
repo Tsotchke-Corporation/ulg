@@ -1605,6 +1605,15 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       )
     )
   );
+  const validWorkerOwnedResidentParticleStateProducer = Boolean(
+    workerOffscreenRenderRowsStatus === 'worker-offscreen-resident-particle-state-producer-rendered'
+    && workerOffscreenRenderRowsDisplayHandoff === 'transferControlToOffscreen'
+    && workerOffscreenRenderRowsFrameCopyBackRejected === true
+    && workerOffscreenRenderRowsWorkerReady === true
+    && workerOffscreenRenderRowsContextStatus === 'webgpu-context-ready'
+    && Number(workerOffscreenRenderRowsParticleCount ?? 0) > 0
+    && Number(workerOffscreenRenderRowsReadyFrameCount ?? 0) > 0
+  );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
   const activeGridNodeCountFromDiagnostics = numberOrNull(residentDiagnostics?.activeGridNodeCount);
   const activeGridNodeCount = activeGridNodeCountFromDiagnostics
@@ -1654,7 +1663,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     && Number.isFinite(residentStageMs)
     && (effectiveProbeMode === 'direct-resident'
       ? validDirectResidentLoop
-      : (validResidentRenderRowBridge || validResidentSurfaceBufferHandoff))
+      : (
+        validResidentRenderRowBridge
+        || validResidentSurfaceBufferHandoff
+        || validWorkerOwnedResidentParticleStateProducer
+      ))
     ? 'good'
     : (exit.code === 0 ? 'bad' : 'probe-error');
   return {
@@ -1748,6 +1761,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction,
     surfaceDrawGpuBufferHandoffUpperBoundVertexCount,
     validResidentSurfaceBufferHandoff,
+    validWorkerOwnedResidentParticleStateProducer,
     surfaceDrawVisibleGpuConsumerReady,
     surfaceDrawVisibleGpuConsumerStatus,
     surfaceDrawVisibleGpuConsumerReason,

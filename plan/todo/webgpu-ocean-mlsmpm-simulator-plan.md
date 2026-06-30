@@ -1142,6 +1142,14 @@ Interim status, 2026-06-18 AKDT:
   a scheduler/backpressure fix for the slideshow symptom after source-field
   budget tuning; it does not remove the durable need for a sparse/source-local
   material-interface source-field builder.
+- 2026-06-30 worker-owned benchmark gate update: the long-horizon probe and
+  `sph-performance-benchmark` now accept the worker-owned resident
+  particle-state producer as visible output when it proves transferred-canvas
+  presentation, frame-copy-back rejection, WebGPU worker readiness, positive
+  particle count, and positive ready-frame count. The same 1024-particle
+  worker-offscreen sphere smoke now reports `scenarioStatus=good`,
+  `probeIssues=[]`, `residentStageMs=7.4`, `residentStageStepsPerSecond=135.1`,
+  and `estimatedReadbackBytesPerStep=0`.
 
 ## ULG-Specific Constraints
 

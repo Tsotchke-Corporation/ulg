@@ -104,6 +104,18 @@ not another same-worker continuation change; it must export or otherwise admit
 a compact `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0`
 materialization contract for worker-private GPU refs. Keep the direct
 `GPUBuffer` structured-clone path as an explicit experimental mode only.
+Follow-up, 2026-06-30 AKDT: the presentation worker now captures export-owned
+G2P state/mechanics source buffers when retained compact snapshot export is
+explicitly requested. The unit regression destroys the original G2P buffers
+and still exports a valid
+`peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` from the owned
+copies plus the retained thermo shadow. Live Chromium evidence still blocks
+the browser snapshot at worker `mapAsync` with `A valid external Instance
+reference no longer exists` even after
+`compactSnapshotExportSourceStatus=worker-retained-compact-snapshot-export-sources-ready`.
+This changes the next cross-peer slice: do not keep cloning more buffers in the
+presentation worker; move to a GPU-side publication/local materialization path
+that avoids worker-side mapped readback on this device.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

@@ -110,10 +110,17 @@ Tactical status, 2026-06-28 AKDT:
   Chromium rejects `mapAsync` on the retained `sph-state` readback buffer with
   `A valid external Instance reference no longer exists`. Snapshot export is
   now opt-in via policy/URL/benchmark flags so the normal retained-presentation
-  hot path does not run the failing readback. The next cross-peer slice is still
-  a plan decision: either make the presentation worker retain export-owned clone
-  buffers before stage outputs can expire, or bypass worker `mapAsync` with a
-  GPU-side publication/materialization path.
+  hot path does not run the failing readback. Follow-up implemented the
+  export-owned clone-buffer branch: when retained compact snapshot export is
+  requested, the presentation worker captures private G2P state/mechanics
+  sources before the original stage outputs can expire, and the focused worker
+  unit test proves compact snapshot export still succeeds after the original
+  G2P buffers are destroyed. Live HTTPS benchmark evidence still blocks at
+  worker `mapAsync` on the readback buffer itself, even with
+  `compactSnapshotExportSourceStatus=worker-retained-compact-snapshot-export-sources-ready`.
+  The next cross-peer slice is therefore no longer another clone/lifetime
+  change; bypass worker mapped readback with a GPU-side publication or
+  peer-local materialization path.
   Follow-up also added a presentation-only fast path for visible retained
   output: once the worker has rendered a retained G2P frame, main-thread
   resident render refresh publishes

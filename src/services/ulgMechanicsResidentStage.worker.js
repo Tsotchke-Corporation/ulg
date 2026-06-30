@@ -82,6 +82,7 @@ function getLaneRecord(payload = {}) {
       retainedThermoBufferSeededFromCpu: false,
       retainedThermoBufferCopySrc: false,
       retainedThermoSnapshotRows: null,
+      compactSnapshotExportSources: null,
       nextBufferOrdinal: 1
     };
     retainedLanes.set(key, record);
@@ -137,6 +138,12 @@ function positiveByteLength(...values) {
     if (Number.isFinite(number) && number > 0) return Math.round(number);
   }
   return 0;
+}
+
+function destroyGpuBufferQuietly(buffer) {
+  try {
+    buffer?.destroy?.();
+  } catch {}
 }
 
 function cloneFloat32Rows(value, expectedLength = null) {
@@ -199,6 +206,183 @@ async function readWorkerGpuBufferFloat32({
     try {
       readbackBuffer?.destroy?.();
     } catch {}
+  }
+}
+
+async function cloneWorkerGpuBufferForCompactSnapshot({
+  device,
+  sourceBuffer,
+  byteLength,
+  label
+} = {}) {
+  const resolvedByteLength = positiveByteLength(byteLength);
+  if (!device?.createBuffer || !device?.createCommandEncoder || typeof device?.queue?.submit !== 'function') {
+    throw new Error(`${label || 'compact-snapshot-source'} clone requires a WebGPU device`);
+  }
+  if (!sourceBuffer || resolvedByteLength <= 0) {
+    throw new Error(`${label || 'compact-snapshot-source'} clone requires a retained source buffer`);
+  }
+  const clone = device.createBuffer({
+    label: `ulg-worker-retained-compact-snapshot-${label || 'source'}-export-source`,
+    size: Math.max(4, resolvedByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  try {
+    const encoder = device.createCommandEncoder({
+      label: `ulg-worker-retained-compact-snapshot-${label || 'source'}-export-source-copy`
+    });
+    encoder.copyBufferToBuffer(sourceBuffer, 0, clone, 0, Math.max(4, resolvedByteLength));
+    device.queue.submit([encoder.finish()]);
+    return clone;
+  } catch (error) {
+    destroyGpuBufferQuietly(clone);
+    throw error;
+  }
+}
+
+function compactSnapshotExportSourcesBlocked({
+  reason,
+  laneId = null,
+  stateKey = null,
+  sourceStageId = 'g2p',
+  source = null,
+  error = null
+} = {}) {
+  return {
+    schema: 'peercompute.ulg.worker-retained-compact-snapshot-export-sources.v0',
+    status: 'worker-retained-compact-snapshot-export-sources-blocked',
+    reason,
+    laneId: normalizeString(laneId, null),
+    stateKey: normalizeString(stateKey, null),
+    sourceStageId,
+    stateBufferRetained: Boolean(source?.stateBuffer),
+    mechanicsBufferRetained: Boolean(source?.mechanicsBuffer),
+    stateBufferByteLength: positiveByteLength(source?.stateBufferByteLength),
+    mechanicsBufferByteLength: positiveByteLength(source?.mechanicsBufferByteLength),
+    exportOwnedStateBufferReady: false,
+    exportOwnedMechanicsBufferReady: false,
+    exportOwnedSourceReady: false,
+    errorName: error instanceof Error ? error.name : null,
+    errorMessage: error instanceof Error ? error.message : (error ? String(error) : null)
+  };
+}
+
+function compactSnapshotExportSourcesSummary(sources = null) {
+  if (!sources) return null;
+  return {
+    schema: sources.schema || 'peercompute.ulg.worker-retained-compact-snapshot-export-sources.v0',
+    status: sources.status || null,
+    reason: sources.reason || null,
+    laneId: sources.laneId ?? null,
+    stateKey: sources.stateKey ?? null,
+    sourceStageId: sources.sourceStageId ?? null,
+    stateBufferByteLength: sources.stateBufferByteLength ?? null,
+    mechanicsBufferByteLength: sources.mechanicsBufferByteLength ?? null,
+    exportOwnedStateBufferReady: sources.exportOwnedStateBufferReady === true,
+    exportOwnedMechanicsBufferReady: sources.exportOwnedMechanicsBufferReady === true,
+    exportOwnedSourceReady: sources.exportOwnedSourceReady === true,
+    errorName: sources.errorName ?? null,
+    errorMessage: sources.errorMessage ?? null
+  };
+}
+
+function releaseCompactSnapshotExportSources(record) {
+  const sources = record?.compactSnapshotExportSources;
+  if (!sources?.exportOwnedSourceReady) return;
+  destroyGpuBufferQuietly(sources.stateBuffer);
+  destroyGpuBufferQuietly(sources.mechanicsBuffer);
+}
+
+export async function captureUlgMechanicsResidentStageWorkerCompactSnapshotExportSources({
+  device = null,
+  record = null,
+  source = null,
+  laneId = null,
+  stateKey = null,
+  sourceStageId = 'g2p'
+} = {}) {
+  if (!record || typeof record !== 'object') {
+    return compactSnapshotExportSourcesBlocked({
+      reason: 'worker-retained-compact-snapshot-export-sources-record-required',
+      laneId,
+      stateKey,
+      sourceStageId,
+      source
+    });
+  }
+  const stateByteLength = positiveByteLength(source?.stateBufferByteLength);
+  const mechanicsByteLength = positiveByteLength(source?.mechanicsBufferByteLength);
+  if (!source?.stateBuffer || !source?.mechanicsBuffer || stateByteLength <= 0 || mechanicsByteLength <= 0) {
+    const blocked = compactSnapshotExportSourcesBlocked({
+      reason: 'worker-retained-compact-snapshot-export-sources-require-g2p-state-and-mechanics',
+      laneId,
+      stateKey,
+      sourceStageId,
+      source
+    });
+    releaseCompactSnapshotExportSources(record);
+    record.compactSnapshotExportSources = blocked;
+    return blocked;
+  }
+  if (!device?.createBuffer || !device?.createCommandEncoder || typeof device?.queue?.submit !== 'function') {
+    const blocked = compactSnapshotExportSourcesBlocked({
+      reason: 'worker-retained-compact-snapshot-export-sources-require-webgpu-device',
+      laneId,
+      stateKey,
+      sourceStageId,
+      source
+    });
+    releaseCompactSnapshotExportSources(record);
+    record.compactSnapshotExportSources = blocked;
+    return blocked;
+  }
+  let stateBuffer = null;
+  let mechanicsBuffer = null;
+  try {
+    stateBuffer = await cloneWorkerGpuBufferForCompactSnapshot({
+      device,
+      sourceBuffer: source.stateBuffer,
+      byteLength: stateByteLength,
+      label: 'sph-state'
+    });
+    mechanicsBuffer = await cloneWorkerGpuBufferForCompactSnapshot({
+      device,
+      sourceBuffer: source.mechanicsBuffer,
+      byteLength: mechanicsByteLength,
+      label: 'mls-mpm-mechanics'
+    });
+    releaseCompactSnapshotExportSources(record);
+    const ready = {
+      schema: 'peercompute.ulg.worker-retained-compact-snapshot-export-sources.v0',
+      status: 'worker-retained-compact-snapshot-export-sources-ready',
+      reason: 'export-owned-g2p-sources-captured-before-stage-output-expiry',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      sourceStageId,
+      stateBuffer,
+      mechanicsBuffer,
+      stateBufferByteLength: stateByteLength,
+      mechanicsBufferByteLength: mechanicsByteLength,
+      exportOwnedStateBufferReady: true,
+      exportOwnedMechanicsBufferReady: true,
+      exportOwnedSourceReady: true
+    };
+    record.compactSnapshotExportSources = ready;
+    return compactSnapshotExportSourcesSummary(ready);
+  } catch (error) {
+    destroyGpuBufferQuietly(stateBuffer);
+    destroyGpuBufferQuietly(mechanicsBuffer);
+    const blocked = compactSnapshotExportSourcesBlocked({
+      reason: 'worker-retained-compact-snapshot-export-sources-copy-failed',
+      laneId,
+      stateKey,
+      sourceStageId,
+      source,
+      error
+    });
+    releaseCompactSnapshotExportSources(record);
+    record.compactSnapshotExportSources = blocked;
+    return blocked;
   }
 }
 
@@ -509,6 +693,11 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
   }
   const g2p = retainedG2pOutput(record);
   const source = sourceStageId === 'g2p' ? g2p : null;
+  const exportSources = sourceStageId === 'g2p'
+    && record.compactSnapshotExportSources?.status === 'worker-retained-compact-snapshot-export-sources-ready'
+    && record.compactSnapshotExportSources?.exportOwnedSourceReady === true
+    ? record.compactSnapshotExportSources
+    : null;
   const thermoBuffer = record.retainedThermoBuffer || source?.thermoBuffer || null;
   const resolvedParticleCount = Math.max(0, Math.floor(Number(
     particleCount ?? source?.particleCount
@@ -552,18 +741,21 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     stateKey: normalizeString(stateKey, null),
     sourceStageId,
     retainedWithinWorker: true,
-    sourceStateBuffer: source.stateBuffer,
+    sourceStateBuffer: exportSources?.stateBuffer || source.stateBuffer,
     sourceThermoBuffer: thermoBuffer,
-    sourceMechanicsBuffer: source.mechanicsBuffer || null,
+    sourceMechanicsBuffer: exportSources?.mechanicsBuffer || source.mechanicsBuffer || null,
     particleCount: resolvedParticleCount,
     stateStrideFloats: resolvedStateStrideFloats,
     thermoStrideFloats: resolvedThermoStrideFloats,
-    stateBufferByteLength: resolvedStateByteLength,
+    stateBufferByteLength: exportSources?.stateBufferByteLength || resolvedStateByteLength,
     thermoBufferByteLength: resolvedThermoByteLength,
-    mechanicsBufferByteLength: positiveByteLength(source.mechanicsBufferByteLength),
+    mechanicsBufferByteLength: exportSources?.mechanicsBufferByteLength || positiveByteLength(source.mechanicsBufferByteLength),
     retainedThermoBufferSourceStage: record.retainedThermoBufferSourceStage || null,
     retainedThermoBufferSeededFromCpu: record.retainedThermoBufferSeededFromCpu === true,
-    retainedThermoBufferCopySrc: record.retainedThermoBufferCopySrc === true
+    retainedThermoBufferCopySrc: record.retainedThermoBufferCopySrc === true,
+    compactSnapshotExportSources: compactSnapshotExportSourcesSummary(exportSources),
+    compactSnapshotExportSourceStatus: exportSources?.status || null,
+    compactSnapshotExportOwnedSources: Boolean(exportSources)
   };
 }
 
@@ -1180,6 +1372,11 @@ function baseStageData(payload = {}) {
     useWorkerRetainedG2pInput: context.useWorkerRetainedG2pInput === true
       || context.useRetainedG2pAsInput === true
       || common.useWorkerRetainedG2pInput === true,
+    captureRetainedCompactSnapshotExportSources:
+      context.captureRetainedCompactSnapshotExportSources === true
+      || context.retainedCompactSnapshotExportRequested === true
+      || common.captureRetainedCompactSnapshotExportSources === true
+      || common.retainedCompactSnapshotExportRequested === true,
     computeTaskId: `${context.taskIdPrefix || 'ulg-worker:mechanics-stage'}:${stageId}`,
     lawGraphNode: {
       schema: 'peercompute.ulg.law-graph-node-task-ref.v0',
@@ -1346,6 +1543,17 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerDeviceResult
   });
   const rawResult = await runner(data);
+  const compactSnapshotExportSources = stageId === 'g2p'
+    && data.captureRetainedCompactSnapshotExportSources === true
+    ? await captureUlgMechanicsResidentStageWorkerCompactSnapshotExportSources({
+        device: workerDeviceResult?.device || data.device || null,
+        record,
+        source: rawResult?.gpuResult || rawResult,
+        laneId: payload.lease?.laneId || payload.lane?.laneId || null,
+        stateKey: payload.lease?.stateKey || payload.lane?.stateKey || null,
+        sourceStageId: 'g2p'
+      })
+    : null;
   const workerQueueFence = await completeWorkerQueueFence({
     stageId,
     data,
@@ -1398,6 +1606,9 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerRetainedThermoInputStatus: workerRetainedThermoInput?.status || null,
     workerRetainedThermoOutput,
     workerRetainedThermoOutputStatus: workerRetainedThermoOutput?.status || null,
+    compactSnapshotExportSources,
+    compactSnapshotExportSourceStatus: compactSnapshotExportSources?.status || null,
+    compactSnapshotExportOwnedSourcesReady: compactSnapshotExportSources?.exportOwnedSourceReady === true,
     retainedBufferRefs,
     workerRetainedBufferRefs,
     cloneableResultReturned: true
@@ -1416,6 +1627,8 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
       workerRetainedContinuationInputStatus: cloneableResult.workerResidentStage.workerRetainedContinuationInputStatus,
       workerRetainedThermoInputStatus: cloneableResult.workerResidentStage.workerRetainedThermoInputStatus,
       workerRetainedThermoOutputStatus: cloneableResult.workerResidentStage.workerRetainedThermoOutputStatus,
+      compactSnapshotExportSourceStatus: cloneableResult.workerResidentStage.compactSnapshotExportSourceStatus,
+      compactSnapshotExportOwnedSourcesReady: cloneableResult.workerResidentStage.compactSnapshotExportOwnedSourcesReady,
       retainedBufferRefCount: retainedBufferRefs.length,
       workerRetainedBufferRefCount: workerRetainedBufferRefs.length
     }

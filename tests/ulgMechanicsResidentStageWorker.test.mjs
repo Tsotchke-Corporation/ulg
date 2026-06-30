@@ -7,6 +7,7 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
+  exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot,
   resolveUlgMechanicsResidentStageWorkerDeviceResult,
   runUlgMechanicsResidentStageWorkerPayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
@@ -80,6 +81,87 @@ function payload(stageRecord, context, input = null, {
       ulgMechanicsResidentStageWorker: context
     }
   };
+}
+
+class FakeGpuBuffer {
+  constructor({ label = null, size = 4, usage = 0 } = {}) {
+    this.label = label;
+    this.size = Math.max(4, Math.round(Number(size) || 4));
+    this.usage = usage;
+    this.bytes = new Uint8Array(this.size);
+    this.destroyed = false;
+  }
+
+  mapAsync() {
+    if (this.destroyed) throw new Error(`${this.label || 'buffer'} was destroyed`);
+    return Promise.resolve();
+  }
+
+  getMappedRange(offset = 0, size = this.bytes.byteLength - offset) {
+    if (this.destroyed) throw new Error(`${this.label || 'buffer'} was destroyed`);
+    const start = Math.max(0, Math.round(Number(offset) || 0));
+    const end = Math.min(this.bytes.byteLength, start + Math.max(0, Math.round(Number(size) || 0)));
+    return this.bytes.buffer.slice(start, end);
+  }
+
+  unmap() {}
+
+  destroy() {
+    this.destroyed = true;
+  }
+}
+
+function createFakeGpuDevice() {
+  return {
+    createBuffer(descriptor = {}) {
+      return new FakeGpuBuffer(descriptor);
+    },
+    createCommandEncoder() {
+      const ops = [];
+      return {
+        copyBufferToBuffer(source, sourceOffset, target, targetOffset, size) {
+          ops.push({ source, sourceOffset, target, targetOffset, size });
+        },
+        finish() {
+          return ops;
+        }
+      };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        if (buffer.destroyed) throw new Error(`${buffer.label || 'buffer'} was destroyed`);
+        const bytes = data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        buffer.bytes.set(bytes, Math.max(0, Math.round(Number(offset) || 0)));
+      },
+      submit(commandBuffers) {
+        for (const commandBuffer of commandBuffers || []) {
+          for (const op of commandBuffer || []) {
+            if (op.source.destroyed) throw new Error(`${op.source.label || 'source'} was destroyed`);
+            if (op.target.destroyed) throw new Error(`${op.target.label || 'target'} was destroyed`);
+            const sourceOffset = Math.max(0, Math.round(Number(op.sourceOffset) || 0));
+            const targetOffset = Math.max(0, Math.round(Number(op.targetOffset) || 0));
+            const size = Math.max(0, Math.round(Number(op.size) || 0));
+            op.target.bytes.set(op.source.bytes.subarray(sourceOffset, sourceOffset + size), targetOffset);
+          }
+        }
+      },
+      onSubmittedWorkDone() {
+        return Promise.resolve();
+      }
+    }
+  };
+}
+
+function fakeStorageBuffer(device, label, rows) {
+  const buffer = device.createBuffer({
+    label,
+    size: Math.max(4, rows.byteLength),
+    usage: 128 | 4 | 8
+  });
+  device.queue.writeBuffer(buffer, 0, rows);
+  return buffer;
 }
 
 test('ULG mechanics resident stage worker device resolver adopts a supplied worker device result', async () => {
@@ -546,4 +628,118 @@ test('ULG resident stage worker can run reaction product stage with retained par
   assert.equal(reactionInputs[0].sourceThermoBuffer, sourceThermoBuffer);
   assert.equal(reactionInputs[0].sourceMechanicsBuffer, sourceMechanicsBuffer);
   assert.equal(reactionInputs[0].retainOutputParticleBuffers, true);
+});
+
+test('ULG resident stage worker exports compact snapshots from export-owned G2P source copies', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = manualBuffers({
+    position: [1.5, 1.75, 2.25],
+    velocity: [0.25, -0.5, 0.75],
+    massKg: 4,
+    restDensityKgPerM3: 8
+  });
+  const laneId = 'ulg:test:compact-snapshot-export-lane';
+  const stateKey = 'ulg:test:compact-snapshot-export-state';
+  const inputStateBuffer = fakeStorageBuffer(device, 'worker-input-sph-state', buffers.sphParticleState.state);
+  const inputThermoBuffer = fakeStorageBuffer(device, 'worker-input-sph-thermo', buffers.sphParticleState.thermo);
+  const inputMechanicsBuffer = fakeStorageBuffer(device, 'worker-input-mls-mpm-mechanics', buffers.mlsMpmParticleState.mechanics);
+  const updatedGridBuffer = fakeStorageBuffer(device, 'worker-g2p-updated-grid', new Float32Array([1, 0, 0, 0]));
+  const g2pStateRows = new Float32Array(buffers.sphParticleState.state);
+  g2pStateRows[0] = 2.125;
+  g2pStateRows[4] = 0.5;
+  const g2pMechanicsRows = new Float32Array(buffers.mlsMpmParticleState.mechanics);
+  g2pMechanicsRows[18] = 1.125;
+  g2pMechanicsRows[19] = 0.5;
+  const transientG2pStateBuffer = fakeStorageBuffer(device, 'transient-g2p-state', g2pStateRows);
+  const transientG2pMechanicsBuffer = fakeStorageBuffer(device, 'transient-g2p-mechanics', g2pMechanicsRows);
+  const g2pInputs = [];
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:compact-snapshot-export-worker',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    retainedCompactSnapshotExportRequested: true,
+    captureRetainedCompactSnapshotExportSources: true,
+    common: {
+      ...buffers,
+      device,
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        stateBuffer: inputStateBuffer,
+        thermoBuffer: inputThermoBuffer
+      },
+      mlsMpmParticleUpload: {
+        status: 'webgpu-uploaded',
+        mechanicsBuffer: inputMechanicsBuffer
+      },
+      boxDimsM: [5, 5, 5],
+      dt: buffers.mlsMpmParticleState.mechanicsDtS,
+      webGpuRunner(args) {
+        g2pInputs.push(args);
+        return {
+          schema: 'peercompute.ulg.mls-mpm-g2p-webgpu-result.v0',
+          backend: 'webgpu',
+          status: 'reconstructed',
+          particleCount: buffers.sphParticleState.particleCount,
+          gridNodeCount: 1,
+          stateBuffer: transientG2pStateBuffer,
+          mechanicsBuffer: transientG2pMechanicsBuffer,
+          stateBufferByteLength: g2pStateRows.byteLength,
+          mechanicsBufferByteLength: g2pMechanicsRows.byteLength,
+          stateStrideFloats: 8,
+          mechanicsStrideFloats: g2pMechanicsRows.length,
+          retainedOutputParticleBuffers: true,
+          readbackMode: 'no-full-readback',
+          fullReadbackPerformed: false,
+          normalHotLoopReadbackFree: true,
+          internalPressureScale: 0,
+          webgpuStatus: { status: 'webgpu-executed-no-full-readback' }
+        };
+      }
+    }
+  };
+
+  const g2p = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('g2p', ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'], ['sph-particle-state', 'mls-mpm-mechanics']),
+    context,
+    {
+      backend: 'webgpu',
+      status: 'grid-updated',
+      updatedGridBuffer,
+      updatedGridBufferByteLength: 16,
+      dt: buffers.mlsMpmParticleState.mechanicsDtS
+    },
+    { laneId, stateKey }
+  ));
+
+  assert.equal(g2pInputs.length, 1);
+  assert.equal(g2p.value.workerResidentStage.stageId, 'g2p');
+  assert.equal(
+    g2p.value.workerResidentStage.compactSnapshotExportSourceStatus,
+    'worker-retained-compact-snapshot-export-sources-ready'
+  );
+  assert.equal(g2p.value.workerResidentStage.compactSnapshotExportOwnedSourcesReady, true);
+  assert.equal(g2p.summary.compactSnapshotExportOwnedSourcesReady, true);
+
+  transientG2pStateBuffer.destroy();
+  transientG2pMechanicsBuffer.destroy();
+
+  const exported = await exportUlgMechanicsResidentStageWorkerRetainedCompactSnapshot({
+    device,
+    laneId,
+    stateKey,
+    cacheKey: 'ulg:test:compact-snapshot-export-cache',
+    particleCount: buffers.sphParticleState.particleCount,
+    step: 1,
+    time: 0.1,
+    smoothingLengthM: buffers.sphParticleState.smoothingLengthM
+  });
+
+  assert.equal(exported.status, 'worker-retained-compact-snapshot-exported');
+  assert.equal(exported.portableSnapshotAvailable, true);
+  assert.equal(exported.crossPeerReplayReady, true);
+  assert.equal(exported.compactBufferSnapshot.schema, 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0');
+  assert.deepEqual([...exported.compactBufferSnapshot.sphState], [...g2pStateRows]);
+  assert.deepEqual([...exported.compactBufferSnapshot.mlsMpmMechanics], [...g2pMechanicsRows]);
+  assert.deepEqual([...exported.compactBufferSnapshot.sphThermo], [...buffers.sphParticleState.thermo]);
 });

@@ -24766,6 +24766,10 @@ export function createSphPhaseScene(container, {
             dt: currentMlsState?.mechanicsDtS ?? 0.0005,
             gravityMPerS2: currentMlsState?.gravityMPerS2 || [0, -9.80665, 0],
             cflFactor: currentMlsState?.gridCflFactor ?? 10,
+            retainedCompactSnapshotExportRequested:
+              scene.userData.sphPeerComputeRenderOwnershipPolicy?.retainedCompactSnapshotExportRequested === true,
+            captureRetainedCompactSnapshotExportSources:
+              scene.userData.sphPeerComputeRenderOwnershipPolicy?.retainedCompactSnapshotExportRequested === true,
             presentationWorkerRenderRetainedStageOutput:
               workerOffscreenRetainedStageOutputRenderRequest({
                 stageId,

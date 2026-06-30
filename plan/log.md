@@ -33109,3 +33109,57 @@ Next:
   `workerOffscreenPresentation=1` parameter, then continue with the sparse
   material-interface source-field builder if pacing is still limited by
   interface extraction.
+
+## 2026-06-30 00:50 AKDT - Material-Interface Source-Field Pool
+
+Status:
+
+- Added a dedicated scene-side material-interface source-field rows buffer pool:
+  `peercompute.ulg.sph-resident-material-interface-source-field-rows-buffer-pool.v0`.
+- `refreshSphResidentMaterialInterfaceState()` now writes the pressure
+  material-interface source field into that pooled buffer instead of allocating
+  a fresh field-rows buffer every refresh.
+- The source-field build now uses `waitForQueueCompletion=false` for the
+  no-full-readback path. The subsequent material-interface candidate pass is
+  submitted after the source-field pass, relying on WebGPU's in-order queue
+  dependency instead of forcing an intermediate CPU `queue.onSubmittedWorkDone`
+  fence.
+- Published diagnostics for source-field queue status and pool reuse:
+  `interfaceSourceFieldQueueCompletionStatus`,
+  `interfaceSourceFieldRowsBufferBorrowed`,
+  `interfaceSourceFieldRowsBufferReused`,
+  `interfaceSourceFieldRowsBufferPoolStatus`,
+  `interfaceSourceFieldRowsBufferPoolReused`, and
+  `interfaceSourceFieldRowsBufferPoolByteLength`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- LIVE HTTPS probe on the H2O/H2O same-device/worker-owned sphere scenario
+  with `miCells=4000&miRes=12`: first material-interface refresh reported
+  `interfaceSourceFieldQueueCompletionStatus=queue-submitted-gpu-handoff-no-cpu-fence`,
+  `interfaceSourceFieldRowsBufferBorrowed=true`,
+  `interfaceSourceFieldRowsBufferPoolStatus=material-interface-source-field-rows-buffer-pool-created`,
+  `materialInterfaceSurfaceTableTotalFieldCells=3993`, and compact candidate
+  readback. The second refresh reported
+  `interfaceSourceFieldRowsBufferPoolStatus=material-interface-source-field-rows-buffer-pool-reused`.
+- PASS: smoke benchmark
+  `ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: `scenarioStatus=good`, `probeStatus=good`, `probeIssues=[]`,
+  `meanBatchMs=3315`, `residentStageMs=9.2`,
+  `residentStageStepsPerSecond=108.7`,
+  `residentInterfaceRefreshMode=pipelined`,
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`,
+  `surfaceDrawVertexCount=1024`, `estimatedReadbackBytesPerStep=0`.
+
+Next:
+
+- This removes repeat allocation and an avoidable CPU fence around the
+  material-interface source-field producer. It does not fix the remaining
+  source-field algorithmic cost: the shader still scales with coarse field
+  cells times particles. The next substantive performance slice should be the
+  sparse/source-local material-interface builder or particle-owned interface
+  extraction.

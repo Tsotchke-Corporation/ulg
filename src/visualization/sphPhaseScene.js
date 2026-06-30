@@ -3165,6 +3165,16 @@ function compactMaterialInterfaceFieldSummary(field = null) {
     sourceRenderFieldStatus: field.sourceRenderFieldStatus ?? null,
     sourceRenderFieldReadback: Boolean(field.sourceRenderFieldReadback),
     sourceRenderFieldReadbackMode: field.sourceRenderFieldReadbackMode ?? null,
+    interfaceSourceFieldSchema: field.interfaceSourceFieldSchema ?? field.sourceFieldSchema ?? null,
+    interfaceSourceFieldStatus: field.interfaceSourceFieldStatus ?? field.sourceFieldStatus ?? null,
+    interfaceSourceFieldQueueCompletionStatus: field.interfaceSourceFieldQueueCompletionStatus ?? null,
+    interfaceSourceFieldQueueCompletionMethod: field.interfaceSourceFieldQueueCompletionMethod ?? null,
+    interfaceSourceFieldRowsBufferBorrowed: Boolean(field.interfaceSourceFieldRowsBufferBorrowed),
+    interfaceSourceFieldRowsBufferReused: Boolean(field.interfaceSourceFieldRowsBufferReused),
+    interfaceSourceFieldRowsBufferPoolStatus: field.interfaceSourceFieldRowsBufferPoolStatus ?? null,
+    interfaceSourceFieldRowsBufferPoolReason: field.interfaceSourceFieldRowsBufferPoolReason ?? null,
+    interfaceSourceFieldRowsBufferPoolReused: Boolean(field.interfaceSourceFieldRowsBufferPoolReused),
+    interfaceSourceFieldRowsBufferPoolByteLength: field.interfaceSourceFieldRowsBufferPoolByteLength ?? 0,
     renderRowsReadback: Boolean(field.renderRowsReadback),
     renderRowsReadbackMode: field.renderRowsReadbackMode ?? null,
     materialInterfaceSurfaceTableSeedStatus: field.materialInterfaceSurfaceTableSeedStatus ?? null,
@@ -8055,6 +8065,7 @@ export function createSphPhaseScene(container, {
   let sphResidentSurfaceDrawRenderBridge = null;
   let sphResidentRenderSurfaceState = null;
   let sphResidentRenderFieldRowsBufferPool = null;
+  let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
   const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
   const sphNativeMarchingCubesAdapterCaches = new Set();
   let pressureInterfaceForceRowsUpload = null;
@@ -8091,6 +8102,7 @@ export function createSphPhaseScene(container, {
   scene.userData.sphResidentSurfaceDrawRenderBridge = null;
   scene.userData.sphResidentRenderSurfaceState = null;
   scene.userData.sphResidentRenderFieldRowsBufferPool = null;
+  scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
   scene.userData.sphNativeMarchingCubesAdapterCache = null;
   scene.userData.sphPressureInterfaceForceRowsUpload = null;
 
@@ -9467,6 +9479,11 @@ export function createSphPhaseScene(container, {
       }
       const materialInterfaceSurfaceTable =
         createMaterialInterfaceSurfaceTableForResidentState(sphResidentRenderSurfaceState) || surfaceTable;
+      const materialInterfaceSourceFieldRowsBufferPool =
+        ensureResidentMaterialInterfaceSourceFieldRowsBufferPool({
+          device: resolvedDeviceResult.device,
+          surfaceTable: materialInterfaceSurfaceTable
+        });
       interfaceSourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
         device: resolvedDeviceResult.device,
         renderRows: renderRowsExecution.renderRows,
@@ -9479,7 +9496,11 @@ export function createSphPhaseScene(container, {
         refEdgeM,
         readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
         source,
-        sourceCadence
+        sourceCadence,
+        waitForQueueCompletion: false,
+        deferCleanup: true,
+        targetFieldRowsBuffer: materialInterfaceSourceFieldRowsBufferPool?.buffer || null,
+        targetFieldRowsBufferByteLength: materialInterfaceSourceFieldRowsBufferPool?.byteLength ?? null
       });
       const materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
         device: resolvedDeviceResult.device,
@@ -9525,6 +9546,20 @@ export function createSphPhaseScene(container, {
       materialInterfaceField.renderFieldReadbackMode = interfaceSourceField.sourceRenderFieldReadbackMode ?? null;
       materialInterfaceField.renderFieldQueueCompletionStatus = interfaceSourceField.sourceRenderFieldQueueCompletionStatus ?? null;
       materialInterfaceField.renderFieldQueueCompletionMethod = interfaceSourceField.sourceRenderFieldQueueCompletionMethod ?? null;
+      materialInterfaceField.interfaceSourceFieldRowsBufferBorrowed =
+        Boolean(interfaceSourceField.fieldRowsBufferBorrowed);
+      materialInterfaceField.interfaceSourceFieldRowsBufferReused =
+        Boolean(interfaceSourceField.fieldRowsBufferReused);
+      materialInterfaceField.interfaceSourceFieldRowsBufferPoolStatus =
+        materialInterfaceSourceFieldRowsBufferPool?.status ?? null;
+      materialInterfaceField.interfaceSourceFieldRowsBufferPoolReason =
+        materialInterfaceSourceFieldRowsBufferPool?.reason ?? null;
+      materialInterfaceField.interfaceSourceFieldRowsBufferPoolReused =
+        Boolean(materialInterfaceSourceFieldRowsBufferPool?.reused);
+      materialInterfaceField.interfaceSourceFieldRowsBufferPoolByteLength =
+        materialInterfaceSourceFieldRowsBufferPool?.byteLength ?? 0;
+      materialInterfaceField.interfaceSourceFieldRowsBufferPoolSummary =
+        materialInterfaceSourceFieldRowsBufferPool?.summary ?? null;
       materialInterfaceField.gpuAuthoritativeState = true;
       return publishSphResidentMaterialInterfaceState(materialInterfaceField);
     } catch (error) {
@@ -18472,6 +18507,127 @@ export function createSphPhaseScene(container, {
       byteLength: requiredByteLength,
       status: sphResidentRenderFieldRowsBufferPool.status,
       reason: sphResidentRenderFieldRowsBufferPool.lastReason,
+      reused: false,
+      summary
+    };
+  }
+
+  function summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
+    pool = sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
+    extra = {}
+  ) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-material-interface-source-field-rows-buffer-pool.v0',
+      status: pool?.status ?? 'material-interface-source-field-rows-buffer-pool-empty',
+      byteLength: pool?.byteLength ?? 0,
+      surfaceCount: pool?.surfaceCount ?? 0,
+      totalFieldCells: pool?.totalFieldCells ?? 0,
+      deviceMatched: pool ? pool.device === extra.device : null,
+      reuseCount: pool?.reuseCount ?? 0,
+      createCount: pool?.createCount ?? 0,
+      replaceCount: pool?.replaceCount ?? 0,
+      lastReason: pool?.lastReason ?? null,
+      ...extra
+    };
+  }
+
+  function destroyResidentMaterialInterfaceSourceFieldRowsBufferPool(
+    reason = 'material-interface-source-field-rows-buffer-pool-destroy'
+  ) {
+    if (sphResidentMaterialInterfaceSourceFieldRowsBufferPool?.buffer) {
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.buffer.destroy?.();
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status =
+        'material-interface-source-field-rows-buffer-pool-destroyed';
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason = reason;
+    }
+    sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
+    scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
+  }
+
+  function ensureResidentMaterialInterfaceSourceFieldRowsBufferPool({ device, surfaceTable } = {}) {
+    const requiredByteLength = renderFieldRowsBufferByteLengthForSurfaceTable(surfaceTable);
+    if (!device?.createBuffer || requiredByteLength <= 0) {
+      return {
+        buffer: null,
+        byteLength: 0,
+        status: 'material-interface-source-field-rows-buffer-pool-unavailable',
+        reason: 'WebGPU device and positive material-interface source-field byte length are required',
+        reused: false,
+        summary: summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(null, {
+          device,
+          requiredByteLength
+        })
+      };
+    }
+    const canReuse = Boolean(
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool?.buffer
+      && sphResidentMaterialInterfaceSourceFieldRowsBufferPool.device === device
+      && sphResidentMaterialInterfaceSourceFieldRowsBufferPool.byteLength >= requiredByteLength
+    );
+    if (canReuse) {
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.reuseCount += 1;
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status =
+        'material-interface-source-field-rows-buffer-pool-reused';
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason = null;
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.surfaceCount = surfaceTable.surfaceCount ?? 0;
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool.totalFieldCells = surfaceTable.totalFieldCells ?? 0;
+      const summary = summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
+        sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
+        {
+          device,
+          requiredByteLength,
+          reused: true
+        }
+      );
+      scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = summary;
+      return {
+        buffer: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.buffer,
+        byteLength: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.byteLength,
+        status: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status,
+        reason: null,
+        reused: true,
+        summary
+      };
+    }
+    const previous = sphResidentMaterialInterfaceSourceFieldRowsBufferPool;
+    if (previous?.buffer) {
+      previous.buffer.destroy?.();
+    }
+    const buffer = device.createBuffer({
+      label: 'ulg-sph-material-interface-source-field-cells-pooled',
+      size: requiredByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    });
+    sphResidentMaterialInterfaceSourceFieldRowsBufferPool = {
+      status: previous
+        ? 'material-interface-source-field-rows-buffer-pool-replaced'
+        : 'material-interface-source-field-rows-buffer-pool-created',
+      buffer,
+      device,
+      byteLength: requiredByteLength,
+      surfaceCount: surfaceTable.surfaceCount ?? 0,
+      totalFieldCells: surfaceTable.totalFieldCells ?? 0,
+      reuseCount: previous?.reuseCount ?? 0,
+      createCount: (previous?.createCount ?? 0) + 1,
+      replaceCount: previous ? (previous.replaceCount ?? 0) + 1 : 0,
+      lastReason: previous
+        ? 'existing pooled material-interface source-field buffer did not match device or byte-length requirements'
+        : 'created pooled material-interface source-field buffer'
+    };
+    const summary = summarizeResidentMaterialInterfaceSourceFieldRowsBufferPool(
+      sphResidentMaterialInterfaceSourceFieldRowsBufferPool,
+      {
+        device,
+        requiredByteLength,
+        reused: false
+      }
+    );
+    scene.userData.sphResidentMaterialInterfaceSourceFieldRowsBufferPool = summary;
+    return {
+      buffer,
+      byteLength: requiredByteLength,
+      status: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.status,
+      reason: sphResidentMaterialInterfaceSourceFieldRowsBufferPool.lastReason,
       reused: false,
       summary
     };

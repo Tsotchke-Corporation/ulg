@@ -107,6 +107,26 @@ test('resident material interface seeds surface table before full render-row rea
     /materialInterfaceSurfaceTableTotalFieldCells/,
     'material-interface diagnostics should expose the coarse table cell count'
   );
+  assert.match(
+    sceneSource,
+    /sphResidentMaterialInterfaceSourceFieldRowsBufferPool/,
+    'material-interface source-field extraction should have an independent reusable field buffer pool'
+  );
+  assert.match(
+    sceneSource,
+    /targetFieldRowsBuffer: materialInterfaceSourceFieldRowsBufferPool\?\.buffer/,
+    'material-interface source-field extraction should write into the pooled buffer'
+  );
+  assert.match(
+    sceneSource,
+    /waitForQueueCompletion: false/,
+    'material-interface source-field extraction should submit a GPU handoff without an intermediate CPU queue fence'
+  );
+  assert.match(
+    sceneSource,
+    /interfaceSourceFieldRowsBufferPoolStatus/,
+    'material-interface diagnostics should expose source-field buffer pool status'
+  );
   const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
   assert.match(mountSource, /materialInterfaceMaxFieldCells/);
   assert.match(mountSource, /miCells/);

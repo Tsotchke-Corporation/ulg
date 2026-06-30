@@ -1156,6 +1156,15 @@ Interim status, 2026-06-18 AKDT:
   use the existing transitional render-row path; ready targets use
   `worker-owned-resident-render-producer`; explicit main-thread/other modes
   still override the use-case default.
+- 2026-06-30 material-interface source-field pool: the pressure
+  material-interface refresh now writes source-field rows into a dedicated
+  pooled WebGPU buffer and submits the no-full source-field pass without an
+  intermediate CPU queue fence before candidate extraction. Live diagnostics
+  show pool create/reuse and
+  `queue-submitted-gpu-handoff-no-cpu-fence`; smoke benchmark remains `good`
+  with zero estimated readback bytes per step. This is an allocation/fence
+  cleanup, not the sparse/source-local builder; the shader still scales with
+  coarse field cells times particles.
 
 ## ULG-Specific Constraints
 

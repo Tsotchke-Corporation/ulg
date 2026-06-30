@@ -45,6 +45,29 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
 });
 
+test('render ownership policy lets same-device use case imply worker-owned producer', () => {
+  const pendingPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    useCase: 'same-device-mobile'
+  });
+  const readyPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    useCase: 'same-device-mobile',
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(
+    pendingPolicy.requestedMode,
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+  );
+  assert.equal(pendingPolicy.effectiveMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS);
+  assert.equal(pendingPolicy.workerOffscreenPresentationRequested, true);
+  assert.equal(pendingPolicy.workerOwnedResidentProducerPending, true);
+  assert.equal(pendingPolicy.transitionalRenderRowsActive, true);
+  assert.equal(pendingPolicy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(readyPolicy.effectiveMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER);
+  assert.equal(readyPolicy.workerOwnedResidentProducerPending, false);
+  assert.equal(readyPolicy.residentInterfaceRefreshMode, 'pipelined');
+});
+
 test('render ownership policy upgrades implicit local worker presentation when the producer is ready', () => {
   const policy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy: {

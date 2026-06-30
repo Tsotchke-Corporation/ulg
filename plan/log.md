@@ -33074,3 +33074,38 @@ Next:
   the remaining slow material-interface source-field algorithm. Continue with
   sparse/source-local material-interface extraction or device-side particle
   ownership for the next substantive performance slice.
+
+## 2026-06-30 00:35 AKDT - Same-Device Ownership Default
+
+Status:
+
+- Changed `resolvePeerComputeRenderOwnershipPolicy()` so use cases
+  `same-device`, `same-device-mobile`, and `mobile` imply the
+  worker-owned resident producer target when no explicit render ownership mode
+  is supplied.
+- If the worker-owned producer is not ready, the existing transitional
+  render-row path is used. If it is ready, the effective mode is
+  `worker-owned-resident-render-producer`.
+- Explicit modes still win: `requestedMode=main-thread-renderer` keeps
+  main-thread rendering even with `useCase=same-device-mobile`.
+- The same-device path also keeps the interactive post-step interface refresh
+  cadence at `pipelined`.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs`
+- Probe: `useCase=same-device-mobile` now resolves
+  `requestedMode=worker-owned-resident-render-producer`,
+  `effectiveMode=worker-offscreen-render-rows` while pending,
+  `workerOffscreenPresentationRequested=true`,
+  and `residentInterfaceRefreshMode=pipelined`; with
+  `workerOwnedResidentProducerReady=true`, effective mode becomes
+  `worker-owned-resident-render-producer`.
+
+Next:
+
+- Re-run the same-device URL without requiring a separate
+  `workerOffscreenPresentation=1` parameter, then continue with the sparse
+  material-interface source-field builder if pacing is still limited by
+  interface extraction.

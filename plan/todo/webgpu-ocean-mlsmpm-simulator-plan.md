@@ -1150,6 +1150,12 @@ Interim status, 2026-06-18 AKDT:
   worker-offscreen sphere smoke now reports `scenarioStatus=good`,
   `probeIssues=[]`, `residentStageMs=7.4`, `residentStageStepsPerSecond=135.1`,
   and `estimatedReadbackBytesPerStep=0`.
+- 2026-06-30 same-device ownership default: `renderUseCase=same-device`,
+  `same-device-mobile`, or `mobile` now implies the worker-owned resident
+  producer target when no explicit ownership mode is supplied. Pending targets
+  use the existing transitional render-row path; ready targets use
+  `worker-owned-resident-render-producer`; explicit main-thread/other modes
+  still override the use-case default.
 
 ## ULG-Specific Constraints
 

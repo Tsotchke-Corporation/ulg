@@ -1,0 +1,96 @@
+{
+  "result": {
+    "steps": {},
+    "threeSummary": {
+      "state": {
+        "status": "resident-render-rows-unavailable",
+        "source": "cpu-particles",
+        "bridge": null,
+        "sourceBridge": null,
+        "reason": "retained resident SPH buffers are not available"
+      },
+      "bridge": null,
+      "projectSamples": []
+    },
+    "webSummary": {
+      "state": {
+        "status": "resident-render-rows-unavailable",
+        "source": "cpu-particles",
+        "bridge": null,
+        "sourceBridge": null,
+        "reason": "retained resident SPH buffers are not available"
+      },
+      "bridge": null
+    }
+  },
+  "consoleEntries": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x21ec00157600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x21ec00157600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x21ec00157600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x21ec00157600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-unavailable stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-unavailable stage=resident-render-refresh"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initializing..."
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Node ID: 1781784684377-r0hyrxz5o"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] NetworkManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[StateManager] Initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] StateManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] ComputeManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initialization complete"
+    }
+  ]
+}

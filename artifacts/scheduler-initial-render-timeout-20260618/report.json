@@ -1,0 +1,1009 @@
+{
+  "schema": "peercompute.ulg.scheduler-initial-render-timeout-probe.v0",
+  "status": "bad",
+  "waitResult": {
+    "status": "timeout",
+    "error": "page.waitForFunction: Timeout 70000ms exceeded."
+  },
+  "elapsedMs": 70643,
+  "result": {
+    "autoSchedule": {
+      "schema": "peercompute.ulg.sph-demo-resident-auto-schedule.v0",
+      "status": "resident-auto-schedule-enabled",
+      "residentAuto": true,
+      "residentExecutionPolicy": {
+        "schema": "peercompute.ulg.sph-demo-resident-execution-policy.v0",
+        "residentWorkersEnabled": true,
+        "fuseNoFullResidentMechanicsSequence": true,
+        "fuseNoFullResidentMechanicsActiveGrid": true,
+        "activeGridSafetyCells": null,
+        "measureFusedSequenceQueueFence": false
+      },
+      "generation": 1,
+      "updatedAtMs": 7721.900000035763
+    },
+    "pending": null,
+    "slow": null,
+    "stale": null,
+    "error": "GPU fence missing or unsatisfied for task ulg:sph-resident-steps:128|0|0|4096|6144|128|0|0|16384|0.0005|16|0.002977824741264862|40|0.2|0.0005|0,-9.80665,0|0.6|no-full-readback|1|{\"xMin\":293.15,\"xMax\":293.15,\"yMin\":293.15,\"yMax\":293.15,\"zMin\":293.15,\"zMax\":293.15}|mechanics:1,gravity:1,eos:1,pressure:1,thermal:1,reactions:1,viscosity:1,surfaceTension:0|0|0|0|0|0|0|0||||||||no-pressure-interface-force-solver|no-pressure-interface-gas-cell-field-import|5,5,5|fuseSeq=1|activeGrid=1|activeGridSafety=default|queueFence=0|16|false|none|particle-visual|cpu-packed-state",
+    "remoteRefresh": {
+      "schema": "peercompute.ulg.sph-demo-remote-resident-task-graph-refresh.v0",
+      "status": "disabled",
+      "enabled": false,
+      "submitted": false,
+      "refreshed": false,
+      "updatedAtMs": 1625.6000000238419
+    },
+    "residentPerf": {
+      "schema": "peercompute.ulg.sph-demo-resident-perf.v0",
+      "residentSubmissions": 0,
+      "residentStepsPerSchedule": 16,
+      "renderReadbackCadence": 3,
+      "effectiveRenderReadbackCadence": 3,
+      "playbackVisualRefreshForced": false,
+      "renderReadbacks": 0,
+      "skippedRenderReadbacks": 0,
+      "accumulatedSubvisibleMotionM": 0,
+      "subvisibleMotionBurstCount": 0,
+      "staleResidentSubmissions": 0,
+      "lastResidentMs": null,
+      "lastRenderReadbackMs": null,
+      "lastResidentStageTiming": null,
+      "scientificValidation": false,
+      "sphValidation": false,
+      "phaseChangeValidation": false,
+      "fullPhysicsValidation": false,
+      "resetReason": "worker-rebuild-scene-reused",
+      "lastRenderReadbackSkipped": false,
+      "updatedAtMs": 7722.600000023842
+    },
+    "cpuClosureTask": null,
+    "worker": {
+      "schema": "peercompute.ulg.sph-phase-rebuild-worker-status.v0",
+      "status": "complete",
+      "rootTaskId": "task-ulg-sph-phase-mqjhuwem-8",
+      "artifactRef": {
+        "uri": "artifact://sha256:af4b2ec96ee1a2ff04b58290c7b00a6e8b53c4051705335aaceb8a812bd043a4",
+        "artifactHash": "sha256:af4b2ec96ee1a2ff04b58290c7b00a6e8b53c4051705335aaceb8a812bd043a4",
+        "sourceService": "ulg-runtime",
+        "createdAt": 1781786809501
+      },
+      "generation": 1,
+      "backend": "cpu-worker",
+      "materialKeys": [
+        "h2o",
+        "fe",
+        "air",
+        "h2",
+        "o2"
+      ],
+      "timing": {
+        "schema": "peercompute.ulg.sph-phase-worker-rebuild-timing.v0",
+        "stageMs": {
+          "cacheLookup": 2.199999988079071,
+          "createSphPhaseDemo": 5531.699999988079,
+          "createSphPhaseViewState": 12.700000047683716,
+          "preflight": 3.199999988079071,
+          "cachePersistence": 6,
+          "staticTableCache": 181.89999997615814
+        },
+        "totalMs": 5737.699999988079,
+        "materialCount": 5,
+        "reactionCount": 0,
+        "productReuseCount": 0,
+        "cacheStatus": "derived-cache-miss"
+      },
+      "directViewState": true,
+      "artifactViewStateSummary": {
+        "schema": "peercompute.ulg.sph-phase-view-state-summary.v0",
+        "status": "sph-phase-view-state-built",
+        "sourcePayload": "direct-task-result",
+        "particleCount": 128,
+        "colorRows": 128,
+        "materialKeys": [
+          "h2o",
+          "fe",
+          "air",
+          "h2",
+          "o2"
+        ],
+        "surfaceMaterialRows": 128,
+        "reactionCount": 0,
+        "reactionNote": "same material on both blocks: no reaction",
+        "counts": {
+          "drop": 64,
+          "base": 64,
+          "total": 128
+        },
+        "box": {
+          "edgeM": 5,
+          "dimensionsM": [
+            5,
+            5,
+            5
+          ]
+        },
+        "dropMaterial": "h2o",
+        "baseMaterial": "h2o",
+        "totals": {
+          "massKg": 1062.9747711959426,
+          "momentumKgMPerS": [
+            0,
+            0,
+            0
+          ],
+          "momentumMagnitudeKgMPerS": 0,
+          "kineticEnergyJ": 0,
+          "thermalEnergyJ": 1331361326.3455436,
+          "totalEnergyJ": 1331361326.3455436
+        },
+        "phaseMassSummary": {
+          "byMaterialPhase": {
+            "h2o": {
+              "liquid": 1062.9747711959426
+            }
+          },
+          "solidFractionByMaterial": {
+            "h2o": 0
+          },
+          "ironSolidFraction": null
+        },
+        "gasPressureSummary": {
+          "schema": "peercompute.ulg.sph-sealed-gas-pressure-summary.v0",
+          "status": "closure-derived-gas-pressure-diagnostic",
+          "source": "cpu-particle-state",
+          "fullParticleReadbackPerformed": true,
+          "totalPressurePa": 101325,
+          "totalPressureAtm": 1,
+          "gasVolumeM3": 123.875,
+          "condensedVolumeM3": 1.125,
+          "boxVolumeM3": 125,
+          "boxDimsM": [
+            5,
+            5,
+            5
+          ],
+          "bySpecies": {
+            "air": {
+              "material": "air",
+              "massKg": 187.55112952855447,
+              "moles": 6474.8643617598445,
+              "temperatureK": 233.15,
+              "partialPressurePa": 101325
+            }
+          },
+          "spatialGasSpeciesLedger": null,
+          "spatialGasSpeciesLedgerSchema": null,
+          "spatialGasSpeciesLedgerStatus": null,
+          "residentSpatialGasSpeciesLedgerStatus": "blocked-resident-spatial-gas-species-ledger-required",
+          "baselineSummaryStatus": null,
+          "residentLedgerStatus": null,
+          "strictReactionGate": null,
+          "scientificValidation": false,
+          "gasValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false,
+          "pressureFeedback": {
+            "schema": "peercompute.ulg.sph-sealed-gas-pressure-feedback.v0",
+            "status": "wall-pressure-ledger-ready",
+            "source": "cpu-particle-state",
+            "totalPressurePa": 101325,
+            "externalPressurePa": 101325,
+            "pressureGaugePa": 0,
+            "boxDimsM": [
+              5,
+              5,
+              5
+            ],
+            "wallLedger": [
+              {
+                "faceId": "xMin",
+                "normal": [
+                  -1,
+                  0,
+                  0
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              },
+              {
+                "faceId": "xMax",
+                "normal": [
+                  1,
+                  0,
+                  0
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              },
+              {
+                "faceId": "yMin",
+                "normal": [
+                  0,
+                  -1,
+                  0
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              },
+              {
+                "faceId": "yMax",
+                "normal": [
+                  0,
+                  1,
+                  0
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              },
+              {
+                "faceId": "zMin",
+                "normal": [
+                  0,
+                  0,
+                  -1
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              },
+              {
+                "faceId": "zMax",
+                "normal": [
+                  0,
+                  0,
+                  1
+                ],
+                "areaM2": 25,
+                "pressureGaugePa": 0,
+                "forceN": 0,
+                "forceVectorN": [
+                  0,
+                  0,
+                  0
+                ],
+                "role": "balanced"
+              }
+            ],
+            "totalAbsWallForceN": 0,
+            "netForceN": [
+              0,
+              0,
+              0
+            ],
+            "gasCellField": {
+              "schema": "peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0",
+              "status": "gas-cell-pressure-field-ready",
+              "source": "cpu-particle-state",
+              "totalPressurePa": 101325,
+              "pressureGaugePa": 0,
+              "boxDimsM": [
+                5,
+                5,
+                5
+              ],
+              "cellDims": [
+                1,
+                1,
+                1
+              ],
+              "cellCount": 1,
+              "cells": [],
+              "pressureFieldMode": "uniform-single-cell-sealed-gas",
+              "pressureFieldResolution": "lumped-sealed-box",
+              "pressureFieldCellFamily": "resident-gas-pressure",
+              "uniformPressurePa": 101325,
+              "uniformPressureGaugePa": 0,
+              "pressureGradientPaPerM": [
+                0,
+                0,
+                0
+              ],
+              "gradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+              "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+              "localPressureGradientReady": false,
+              "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+              "localPressureGradientBlockers": [
+                "single-cell-uniform-pressure-field",
+                "resident-gas-cell-eos-gradient-not-derived"
+              ],
+              "localPressureGradientForceCouplingStatus": "blocked-local-pressure-gradient-field-required",
+              "gasCellForceCouplingPolicy": "uniform-interface-traction-only",
+              "materialSurfaceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+              "localPressureGradientValidation": false,
+              "spatialGasSpeciesLedgerSchema": null,
+              "spatialGasSpeciesLedgerStatus": null,
+              "residentSpatialGasSpeciesLedgerStatus": "blocked-resident-spatial-gas-species-ledger-required",
+              "eosPressureClosure": null,
+              "retainedSpatialGasSourceBufferRefs": [],
+              "workerRetainedSpatialGasSourceBufferRefs": [],
+              "spatialGasSourceBufferRetained": false,
+              "residentGasCellGradientCouplingValidation": false,
+              "pressureFieldValidation": false,
+              "forceCouplingValidation": false,
+              "scientificValidation": false,
+              "gasValidation": false,
+              "sphValidation": false,
+              "fullPhysicsValidation": false
+            },
+            "pressureGradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+            "pressureFieldMode": "uniform-single-cell-sealed-gas",
+            "pressureFieldResolution": "lumped-sealed-box",
+            "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+            "localPressureGradientReady": false,
+            "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+            "localPressureGradientBlockers": [
+              "single-cell-uniform-pressure-field",
+              "resident-gas-cell-eos-gradient-not-derived"
+            ],
+            "localPressureGradientForceCouplingStatus": "blocked-local-pressure-gradient-field-required",
+            "forceCouplingPrerequisites": [
+              "strict-reaction-gate-pass",
+              "gas-cell-pressure-field-ready",
+              "material-surface-normals-and-areas"
+            ],
+            "strictReactionGateStatus": null,
+            "strictReactionGateBlockers": [],
+            "forceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+            "wallLedgerValidation": false,
+            "localPressureGradientValidation": false,
+            "forceCouplingValidation": false,
+            "scientificValidation": false,
+            "gasValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false,
+            "pressureInterfaceCoupling": {
+              "schema": "peercompute.ulg.sph-pressure-interface-coupling.v0",
+              "status": "pressure-interface-coupling-blocked",
+              "pressureFeedbackSchema": "peercompute.ulg.sph-sealed-gas-pressure-feedback.v0",
+              "gasCellFieldSchema": "peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0",
+              "gasCellFieldStatus": "gas-cell-pressure-field-ready",
+              "pressureFieldMode": "uniform-single-cell-sealed-gas",
+              "pressureFieldResolution": "lumped-sealed-box",
+              "pressureGradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+              "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+              "localPressureGradientReady": false,
+              "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+              "localPressureGradientBlockers": [
+                "single-cell-uniform-pressure-field",
+                "resident-gas-cell-eos-gradient-not-derived"
+              ],
+              "localPressureGradientForceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+              "pressureGaugePa": 0,
+              "materialInterfaceFieldSchema": null,
+              "materialInterfaceFieldStatus": null,
+              "materialInterfaceReadySurfaceCount": 0,
+              "materialInterfaceTotalSurfaceAreaM2": 0,
+              "materialInterfaceSurfaceCount": 0,
+              "strictReactionGateStatus": null,
+              "strictReactionGateBlockers": [],
+              "forceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+              "forceCouplingPrerequisites": [
+                "strict-reaction-gate-pass",
+                "gas-cell-pressure-field-ready",
+                "material-interface-field-ready",
+                "pressure-force-solver"
+              ],
+              "uniformPressureForceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+              "forceResolution": "blocked",
+              "localPressureGradientValidation": false,
+              "forceCouplingValidation": false,
+              "scientificValidation": false,
+              "gasValidation": false,
+              "sphValidation": false,
+              "fullPhysicsValidation": false
+            }
+          }
+        },
+        "gasPressureFeedback": {
+          "schema": "peercompute.ulg.sph-sealed-gas-pressure-feedback.v0",
+          "status": "wall-pressure-ledger-ready",
+          "source": "cpu-particle-state",
+          "totalPressurePa": 101325,
+          "externalPressurePa": 101325,
+          "pressureGaugePa": 0,
+          "boxDimsM": [
+            5,
+            5,
+            5
+          ],
+          "wallLedger": [
+            {
+              "faceId": "xMin",
+              "normal": [
+                -1,
+                0,
+                0
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            },
+            {
+              "faceId": "xMax",
+              "normal": [
+                1,
+                0,
+                0
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            },
+            {
+              "faceId": "yMin",
+              "normal": [
+                0,
+                -1,
+                0
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            },
+            {
+              "faceId": "yMax",
+              "normal": [
+                0,
+                1,
+                0
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            },
+            {
+              "faceId": "zMin",
+              "normal": [
+                0,
+                0,
+                -1
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            },
+            {
+              "faceId": "zMax",
+              "normal": [
+                0,
+                0,
+                1
+              ],
+              "areaM2": 25,
+              "pressureGaugePa": 0,
+              "forceN": 0,
+              "forceVectorN": [
+                0,
+                0,
+                0
+              ],
+              "role": "balanced"
+            }
+          ],
+          "totalAbsWallForceN": 0,
+          "netForceN": [
+            0,
+            0,
+            0
+          ],
+          "gasCellField": {
+            "schema": "peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0",
+            "status": "gas-cell-pressure-field-ready",
+            "source": "cpu-particle-state",
+            "totalPressurePa": 101325,
+            "pressureGaugePa": 0,
+            "boxDimsM": [
+              5,
+              5,
+              5
+            ],
+            "cellDims": [
+              1,
+              1,
+              1
+            ],
+            "cellCount": 1,
+            "cells": [],
+            "pressureFieldMode": "uniform-single-cell-sealed-gas",
+            "pressureFieldResolution": "lumped-sealed-box",
+            "pressureFieldCellFamily": "resident-gas-pressure",
+            "uniformPressurePa": 101325,
+            "uniformPressureGaugePa": 0,
+            "pressureGradientPaPerM": [
+              0,
+              0,
+              0
+            ],
+            "gradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+            "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+            "localPressureGradientReady": false,
+            "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+            "localPressureGradientBlockers": [
+              "single-cell-uniform-pressure-field",
+              "resident-gas-cell-eos-gradient-not-derived"
+            ],
+            "localPressureGradientForceCouplingStatus": "blocked-local-pressure-gradient-field-required",
+            "gasCellForceCouplingPolicy": "uniform-interface-traction-only",
+            "materialSurfaceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+            "localPressureGradientValidation": false,
+            "spatialGasSpeciesLedgerSchema": null,
+            "spatialGasSpeciesLedgerStatus": null,
+            "residentSpatialGasSpeciesLedgerStatus": "blocked-resident-spatial-gas-species-ledger-required",
+            "eosPressureClosure": null,
+            "retainedSpatialGasSourceBufferRefs": [],
+            "workerRetainedSpatialGasSourceBufferRefs": [],
+            "spatialGasSourceBufferRetained": false,
+            "residentGasCellGradientCouplingValidation": false,
+            "pressureFieldValidation": false,
+            "forceCouplingValidation": false,
+            "scientificValidation": false,
+            "gasValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          },
+          "pressureGradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+          "pressureFieldMode": "uniform-single-cell-sealed-gas",
+          "pressureFieldResolution": "lumped-sealed-box",
+          "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+          "localPressureGradientReady": false,
+          "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+          "localPressureGradientBlockers": [
+            "single-cell-uniform-pressure-field",
+            "resident-gas-cell-eos-gradient-not-derived"
+          ],
+          "localPressureGradientForceCouplingStatus": "blocked-local-pressure-gradient-field-required",
+          "forceCouplingPrerequisites": [
+            "strict-reaction-gate-pass",
+            "gas-cell-pressure-field-ready",
+            "material-surface-normals-and-areas"
+          ],
+          "strictReactionGateStatus": null,
+          "strictReactionGateBlockers": [],
+          "forceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+          "wallLedgerValidation": false,
+          "localPressureGradientValidation": false,
+          "forceCouplingValidation": false,
+          "scientificValidation": false,
+          "gasValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false,
+          "pressureInterfaceCoupling": {
+            "schema": "peercompute.ulg.sph-pressure-interface-coupling.v0",
+            "status": "pressure-interface-coupling-blocked",
+            "pressureFeedbackSchema": "peercompute.ulg.sph-sealed-gas-pressure-feedback.v0",
+            "gasCellFieldSchema": "peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0",
+            "gasCellFieldStatus": "gas-cell-pressure-field-ready",
+            "pressureFieldMode": "uniform-single-cell-sealed-gas",
+            "pressureFieldResolution": "lumped-sealed-box",
+            "pressureGradientStatus": "uniform-sealed-gas-pressure-zero-gradient",
+            "localPressureGradientSchema": "peercompute.ulg.sph-local-pressure-gradient-field.v0",
+            "localPressureGradientReady": false,
+            "localPressureGradientStatus": "blocked-uniform-single-cell-field-has-no-local-gradient",
+            "localPressureGradientBlockers": [
+              "single-cell-uniform-pressure-field",
+              "resident-gas-cell-eos-gradient-not-derived"
+            ],
+            "localPressureGradientForceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+            "pressureGaugePa": 0,
+            "materialInterfaceFieldSchema": null,
+            "materialInterfaceFieldStatus": null,
+            "materialInterfaceReadySurfaceCount": 0,
+            "materialInterfaceTotalSurfaceAreaM2": 0,
+            "materialInterfaceSurfaceCount": 0,
+            "strictReactionGateStatus": null,
+            "strictReactionGateBlockers": [],
+            "forceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+            "forceCouplingPrerequisites": [
+              "strict-reaction-gate-pass",
+              "gas-cell-pressure-field-ready",
+              "material-interface-field-ready",
+              "pressure-force-solver"
+            ],
+            "uniformPressureForceCouplingStatus": "blocked-material-surface-normals-not-resolved",
+            "forceResolution": "blocked",
+            "localPressureGradientValidation": false,
+            "forceCouplingValidation": false,
+            "scientificValidation": false,
+            "gasValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          }
+        },
+        "gpuMechanics": {
+          "integrator": "mlsmpm",
+          "gridSpacingM": 0.2,
+          "dt": 0.0005,
+          "mechanicalSubsteps": 16,
+          "soundSpeedScale": 0.002977824741264862,
+          "modulusScale": 0.000008867440189689143,
+          "minGasSoundSpeedMPerS": 40,
+          "requestedMinGasSoundSpeedMPerS": 40,
+          "maxRealSoundSpeedMPerS": 53730.49588272222,
+          "cflMaxSoundSpeedMPerS": 160.00000000000003,
+          "cflSafety": 0.4,
+          "gridCflFactor": 0.6,
+          "mlsMpmArtificialViscosityAlpha": 0.04,
+          "mlsMpmLiquidVelocityDiffusionAlpha": 0,
+          "mlsMpmLiquidVelocityDiffusionRadiusM": 0.4,
+          "mlsMpmLiquidWallDampingAlpha": 0.2,
+          "mlsMpmLiquidWallDampingDistanceM": 0.30000000000000004,
+          "gravityMPerS2": [
+            0,
+            -9.80665,
+            0
+          ],
+          "hydrostaticInitialization": true,
+          "sphCavitationPressureFloorPa": null,
+          "sphDensityProjectionIterations": 0,
+          "sphDensityProjectionRelaxation": 0,
+          "sphFluidHydrostaticPressure": false,
+          "sphFluidHydrostaticPressureScale": 1,
+          "sphFluidHydrostaticPressureDensityFloorRatio": 0.85,
+          "sphFluidHydrostaticPressureDensityFullRatio": 1,
+          "sphLiquidFreeSurfaceRelaxationAlpha": 0,
+          "sphLiquidFreeSurfaceTargetDepthM": null,
+          "sphLiquidFreeSurfaceContactDepthM": null,
+          "sphLiquidVelocityDiffusionAlpha": 0.04,
+          "sphLiquidVelocityDiffusionRadiusM": 0.4,
+          "sphLiquidWallDampingAlpha": 0.3,
+          "sphLiquidWallDampingDistanceM": 0.30000000000000004,
+          "physicalLawGroups": {
+            "mechanics": true,
+            "gravity": true,
+            "eos": true,
+            "pressure": true,
+            "thermal": true,
+            "reactions": true,
+            "viscosity": true,
+            "surfaceTension": false
+          },
+          "pendingPhysicalLawGroups": []
+        },
+        "bufferByteLengths": {
+          "positionsM": 1536,
+          "colorsRgb": 1536,
+          "sphGpuParticleState": 4096,
+          "mlsMpmGpuParticleState": 0
+        },
+        "scientificValidation": false,
+        "sphValidation": false,
+        "phaseChangeValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "updatedAtMs": 7713.700000047684
+    },
+    "computeManager": {
+      "schema": "peercompute.ulg.sph-demo-resident-compute-manager.v0",
+      "status": "available",
+      "source": "peercompute-resident-authority-host",
+      "submitTask": true,
+      "updatedAtMs": 7798.5
+    },
+    "stateManager": {
+      "schema": "peercompute.ulg.sph-demo-resident-state-manager.v0",
+      "status": "available",
+      "source": "peercompute-resident-authority-host",
+      "getWarmDeltas": true,
+      "readWarm": false,
+      "getDataState": true,
+      "updatedAtMs": 7798.600000023842
+    },
+    "steps": null,
+    "renderState": null,
+    "surfaceDraw": null,
+    "bridge": null,
+    "statusText": "preflight        : preflight-feasible-derived-closures (feasible=true)\nfinal phase      : H2O liquid / H2O liquid\nheat to walls    : 26.40M J\nmasses (kg)      : H2O 118.11  H2O 944.87  air 187.55\nparticles        : H2O 128  total 128\nreaction         : same material on both blocks: no reaction\nmaterial phases  : h2o:liquid 1.06kkg\ngas pressure     : total=101.3kPa atm=1.000 vol=123.875m3 gauge=0.0Pa wallF=0.0N force=blocked-material-surface-normals-not-resolved air=101.3kPa\nsolid fractions  : H2O 0.000\ntotal energy     : 1.33e+9 J\nmomentum |p|     : 0.00 kg·m/s\nview state       : peercompute-worker-packed-state\nlaw groups       : mechanics=on gravity=on eos=on pressure=on thermal=on reactions=on viscosity=on surfaceTension=off\nresident auto    : resident-auto-schedule-enabled\nresident workers : enabled\nresident policy  : fuse-seq=on active-grid=on safety=default queue-fence=off\nresident backend : pending\nmls grid         : dims=pending nodes=pending dx=0.200m\nresident readback: requested=no-full-readback actual=pending\nresident motion  : status=resident-execution-pending max-dx=pendingm max-v=pendingm/s threshold=0.000200m batch-est=pendingm accumulated=0.000000m bursts=0 pressure-impulse=pendingN*s\nresident reaction: status=no-derived-reactions backend=pending reactions=0\nresident product : status=pending rows=0 unplaced=pendingkg eos=pending\nmaterial iface  : owner=pending source=pending status=pending ready=0/0 source-field=pending candidate-readback=false\nrender source    : cpu-particles status=pending backend=pending rows=0 field-cells=0 field-readback=false\nrender error     : none\nsurface draw     : status=pending policy=surface-draw-overlay-disabled-by-policy mode=disabled active=0 vertices=0 draw-retained=false indirect-retained=false compact-retained=false readback=false bridge=pending depth=pending depth-ready=false transparent=pending optics=pending records=0 spectra=0 swap=pending retained=false\nrender pressure  : source=cpu-particle-state optical-state=false\nrender cadence   : every=3 effective=3 forced=false reason=pending sequence=0 skipped=0 last-skipped=false\nresident profile : submissions=0 stale=0 substeps=16 target=16 step-ms=— render-ms=—\nresident stages  : pending\nscene sync       : total=5.1ms batch=0.0ms thermal=0.1ms react=0.0ms optical=0.6ms surface=0.2ms\nworker rebuild   : total=5.7kms demo=5.5kms view=12.7ms preflight=3.2ms materials=5 reactions=0 cache=derived-cache-miss\nfps              : render 28.4 physics 0.0 resident 0.0\nclosure cache    : lookup=empty hits=0 misses=7 stale=0 stored=5 consumed=false\ncold cache       : lookup=reaction-cache-miss storage=empty reactions=0 products=0 tables=0 table-read=static-table-cache-bundle-hit table-status=stored table-writes=5 gpu=0 gpu-writes=1\ncache clear      : idle\nperf trace       : spans=3 last=\"static table cache worker rehydrate\" 0.0ms\ncpu closure task : idle\nper-wall ledger  :\n  xMin sink 4.40MJ\n  xMax sink 4.40MJ\n  yMin sink 4.40MJ\n  yMax sink 4.40MJ\n  zMin sink 4.40MJ\n  zMax sink 4.40MJ\n\nvalidation       : scientific=false sph=false phase=false (worker view-state evidence-only)",
+    "warningText": "render fps 28.4 | physics fps 0.0 | resident fps 0.0 | sim t 0.000sHot loop is not fully GPU-resident yet."
+  },
+  "screenshot": "artifacts/scheduler-initial-render-timeout-20260618/scheduler-timeout-state.png",
+  "consoleIssueCount": 0,
+  "consoleIssues": [],
+  "pageErrors": [],
+  "consoleTail": [
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=11"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=12"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=12"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=13"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=13"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=14"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=14"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=15"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=15"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-complete"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-error"
+    }
+  ]
+}

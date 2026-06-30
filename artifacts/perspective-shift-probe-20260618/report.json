@@ -1,0 +1,282 @@
+{
+  "schema": "peercompute.ulg.perspective-shift-probe.v0",
+  "status": "complete",
+  "url": "https://127.0.0.1:5173/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1",
+  "samples": [
+    {
+      "label": "initial",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:initial",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 127667.70000004768,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          6.750000000000001,
+          5.25,
+          8.25
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/initial.png"
+    },
+    {
+      "label": "front-low",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:front-low",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 128262.80000001192,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          0,
+          1.2499999999999996,
+          8
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/front-low.png"
+    },
+    {
+      "label": "side-high",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:side-high",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 128743.10000002384,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          8,
+          5,
+          -8.881784197001252e-16
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/side-high.png"
+    },
+    {
+      "label": "rear-high",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:rear-high",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 129256.80000001192,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          -7,
+          4.000000000000002,
+          -8.000000000000004
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/rear-high.png"
+    },
+    {
+      "label": "mobile-landscape-resize",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:mobile-landscape-resize",
+        "width": 1688,
+        "height": 780,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 130018,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          7.999999999999999,
+          3.999999999999999,
+          8
+        ],
+        "aspect": 2.164102564102564,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 844,
+        "innerHeight": 390,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/mobile-landscape-resize.png"
+    },
+    {
+      "label": "mobile-portrait-return",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-probe:mobile-portrait-return",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 130777.30000001192,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          4,
+          3,
+          9
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": null,
+      "surfaceDraw": null,
+      "bridge": null,
+      "objects": [],
+      "screenshot": "artifacts/perspective-shift-probe-20260618/mobile-portrait-return.png"
+    }
+  ],
+  "consoleIssueCount": 0,
+  "consoleWarningCount": 0,
+  "consoleIssues": [],
+  "consoleWarnings": [],
+  "pageErrors": [],
+  "consoleTail": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3dd40015ac00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3dd40015ac00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3dd40015ac00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3dd40015ac00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initializing..."
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Node ID: 1781785957785-pcp7t4lsi"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] NetworkManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[StateManager] Initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] StateManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] ComputeManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initialization complete"
+    }
+  ]
+}

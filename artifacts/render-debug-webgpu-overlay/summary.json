@@ -1,0 +1,93 @@
+{
+  "result": {
+    "threeSummary": {
+      "state": {
+        "status": "resident-render-rows-unavailable",
+        "bridge": null,
+        "source": null
+      },
+      "surfaceDraw": null,
+      "bridge": null,
+      "projectSamples": []
+    },
+    "webSummary": {
+      "state": {
+        "status": "resident-render-rows-unavailable",
+        "bridge": null,
+        "source": null
+      },
+      "surfaceDraw": null,
+      "bridge": null
+    }
+  },
+  "consoleEntries": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x11f400156c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x11f400156c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x11f400156c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x11f400156c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-unavailable stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-unavailable stage=resident-render-refresh"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initializing..."
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Node ID: 1781784620869-aer8snmx6"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] NetworkManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[StateManager] Initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] StateManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] ComputeManager initialized"
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initialization complete"
+    }
+  ]
+}

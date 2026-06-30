@@ -1,0 +1,1568 @@
+{
+  "schema": "peercompute.ulg.sph-history-probe-result.v0",
+  "status": "bad",
+  "repoDir": "/home/cos/projects/ulg",
+  "packageExists": true,
+  "nodeModules": {
+    "status": "present",
+    "target": "/home/cos/projects/ulg/node_modules"
+  },
+  "baseUrl": "http://127.0.0.1:5255",
+  "browserLaunch": {
+    "schema": "peercompute.ulg.sph-probe-browser-launch.v0",
+    "channel": null,
+    "executablePath": null,
+    "args": [
+      "--enable-unsafe-webgpu"
+    ],
+    "page": {
+      "schema": "peercompute.ulg.sph-probe-page-options.v0",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "deviceScaleFactor": null,
+      "isMobile": false,
+      "hasTouch": false
+    }
+  },
+  "probeMode": "scene",
+  "scenarioUrl": "/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1",
+  "thresholds": {
+    "maxSpeedMPerS": 50,
+    "minVolumeRatioJ": 0.2,
+    "maxVolumeRatioJ": 5,
+    "expectStatic": false,
+    "staticMaxDisplacementM": 0.000001,
+    "staticMaxCenterOfMassDeltaM": 0.000001,
+    "expectLiquidMerge": false,
+    "expectLiquidSettled": false,
+    "expectLiquidFreeSurface": false,
+    "liquidMergeMaxFinalSupportGapM": 0.005,
+    "liquidSettledMinTimeS": 1,
+    "liquidSettledMaxFinalDropSpeedMPerS": 0.25,
+    "liquidFreeSurfaceMinTimeS": 0.25,
+    "liquidFreeSurfaceMaxTallnessRatio": 0.75,
+    "liquidFreeSurfaceMinFootprintFillRatio": 0.15,
+    "liquidFreeSurfaceMaxHeightM": null,
+    "expectedH2oVisibleSurfaceCount": null,
+    "expectedMaterialPresent": [],
+    "expectedMaterialAbsent": [],
+    "minReactionEventsTotal": null,
+    "minVisualFrameTimeSpanS": null,
+    "visualOnly": true,
+    "visibleBoundsToleranceM": 0.05,
+    "particleBoundsToleranceM": 0.2
+  },
+  "visualFrameArtifacts": {
+    "schema": "peercompute.ulg.sph-probe-visual-frame-artifacts.v0",
+    "status": "ready",
+    "frameDir": "/home/cos/projects/ulg/artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-3-frames",
+    "frameCount": 0,
+    "frames": [
+      {
+        "schema": "peercompute.ulg.sph-probe-visual-frame.v0",
+        "status": "capture-error",
+        "index": 0,
+        "batchIndex": 1,
+        "phase": "post-probe-composited-page",
+        "sampleIndex": 0,
+        "width": null,
+        "height": null,
+        "capturedAtMs": 1781819646993,
+        "reason": null,
+        "error": "page.evaluate: Target page, context or browser has been closed",
+        "path": null,
+        "byteLength": 0
+      }
+    ]
+  },
+  "timeline": {
+    "schema": "peercompute.ulg.sph-history-long-horizon-probe.v0",
+    "status": "blocked",
+    "reason": "browser probe timed out after 180000ms",
+    "batchCount": 1,
+    "batchStepCount": 1,
+    "requestedSubsteps": 1,
+    "readbackMode": "no-full-readback",
+    "compactSummaryMode": "none",
+    "renderReadbackMode": "no-full-readback",
+    "renderRowsReadbackMode": "no-full-readback",
+    "renderFieldSurfaceSummaryMode": "skip",
+    "surfaceDrawDiagnosticMode": "three-webgpu-surface-buffers",
+    "surfaceDrawDiagnosticMaxFieldCells": 100000,
+    "surfaceDrawDiagnosticMaxResolution": 8,
+    "pressureInterfaceDisabled": false,
+    "anomalyRowReadback": false,
+    "residentBufferDebug": false,
+    "renderEveryBatches": 1,
+    "preProbeSnapshots": [
+      {
+        "schema": "peercompute.ulg.sph-probe-browser-snapshot.v0",
+        "status": "captured",
+        "label": "overlay-ready",
+        "capturedAtMs": 1906.1000000238419,
+        "href": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+        "overlayReady": true,
+        "viewStateReady": false,
+        "viewStateSource": null,
+        "driverReady": false,
+        "sceneReady": true,
+        "particleStateReady": false,
+        "mlsParticleStateReady": false,
+        "residentPending": null,
+        "residentAutoSchedule": null,
+        "probeProgress": null,
+        "residentRefreshProgress": null,
+        "residentSteps": null,
+        "residentAuthorityHost": {
+          "schema": "peercompute.ulg.browser-resident-authority-host.v0",
+          "status": "initializing",
+          "source": null,
+          "hostId": null,
+          "computeManagerReady": false,
+          "stateManagerReady": false,
+          "nodeKernelMode": null,
+          "nodeKernelReady": false,
+          "nodeKernelStarted": false,
+          "workerCapability": {
+            "schema": null,
+            "status": null,
+            "blocker": null,
+            "constructorAvailable": null,
+            "requestedEnableWorkers": null,
+            "effectiveEnableWorkers": null,
+            "workerCount": null,
+            "targetWorkers": null
+          },
+          "peercomputeResidentStageWorkerBridgeAvailable": false,
+          "residentMechanicsStageWorkerRunnerFactoryReady": false
+        },
+        "residentWorkerCapability": {
+          "schema": null,
+          "status": null,
+          "blocker": null,
+          "constructorAvailable": null,
+          "requestedEnableWorkers": null,
+          "effectiveEnableWorkers": null,
+          "workerCount": null,
+          "targetWorkers": null
+        },
+        "residentComputeManager": null,
+        "cpuClosureTask": {
+          "schema": "peercompute.ulg.sph-demo-cpu-closure-task.v0",
+          "active": true,
+          "label": "material/reaction/closure rebuild",
+          "location": "ulg-runtime worker",
+          "reason": "supervised PeerCompute sph.phase.rebuild task",
+          "updatedAtMs": 1123.9000000357628
+        },
+        "workerRebuild": {
+          "schema": "peercompute.ulg.sph-phase-rebuild-worker-status.v0",
+          "status": "submitted",
+          "backend": null,
+          "generation": 1,
+          "timing": null
+        },
+        "peerClosureCache": {
+          "schema": null,
+          "status": null,
+          "materialLookup": null,
+          "coldStartLookup": null,
+          "staticTableRead": null,
+          "staticTableWrite": null
+        },
+        "performanceTrace": {
+          "schema": "peercompute.ulg.sph-cold-start-performance-trace.v0",
+          "spanCount": 1,
+          "lastSpan": {
+            "label": "cache storage snapshot read",
+            "startMs": 1125.0999999642372,
+            "endMs": 1125.699999988079,
+            "durationMs": 0.6000000238418579,
+            "materialBytes": 0,
+            "coldStartBytes": 0,
+            "staticTableBytes": 0
+          }
+        },
+        "setParticlesTiming": null,
+        "surfaceApplyTiming": null,
+        "rendererInit": {
+          "schema": "peercompute.ulg.sph-three-renderer-init.v0",
+          "status": "three-webgl-renderer-ready",
+          "reason": null,
+          "requestedRendererBackend": "webgpu",
+          "rendererBackend": "three-webgl",
+          "rendererReady": true,
+          "rendererIsWebGPU": false,
+          "rendererPresentationRequested": true,
+          "rendererPresentationEnabled": false,
+          "rendererPresentationBlocked": true,
+          "rendererPresentationBlockReason": "Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering",
+          "rendererBackendDeviceReady": false,
+          "rendererOwnedResidentDevicePolicy": {
+            "schema": "peercompute.ulg.sph-three-webgpu-renderer-owned-resident-device-policy.v0",
+            "status": "renderer-owned-resident-device-blocked-non-webgpu-renderer",
+            "reason": "renderer-owned resident GPUDevice requires Three WebGPU renderer",
+            "requested": false,
+            "rendererIsWebGPU": false,
+            "rendererPresentationEnabled": false,
+            "rendererBackendDeviceReady": false,
+            "rendererBackendBufferBindingAvailable": false,
+            "rendererOwnedDeviceAllowed": false
+          },
+          "requiredLimits": null,
+          "error": null,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "rendererFrame": {
+          "schema": "peercompute.ulg.sph-three-renderer-frame.v0",
+          "status": "renderer-frame-rendered",
+          "reason": "animation-frame",
+          "rendererInitStatus": "three-webgl-renderer-ready",
+          "rendererBackend": "three-webgl",
+          "updatedAtMs": 1882.800000011921,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "viewportRefresh": {
+          "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+          "status": "viewport-refresh-rendered",
+          "reason": "window-pageshow:raf-2",
+          "width": 1280,
+          "height": 800,
+          "cssWidth": 1280,
+          "cssHeight": 800,
+          "pixelRatio": 1,
+          "resizeStatus": {
+            "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+            "status": "viewport-resized",
+            "reason": "window-pageshow:raf-2",
+            "cssWidth": 1280,
+            "cssHeight": 800,
+            "backingWidth": 1280,
+            "backingHeight": 800,
+            "pixelRatio": 1,
+            "containerClientWidth": 1280,
+            "containerClientHeight": 800,
+            "containerRectWidth": 1280,
+            "containerRectHeight": 800,
+            "visualViewportWidth": 1280,
+            "visualViewportHeight": 800,
+            "updatedAtMs": 1702.199999988079,
+            "scientificValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          },
+          "overlayCanvasWidth": null,
+          "overlayCanvasHeight": null,
+          "updatedAtMs": 1702.9000000357628,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "viewportResize": {
+          "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+          "status": "viewport-resized",
+          "reason": "window-pageshow:raf-2",
+          "cssWidth": 1280,
+          "cssHeight": 800,
+          "backingWidth": 1280,
+          "backingHeight": 800,
+          "pixelRatio": 1,
+          "containerClientWidth": 1280,
+          "containerClientHeight": 800,
+          "containerRectWidth": 1280,
+          "containerRectHeight": 800,
+          "visualViewportWidth": 1280,
+          "visualViewportHeight": 800,
+          "updatedAtMs": 1702.199999988079,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "frameCounters": {
+          "renderFrames": 10,
+          "physicsFrames": 0,
+          "residentFrames": 0,
+          "renderFps": 0,
+          "physicsFps": 0,
+          "residentFps": 0,
+          "lastSampleMs": 1123.9000000357628
+        },
+        "statusText": "preflight        : submitted\nworker           : generation=1 reason=initial-load backend=pending\nview state       : peercompute-worker-pending\nworker rebuild   : pending\nclosure cache    : lookup=pending hits=0 misses=0 stale=0 stored=0 consumed=false\ncold cache       : lookup=pending storage=pending reactions=0 products=0 tables=0 table-read=pending table-status=pending table-writes=0 gpu=0 gpu-writes=0\ncache clear      : idle\nperf trace       : spans=1 last=\"cache storage snapshot read\" 0.6ms\ncpu closure task : material/reaction/closure rebuild (ulg-runtime worker)\n\nvalidation       : pending worker view-state",
+        "warningText": "render fps 0.0 | physics fps 0.0 | resident fps 0.0deriving material or reaction propertiesCPU closure task: material/reaction/closure rebuild (ulg-runtime worker).Hot loop is not fully GPU-resident yet."
+      },
+      {
+        "schema": "peercompute.ulg.sph-probe-browser-snapshot.v0",
+        "status": "snapshot-timeout",
+        "label": "particle-state-ready",
+        "timeoutMs": 2000,
+        "elapsedMs": 2002
+      },
+      {
+        "schema": "peercompute.ulg.sph-probe-browser-snapshot.v0",
+        "status": "captured",
+        "label": "before-in-page-probe",
+        "capturedAtMs": 21009.900000035763,
+        "href": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+        "overlayReady": true,
+        "viewStateReady": true,
+        "viewStateSource": "peercompute-worker-packed-state",
+        "driverReady": false,
+        "sceneReady": true,
+        "particleStateReady": true,
+        "mlsParticleStateReady": true,
+        "residentPending": null,
+        "residentAutoSchedule": {
+          "schema": "peercompute.ulg.sph-demo-resident-auto-schedule.v0",
+          "status": "disabled-by-url-residentAuto",
+          "residentAuto": false,
+          "residentExecutionPolicy": {
+            "schema": "peercompute.ulg.sph-demo-resident-execution-policy.v0",
+            "residentWorkersEnabled": true,
+            "fuseNoFullResidentMechanicsSequence": true,
+            "fuseNoFullResidentMechanicsActiveGrid": true,
+            "activeGridSafetyCells": null,
+            "measureFusedSequenceQueueFence": false
+          },
+          "generation": 1,
+          "updatedAtMs": 8248.5
+        },
+        "probeProgress": null,
+        "residentRefreshProgress": null,
+        "residentSteps": null,
+        "residentAuthorityHost": {
+          "schema": "peercompute.ulg.browser-resident-authority-host.v0",
+          "status": "ready",
+          "source": "peercompute-browser-nodekernel-authority-host",
+          "hostId": "ulg-peercompute-resident-host:yfigr6y8",
+          "computeManagerReady": true,
+          "stateManagerReady": true,
+          "nodeKernelMode": "real-peercompute-nodekernel",
+          "nodeKernelReady": true,
+          "nodeKernelStarted": false,
+          "workerCapability": {
+            "schema": "peercompute.ulg.browser-worker-capability.v0",
+            "status": "worker-capability-ready",
+            "blocker": null,
+            "constructorAvailable": true,
+            "requestedEnableWorkers": true,
+            "effectiveEnableWorkers": true,
+            "workerCount": 12,
+            "targetWorkers": 12
+          },
+          "peercomputeResidentStageWorkerBridgeAvailable": true,
+          "residentMechanicsStageWorkerRunnerFactoryReady": true
+        },
+        "residentWorkerCapability": {
+          "schema": "peercompute.ulg.browser-worker-capability.v0",
+          "status": "worker-capability-ready",
+          "blocker": null,
+          "constructorAvailable": true,
+          "requestedEnableWorkers": true,
+          "effectiveEnableWorkers": true,
+          "workerCount": 12,
+          "targetWorkers": 12
+        },
+        "residentComputeManager": null,
+        "cpuClosureTask": null,
+        "workerRebuild": {
+          "schema": "peercompute.ulg.sph-phase-rebuild-worker-status.v0",
+          "status": "complete",
+          "backend": "cpu-worker",
+          "generation": 1,
+          "timing": {
+            "schema": "peercompute.ulg.sph-phase-worker-rebuild-timing.v0",
+            "stageMs": {
+              "cacheLookup": 2.100000023841858,
+              "createSphPhaseDemo": 5596,
+              "createSphPhaseViewState": 10.899999976158142,
+              "preflight": 3.800000011920929,
+              "cachePersistence": 6.800000011920929,
+              "staticTableCache": 170.5
+            },
+            "totalMs": 5790.5,
+            "materialCount": 5,
+            "reactionCount": 0,
+            "productReuseCount": 0,
+            "cacheStatus": "derived-cache-miss"
+          }
+        },
+        "peerClosureCache": {
+          "schema": null,
+          "status": null,
+          "materialLookup": null,
+          "coldStartLookup": {
+            "status": "reaction-cache-miss",
+            "reactionCount": 0,
+            "productReuseCount": 0
+          },
+          "staticTableRead": {
+            "status": "static-table-cache-bundle-hit",
+            "hitCount": 5,
+            "tableCount": 5,
+            "gpuWarmupCount": 1
+          },
+          "staticTableWrite": {
+            "status": "stored",
+            "backend": "cpu-worker-rebuild",
+            "tableWriteCount": 5,
+            "gpuWarmupWriteCount": 1,
+            "counts": {
+              "tables": 5,
+              "gpuWarmup": 1
+            }
+          }
+        },
+        "performanceTrace": {
+          "schema": "peercompute.ulg.sph-cold-start-performance-trace.v0",
+          "spanCount": 3,
+          "lastSpan": {
+            "label": "static table cache worker rehydrate",
+            "startMs": 7800.400000035763,
+            "endMs": 7800.400000035763,
+            "durationMs": 0,
+            "backend": "cpu-worker-rebuild",
+            "hitCount": 5,
+            "restoredFamilies": "thermalMaterialTable,thermalClosureGraphSet,thermalPhaseResponseTable,opticalGpuTable,reactionTable",
+            "tableCount": 5,
+            "gpuWarmupCount": 1
+          }
+        },
+        "setParticlesTiming": {
+          "schema": "peercompute.ulg.sph-scene-set-particles-timing.v0",
+          "totalMs": 444.10000002384186,
+          "stageMs": {
+            "surfaceBatching": 1.899999976158142,
+            "cpuSurfaceMerge": 1.4000000357627869,
+            "thermalMaterialTable": 0,
+            "thermalClosureGraphs": 0,
+            "thermalPhaseResponse": 0,
+            "mechanicsMaterialTable": 1.5,
+            "reactionTable": 0,
+            "residentSurfaceBatches": 181.80000001192093,
+            "opticalState": 2.200000047683716,
+            "residentSurfaceTable": 2.799999952316284,
+            "surfaceApply": 53.80000001192093
+          },
+          "particleCount": 72,
+          "surfaceBatchCount": 2,
+          "cpuSurfaceBatchCount": 1,
+          "residentSurfaceBatchCount": 3,
+          "residentSurfaceTableCellCount": 272072,
+          "materialCount": 5,
+          "reactionCount": 0,
+          "thermalMaterialCount": 5,
+          "opticalRecordCount": 3,
+          "staticTableCacheStatus": "static-table-cache-bundle-hit",
+          "staticTableCacheFamilies": [
+            "thermalMaterialTable",
+            "thermalClosureGraphSet",
+            "thermalPhaseResponseTable",
+            "opticalGpuTable",
+            "reactionTable"
+          ],
+          "surfaceApplyTiming": {
+            "schema": "peercompute.ulg.sph-surface-apply-timing.v0",
+            "totalMs": 53.10000002384186,
+            "totals": {
+              "ensureSurfaceMs": 1.699999988079071,
+              "materialMs": 0.10000002384185791,
+              "resetMs": 1.5999999642372131,
+              "addBallMs": 3.599999964237213,
+              "updateMs": 45.5,
+              "hideInactiveMs": 0
+            },
+            "details": [
+              {
+                "surfaceKey": "h2o|h2o|liquid",
+                "material": "h2o",
+                "renderKey": "h2o",
+                "phase": "liquid",
+                "particleCount": 72,
+                "resolution": 32,
+                "maxPolyCount": 48000,
+                "opticalSource": "optical-gpu-table-row",
+                "opticalSurfaceVisibility": "non-vapor-surface",
+                "ensureSurfaceMs": 1.699999988079071,
+                "materialMs": 0.10000002384185791,
+                "resetMs": 1.5999999642372131,
+                "addBallMs": 3.599999964237213,
+                "updateMs": 45.5,
+                "requestedSurfaceRadiusM": 0.30937499999999996,
+                "cpuMarchingCubesRadiusFloorM": 0.11520737327188939,
+                "cpuMarchingCubesCellSizeM": 0.23041474654377878,
+                "cpuMarchingCubesRadiusFloorApplied": false,
+                "surfaceBoxClipStatus": "clipped-to-container",
+                "surfaceBoxClipVertexCount": 552
+              }
+            ],
+            "surfaceCount": 1,
+            "renderSource": "cpu-particles",
+            "scientificValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          },
+          "presentationRefresh": {
+            "schema": "peercompute.ulg.sph-scene-viewport-refresh-burst.v0",
+            "status": "viewport-refresh-burst-running",
+            "reason": "set-particles-cpu-surface-apply",
+            "requestedFrameCount": 2,
+            "completedFrameCount": 0,
+            "immediateRefresh": {
+              "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+              "status": "viewport-refresh-rendered",
+              "reason": "set-particles-cpu-surface-apply:immediate",
+              "width": 1280,
+              "height": 800,
+              "cssWidth": 1280,
+              "cssHeight": 800,
+              "pixelRatio": 1,
+              "resizeStatus": {
+                "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+                "status": "viewport-resized",
+                "reason": "set-particles-cpu-surface-apply:immediate",
+                "cssWidth": 1280,
+                "cssHeight": 800,
+                "backingWidth": 1280,
+                "backingHeight": 800,
+                "pixelRatio": 1,
+                "containerClientWidth": 1280,
+                "containerClientHeight": 800,
+                "containerRectWidth": 1280,
+                "containerRectHeight": 800,
+                "visualViewportWidth": 1280,
+                "visualViewportHeight": 800,
+                "updatedAtMs": 8050.900000035763,
+                "scientificValidation": false,
+                "sphValidation": false,
+                "fullPhysicsValidation": false
+              },
+              "overlayCanvasWidth": null,
+              "overlayCanvasHeight": null,
+              "updatedAtMs": 8247.300000011921,
+              "scientificValidation": false,
+              "sphValidation": false,
+              "fullPhysicsValidation": false
+            },
+            "lastRefresh": {
+              "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+              "status": "viewport-refresh-rendered",
+              "reason": "set-particles-cpu-surface-apply:immediate",
+              "width": 1280,
+              "height": 800,
+              "cssWidth": 1280,
+              "cssHeight": 800,
+              "pixelRatio": 1,
+              "resizeStatus": {
+                "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+                "status": "viewport-resized",
+                "reason": "set-particles-cpu-surface-apply:immediate",
+                "cssWidth": 1280,
+                "cssHeight": 800,
+                "backingWidth": 1280,
+                "backingHeight": 800,
+                "pixelRatio": 1,
+                "containerClientWidth": 1280,
+                "containerClientHeight": 800,
+                "containerRectWidth": 1280,
+                "containerRectHeight": 800,
+                "visualViewportWidth": 1280,
+                "visualViewportHeight": 800,
+                "updatedAtMs": 8050.900000035763,
+                "scientificValidation": false,
+                "sphValidation": false,
+                "fullPhysicsValidation": false
+              },
+              "overlayCanvasWidth": null,
+              "overlayCanvasHeight": null,
+              "updatedAtMs": 8247.300000011921,
+              "scientificValidation": false,
+              "sphValidation": false,
+              "fullPhysicsValidation": false
+            },
+            "updatedAtMs": 8247.300000011921,
+            "scientificValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          },
+          "scientificValidation": false,
+          "sphValidation": false,
+          "phaseChangeValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "surfaceApplyTiming": {
+          "schema": "peercompute.ulg.sph-surface-apply-timing.v0",
+          "totalMs": 53.10000002384186,
+          "totals": {
+            "ensureSurfaceMs": 1.699999988079071,
+            "materialMs": 0.10000002384185791,
+            "resetMs": 1.5999999642372131,
+            "addBallMs": 3.599999964237213,
+            "updateMs": 45.5,
+            "hideInactiveMs": 0
+          },
+          "details": [
+            {
+              "surfaceKey": "h2o|h2o|liquid",
+              "material": "h2o",
+              "renderKey": "h2o",
+              "phase": "liquid",
+              "particleCount": 72,
+              "resolution": 32,
+              "maxPolyCount": 48000,
+              "opticalSource": "optical-gpu-table-row",
+              "opticalSurfaceVisibility": "non-vapor-surface",
+              "ensureSurfaceMs": 1.699999988079071,
+              "materialMs": 0.10000002384185791,
+              "resetMs": 1.5999999642372131,
+              "addBallMs": 3.599999964237213,
+              "updateMs": 45.5,
+              "requestedSurfaceRadiusM": 0.30937499999999996,
+              "cpuMarchingCubesRadiusFloorM": 0.11520737327188939,
+              "cpuMarchingCubesCellSizeM": 0.23041474654377878,
+              "cpuMarchingCubesRadiusFloorApplied": false,
+              "surfaceBoxClipStatus": "clipped-to-container",
+              "surfaceBoxClipVertexCount": 552
+            }
+          ],
+          "surfaceCount": 1,
+          "renderSource": "cpu-particles",
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "rendererInit": {
+          "schema": "peercompute.ulg.sph-three-renderer-init.v0",
+          "status": "three-webgl-renderer-ready",
+          "reason": null,
+          "requestedRendererBackend": "webgpu",
+          "rendererBackend": "three-webgl",
+          "rendererReady": true,
+          "rendererIsWebGPU": false,
+          "rendererPresentationRequested": true,
+          "rendererPresentationEnabled": false,
+          "rendererPresentationBlocked": true,
+          "rendererPresentationBlockReason": "Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering",
+          "rendererBackendDeviceReady": false,
+          "rendererOwnedResidentDevicePolicy": {
+            "schema": "peercompute.ulg.sph-three-webgpu-renderer-owned-resident-device-policy.v0",
+            "status": "renderer-owned-resident-device-blocked-non-webgpu-renderer",
+            "reason": "renderer-owned resident GPUDevice requires Three WebGPU renderer",
+            "requested": false,
+            "rendererIsWebGPU": false,
+            "rendererPresentationEnabled": false,
+            "rendererBackendDeviceReady": false,
+            "rendererBackendBufferBindingAvailable": false,
+            "rendererOwnedDeviceAllowed": false
+          },
+          "requiredLimits": null,
+          "error": null,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "rendererFrame": {
+          "schema": "peercompute.ulg.sph-three-renderer-frame.v0",
+          "status": "renderer-frame-rendered",
+          "reason": "animation-frame",
+          "rendererInitStatus": "three-webgl-renderer-ready",
+          "rendererBackend": "three-webgl",
+          "updatedAtMs": 20423.5,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "viewportRefresh": {
+          "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+          "status": "viewport-refresh-rendered",
+          "reason": "set-particles-cpu-surface-apply:raf-2",
+          "width": 1280,
+          "height": 800,
+          "cssWidth": 1280,
+          "cssHeight": 800,
+          "pixelRatio": 1,
+          "resizeStatus": {
+            "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+            "status": "viewport-resized",
+            "reason": "set-particles-cpu-surface-apply:raf-2",
+            "cssWidth": 1280,
+            "cssHeight": 800,
+            "backingWidth": 1280,
+            "backingHeight": 800,
+            "pixelRatio": 1,
+            "containerClientWidth": 1280,
+            "containerClientHeight": 800,
+            "containerRectWidth": 1280,
+            "containerRectHeight": 800,
+            "visualViewportWidth": 1280,
+            "visualViewportHeight": 800,
+            "updatedAtMs": 10523.199999988079,
+            "scientificValidation": false,
+            "sphValidation": false,
+            "fullPhysicsValidation": false
+          },
+          "overlayCanvasWidth": null,
+          "overlayCanvasHeight": null,
+          "updatedAtMs": 10524.100000023842,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "viewportResize": {
+          "schema": "peercompute.ulg.sph-scene-viewport-resize.v0",
+          "status": "viewport-resized",
+          "reason": "set-particles-cpu-surface-apply:raf-2",
+          "cssWidth": 1280,
+          "cssHeight": 800,
+          "backingWidth": 1280,
+          "backingHeight": 800,
+          "pixelRatio": 1,
+          "containerClientWidth": 1280,
+          "containerClientHeight": 800,
+          "containerRectWidth": 1280,
+          "containerRectHeight": 800,
+          "visualViewportWidth": 1280,
+          "visualViewportHeight": 800,
+          "updatedAtMs": 10523.199999988079,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "fullPhysicsValidation": false
+        },
+        "frameCounters": {
+          "renderFrames": 0,
+          "physicsFrames": 0,
+          "residentFrames": 0,
+          "renderFps": 1.6700066800765898,
+          "physicsFps": 0,
+          "residentFps": 0,
+          "lastSampleMs": 20423.5
+        },
+        "statusText": "preflight        : preflight-feasible-derived-closures (feasible=true)\nfinal phase      : H2O liquid / H2O liquid\nheat to walls    : 30.38M J\nmasses (kg)      : H2O 118.11  H2O 944.87  air 95.19\nparticles        : H2O 72  total 72\nreaction         : same material on both blocks: no reaction\nmaterial phases  : h2o:liquid 1.06kkg\ngas pressure     : total=101.3kPa atm=1.000 vol=62.875m3 gauge=0.0Pa wallF=0.0N force=blocked-material-surface-normals-not-resolved air=101.3kPa\nsolid fractions  : H2O 0.000\ntotal energy     : 1.33e+9 J\nmomentum |p|     : 0.00 kg·m/s\nview state       : peercompute-worker-packed-state\nlaw groups       : mechanics=on gravity=on eos=on pressure=on thermal=on reactions=on viscosity=on surfaceTension=off\nresident auto    : disabled-by-url-residentAuto\nresident workers : enabled\nresident policy  : fuse-seq=on active-grid=on safety=default queue-fence=off\nresident backend : pending\nmls grid         : dims=pending nodes=pending dx=0.310m\nresident readback: requested=no-full-readback actual=pending\nresident motion  : status=resident-execution-pending max-dx=pendingm max-v=pendingm/s threshold=0.000310m batch-est=pendingm accumulated=0.000000m bursts=0 pressure-impulse=pendingN*s\nresident reaction: status=no-derived-reactions backend=pending reactions=0\nresident product : status=pending rows=0 unplaced=pendingkg eos=pending\nmaterial iface  : owner=pending source=pending status=pending ready=0/0 source-field=pending candidate-readback=false\nrender source    : cpu-particles status=pending backend=pending rows=0 field-cells=0 field-readback=false\nrender error     : none\nsurface draw     : status=pending policy=surface-draw-overlay-disabled-by-policy mode=disabled active=0 vertices=0 draw-retained=false indirect-retained=false compact-retained=false readback=false bridge=pending depth=pending depth-ready=false transparent=pending optics=pending records=0 spectra=0 swap=pending retained=false\nrender pressure  : source=cpu-particle-state optical-state=false\nrender cadence   : every=3 effective=3 forced=false reason=pending sequence=0 skipped=0 last-skipped=false\nresident profile : submissions=0 stale=0 substeps=16 target=16 step-ms=— render-ms=—\nresident stages  : pending\nscene sync       : total=444.1ms batch=1.9ms thermal=0.0ms react=0.0ms optical=2.2ms surface=53.8ms\nworker rebuild   : total=5.8kms demo=5.6kms view=10.9ms preflight=3.8ms materials=5 reactions=0 cache=derived-cache-miss\nfps              : render 1.7 physics 0.0 resident 0.0\nclosure cache    : lookup=empty hits=0 misses=7 stale=0 stored=5 consumed=false\ncold cache       : lookup=reaction-cache-miss storage=empty reactions=0 products=0 tables=0 table-read=static-table-cache-bundle-hit table-status=stored table-writes=5 gpu=0 gpu-writes=1\ncache clear      : idle\nperf trace       : spans=3 last=\"static table cache worker rehydrate\" 0.0ms\ncpu closure task : idle\nper-wall ledger  :\n  xMin sink 5.06MJ\n  xMax sink 5.06MJ\n  yMin sink 5.06MJ\n  yMax sink 5.06MJ\n  zMin sink 5.06MJ\n  zMax sink 5.06MJ\n\nvalidation       : scientific=false sph=false phase=false (worker view-state evidence-only)",
+        "warningText": "render fps 1.7 | physics fps 0.0 | resident fps 0.0 | sim t 0.000sHot loop is not fully GPU-resident yet."
+      },
+      {
+        "schema": "peercompute.ulg.sph-probe-browser-snapshot.v0",
+        "status": "snapshot-timeout",
+        "label": "probe-timeout",
+        "timeoutMs": 2000,
+        "elapsedMs": 2002
+      }
+    ],
+    "pageConsole": [
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[vite] connecting...",
+        "location": {
+          "url": "http://127.0.0.1:5255/@vite/client",
+          "lineNumber": 850,
+          "columnNumber": 8
+        },
+        "receivedAtMs": 1781819334056,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[vite] connected.",
+        "location": {
+          "url": "http://127.0.0.1:5255/@vite/client",
+          "lineNumber": 954,
+          "columnNumber": 11
+        },
+        "receivedAtMs": 1781819334072,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "warning",
+        "text": "[.WebGL-0x3f3c00156800]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+        "location": {
+          "url": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+          "lineNumber": 0,
+          "columnNumber": 0
+        },
+        "receivedAtMs": 1781819334767,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "warning",
+        "text": "[.WebGL-0x3f3c00156800]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+        "location": {
+          "url": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+          "lineNumber": 0,
+          "columnNumber": 0
+        },
+        "receivedAtMs": 1781819334833,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "warning",
+        "text": "[.WebGL-0x3f3c00156800]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+        "location": {
+          "url": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+          "lineNumber": 0,
+          "columnNumber": 0
+        },
+        "receivedAtMs": 1781819334876,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "warning",
+        "text": "[.WebGL-0x3f3c00156800]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)",
+        "location": {
+          "url": "http://127.0.0.1:5255/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=4&boxy=4&boxz=4&dropn=2&basen=3&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&residentActiveGrid=1",
+          "lineNumber": 0,
+          "columnNumber": 0
+        },
+        "receivedAtMs": 1781819334893,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] Initializing...",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 597,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335488,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] Node ID: 1781819335486-et7e8xzms",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 603,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335488,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] NetworkManager initialized",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 661,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335563,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[StateManager] Initialized",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/stateManager/StateManager.js",
+          "lineNumber": 379,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335569,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] StateManager initialized",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 687,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335569,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] ComputeManager initialized",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 710,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335575,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "log",
+        "text": "[NodeKernel] Initialization complete",
+        "location": {
+          "url": "http://127.0.0.1:5255/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+          "lineNumber": 713,
+          "columnNumber": 14
+        },
+        "receivedAtMs": 1781819335575,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-probe-progress] in-page-probe-entered-before-helpers",
+        "location": {
+          "url": null,
+          "lineNumber": 34,
+          "columnNumber": 16
+        },
+        "receivedAtMs": 1781819354797,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-probe-progress] in-page-probe-helpers-ready",
+        "location": {
+          "url": null,
+          "lineNumber": 34,
+          "columnNumber": 16
+        },
+        "receivedAtMs": 1781819354797,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-probe-progress] initial-render-state-started",
+        "location": {
+          "url": null,
+          "lineNumber": 34,
+          "columnNumber": 16
+        },
+        "receivedAtMs": 1781819355378,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819355384,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-device-ready stage=resident-render-refresh",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819355384,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-rows-started stage=render-rows",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819355384,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-rows-complete stage=render-rows",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356008,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-surface-table-ready stage=surface-table surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356010,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-field-started stage=render-field surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356010,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-field-complete stage=render-field surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356674,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] resident-render-surface-draw-diagnostic-started stage=surface-draw-diagnostic surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356674,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-draw-bridge-started stage=surface-draw-bridge surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356675,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-draw-vertices-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356675,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-kernel-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356677,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-source-buffers-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356677,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-source-buffers-ready stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356678,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-output-buffer-create-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356678,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-output-buffer-create-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356678,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-output-buffer-zero-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356678,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-output-buffer-zero-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-params-buffer-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-params-buffer-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-shader-module-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-shader-module-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-pipeline-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356683,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-pipeline-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356684,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-bind-group-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356684,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-bind-group-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356684,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-command-encode-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356684,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-command-encode-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356685,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-queue-submit-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356685,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-queue-submit-complete stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356685,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      },
+      {
+        "kind": "console",
+        "type": "debug",
+        "text": "[sph-render-progress] surface-vertices-full-readback-started stage=surface-vertices surfaces=3 cells=1536",
+        "location": {
+          "url": "http://127.0.0.1:5255/src/visualization/sphPhaseScene.js",
+          "lineNumber": 9705,
+          "columnNumber": 19
+        },
+        "receivedAtMs": 1781819356685,
+        "issue": null,
+        "warning": null,
+        "severity": null
+      }
+    ],
+    "visualFrameCapture": {
+      "enabled": true,
+      "frameEveryBatches": 1,
+      "maxFrames": 3,
+      "frameCount": 1,
+      "compositedPageCapture": false,
+      "artifactStatus": "ready",
+      "frameDir": "/home/cos/projects/ulg/artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-3-frames",
+      "writtenFrameCount": 0
+    },
+    "visualFrames": [
+      {
+        "schema": "peercompute.ulg.sph-probe-visual-frame.v0",
+        "status": "capture-error",
+        "index": 0,
+        "batchIndex": 1,
+        "phase": "post-probe-composited-page",
+        "sampleIndex": 0,
+        "width": null,
+        "height": null,
+        "capturedAtMs": 1781819646993,
+        "reason": null,
+        "error": "page.evaluate: Target page, context or browser has been closed",
+        "path": null,
+        "byteLength": 0
+      }
+    ],
+    "errors": [
+      {
+        "batchIndex": null,
+        "message": "browser probe timed out after 180000ms"
+      }
+    ],
+    "metrics": [],
+    "scientificValidation": false,
+    "sphValidation": false,
+    "phaseChangeValidation": false,
+    "fullPhysicsValidation": false,
+    "pageErrors": [],
+    "browserConsole": {
+      "schema": "peercompute.ulg.sph-browser-console-summary.v0",
+      "entryCount": 46,
+      "retainedEntryCount": 46,
+      "droppedEntryCount": 0,
+      "issueCount": 0,
+      "retainedIssueCount": 0,
+      "droppedIssueCount": 0,
+      "pageErrorCount": 0,
+      "issueCounts": {},
+      "warningCounts": {},
+      "issueTypes": [],
+      "warningTypes": []
+    },
+    "browserConsoleIssues": []
+  },
+  "analysis": {
+    "schema": "peercompute.ulg.sph-history-long-horizon-analysis.v0",
+    "status": "bad",
+    "probeMode": "scene",
+    "expectStatic": false,
+    "staticMaxDisplacementM": 0.000001,
+    "staticMaxCenterOfMassDeltaM": 0.000001,
+    "expectLiquidMerge": false,
+    "expectLiquidSettled": false,
+    "expectLiquidFreeSurface": false,
+    "liquidMergeMaxFinalSupportGapM": 0.005,
+    "liquidSettledMinTimeS": 1,
+    "liquidSettledMaxFinalDropSpeedMPerS": 0.25,
+    "liquidFreeSurfaceMinTimeS": 0.25,
+    "liquidFreeSurfaceMaxTallnessRatio": 0.75,
+    "liquidFreeSurfaceMinFootprintFillRatio": 0.15,
+    "liquidFreeSurfaceMaxHeightM": null,
+    "expectedH2oVisibleSurfaceCount": null,
+    "expectedMaterialPresent": [],
+    "expectedMaterialAbsent": [],
+    "minReactionEventsTotal": null,
+    "minVisualFrameTimeSpanS": null,
+    "visualOnly": true,
+    "visibleBoundsToleranceM": 0.05,
+    "particleBoundsToleranceM": 0.2,
+    "issues": [
+      "probe-status:blocked",
+      "no-visible-surface-samples",
+      "no-visible-h2o-surface-samples"
+    ],
+    "browserConsoleIssueCounts": {},
+    "browserConsoleWarningCounts": {},
+    "browserConsoleIssueCount": 0,
+    "browserConsoleWarningCount": 0,
+    "initialPreflightStatus": null,
+    "initialPreflightBlockers": [],
+    "maxSpeedObservedMPerS": null,
+    "maxDisplacementObservedM": null,
+    "motionMaxSpeedObservedMPerS": null,
+    "motionMaxDisplacementObservedM": null,
+    "motionSpeedEvidenceSource": null,
+    "motionDisplacementEvidenceSource": null,
+    "compactSummaryDisabled": true,
+    "renderRowMotionEvidenceAvailable": false,
+    "renderRowMotionSampleCount": 0,
+    "renderRowMaxCenterDisplacementM": null,
+    "renderRowMaxBoundsCenterDisplacementM": null,
+    "renderRowMaxBoundsExtentDeltaM": null,
+    "renderRowMaxDisplacementM": null,
+    "renderRowEstimatedMaxCenterSpeedMPerS": null,
+    "renderRowEstimatedMaxBoundsCenterSpeedMPerS": null,
+    "renderRowEstimatedMaxBoundsExtentRateMPerS": null,
+    "renderRowEstimatedMaxSpeedMPerS": null,
+    "minActiveGridNodeCount": null,
+    "minVolumeObservedJ": null,
+    "maxVolumeObservedJ": null,
+    "maxPressureImpulseNSeconds": null,
+    "maxNextTimeS": null,
+    "firstNextCenterOfMassYM": null,
+    "lastNextCenterOfMassYM": null,
+    "nextCenterOfMassYDeltaM": null,
+    "minNextPositionBoundsYM": null,
+    "maxNextPositionBoundsYM": null,
+    "cohortDiagnosticsAvailableCount": 0,
+    "firstDropCenterOfMassYM": null,
+    "lastDropCenterOfMassYM": null,
+    "dropCenterOfMassYDeltaM": null,
+    "firstDropBaseGapM": null,
+    "lastDropBaseGapM": null,
+    "dropBaseGapDeltaM": null,
+    "firstDropBaseSupportGapM": null,
+    "lastDropBaseSupportGapM": null,
+    "dropBaseSupportGapDeltaM": null,
+    "initialCenterGapYM": null,
+    "initialSupportGapYM": null,
+    "centerToSupportGapOffsetYM": null,
+    "minDropPositionBoundsYM": null,
+    "maxDropPositionBoundsYM": null,
+    "firstDropMaxSpeedMPerS": null,
+    "lastDropMaxSpeedMPerS": null,
+    "maxDropSpeedMPerS": null,
+    "firstH2oVisibleSurfaceCount": null,
+    "lastH2oVisibleSurfaceCount": null,
+    "finalParticlesByMaterial": null,
+    "maxReactionEventsTotal": null,
+    "visualFrameTimesS": [],
+    "visualFrameTimeSpanS": null,
+    "meanBatchMs": null,
+    "maxBatchMs": null,
+    "meanCompactSummaryMs": null,
+    "maxCompactSummaryMs": null,
+    "meanCompactSummaryMapAsyncMs": null,
+    "maxCompactSummaryMapAsyncMs": null,
+    "compactSummaryMeanBatchShare": null,
+    "compactSummaryMapAsyncMeanBatchShare": null,
+    "visualSurfaceIssues": [],
+    "maxVisibleSurfaceOutsideM": 0,
+    "maxVisibleSurfaceOutsideParticleBoundsM": 0,
+    "maxVisibleSurfaceComponentCount": 0,
+    "maxVisibleSurfaceSmallComponentCount": 0,
+    "minVisibleSurfaceLargestComponentRatio": null,
+    "maxH2oLiquidSurfaceHeightM": null,
+    "maxH2oLiquidSurfaceTallnessRatio": null,
+    "minH2oLiquidSurfaceFootprintFillRatio": null,
+    "lastH2oLiquidSurfaceHeightM": null,
+    "lastH2oLiquidSurfaceTallnessRatio": null,
+    "lastH2oLiquidSurfaceFootprintFillRatio": null,
+    "visibleSurfaceSampleCount": 0,
+    "h2oVisibleSurfaceSampleCount": 0,
+    "residentOverlayVisibleSampleCount": 0
+  }
+}

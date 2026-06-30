@@ -1,0 +1,2604 @@
+{
+  "result": {
+    "ok": true,
+    "elapsedMs": 120.29999995231628,
+    "execution": {
+      "schema": "peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0",
+      "status": "resident-steps-executed",
+      "backend": "webgpu",
+      "completedStepCount": 16,
+      "readbackMode": "no-full-readback",
+      "finalStep": {
+        "status": "resident-step-webgpu-executed",
+        "backend": "webgpu",
+        "readbackMode": "no-full-readback",
+        "queue": null,
+        "normalHotLoopReadbackFree": true,
+        "activeGridCellCount": null,
+        "diagnostics": {
+          "particleCount": 128,
+          "gridNodeCount": 27000,
+          "activeGridNodeCount": null,
+          "sourceMassKg": null,
+          "nextMassKg": null,
+          "massDeltaKg": null,
+          "sourceMomentumKgMPerS": null,
+          "nextMomentumKgMPerS": null,
+          "momentumDeltaKgMPerS": null,
+          "sourceCenterOfMassM": null,
+          "nextCenterOfMassM": null,
+          "centerOfMassDeltaM": null,
+          "sourcePositionBoundsM": null,
+          "nextPositionBoundsM": null,
+          "maxSpeedMPerS": null,
+          "maxDisplacementM": null,
+          "minVolumeRatioJ": null,
+          "maxVolumeRatioJ": null,
+          "phaseMassKg": null,
+          "temperatureMassWeightedMeanK": null,
+          "minTemperatureK": null,
+          "maxTemperatureK": null,
+          "thermalReadyCount": null,
+          "thermalProblemCount": null,
+          "finiteTemperatureCount": null,
+          "phaseMassTotalKg": null,
+          "thermalPhaseSummaryAvailable": false,
+          "thermalSummaryStatus": null,
+          "readbackMode": "no-full-readback",
+          "compactGpuSummaryAvailable": false,
+          "compactGpuSummaryStatus": "not-run",
+          "compactGpuSummaryReason": null,
+          "compactSummaryScope": null,
+          "activeGridNodeCountAvailable": null,
+          "activeGridNodeSummaryStatus": null,
+          "gridNodeScanCount": null,
+          "gridNodeScanSkipped": false,
+          "compactSummaryTiming": null,
+          "compactSummaryMapAsyncWaitMs": null,
+          "compactSummaryQueueFenceAttribution": null,
+          "pressureInterfaceForceSolverSchema": null,
+          "pressureInterfaceForceSolverStatus": null,
+          "pressureInterfaceForceCouplingStatus": "pressure-interface-grid-force-rows-unavailable",
+          "pressureInterfaceForceApplicationStatus": "blocked-pressure-force-rows-unavailable",
+          "pressureInterfaceGridForceAdmissionSchema": null,
+          "pressureInterfaceGridForceAdmissionStatus": null,
+          "pressureInterfaceGridForceAdmissionApproved": false,
+          "pressureInterfaceGridForceAdmissionDescriptorStatus": null,
+          "pressureInterfaceGridForceAdmissionSourceHotBufferKey": null,
+          "pressureInterfaceForceRowCount": 0,
+          "pressureInterfaceAppliedImpulseNSeconds": [
+            0,
+            0,
+            0
+          ],
+          "pressureInterfaceAppliedImpulseMagnitudeNSeconds": 0,
+          "pressureInterfaceAppliedImpulseSource": "no-pressure-interface-force-rows",
+          "pressureInterfaceImpulseProofStatus": "not-submitted-no-pressure-interface-force-rows",
+          "pressureInterfaceForceConsumerStatus": "blocked-pressure-force-rows-unavailable",
+          "reactionSummaryAvailable": false,
+          "reactionSummaryStatus": "not-required",
+          "reactionSummaryReadbackMode": null,
+          "reactionSummaryReadbackByteLength": 0,
+          "reactionSummaryReductionStrategy": null,
+          "reactionVisibleProductMassKg": null,
+          "reactionVisibleGasProductMassKg": null,
+          "reactionOutputGasPhaseMassKg": null,
+          "reactionChangedMaterialCount": null,
+          "reactionChangedMassCount": null,
+          "reactionCanonicalEventCount": null,
+          "reactionConsumedReactantMassKg": null,
+          "reactionExpectedProductMassKg": null,
+          "reactionRawProductMassKg": null,
+          "reactionLedgerVisibleProductMassKg": null,
+          "reactionLedgerUnplacedProductMassKg": null,
+          "reactionLedgerGasProductMassKg": null,
+          "reactionLedgerVisibleGasProductMassKg": null,
+          "reactionLedgerUnplacedGasProductMassKg": null,
+          "reactionSealedBoxGasProductMoles": null,
+          "reactionHeatJ": null,
+          "reactionLedgerMassResidualKg": null,
+          "reactionLedgerReadyEventCount": null,
+          "reactionLedgerProblemEventCount": null,
+          "reactionProposalMutualPairCount": null,
+          "reactionCompactLedgerAvailable": false,
+          "reactionProductInventoryCount": 0,
+          "reactionProductInventoryReadbackByteLength": 0,
+          "reactionProductEventRowCount": 0,
+          "reactionProductEventActiveEventCount": 0,
+          "reactionProductEventReadbackByteLength": 0,
+          "reactionProductEventBufferByteLength": 0,
+          "reactionProductEventBufferRetained": false,
+          "reactionResidentProductMassStatus": null,
+          "reactionResidentProductMassBufferRetained": false,
+          "reactionResidentProductMassBufferByteLength": 0,
+          "reactionResidentProductMassProductEventRowCount": 0,
+          "reactionResidentProductMassUnplacedProductMassKg": null,
+          "reactionResidentProductMassUnplacedGasProductMassKg": null,
+          "reactionResidentProductMassEosCouplingStatus": null,
+          "reactionProductInventory": null,
+          "reactionAtomResidualCount": 0,
+          "reactionAtomResidualReadbackByteLength": 0,
+          "reactionAtomResidualSummary": null,
+          "reactionStrictGateStatus": null,
+          "reactionStrictGateBlockers": [],
+          "reactionStrictGate": null,
+          "reactionGasSpeciesLedgerCount": 0,
+          "reactionGasSpeciesReadbackByteLength": 0,
+          "reactionGasSpeciesLedger": null,
+          "reactionSummaryVisibleOnly": null,
+          "reactionSummaryUnplacedProductInventoryIncluded": null,
+          "scientificValidation": false,
+          "sphValidation": false,
+          "phaseChangeValidation": false,
+          "fullPhysicsValidation": false,
+          "internalPressureScale": 1,
+          "residentAuthorityLedgerStatus": "resident-authority-ledger-ready",
+          "residentAuthorityFamilyCount": 7,
+          "residentAuthorityWarnings": [
+            "cpu-mirrors-stale-unless-admitted-readback",
+            "render-stage-must-not-create-pressure-physics"
+          ],
+          "residentAuthorityBlockers": [],
+          "residentAuthorityParticleOwner": "thermal-phase-step",
+          "residentAuthorityMechanicsOwner": "mechanics-constitutive-refresh",
+          "residentAuthorityThermoOwner": "thermal-phase-step",
+          "thermalMechanicsRefreshStatus": "mechanics-constitutive-refreshed-after-thermal-state",
+          "residentBufferLeaseLedgerStatus": "resident-buffer-lease-ledger-empty",
+          "residentBufferLeaseResourceCount": 0,
+          "residentBufferLeaseActiveLeaseCount": 0,
+          "residentBufferLeaseWarnings": [],
+          "residentBufferLeaseBlockers": []
+        },
+        "compactGpuSummary": null,
+        "p2gQueue": null,
+        "gridQueue": "queue-submitted-cleanup-deferred",
+        "g2pQueue": null
+      },
+      "gpuFence": null,
+      "stepSummaries": [
+        {
+          "backend": "webgpu",
+          "status": "resident-step-webgpu-executed",
+          "readbackMode": "no-full-readback"
+        },
+        {
+          "backend": "webgpu",
+          "status": "resident-step-webgpu-executed",
+          "readbackMode": "no-full-readback"
+        },
+        {
+          "backend": "webgpu",
+          "status": "resident-step-webgpu-executed",
+          "readbackMode": "no-full-readback"
+        },
+        {
+          "backend": "webgpu",
+          "status": "resident-step-webgpu-executed",
+          "readbackMode": "no-full-readback"
+        }
+      ]
+    }
+  },
+  "consoleEntries": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting...",
+      "location": {
+        "url": "https://127.0.0.1:5173/@vite/client",
+        "line": 850,
+        "column": 8,
+        "lineNumber": 850,
+        "columnNumber": 8
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected.",
+      "location": {
+        "url": "https://127.0.0.1:5173/@vite/client",
+        "line": 954,
+        "column": 11,
+        "lineNumber": 954,
+        "columnNumber": 11
+      }
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x25740015bc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "location": {
+        "url": "https://127.0.0.1:5173/#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&residentActiveGrid=1",
+        "line": 0,
+        "column": 0,
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "warning",
+      "text": "This site does not have a valid SSL certificate! Without SSL, your site's and visitors' data is vulnerable to theft and tampering. Get a valid SSL certificate before  releasing your website to the public.",
+      "location": {
+        "url": "https://127.0.0.1:5173/#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&residentActiveGrid=1",
+        "line": 0,
+        "column": 0,
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x25740015bc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "location": {
+        "url": "https://127.0.0.1:5173/#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&residentActiveGrid=1",
+        "line": 0,
+        "column": 0,
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x25740015bc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "location": {
+        "url": "https://127.0.0.1:5173/#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&residentActiveGrid=1",
+        "line": 0,
+        "column": 0,
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x25740015bc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)",
+      "location": {
+        "url": "https://127.0.0.1:5173/#wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=0&blob=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&residentActiveGrid=1",
+        "line": 0,
+        "column": 0,
+        "lineNumber": 0,
+        "columnNumber": 0
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initializing...",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 597,
+        "column": 14,
+        "lineNumber": 597,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Node ID: 1781787332339-6nuubrrr7",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 603,
+        "column": 14,
+        "lineNumber": 603,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] NetworkManager initialized",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 661,
+        "column": 14,
+        "lineNumber": 661,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[StateManager] Initialized",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/stateManager/StateManager.js?t=1781454609677",
+        "line": 379,
+        "column": 14,
+        "lineNumber": 379,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] StateManager initialized",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 687,
+        "column": 14,
+        "lineNumber": 687,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] ComputeManager initialized",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 710,
+        "column": 14,
+        "lineNumber": 710,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "log",
+      "text": "[NodeKernel] Initialization complete",
+      "location": {
+        "url": "https://127.0.0.1:5173/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js?import",
+        "line": 713,
+        "column": 14,
+        "lineNumber": 713,
+        "columnNumber": 14
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-submitted",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-requesting-device",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-device-ready",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-sph-upload-ready",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-mls-upload-ready",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-thermal-upload-ready",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-borrowing-pressure-rows",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-running-kernels",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-started",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=0",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=0",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=1",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=1",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=2",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=2 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=2 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=2 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=2 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=2 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=2 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=2 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=2 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=2 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=2 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=2",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=3",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=3 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=3 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=3 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=3 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=3 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=3 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=3 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=3 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=3 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=3 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=3",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=4",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=4 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=4 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=4 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=4 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=4 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=4 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=4 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=4 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=4 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=4 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=4",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=5",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=5 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=5 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=5 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=5 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=5 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=5 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=5 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=5 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=5 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=5 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=5",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=6",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=6 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=6 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=6 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=6 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=6 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=6 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=6 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=6 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=6 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=6 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=6",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=7",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=7 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=7 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=7 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=7 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=7 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=7 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=7 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=7 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=7 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=7 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=7",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=8",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=8 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=8 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=8 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=8 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=8 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=8 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=8 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=8 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=8 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=8 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=8",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=9",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=9 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=9 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=9 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=9 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=9 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=9 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=9 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=9 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=9 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=9 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=9",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=10",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=10 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=10 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=10 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=10 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=10 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=10 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=10 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=10 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=10 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=10 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=10",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=11",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=11 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=11 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=11",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=12",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=12 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=12 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=12",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=13",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=13 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=13 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=13",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=14",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=14 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=14 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=14",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=15",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=deviceAcquire",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=fusedMechanics",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=thermalStep",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=mechanicsRefresh",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=15 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=15 stage=residentStepEnvelope",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=15",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-complete",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-kernels-complete",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-publishing-artifacts",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-published",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-complete",
+      "location": {
+        "url": "https://127.0.0.1:5173/src/visualization/sphPhaseScene.js?t=1781785286780",
+        "line": 6682,
+        "column": 21,
+        "lineNumber": 6682,
+        "columnNumber": 21
+      }
+    }
+  ]
+}

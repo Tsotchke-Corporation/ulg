@@ -1,0 +1,450 @@
+{
+  "schema": "peercompute.ulg.sph-performance-benchmark.v0",
+  "status": "complete",
+  "profile": "smoke",
+  "repoDir": "/home/cos/projects/ulg",
+  "generatedAt": "2026-06-18T08:20:10.588Z",
+  "batches": 3,
+  "batchSteps": 4,
+  "probeMode": "direct-resident",
+  "compactSummaryMode": "none",
+  "lawGroups": {
+    "mechanics": true,
+    "gravity": true,
+    "eos": true,
+    "pressure": true,
+    "thermal": false,
+    "reactions": true,
+    "viscosity": true,
+    "surfaceTension": false
+  },
+  "page": {
+    "schema": "peercompute.ulg.sph-performance-benchmark-page.v0",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "deviceScaleFactor": null,
+    "isMobile": false,
+    "hasTouch": false
+  },
+  "surfaceDrawMode": "three-render-row-points",
+  "fusedResidentMechanicsSequence": true,
+  "fusedResidentMechanicsActiveGrid": true,
+  "fusedActiveGridSafetyCells": null,
+  "measureGpuQueueFence": true,
+  "scenarios": [
+    {
+      "schema": "peercompute.ulg.sph-performance-benchmark-scenario.v0",
+      "targetParticleCount": 10000,
+      "actualParticleCount": 9826,
+      "latticeEdgePerCohort": 17,
+      "status": "good",
+      "probeStatus": "bad",
+      "probeMode": "direct-resident",
+      "probeIssues": [
+        "missing-max-speed",
+        "no-positive-displacement"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "scenarioUrl": "/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=17&basen=17&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&lawt=0&lawr=1&lawv=1&lawst=0&visualCapture=1&surfaceDraw=three-render-row-points&blob=1",
+      "batches": 3,
+      "batchSteps": 4,
+      "completedStepCount": 4,
+      "meanBatchMs": 352.3333333333333,
+      "maxBatchMs": 780.5,
+      "physicsStepsPerSecond": 7.132667615263109,
+      "probeWallStepsPerSecond": 11.352885525070956,
+      "residentStageMs": 140.20000004768372,
+      "residentGpuQueueFenceMs": 139.10000002384186,
+      "residentGpuCompletedStageMs": 140.20000004768372,
+      "residentStageStepsPerSecond": 7.132667615263109,
+      "residentStageTiming": {
+        "totalMs": 140.20000004768372,
+        "stageMs": {
+          "deviceAcquire": 0,
+          "fusedMechanicsSequence": 1,
+          "p2gGridProjection": 0,
+          "gridUpdate": 0,
+          "g2pReconstruction": 0,
+          "thermalStep": 0,
+          "reactionStep": 0,
+          "mechanicsRefresh": 0,
+          "compactSummary": 0
+        },
+        "queueFenceMs": {
+          "compactSummaryMapAsync": null,
+          "fusedMechanicsSequence": 139.10000002384186
+        },
+        "queueFenceStatus": {
+          "fusedMechanicsSequence": "complete"
+        },
+        "queueFenceMethod": {
+          "fusedMechanicsSequence": "queue.onSubmittedWorkDone"
+        },
+        "compactSummaryTiming": null,
+        "requestedReadbackMode": "no-full-readback",
+        "compactSummaryRequested": false,
+        "compactSummaryScope": "particle-visual",
+        "fusedResidentMechanics": null,
+        "fusedResidentSequence": true,
+        "fusedResidentSequenceStepCount": 4,
+        "activeGridDispatch": {
+          "schema": "peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0",
+          "status": "active-grid-dispatch-ready",
+          "requested": true,
+          "useActiveGrid": true,
+          "fullGridNodeCount": 54872,
+          "activeNodeCount": 19343,
+          "activeGridRatio": 0.35251129902318123,
+          "activeStart": [
+            4,
+            0,
+            4
+          ],
+          "activeCount": [
+            29,
+            23,
+            29
+          ],
+          "activeEnd": [
+            32,
+            22,
+            32
+          ],
+          "gridDims": [
+            38,
+            38,
+            38
+          ],
+          "safetyCells": 3,
+          "boundsSource": "resident-position-bounds",
+          "sourcePositionBoundsM": {
+            "status": "resident-active-grid-predicted-bounds",
+            "min": [
+              1.129411792755127,
+              -0.8706274617845502,
+              1.129411792755127
+            ],
+            "max": [
+              3.8705882072448734,
+              2.385333330222436,
+              3.8705882072448734
+            ],
+            "massKg": 1062.9748083986342
+          },
+          "predictedExpansionM": [
+            0.44999999999999996,
+            0.45001961329999995,
+            0.44999999999999996
+          ],
+          "maxSpeedMPerS": 0,
+          "horizonS": 0.002
+        },
+        "thermalRequested": false,
+        "mechanicsRefreshRequested": false,
+        "reactionRequested": false
+      },
+      "residentStepsStatus": "resident-steps-executed",
+      "residentStepStatus": "resident-step-webgpu-executed",
+      "fusedResidentMechanics": null,
+      "fusedResidentSequence": true,
+      "fusedResidentSequenceStepCount": 4,
+      "fusedResidentSequenceRequested": true,
+      "fusedResidentActiveGridRequested": true,
+      "gridNodeCount": 54872,
+      "activeGridNodeCount": null,
+      "activeGridNodeCountAvailable": null,
+      "activeGridDispatch": {
+        "schema": "peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0",
+        "status": "active-grid-dispatch-ready",
+        "requested": true,
+        "useActiveGrid": true,
+        "fullGridNodeCount": 54872,
+        "activeNodeCount": 19343,
+        "activeGridRatio": 0.35251129902318123,
+        "activeStart": [
+          4,
+          0,
+          4
+        ],
+        "activeCount": [
+          29,
+          23,
+          29
+        ],
+        "activeEnd": [
+          32,
+          22,
+          32
+        ],
+        "gridDims": [
+          38,
+          38,
+          38
+        ],
+        "safetyCells": 3,
+        "boundsSource": "resident-position-bounds",
+        "sourcePositionBoundsM": {
+          "status": "resident-active-grid-predicted-bounds",
+          "min": [
+            1.129411792755127,
+            -0.8706274617845502,
+            1.129411792755127
+          ],
+          "max": [
+            3.8705882072448734,
+            2.385333330222436,
+            3.8705882072448734
+          ],
+          "massKg": 1062.9748083986342
+        },
+        "predictedExpansionM": [
+          0.44999999999999996,
+          0.45001961329999995,
+          0.44999999999999996
+        ],
+        "maxSpeedMPerS": 0,
+        "horizonS": 0.002
+      },
+      "visualRefreshHzEstimate": 2.838221381267739,
+      "compactSummaryMeanBatchShare": 0,
+      "browserConsoleIssueCount": 0,
+      "browserConsoleIssueCounts": {},
+      "browserConsoleWarningCounts": {},
+      "surfaceDrawStatus": null,
+      "surfaceDrawBridge": null,
+      "surfaceDrawSource": null,
+      "surfaceDrawReadback": null,
+      "renderRowsReadback": null,
+      "renderRowsReadbackMode": null,
+      "renderRowsReadbackByteLength": null,
+      "surfaceDrawSummaryReadback": null,
+      "surfaceDrawSummaryReadbackByteLength": null,
+      "surfaceDrawRowsBufferByteLength": null,
+      "surfaceDrawIndirectRowsBufferByteLength": null,
+      "surfaceDrawCompactedVertexRowsBufferByteLength": null,
+      "estimatedReadbackBytesPerBatch": null,
+      "estimatedReadbackBytesPerStep": null,
+      "copyBudget": {
+        "schema": "peercompute.ulg.sph-performance-benchmark-copy-budget.v0",
+        "renderRowsReadbackByteLength": null,
+        "surfaceDrawSummaryReadbackByteLength": null,
+        "estimatedReadbackBytesPerBatch": null,
+        "estimatedReadbackBytesPerStep": null
+      },
+      "surfaceDrawVertexCount": null,
+      "surfaceDrawTriangleCount": null,
+      "surfaceDrawThreeMeshCount": null,
+      "surfaceDrawThreeGeometryByteLength": null,
+      "stderrTail": ""
+    },
+    {
+      "schema": "peercompute.ulg.sph-performance-benchmark-scenario.v0",
+      "targetParticleCount": 50000,
+      "actualParticleCount": 48778,
+      "latticeEdgePerCohort": 29,
+      "status": "good",
+      "probeStatus": "bad",
+      "probeMode": "direct-resident",
+      "probeIssues": [
+        "missing-max-speed",
+        "no-positive-displacement"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "scenarioUrl": "/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=29&basen=29&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&lawt=0&lawr=1&lawv=1&lawst=0&visualCapture=1&surfaceDraw=three-render-row-points&blob=1",
+      "batches": 3,
+      "batchSteps": 4,
+      "completedStepCount": 4,
+      "meanBatchMs": 794.2666666706403,
+      "maxBatchMs": 1233.8999999761581,
+      "physicsStepsPerSecond": 1.7232465967295723,
+      "probeWallStepsPerSecond": 5.036091992588537,
+      "residentStageMs": 580.2999999523163,
+      "residentGpuQueueFenceMs": 579.8000000119209,
+      "residentGpuCompletedStageMs": 580.2999999523163,
+      "residentStageStepsPerSecond": 1.7232465967295723,
+      "residentStageTiming": {
+        "totalMs": 580.2999999523163,
+        "stageMs": {
+          "deviceAcquire": 0,
+          "fusedMechanicsSequence": 0.3999999761581421,
+          "p2gGridProjection": 0,
+          "gridUpdate": 0,
+          "g2pReconstruction": 0,
+          "thermalStep": 0,
+          "reactionStep": 0,
+          "mechanicsRefresh": 0,
+          "compactSummary": 0
+        },
+        "queueFenceMs": {
+          "compactSummaryMapAsync": null,
+          "fusedMechanicsSequence": 579.8000000119209
+        },
+        "queueFenceStatus": {
+          "fusedMechanicsSequence": "complete"
+        },
+        "queueFenceMethod": {
+          "fusedMechanicsSequence": "queue.onSubmittedWorkDone"
+        },
+        "compactSummaryTiming": null,
+        "requestedReadbackMode": "no-full-readback",
+        "compactSummaryRequested": false,
+        "compactSummaryScope": "particle-visual",
+        "fusedResidentMechanics": null,
+        "fusedResidentSequence": true,
+        "fusedResidentSequenceStepCount": 4,
+        "activeGridDispatch": {
+          "schema": "peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0",
+          "status": "active-grid-dispatch-ready",
+          "requested": true,
+          "useActiveGrid": true,
+          "fullGridNodeCount": 54872,
+          "activeNodeCount": 20700,
+          "activeGridRatio": 0.3772415804053069,
+          "activeStart": [
+            3,
+            0,
+            3
+          ],
+          "activeCount": [
+            30,
+            23,
+            30
+          ],
+          "activeEnd": [
+            32,
+            22,
+            32
+          ],
+          "gridDims": [
+            38,
+            38,
+            38
+          ],
+          "safetyCells": 3,
+          "boundsSource": "resident-position-bounds",
+          "sourcePositionBoundsM": {
+            "status": "resident-active-grid-predicted-bounds",
+            "min": [
+              1.1172414779663087,
+              -0.8827978473538842,
+              1.1172414779663087
+            ],
+            "max": [
+              3.8827585220336918,
+              2.3914184876168454,
+              3.8827585220336918
+            ],
+            "massKg": 1062.9747265912592
+          },
+          "predictedExpansionM": [
+            0.44999999999999996,
+            0.45001961329999995,
+            0.44999999999999996
+          ],
+          "maxSpeedMPerS": 0,
+          "horizonS": 0.002
+        },
+        "thermalRequested": false,
+        "mechanicsRefreshRequested": false,
+        "reactionRequested": false
+      },
+      "residentStepsStatus": "resident-steps-executed",
+      "residentStepStatus": "resident-step-webgpu-executed",
+      "fusedResidentMechanics": null,
+      "fusedResidentSequence": true,
+      "fusedResidentSequenceStepCount": 4,
+      "fusedResidentSequenceRequested": true,
+      "fusedResidentActiveGridRequested": true,
+      "gridNodeCount": 54872,
+      "activeGridNodeCount": null,
+      "activeGridNodeCountAvailable": null,
+      "activeGridDispatch": {
+        "schema": "peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0",
+        "status": "active-grid-dispatch-ready",
+        "requested": true,
+        "useActiveGrid": true,
+        "fullGridNodeCount": 54872,
+        "activeNodeCount": 20700,
+        "activeGridRatio": 0.3772415804053069,
+        "activeStart": [
+          3,
+          0,
+          3
+        ],
+        "activeCount": [
+          30,
+          23,
+          30
+        ],
+        "activeEnd": [
+          32,
+          22,
+          32
+        ],
+        "gridDims": [
+          38,
+          38,
+          38
+        ],
+        "safetyCells": 3,
+        "boundsSource": "resident-position-bounds",
+        "sourcePositionBoundsM": {
+          "status": "resident-active-grid-predicted-bounds",
+          "min": [
+            1.1172414779663087,
+            -0.8827978473538842,
+            1.1172414779663087
+          ],
+          "max": [
+            3.8827585220336918,
+            2.3914184876168454,
+            3.8827585220336918
+          ],
+          "massKg": 1062.9747265912592
+        },
+        "predictedExpansionM": [
+          0.44999999999999996,
+          0.45001961329999995,
+          0.44999999999999996
+        ],
+        "maxSpeedMPerS": 0,
+        "horizonS": 0.002
+      },
+      "visualRefreshHzEstimate": 1.2590229981471341,
+      "compactSummaryMeanBatchShare": 0,
+      "browserConsoleIssueCount": 0,
+      "browserConsoleIssueCounts": {},
+      "browserConsoleWarningCounts": {},
+      "surfaceDrawStatus": null,
+      "surfaceDrawBridge": null,
+      "surfaceDrawSource": null,
+      "surfaceDrawReadback": null,
+      "renderRowsReadback": null,
+      "renderRowsReadbackMode": null,
+      "renderRowsReadbackByteLength": null,
+      "surfaceDrawSummaryReadback": null,
+      "surfaceDrawSummaryReadbackByteLength": null,
+      "surfaceDrawRowsBufferByteLength": null,
+      "surfaceDrawIndirectRowsBufferByteLength": null,
+      "surfaceDrawCompactedVertexRowsBufferByteLength": null,
+      "estimatedReadbackBytesPerBatch": null,
+      "estimatedReadbackBytesPerStep": null,
+      "copyBudget": {
+        "schema": "peercompute.ulg.sph-performance-benchmark-copy-budget.v0",
+        "renderRowsReadbackByteLength": null,
+        "surfaceDrawSummaryReadbackByteLength": null,
+        "estimatedReadbackBytesPerBatch": null,
+        "estimatedReadbackBytesPerStep": null
+      },
+      "surfaceDrawVertexCount": null,
+      "surfaceDrawTriangleCount": null,
+      "surfaceDrawThreeMeshCount": null,
+      "surfaceDrawThreeGeometryByteLength": null,
+      "stderrTail": ""
+    }
+  ]
+}

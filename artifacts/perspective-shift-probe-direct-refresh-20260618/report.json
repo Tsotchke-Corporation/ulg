@@ -1,0 +1,583 @@
+{
+  "schema": "peercompute.ulg.perspective-shift-direct-refresh-probe.v0",
+  "status": "complete",
+  "url": "https://127.0.0.1:5173/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1",
+  "setup": {
+    "steps": {
+      "schema": "peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0",
+      "status": "resident-steps-executed",
+      "backend": "webgpu",
+      "readbackMode": "no-full-readback",
+      "continuationAvailable": true
+    },
+    "renderState": {
+      "status": "resident-render-field-applied",
+      "source": "resident-gpu-render-field",
+      "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+      "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+      "surfaceDrawRenderBridgeThreeMeshCount": 1,
+      "surfaceDrawStatus": "resident-render-row-spheres-built",
+      "surfaceDrawReason": "resident render rows are displayed through a three-render-row-spheres bridge"
+    },
+    "surfaceDraw": {
+      "status": "resident-render-row-spheres-built",
+      "visibleRendererBridge": "three-render-row-spheres",
+      "renderBridgeStatus": "three-render-row-spheres-ready",
+      "renderBridgeThreeMeshCount": 1
+    }
+  },
+  "samples": [
+    {
+      "label": "initial",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:initial",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 9272.100000023842,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          6.750000000000001,
+          5.25,
+          8.25
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/initial.png"
+    },
+    {
+      "label": "front-low",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:front-low",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 9915.199999988079,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          0,
+          1.2499999999999996,
+          8
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/front-low.png"
+    },
+    {
+      "label": "side-high",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:side-high",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 10463.699999988079,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          8,
+          5,
+          -8.881784197001252e-16
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/side-high.png"
+    },
+    {
+      "label": "rear-high",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:rear-high",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 11036.800000011921,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          -7,
+          4.000000000000002,
+          -8.000000000000004
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/rear-high.png"
+    },
+    {
+      "label": "mobile-landscape-resize",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:mobile-landscape-resize",
+        "width": 1688,
+        "height": 780,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 11777.199999988079,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          7.999999999999999,
+          3.999999999999999,
+          8
+        ],
+        "aspect": 2.164102564102564,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 844,
+        "innerHeight": 390,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/mobile-landscape-resize.png"
+    },
+    {
+      "label": "mobile-portrait-return",
+      "refresh": {
+        "schema": "peercompute.ulg.sph-scene-viewport-refresh.v0",
+        "status": "viewport-refresh-rendered",
+        "reason": "perspective-shift-direct-refresh:mobile-portrait-return",
+        "width": 794,
+        "height": 1720,
+        "overlayCanvasWidth": null,
+        "overlayCanvasHeight": null,
+        "updatedAtMs": 12541.300000011921,
+        "scientificValidation": false,
+        "sphValidation": false,
+        "fullPhysicsValidation": false
+      },
+      "camera": {
+        "position": [
+          4,
+          3,
+          9
+        ],
+        "aspect": 0.46162790697674416,
+        "near": 0.05,
+        "far": 500
+      },
+      "viewport": {
+        "innerWidth": 397,
+        "innerHeight": 860,
+        "dpr": 3
+      },
+      "renderState": {
+        "status": "resident-render-field-applied",
+        "surfaceDrawVisibleRendererBridge": "three-render-row-spheres",
+        "surfaceDrawVisibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "surfaceDrawRenderBridgeStatus": "three-render-row-spheres-ready",
+        "surfaceDrawRenderBridgeFrameCount": 0,
+        "surfaceDrawRenderBridgeThreeMeshCount": 1
+      },
+      "surfaceDraw": {
+        "status": "resident-render-row-spheres-built",
+        "visibleRendererBridge": "three-render-row-spheres",
+        "visibleRenderSource": "resident-render-rows-three-instanced-spheres",
+        "renderBridgeStatus": "three-render-row-spheres-ready",
+        "renderBridgeFrameCount": 0,
+        "renderBridgeThreeMeshCount": 1
+      },
+      "bridge": {
+        "status": "three-render-row-spheres-ready",
+        "lastRenderStatus": "three-render-row-spheres-submitted",
+        "threeMeshCount": 1,
+        "frameCount": 0,
+        "hasThreeSurfaceGroup": true,
+        "canvasAttached": false
+      },
+      "objects": [
+        {
+          "name": "ulg-sph-three-render-row-spheres",
+          "type": "Mesh",
+          "visible": true,
+          "renderMode": "three-render-row-spheres",
+          "renderSource": "resident-render-rows-three-instanced-spheres",
+          "count": 128,
+          "frustumCulled": false,
+          "matrixWorldNeedsUpdate": false
+        }
+      ],
+      "screenshot": "artifacts/perspective-shift-probe-direct-refresh-20260618/mobile-portrait-return.png"
+    }
+  ],
+  "consoleIssueCount": 0,
+  "consoleWarningCount": 4,
+  "consoleIssues": [],
+  "consoleWarnings": [
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3bac03fb4000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3bac03fb4000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3bac03fb4000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "type": "warning",
+      "text": "[.WebGL-0x3bac03fb4000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    }
+  ],
+  "pageErrors": [],
+  "consoleTail": [
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=0 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=0 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=0"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-started step=1"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=deviceAcquire"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=fusedMechanics"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=thermalStep"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=mechanicsRefresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-started step=1 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-stage-complete step=1 stage=residentStepEnvelope"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-step-complete step=1"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-sequence-complete"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-kernels-complete"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-publishing-artifacts"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-published"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-resident-progress] resident-steps-complete"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-refresh-started stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-device-ready stage=resident-render-refresh"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-rows-started stage=render-rows"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-rows-complete stage=render-rows"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-surface-table-ready stage=surface-table surfaces=0 cells=0"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-field-skipped-three-points stage=render-field surfaces=0"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-optical-lookup-started stage=optical-lookup"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-optical-lookup-complete stage=optical-lookup"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-pressure-interface-started stage=pressure-interface"
+    },
+    {
+      "type": "debug",
+      "text": "[sph-render-progress] resident-render-pressure-interface-complete stage=pressure-interface"
+    }
+  ]
+}

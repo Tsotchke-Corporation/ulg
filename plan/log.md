@@ -33575,3 +33575,47 @@ Next:
 - Remaining worker-owned sphere-path time is now real engine/probe work rather
   than artificial RAF wait. The next performance slices should target
   resident-step/render-refresh costs and worker source transfer/cache behavior.
+
+## 2026-06-30 AKDT - Worker Particle-State Source Cache Diagnostics
+
+Status:
+
+- Replaced the worker-owned particle-state producer's hash-only source-cache
+  key with a typed descriptor. CPU-visible particle states now use a
+  `step-time` key, while stale or unversioned states keep the full content-hash
+  fallback.
+- Threaded source-cache strategy, stale-state flag, and cache-miss reason
+  through the offscreen bridge, worker status, scene render state, and
+  benchmark summary.
+- The resulting smoke benchmark shows the final worker-owned sphere draw using
+  `sourceCacheKeyStrategy=step-time` with
+  `sourceCacheMissReason=source-cache-empty`, so the remaining state transfer is
+  no longer explained by an opaque key mismatch. The next slice should inspect
+  bridge/draw cadence and retained same-worker state ownership.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check src/visualization/offscreenPresentationBridge.js`
+- PASS: `node --check src/services/ulgOffscreenRender.worker.js`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --test tests/offscreenPresentationBridge.test.mjs tests/nativeSurfaceHarness.test.mjs --test-name-pattern "resident particle-state|worker-owned|benchmark"`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "worker resident particle-state source cache"`
+- PASS: benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, probe `good`,
+  `probeIssues=[]`, `probeBatchWallMs=55.5`, `probeEngineBatchMs=54.5`,
+  `residentStageMs=4.5`, `renderRefreshTotalMs=11.8`,
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`,
+  `workerOffscreenRenderRowsSourceStateTransferBytes=81952`,
+  `workerOffscreenRenderRowsSourceCacheKeyStrategy=step-time`,
+  `workerOffscreenRenderRowsSourceCacheMissReason=source-cache-empty`, and
+  `workerOffscreenRenderRowsSourceCpuStateStale=false`.
+
+Next:
+
+- Determine why the worker-owned particle-state producer still sees an empty
+  source cache at the benchmark sample point. If the bridge really gets only
+  one producer draw per resident batch, move the next performance slice toward
+  retained same-worker mechanics output/presentation instead of further
+  main-thread particle-state cache tuning.

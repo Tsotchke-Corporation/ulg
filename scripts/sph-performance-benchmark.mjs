@@ -871,6 +871,15 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const workerOffscreenRenderRowsSourceCacheStatus = workerOffscreenRenderRows?.sourceCacheStatus
     ?? renderState?.workerOffscreenRenderRowsSourceCacheStatus
     ?? null;
+  const workerOffscreenRenderRowsSourceCacheKeyStrategy = workerOffscreenRenderRows?.sourceCacheKeyStrategy
+    ?? renderState?.workerOffscreenRenderRowsSourceCacheKeyStrategy
+    ?? null;
+  const workerOffscreenRenderRowsSourceCacheMissReason = workerOffscreenRenderRows?.sourceCacheMissReason
+    ?? renderState?.workerOffscreenRenderRowsSourceCacheMissReason
+    ?? null;
+  const workerOffscreenRenderRowsSourceCpuStateStale = workerOffscreenRenderRows?.sourceCpuStateStale
+    ?? renderState?.workerOffscreenRenderRowsSourceCpuStateStale
+    ?? null;
   const workerOffscreenRenderRowsSourceCacheHit = workerOffscreenRenderRows?.sourceCacheHit
     ?? renderState?.workerOffscreenRenderRowsSourceCacheHit
     ?? null;
@@ -2401,6 +2410,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    workerOffscreenRenderRowsSourceStateTransferBytes,
 	    workerOffscreenRenderRowsSourceCacheKey,
 	    workerOffscreenRenderRowsSourceCacheStatus,
+	    workerOffscreenRenderRowsSourceCacheKeyStrategy,
+	    workerOffscreenRenderRowsSourceCacheMissReason,
+	    workerOffscreenRenderRowsSourceCpuStateStale,
 	    workerOffscreenRenderRowsSourceCacheHit,
 	    workerOffscreenRenderRowsSourceRowsPacked,
 	    workerOffscreenRenderRowsCanvasTransferred,

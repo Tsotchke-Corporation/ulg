@@ -144,6 +144,36 @@ function residentParticleStateProducerExpectedPayloadShape({
   };
 }
 
+function residentParticleStateProducerCacheMissReason(bridge, {
+  normalizedSourceCacheKey = null,
+  expected = null
+} = {}) {
+  if (!normalizedSourceCacheKey) return 'source-cache-key-missing';
+  if (!bridge.residentParticleStateProducerCacheKey) return 'source-cache-empty';
+  if (bridge.residentParticleStateProducerCacheKey !== normalizedSourceCacheKey) {
+    return 'source-cache-key-changed';
+  }
+  if (bridge.residentParticleStateProducerParticleCount !== expected?.particleCount) {
+    return 'particle-count-changed';
+  }
+  if (bridge.residentParticleStateProducerStateStrideFloats !== expected?.stateStrideFloats) {
+    return 'state-stride-changed';
+  }
+  if (bridge.residentParticleStateProducerThermoStrideFloats !== expected?.thermoStrideFloats) {
+    return 'thermo-stride-changed';
+  }
+  if (bridge.residentParticleStateProducerStateByteLength !== expected?.stateByteLength) {
+    return 'state-byte-length-changed';
+  }
+  if (bridge.residentParticleStateProducerThermoByteLength !== expected?.thermoByteLength) {
+    return 'thermo-byte-length-changed';
+  }
+  if (bridge.residentParticleStateProducerColorRowsByteLength !== expected?.colorRowsByteLength) {
+    return 'color-row-byte-length-changed';
+  }
+  return 'source-cache-unavailable';
+}
+
 export function packUlgWorkerOffscreenRenderRowsPayload({
   positionsM = null,
   colorsRgb = null,
@@ -888,6 +918,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       sphParticleState = null,
       materialColorRows = null,
       sourceCacheKey = null,
+      sourceCacheKeyStrategy = null,
+      sourceCpuStateStale = null,
       viewProjectionMatrix = null,
       alpha = 0.92,
       fallbackColorRgb = [1, 1, 1],
@@ -948,6 +980,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && this.residentParticleStateProducerThermoByteLength === expected.thermoByteLength
         && this.residentParticleStateProducerColorRowsByteLength === expected.colorRowsByteLength
       );
+      const sourceCacheMissReason = sourceCacheReusable
+        ? null
+        : residentParticleStateProducerCacheMissReason(this, {
+            normalizedSourceCacheKey,
+            expected
+          });
       const state = sourceCacheReusable
         ? null
         : new Float32Array(sphParticleState?.state || []);
@@ -966,7 +1004,10 @@ export function createUlgWorkerOffscreenPresentationBridge({
           particleCount: expected.particleCount,
           inputTransferBytes: 0,
           sourceCacheKey: normalizedSourceCacheKey,
-          sourceCacheStatus: 'resident-particle-state-incomplete'
+          sourceCacheStatus: 'resident-particle-state-incomplete',
+          sourceCacheKeyStrategy,
+          sourceCpuStateStale,
+          sourceCacheMissReason
         });
       }
       const sourceTransferBytes = sourceCacheReusable
@@ -983,6 +1024,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         sourceCacheStatus: sourceCacheReusable
           ? 'resident-particle-state-cache-reused'
           : 'resident-particle-state-uploaded',
+        sourceCacheKeyStrategy,
+        sourceCpuStateStale,
+        sourceCacheMissReason,
         reuseSourceCache: sourceCacheReusable,
         sourceRowsPacked: false,
         particleCount: expected.particleCount,
@@ -1044,6 +1088,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         sourceCacheStatus: sourceCacheReusable
           ? 'resident-particle-state-cache-reused'
           : 'resident-particle-state-uploaded',
+        sourceCacheKeyStrategy,
+        sourceCpuStateStale,
+        sourceCacheMissReason,
         sourceCacheHit: sourceCacheReusable,
         sourceRowsPacked: false,
         sourceTransferBytes: 0,

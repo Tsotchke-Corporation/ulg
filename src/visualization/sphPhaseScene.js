@@ -366,18 +366,70 @@ function workerResidentParticleStateProducerColorRows(
   return colorRows;
 }
 
-function workerResidentParticleStateProducerSourceCacheKey(sphParticleState = null, colorRows = null) {
+function workerResidentParticleStateProducerVersionKeyPart(label, value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${label}:${number}` : `${label}:unknown`;
+}
+
+export function workerResidentParticleStateProducerSourceCacheDescriptor(sphParticleState = null, colorRows = null) {
   const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
-  if (particleCount <= 0) return null;
-  return [
+  if (particleCount <= 0) {
+    return {
+      key: null,
+      strategy: 'empty',
+      cpuStateStale: Boolean(sphParticleState?.cpuStateStale),
+      particleCount
+    };
+  }
+  const cpuStateStale = Boolean(
+    sphParticleState?.cpuStateStale
+    || sphParticleState?.status === 'gpu-resident-unread-ready'
+  );
+  const step = Number(sphParticleState?.step);
+  const time = Number(sphParticleState?.time);
+  const stateByteLength = sphParticleState?.state?.byteLength ?? 0;
+  const thermoByteLength = sphParticleState?.thermo?.byteLength ?? 0;
+  const stateStrideFloats = Math.max(0, Math.floor(Number(sphParticleState?.stateStrideFloats) || 0));
+  const thermoStrideFloats = Math.max(0, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 0));
+  const colorKey = workerResidentRenderProducerNumericSourceKeyPart('materialColorRows', colorRows || null);
+  const canUseVersionedKey = Number.isFinite(step) && !cpuStateStale;
+  const dynamicStateKeyParts = canUseVersionedKey
+    ? [
+        'sourceKeyStrategy:step-time',
+        workerResidentParticleStateProducerVersionKeyPart('step', step),
+        workerResidentParticleStateProducerVersionKeyPart('time', time),
+        `stateBytes:${stateByteLength}`,
+        `thermoBytes:${thermoByteLength}`
+      ]
+    : [
+        'sourceKeyStrategy:content-hash',
+        `cpuStateStale:${cpuStateStale}`,
+        workerResidentRenderProducerNumericSourceKeyPart('state', sphParticleState?.state || null),
+        workerResidentRenderProducerNumericSourceKeyPart('thermo', sphParticleState?.thermo || null)
+      ];
+  const key = [
     'peercompute.ulg.worker-resident-particle-state-producer-source-cache.v0',
     `particleCount:${particleCount}`,
-    `stateStride:${Math.max(0, Math.floor(Number(sphParticleState?.stateStrideFloats) || 0))}`,
-    `thermoStride:${Math.max(0, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 0))}`,
-    workerResidentRenderProducerNumericSourceKeyPart('state', sphParticleState?.state || null),
-    workerResidentRenderProducerNumericSourceKeyPart('thermo', sphParticleState?.thermo || null),
-    workerResidentRenderProducerNumericSourceKeyPart('materialColorRows', colorRows || null)
+    `stateStride:${stateStrideFloats}`,
+    `thermoStride:${thermoStrideFloats}`,
+    ...dynamicStateKeyParts,
+    colorKey
   ].join('|');
+  return {
+    key,
+    strategy: canUseVersionedKey ? 'step-time' : 'content-hash',
+    cpuStateStale,
+    particleCount,
+    step: Number.isFinite(step) ? step : null,
+    time: Number.isFinite(time) ? time : null,
+    stateByteLength,
+    thermoByteLength,
+    colorRowsByteLength: colorRows?.byteLength ?? 0
+  };
+}
+
+export function workerResidentParticleStateProducerSourceCacheKey(sphParticleState = null, colorRows = null) {
+  return workerResidentParticleStateProducerSourceCacheDescriptor(sphParticleState, colorRows).key;
 }
 
 function scopedResidentComputeLaneId(laneId = 'ulg:sph-resident:scene', stateKey = null) {
@@ -7324,6 +7376,12 @@ export function createSphPhaseScene(container, {
         status?.sourceCacheKey ?? null,
       workerOffscreenRenderRowsSourceCacheStatus:
         status?.sourceCacheStatus ?? null,
+      workerOffscreenRenderRowsSourceCacheKeyStrategy:
+        status?.sourceCacheKeyStrategy ?? null,
+      workerOffscreenRenderRowsSourceCacheMissReason:
+        status?.sourceCacheMissReason ?? null,
+      workerOffscreenRenderRowsSourceCpuStateStale:
+        status?.sourceCpuStateStale ?? null,
       workerOffscreenRenderRowsSourceCacheHit:
         status?.sourceCacheHit ?? null,
       workerOffscreenRenderRowsSourceRowsPacked:
@@ -7716,14 +7774,19 @@ export function createSphPhaseScene(container, {
           reactionTable: sphReactionTable
         })
       : null;
+    const residentParticleStateSourceCache = canUseResidentParticleStateProducer
+      ? workerResidentParticleStateProducerSourceCacheDescriptor(
+          sphParticleState,
+          residentParticleStateColorRows
+        )
+      : null;
     const status = canUseResidentParticleStateProducer
       ? workerOffscreenPresentationBridge.drawResidentParticleStateProducer({
           sphParticleState,
           materialColorRows: residentParticleStateColorRows,
-          sourceCacheKey: workerResidentParticleStateProducerSourceCacheKey(
-            sphParticleState,
-            residentParticleStateColorRows
-          ),
+          sourceCacheKey: residentParticleStateSourceCache?.key ?? null,
+          sourceCacheKeyStrategy: residentParticleStateSourceCache?.strategy ?? null,
+          sourceCpuStateStale: residentParticleStateSourceCache?.cpuStateStale ?? null,
           ...commonDrawOptions
         })
       : drawFn({

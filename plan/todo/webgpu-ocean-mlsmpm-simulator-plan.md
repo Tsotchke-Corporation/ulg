@@ -1234,6 +1234,15 @@ Interim status, 2026-06-18 AKDT:
   `384000` estimated local cell visits versus `6749184` old dense
   cell-particle pairs, no render-row/render-field readback, and about
   `204 ms` warm source-interface refresh.
+- 2026-06-30 worker-owned particle-state source-cache diagnostics: the
+  worker-owned sphere path now uses a typed particle-state source-cache
+  descriptor. CPU-visible states use a `step-time` key instead of hashing every
+  state/thermo float; stale or unversioned states retain the content-hash
+  fallback. Benchmark artifacts now expose source-cache strategy, stale-state
+  flag, and miss reason. The first smoke after this change is still `good` and
+  reports `sourceCacheMissReason=source-cache-empty`, which means the remaining
+  80 KiB-class particle-state transfer is a bridge lifecycle/cadence or
+  same-worker ownership problem, not an opaque key-hash mismatch.
 
 ## ULG-Specific Constraints
 

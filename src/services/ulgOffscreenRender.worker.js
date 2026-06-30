@@ -1546,6 +1546,9 @@ function drawResidentParticleStateProducer(data) {
       sourceCacheStatus: reuseSourceCache
         ? 'resident-particle-state-cache-miss'
         : 'resident-particle-state-empty',
+      sourceCacheKeyStrategy: data.sourceCacheKeyStrategy ?? null,
+      sourceCpuStateStale: data.sourceCpuStateStale ?? null,
+      sourceCacheMissReason: data.sourceCacheMissReason ?? null,
       sourceCacheHit: false,
       sourceRowsPacked: false,
       sourceTransferBytes: 0,
@@ -1708,6 +1711,9 @@ function drawResidentParticleStateProducer(data) {
         ? 'resident-particle-state-cache-reused'
         : 'resident-particle-state-uploaded'
     ),
+    sourceCacheKeyStrategy: data.sourceCacheKeyStrategy ?? null,
+    sourceCpuStateStale: data.sourceCpuStateStale ?? null,
+    sourceCacheMissReason: sourceCacheHit ? null : (data.sourceCacheMissReason ?? null),
     sourceCacheHit,
     sourceRowsPacked: false,
     sourceTransferBytes: 0,

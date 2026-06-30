@@ -260,12 +260,16 @@ test('worker-owned resident particle-state producer imports state once then reus
     sphParticleState,
     materialColorRows,
     sourceCacheKey: 'resident-state:a',
+    sourceCacheKeyStrategy: 'step-time',
+    sourceCpuStateStale: false,
     viewProjectionMatrix
   });
   const secondStatus = bridge.drawResidentParticleStateProducer({
     sphParticleState,
     materialColorRows,
     sourceCacheKey: 'resident-state:a',
+    sourceCacheKeyStrategy: 'step-time',
+    sourceCpuStateStale: false,
     viewProjectionMatrix
   });
   const firstDraw = worker.messages[1]?.data;
@@ -279,8 +283,13 @@ test('worker-owned resident particle-state producer imports state once then reus
   assert.ok(firstDraw.sourceThermo instanceof Float32Array);
   assert.ok(firstDraw.materialColorRows instanceof Float32Array);
   assert.equal(firstDraw.sourceParticleRows, undefined);
+  assert.equal(firstDraw.sourceCacheKeyStrategy, 'step-time');
+  assert.equal(firstDraw.sourceCpuStateStale, false);
+  assert.equal(firstDraw.sourceCacheMissReason, 'source-cache-empty');
   assert.equal(firstStatus.sourceStateTransferBytes, 192);
   assert.equal(firstStatus.sourceTransferBytes, 0);
+  assert.equal(firstStatus.sourceCacheKeyStrategy, 'step-time');
+  assert.equal(firstStatus.sourceCacheMissReason, 'source-cache-empty');
 
   assert.equal(secondDraw.schema, ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA);
   assert.equal(secondDraw.reuseSourceCache, true);
@@ -289,6 +298,8 @@ test('worker-owned resident particle-state producer imports state once then reus
   assert.equal(secondDraw.sourceThermo, undefined);
   assert.equal(secondDraw.materialColorRows, undefined);
   assert.equal(secondStatus.sourceCacheHit, true);
+  assert.equal(secondStatus.sourceCacheKeyStrategy, 'step-time');
+  assert.equal(secondStatus.sourceCacheMissReason, null);
   assert.equal(secondStatus.sourceStateTransferBytes, 0);
   assert.equal(secondStatus.inputTransferBytes, 64);
 });

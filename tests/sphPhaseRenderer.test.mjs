@@ -83,7 +83,8 @@ import {
   stabilizeSurfaceMeshMaterialForRenderer,
   createThreeWebGpuResidentBridgeMaterialProxy,
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
-  nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget
+  nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget,
+  workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
 import {
   GPU_PHASE_IDS,
@@ -116,6 +117,42 @@ test('SPH scene background color defaults to sky blue and normalizes URL hex val
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
+
+test('worker resident particle-state source cache keys avoid full hashes for versioned CPU-visible state', () => {
+  const sphParticleState = {
+    particleCount: 2,
+    step: 7,
+    time: 0.125,
+    status: 'gpu-resident-readback-ready',
+    cpuStateStale: false,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    state: new Float32Array(16),
+    thermo: new Float32Array(24)
+  };
+  const colorRows = new Float32Array([1, 2, 0, 0, 0.5, 0.6, 0.7, 1]);
+  const descriptor = workerResidentParticleStateProducerSourceCacheDescriptor(
+    sphParticleState,
+    colorRows
+  );
+
+  assert.equal(descriptor.strategy, 'step-time');
+  assert.equal(descriptor.cpuStateStale, false);
+  assert.match(descriptor.key, /sourceKeyStrategy:step-time/);
+  assert.match(descriptor.key, /step:7/);
+  assert.match(descriptor.key, /time:0.125/);
+  assert.doesNotMatch(descriptor.key, /\|state:\d+:/);
+
+  const staleDescriptor = workerResidentParticleStateProducerSourceCacheDescriptor({
+    ...sphParticleState,
+    status: 'gpu-resident-unread-ready',
+    cpuStateStale: true
+  }, colorRows);
+  assert.equal(staleDescriptor.strategy, 'content-hash');
+  assert.equal(staleDescriptor.cpuStateStale, true);
+  assert.match(staleDescriptor.key, /sourceKeyStrategy:content-hash/);
+  assert.match(staleDescriptor.key, /\|state:\d+:/);
 });
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {

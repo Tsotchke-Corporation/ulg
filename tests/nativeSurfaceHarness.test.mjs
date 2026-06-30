@@ -356,6 +356,9 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRenderRowsStatus/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsInputTransferBytes/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheStatus/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheKeyStrategy/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheMissReason/);
+  assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCpuStateStale/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheHit/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceRowsPacked/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceStateTransferBytes/);

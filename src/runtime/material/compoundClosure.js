@@ -11,7 +11,6 @@
 // validation flag stays false (HF/STO-3G + additive estimates are approximations, not validated).
 
 import { atomicMassKg } from '../electronicStructure/periodicTable.js';
-import { rhf } from '../electronicStructure/molecularHartreeFock.js';
 import { deriveFormulaMaterialProperties } from './materialDerivation.js';
 import {
   PROPERTY_DERIVATION_STATUS as DS,
@@ -23,8 +22,19 @@ import {
 
 const AVOGADRO = 6.02214076e23;
 const R = 8.314462618;
-const HARTREE_EV = 27.211386245988;
 const OPEN_TOP_K = 1e6;
+const MIN_CONDENSED_DENSITY_KG_PER_M3 = 500;
+const DEFAULT_REDUCED_PRODUCT_DENSITY_KG_PER_M3 = 1500;
+const DEFAULT_REDUCED_PRODUCT_BULK_MODULUS_PA = 1e9;
+
+function formulaMolarMassKgPerMol(atomCounts) {
+  return Object.entries(atomCounts)
+    .reduce((sum, [Z, count]) => sum + Number(count) * atomicMassKg(Number(Z)) * AVOGADRO, 0);
+}
+
+function atomCount(atomCounts) {
+  return Object.values(atomCounts).reduce((sum, count) => sum + Number(count), 0);
+}
 
 // Map a single absorbed wavelength (nm) to an approximate sRGB of that spectral colour (Bruton's
 // piecewise fit). Used to subtract the absorbed band from white → the transmitted body colour.
@@ -56,6 +66,92 @@ export function compoundColorFromGapEv(gapEv) {
   return absorbed.map((c) => Math.max(0.05, 1 - k * c));
 }
 
+function reducedReactantPackedDensityKgPerM3(molarMassKgPerMol, reactants = []) {
+  let sourceVolumeM3PerMol = 0;
+  for (const reactant of reactants || []) {
+    const density = Number(reactant?.densityKgPerM3);
+    const mass = Number(reactant?.molarMassKgPerMol);
+    if (density > MIN_CONDENSED_DENSITY_KG_PER_M3 && mass > 0) {
+      sourceVolumeM3PerMol += mass / density;
+    }
+  }
+  if (sourceVolumeM3PerMol > 0) {
+    return Math.max(MIN_CONDENSED_DENSITY_KG_PER_M3, molarMassKgPerMol / sourceVolumeM3PerMol);
+  }
+  return DEFAULT_REDUCED_PRODUCT_DENSITY_KG_PER_M3;
+}
+
+function reducedReactantBulkModulusPa(reactants = []) {
+  const finite = (reactants || [])
+    .map((reactant) => Number(reactant?.bulkModulusPa))
+    .filter((value) => value > 0);
+  if (finite.length === 0) return DEFAULT_REDUCED_PRODUCT_BULK_MODULUS_PA;
+  return finite.reduce((sum, value) => sum + value, 0) / finite.length;
+}
+
+function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [] }) {
+  const molarMassKgPerMol = formulaMolarMassKgPerMol(atomCounts);
+  const atomsPerFormula = atomCount(atomCounts);
+  const densityKgPerM3 = reducedReactantPackedDensityKgPerM3(molarMassKgPerMol, reactants);
+  const bulkModulusPa = reducedReactantBulkModulusPa(reactants);
+  const cpJPerKgK = (3 * R * Math.max(1, atomsPerFormula)) / molarMassKgPerMol;
+  return withPropertyProvenance({
+    molarMassKgPerMol,
+    atomsPerFormula,
+    label,
+    compound: true,
+    closureBacked: true,
+    derivation: 'reduced-reaction-product-closure: exact formula mass; reactant-packed density and bulk estimates',
+    intrinsicColorSrgb: [0.78, 0.80, 0.82],
+    phases: [{
+      name: 'liquid',
+      cpJPerKgK,
+      densityKgPerM3,
+      temperatureRange: [0, OPEN_TOP_K],
+      bulkModulusPa,
+      shearModulusPa: 0
+    }],
+    transitions: [],
+    validation: {
+      eosValidation: false,
+      thermalValidation: false,
+      opticalValidation: false,
+      scientificValidation: false
+    }
+  }, {
+    entries: [
+      propertyProvenanceEntry({
+        paths: ['molarMassKgPerMol', 'atomsPerFormula'],
+        status: DS.EXACT_CONSTANT,
+        source: 'periodic-table-atomic-masses',
+        method: 'formula molar mass and atom count from product atom counts',
+        inputs: Object.entries(atomCounts).map(([Z, count]) => `Z=${Z}:count=${count}`)
+      }),
+      propertyProvenanceEntry({
+        paths: [
+          'intrinsicColorSrgb',
+          'phases.liquid.cpJPerKgK',
+          'phases.liquid.densityKgPerM3',
+          'phases.liquid.temperatureRange',
+          'phases.liquid.bulkModulusPa',
+          'phases.liquid.shearModulusPa'
+        ],
+        status: DS.REDUCED_ESTIMATE,
+        source: 'reactant-packed-product-closure',
+        method: 'mobile-safe reduced product closure from exact formula mass plus reactant condensed packing and Dulong-Petit heat capacity',
+        inputs: [
+          `product=${key || label}`,
+          ...((reactants || []).map((reactant) => `${reactant?.material || reactant?.formula || 'reactant'}:rho=${reactant?.densityKgPerM3 ?? 'unknown'}:K=${reactant?.bulkModulusPa ?? 'unknown'}`))
+        ],
+        blockers: ['reaction-product-first-principles-closure-skipped-for-interactive-runtime']
+      })
+    ],
+    notes: [
+      `${key || label} uses a reduced reaction-product closure for interactive runtime stability; it is not validated thermochemistry or EOS.`
+    ]
+  });
+}
+
 /**
  * Derive a renderable material closure for a product compound.
  * @param atomCounts  { [Z]: count } formula of one product formula unit.
@@ -64,16 +160,18 @@ export function compoundColorFromGapEv(gapEv) {
  *                    the density/stiffness estimates.
  */
 export function deriveCompoundClosure({ key, label, atomCounts, geometry, reactants = [], allowReducedEstimates = false }) {
-  const properties = {
-    ...deriveFormulaMaterialProperties({
-      key,
-      atomCounts,
-      geometry,
-      phaseModel: 'molecular-condensed'
-    }),
-    label,
-    compound: true
-  };
+  const properties = allowReducedEstimates
+    ? deriveReducedCompoundProperties({ key, label, atomCounts, reactants })
+    : {
+      ...deriveFormulaMaterialProperties({
+        key,
+        atomCounts,
+        geometry,
+        phaseModel: 'molecular-condensed'
+      }),
+      label,
+      compound: true
+    };
 
   const closure = {
     key,

@@ -9,6 +9,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  MLS_MPM_CONDENSED_VOLUME_STRAIN_TOLERANCE,
   MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
   MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
   ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
@@ -203,7 +204,7 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /row6\.z > 0\.5 && row6\.z < 1\.5/);
   assert.match(mlsMpmG2pReconstructWgsl, /params\.internal_pressure_scale == 0\.0/);
   assert.match(mlsMpmG2pReconstructWgsl, /if \(condensed\)/);
-  assert.match(mlsMpmG2pReconstructWgsl, /g2p_clamp\(previous_j, 0\.95, 1\.049\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /g2p_clamp\(previous_j, 0\.995, 1\.005\)/);
   assert.match(mlsMpmG2pReconstructWgsl, /liquid_wall_damping_alpha: f32/);
   assert.match(mlsMpmG2pReconstructWgsl, /velocity = velocity \* keep/);
   assert.match(mlsMpmG2pReconstructWgsl, /if \(!solid\)/);
@@ -345,10 +346,11 @@ test('CPU MLS-MPM G2P bounds condensed liquid volume jumps', () => {
     boxDimsM: [3, 3, 3]
   });
 
-  nearlyEqual(result.mechanics[18], 1.049, 1e-5);
-  nearlyEqual(result.mechanics[0], Math.cbrt(1.049), 1e-5);
-  nearlyEqual(result.mechanics[4], Math.cbrt(1.049), 1e-5);
-  nearlyEqual(result.mechanics[8], Math.cbrt(1.049), 1e-5);
+  const maxCondensedJ = 1 + MLS_MPM_CONDENSED_VOLUME_STRAIN_TOLERANCE;
+  nearlyEqual(result.mechanics[18], maxCondensedJ, 1e-5);
+  nearlyEqual(result.mechanics[0], Math.cbrt(maxCondensedJ), 1e-5);
+  nearlyEqual(result.mechanics[4], Math.cbrt(maxCondensedJ), 1e-5);
+  nearlyEqual(result.mechanics[8], Math.cbrt(maxCondensedJ), 1e-5);
 });
 
 test('CPU MLS-MPM G2P freezes non-solid deformation when EOS pressure is disabled', () => {
@@ -423,8 +425,9 @@ test('CPU MLS-MPM G2P bounds solid volume jumps without accepting blink-scale de
     boxDimsM: [3, 3, 3]
   });
 
-  nearlyEqual(result.mechanics[18], 1.049, 1e-5);
-  assert.ok(result.mechanics[18] <= 1.05, `solid volume ratio should remain bounded, got ${result.mechanics[18]}`);
+  const maxCondensedJ = 1 + MLS_MPM_CONDENSED_VOLUME_STRAIN_TOLERANCE;
+  nearlyEqual(result.mechanics[18], maxCondensedJ, 1e-5);
+  assert.ok(result.mechanics[18] <= maxCondensedJ + 1e-5, `solid volume ratio should remain bounded, got ${result.mechanics[18]}`);
 });
 
 test('CPU MLS-MPM G2P caps non-condensed particle scale before render extraction', () => {

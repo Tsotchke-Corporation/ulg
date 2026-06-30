@@ -5,6 +5,7 @@ import {
   formulaMolarMassKgPerMol,
   tallyFormulaSide
 } from './formula.js';
+import { resolveSedenionReactionScope } from './sedenionReactionScope.js';
 
 const HYDROGEN_Z = 1;
 const OXYGEN_Z = 8;
@@ -135,7 +136,8 @@ function candidate({
   productFormula,
   productAtomCounts,
   energetics,
-  limitations
+  limitations,
+  sedenionScope = null
 }) {
   const atomBalance = balanceFor(reactants, products);
   return {
@@ -149,6 +151,7 @@ function candidate({
     productAtomCounts,
     atomBalance,
     energetics,
+    sedenionScope,
     validation: REACTION_VALIDATION_FLAGS,
     scientificValidation: false,
     limitations
@@ -209,6 +212,12 @@ function metalWaterCandidate(metalSpecies, waterSpecies) {
         `Room-temperature water reactivity class: ${waterReactiveClass}.`
       ]
     }),
+    sedenionScope: resolveSedenionReactionScope(metalSpecies, waterSpecies, {
+      familyId: FAMILY_ACTIVE_METAL_WATER,
+      leftRole: 'cation',
+      rightRole: 'compound',
+      preferredBondType: 'ionic'
+    }),
     limitations: [
       'Common ion charge is a first-pass heuristic; oxidation state selection is not yet solved from electronic structure.',
       'Activation barriers and aqueous solvation are not derived in this layer.',
@@ -251,6 +260,13 @@ function binaryIonicCandidate(metalSpecies, anionSpecies) {
     term(anionCoefficient, anionSpecies)
   ];
   const products = [term(productCoefficient, productFormula, productAtomCounts)];
+  const sedenionScope = resolveSedenionReactionScope(metalSpecies, anionSpecies, {
+    familyId: FAMILY_BINARY_IONIC,
+    leftRole: 'cation',
+    rightRole: 'anion',
+    preferredBondType: 'ionic'
+  });
+  if (sedenionScope.reactiveClass === 'inert') return null;
 
   return candidate({
     familyId: FAMILY_BINARY_IONIC,
@@ -269,6 +285,7 @@ function binaryIonicCandidate(metalSpecies, anionSpecies) {
         'Energetics are provisional ionic-strength heuristics; lattice, molecular, and phase effects are not validated.'
       ]
     }),
+    sedenionScope,
     limitations: [
       'Only elemental nonmetal reactants are handled in this first binary-ionic pass.',
       'Multiple oxidation states, kinetics, and competing products are not ranked by validated chemistry.'
@@ -297,11 +314,15 @@ export function discoverReactionCandidates(leftInput, rightInput, options = {}) 
   const left = describeChemicalFormula(leftInput);
   const right = describeChemicalFormula(rightInput);
   const candidates = [];
+  const sedenionScope = resolveSedenionReactionScope(left, right, {
+    familyId: 'formula-pair-symbolic-prefilter'
+  });
   if (atomCountsEqual(left.atomCounts, right.atomCounts)) {
     return {
       inputs: { left, right },
       candidates,
       note: 'same formula on both sides: no reaction candidate emitted',
+      sedenionScope,
       validation: REACTION_VALIDATION_FLAGS,
       scientificValidation: false
     };
@@ -322,6 +343,7 @@ export function discoverReactionCandidates(leftInput, rightInput, options = {}) 
     note: candidates.length > 0
       ? 'reaction candidates discovered from formula parsing and stoichiometric family rules'
       : 'no supported reaction family matched these formulas',
+    sedenionScope,
     validation: REACTION_VALIDATION_FLAGS,
     scientificValidation: false
   };

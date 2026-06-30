@@ -5922,6 +5922,54 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
+test('MLS-MPM resident steps compute task accepts fused active-grid no-summary retained handoff as fence evidence', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    modulePath: './sphMlsMpmGpuStep.js',
+    laneId: 'ulg:test:sph-resident-steps-fused-active-grid',
+    stateKey: 'ulg:test:sph-state-steps-fused-active-grid',
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1
+  });
+
+  const result = await runMlsMpmResidentStepsComputeTask(task.data);
+
+  assert.equal(result.status, 'resident-steps-executed');
+  assert.equal(result.finalStep.fusedResidentSequence.status, 'fused-resident-sequence-executed');
+  assert.equal(result.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(result.gpuFence.status, 'queue-submitted-cleanup-deferred');
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(
+    result.gpuFence.satisfactionReason,
+    'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
+  );
+  assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
+  assert.equal(result.commitDelta.payload.gpuFence.status, 'queue-submitted-cleanup-deferred');
+  destroyMlsMpmResidentStepsBuffers(result);
+});
+
 test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

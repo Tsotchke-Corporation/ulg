@@ -126,7 +126,7 @@ function fakeTableInputs() {
         sourceRowCount: 1,
         matchedRecordCount: 1,
         consumer: 'optical-gpu-table',
-        consumedAs: 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
+        consumedAs: 'non-authoritative-display-pbr-warm-input-over-closure-derived-optical-rows',
         strictSourceOfTruth: false,
         shaderBound: false
       },

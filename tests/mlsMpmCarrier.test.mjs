@@ -32,8 +32,8 @@ test('MLS-MPM: water block falls under gravity (free-fall) and the fluid stays i
   // Early free fall: Δy ≈ ½ g t².
   const expected = 0.5 * 9.80665 * (N * dt) ** 2;
   assert.ok(Math.abs((y0 - y1) - expected) < 0.3 * expected, `fell ${(y0 - y1).toFixed(4)} vs free-fall ${expected.toFixed(4)}`);
-  // Water remains near-incompressible.
-  assert.ok(parts.every((p) => Math.abs(p.mpmJ - 1) < 0.05));
+  // Water remains near-incompressible under the condensed MPM volume projection.
+  assert.ok(parts.every((p) => Math.abs(p.mpmJ - 1) <= 0.005 + 1e-12));
 });
 
 test('MLS-MPM: stays stable settling on the floor over a long run (no NaN, no blow-up)', () => {

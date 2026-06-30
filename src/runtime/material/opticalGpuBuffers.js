@@ -313,6 +313,43 @@ function materialBankPbrWarmInputForRecord({ material, materialId }, warmInputs)
     || null;
 }
 
+function srgbTriplet(values) {
+  if (!Array.isArray(values) || values.length < 3) return null;
+  const triplet = values.slice(0, 3).map((value) => finiteNumber(value, NaN));
+  if (!triplet.every(Number.isFinite)) return null;
+  return triplet.map((value) => Math.max(0, Math.min(1, value)));
+}
+
+function pbrNumber(value, fallback = 0) {
+  const number = finiteNumber(value, NaN);
+  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback;
+}
+
+function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmInput = null) {
+  const bankColor = srgbTriplet(materialPropertyBankPbrWarmInput?.baseColorSrgb);
+  const closureColor = srgbTriplet(params.baseColorSrgb) || [1, 1, 1];
+  const usesBankPbr = Boolean(bankColor);
+  const bankIor = Number(materialPropertyBankPbrWarmInput?.ior);
+  const ior = Number.isFinite(bankIor) && bankIor > 0
+    ? bankIor
+    : (params.ior == null ? 1 : finiteNumber(params.ior, 1));
+  return {
+    source: usesBankPbr ? 'material-bank-pbr-warm-input' : 'closure-derived-optical-pbr',
+    baseColorSrgb: usesBankPbr ? bankColor : closureColor,
+    metalness: usesBankPbr
+      ? pbrNumber(materialPropertyBankPbrWarmInput.metalness, finiteNumber(params.metalness))
+      : finiteNumber(params.metalness),
+    roughness: usesBankPbr
+      ? pbrNumber(materialPropertyBankPbrWarmInput.roughness, finiteNumber(params.roughness, 0.5))
+      : finiteNumber(params.roughness, 0.5),
+    ior,
+    closureBaseColorSrgb: closureColor,
+    closureMetalness: finiteNumber(params.metalness),
+    closureRoughness: finiteNumber(params.roughness, 0.5),
+    closureIor: params.ior == null ? 1 : finiteNumber(params.ior, 1)
+  };
+}
+
 function materialBankPbrWarmInputConsumerSummary({
   table = null,
   matchedRecordCount = 0
@@ -332,7 +369,9 @@ function materialBankPbrWarmInputConsumerSummary({
     sourceRowCount,
     matchedRecordCount: matchedCount,
     consumer: 'optical-gpu-table',
-    consumedAs: 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
+    consumedAs: matchedCount > 0
+      ? 'non-authoritative-display-pbr-warm-input-over-closure-derived-optical-rows'
+      : 'non-authoritative-pbr-warm-input-metadata-before-closure-derived-optical-rows',
     strictSourceOfTruth: false,
     shaderBound: false,
     scientificValidation: false,
@@ -357,7 +396,7 @@ function materialBankPbrWarmInputConsumerForOutput(table, {
       ? 'optical-material-bank-pbr-warm-inputs-bound-in-shader'
       : consumer.status,
     consumedAs: bound
-      ? 'non-authoritative-shader-bound-pbr-warm-input-metadata-before-closure-derived-optical-rows'
+      ? 'non-authoritative-shader-bound-display-pbr-warm-input-over-closure-derived-optical-rows'
       : consumer.consumedAs,
     shaderBound: bound,
     shaderBinding: bound ? shaderBinding : null,
@@ -410,12 +449,13 @@ export function buildOpticalGpuTable(descriptors, {
     if (materialPropertyBankPbrWarmInput) {
       materialBankPbrWarmInputMatchedRecordCount += 1;
     }
+    const displayPbr = resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmInput);
     const spectralOffset = sampleValues.length / OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS;
     for (const sample of params.spectralSamples || []) {
       sampleValues.push(...spectralSampleFloats(sample));
     }
     const spectralCount = (sampleValues.length / OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS) - spectralOffset;
-    const base = linearRgb(params.baseColorSrgb);
+    const base = linearRgb(displayPbr.baseColorSrgb);
     const attenuation = linearRgb(params.attenuationColor, [1, 1, 1]);
     const scatter = Math.max(
       finiteNumber(params.scatteringCoefficientPerM),
@@ -430,11 +470,11 @@ export function buildOpticalGpuTable(descriptors, {
       base[0],
       base[1],
       base[2],
-      finiteNumber(params.metalness),
-      finiteNumber(params.roughness),
+      finiteNumber(displayPbr.metalness),
+      finiteNumber(displayPbr.roughness),
       finiteNumber(params.transmission),
       finiteNumber(params.opacity),
-      finiteNumber(params.ior, 1),
+      finiteNumber(displayPbr.ior, 1),
       attenuation[0],
       attenuation[1],
       attenuation[2],
@@ -465,6 +505,22 @@ export function buildOpticalGpuTable(descriptors, {
       vertexColorPolicyId: stableEnumId(VERTEX_COLOR_POLICY_IDS, params.vertexColorPolicy),
       blocked: params.blocked === true,
       provenance: params.provenance || null,
+      baseColorSrgb: [...displayPbr.baseColorSrgb],
+      closureBaseColorSrgb: [...displayPbr.closureBaseColorSrgb],
+      displayPbrSource: displayPbr.source,
+      displayPbr: {
+        source: displayPbr.source,
+        baseColorSrgb: [...displayPbr.baseColorSrgb],
+        metalness: displayPbr.metalness,
+        roughness: displayPbr.roughness,
+        ior: displayPbr.ior
+      },
+      closurePbr: {
+        baseColorSrgb: [...displayPbr.closureBaseColorSrgb],
+        metalness: displayPbr.closureMetalness,
+        roughness: displayPbr.closureRoughness,
+        ior: displayPbr.closureIor
+      },
       materialPropertyBankPbrWarmInput,
       materialPropertyBankPbrWarmInputStatus: materialPropertyBankPbrWarmInput
         ? 'material-bank-pbr-warm-input-attached'
@@ -508,7 +564,7 @@ export function buildOpticalGpuTable(descriptors, {
       materialPropertyBankPbrWarmInputConsumer.matchedRecordCount,
     materialMap: [...materialIds.entries()].map(([material, materialId]) => ({ material, materialId })),
     recordMetadata: records,
-    colorSpace: 'linear-rgb-from-srgb-closure-output',
+    colorSpace: 'linear-rgb-from-display-pbr-srgb',
     scientificValidation: false,
     fullPhysicsValidation: false
   };

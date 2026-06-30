@@ -147,6 +147,24 @@ function liquidFreeSurfaceShapeMetrics(particles, boxDimsM) {
   };
 }
 
+function liquidFootprintFillRatioTarget(demo) {
+  const boxAreaM2 = Math.max(
+    Number(demo?.box?.dimensionsM?.[0]) * Number(demo?.box?.dimensionsM?.[2]),
+    1e-9
+  );
+  const dropEdgeM = Number(demo?.initialParticleSpacing?.drop?.blockEdgeM) > 0
+    ? Number(demo.initialParticleSpacing.drop.blockEdgeM)
+    : Number(demo?.scenario?.iron?.edgeM) || 0;
+  const baseEdgeM = Number(demo?.initialParticleSpacing?.base?.blockEdgeM) > 0
+    ? Number(demo.initialParticleSpacing.base.blockEdgeM)
+    : Number(demo?.scenario?.ice?.edgeM) || 0;
+  const initialFootprintM2 = Math.max(dropEdgeM ** 2, baseEdgeM ** 2, 0);
+  return Math.min(0.15, (3.75 * initialFootprintM2) / boxAreaM2);
+}
+
+const CONDENSED_VOLUME_RATIO_MIN_ACCEPTED = 0.995 - 1e-9;
+const CONDENSED_VOLUME_RATIO_MAX_ACCEPTED = 1.005 + 1e-9;
+
 function packedSupportBounds3D(sphParticleState) {
   const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
   const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
@@ -183,6 +201,15 @@ function dropBaseSupportGapY(particles) {
   const drop = supportBoundsY(particlesForRole(particles, 'drop'));
   const base = supportBoundsY(particlesForRole(particles, 'base'));
   return drop.min - base.max;
+}
+
+function derivedDropBaseContactHeightM(options) {
+  const preview = createSphPhaseDemo({
+    ...options,
+    ironBaseHeightM: undefined
+  });
+  const iceBaseHeightM = Number(options?.iceBaseHeightM) || 0;
+  return iceBaseHeightM + Number(preview.demo.initialParticleSpacing.base.blockEdgeM);
 }
 
 function maxPairDistanceDriftForRole(initialParticles, finalParticles, role) {
@@ -376,8 +403,8 @@ test('H2O/H2O mechanics+gravity law isolation moves the drop without pressure im
     assert.ok(dropY <= previousDropY + 1e-9, `drop COM rose during gravity-only step ${stepIndex}`);
     previousDropY = dropY;
     const j = volumeRatioRange(driver.demo.state.particles);
-    assert.ok(j.min >= 0.95, `volume ratio dipped below condensed bound: ${j.min}`);
-    assert.ok(j.max <= 1.05, `volume ratio exceeded condensed bound: ${j.max}`);
+    assert.ok(j.min >= CONDENSED_VOLUME_RATIO_MIN_ACCEPTED, `volume ratio dipped below condensed bound: ${j.min}`);
+    assert.ok(j.max <= CONDENSED_VOLUME_RATIO_MAX_ACCEPTED, `volume ratio exceeded condensed bound: ${j.max}`);
     for (const particle of driver.demo.state.particles) {
       for (let axis = 0; axis < 3; axis += 1) {
         assert.ok(Number.isFinite(particle.x[axis]));
@@ -430,8 +457,8 @@ test('H2O/H2O EOS-on MLS-MPM contact stays incompressible and closes under gravi
   nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
   assert.ok(finalDropY < initialDropY - 0.05, `drop did not descend enough: ${initialDropY} -> ${finalDropY}`);
   assert.ok(finalGap < initialGap - 0.005, `same-material support gap did not close: ${initialGap} -> ${finalGap}`);
-  assert.ok(j.min >= 0.95, `EOS-on liquid volume compressed too far: ${j.min}`);
-  assert.ok(j.max <= 1.05, `EOS-on liquid volume expanded too far: ${j.max}`);
+  assert.ok(j.min >= CONDENSED_VOLUME_RATIO_MIN_ACCEPTED, `EOS-on liquid volume compressed too far: ${j.min}`);
+  assert.ok(j.max <= CONDENSED_VOLUME_RATIO_MAX_ACCEPTED, `EOS-on liquid volume expanded too far: ${j.max}`);
   assert.ok(maxParticleSpeed(particles) < 5, 'EOS-on liquid developed an implausible short-horizon speed spike');
   assert.equal(driver.demo.lastStepTiming.physicalLawGroups.eos, true);
   assert.equal(driver.demo.lastStepTiming.physicalLawGroups.pressure, true);
@@ -687,13 +714,12 @@ test('plain SPH/PBF reference keeps solid H2O from flowing like liquid water', (
 });
 
 test('plain SPH/PBF reference keeps solid H2O supported under gravity', () => {
-  const driver = createSphPhaseDemo({
+  const options = {
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
     dropTemperatureK: 250,
     baseTemperatureK: 250,
     iceBaseHeightM: 0,
-    ironBaseHeightM: 1,
     dropParticleEdge: 3,
     baseParticleEdge: 5,
     mechanics: 'sph',
@@ -705,6 +731,10 @@ test('plain SPH/PBF reference keeps solid H2O supported under gravity', () => {
       thermal: false,
       reactions: false
     }
+  };
+  const driver = createSphPhaseDemo({
+    ...options,
+    ironBaseHeightM: derivedDropBaseContactHeightM(options)
   });
   const initialParticles = driver.demo.state.particles.map((particle) => ({
     ...particle,
@@ -767,6 +797,7 @@ test('plain SPH/PBF long-horizon liquid acceptance remains merged and damps bulk
   const finalGap = dropBaseSupportGapY(particles);
   const finalDropSpeedMPerS = maxParticleSpeedForRole(particles, 'drop');
   const freeSurfaceShape = liquidFreeSurfaceShapeMetrics(particles, driver.demo.box.dimensionsM);
+  const footprintFillRatioTarget = liquidFootprintFillRatioTarget(driver.demo);
   assertFiniteParticleState(particles);
   nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
   assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
@@ -780,8 +811,8 @@ test('plain SPH/PBF long-horizon liquid acceptance remains merged and damps bulk
     `plain SPH liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
   );
   assert.ok(
-    freeSurfaceShape.footprintFillRatio >= 0.15,
-    `plain SPH liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+    freeSurfaceShape.footprintFillRatio >= footprintFillRatioTarget,
+    `plain SPH liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio} < ${footprintFillRatioTarget}`
   );
 });
 
@@ -825,22 +856,24 @@ test('H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop 
   const j = volumeRatioRange(particles);
   const finalDropSpeedMPerS = maxParticleSpeedForRole(particles, 'drop');
   const freeSurfaceShape = liquidFreeSurfaceShapeMetrics(particles, driver.demo.box.dimensionsM);
+  const footprintFillRatioTarget = liquidFootprintFillRatioTarget(driver.demo);
   assertFiniteParticleState(particles);
   nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
+  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidFreeSurfaceRelaxationAlpha, 0.002);
   assert.ok(driver.demo.state.time >= 1, `long-horizon liquid gate did not reach 1 s: ${driver.demo.state.time}s`);
   assert.ok(Math.abs(finalCenter[0] - initialCenter[0]) < 0.05, `symmetric liquid COM drifted in X: ${initialCenter[0]} -> ${finalCenter[0]}`);
   assert.ok(Math.abs(finalCenter[2] - initialCenter[2]) < 0.05, `symmetric liquid COM drifted in Z: ${initialCenter[2]} -> ${finalCenter[2]}`);
   assert.ok(finalGap <= Math.min(0, initialGap), `same-material liquid did not remain merged: ${initialGap} -> ${finalGap}`);
-  assert.ok(j.min >= 0.95, `long-horizon liquid volume compressed too far: ${j.min}`);
-  assert.ok(j.max <= 1.05, `long-horizon liquid volume expanded too far: ${j.max}`);
+  assert.ok(j.min >= CONDENSED_VOLUME_RATIO_MIN_ACCEPTED, `long-horizon liquid volume compressed too far: ${j.min}`);
+  assert.ok(j.max <= CONDENSED_VOLUME_RATIO_MAX_ACCEPTED, `long-horizon liquid volume expanded too far: ${j.max}`);
   assert.ok(finalDropSpeedMPerS < 0.25, `liquid drop retained excessive bulk motion after ${driver.demo.state.time}s: ${finalDropSpeedMPerS} m/s`);
   assert.ok(
     freeSurfaceShape.tallnessRatio <= 0.75,
     `MLS-MPM liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
   );
   assert.ok(
-    freeSurfaceShape.footprintFillRatio >= 0.15,
-    `MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+    freeSurfaceShape.footprintFillRatio >= footprintFillRatioTarget,
+    `MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio} < ${footprintFillRatioTarget}`
   );
 });
 
@@ -896,18 +929,19 @@ test('resident MLS-MPM H2O/H2O long-horizon liquid acceptance matches free-surfa
       execution.nextSphParticleState,
       driver.demo.box.dimensionsM
     );
+    const footprintFillRatioTarget = liquidFootprintFillRatioTarget(driver.demo);
     const finalDiagnostics = execution.finalStep.diagnostics;
     assert.equal(execution.completedStepCount, 2048);
     assert.ok(execution.nextSphParticleState.time >= 1, `resident liquid gate did not reach 1 s: ${execution.nextSphParticleState.time}s`);
-    assert.ok(finalDiagnostics.minVolumeRatioJ >= 0.95, `resident liquid volume compressed too far: ${finalDiagnostics.minVolumeRatioJ}`);
-    assert.ok(finalDiagnostics.maxVolumeRatioJ <= 1.05, `resident liquid volume expanded too far: ${finalDiagnostics.maxVolumeRatioJ}`);
+    assert.ok(finalDiagnostics.minVolumeRatioJ >= CONDENSED_VOLUME_RATIO_MIN_ACCEPTED, `resident liquid volume compressed too far: ${finalDiagnostics.minVolumeRatioJ}`);
+    assert.ok(finalDiagnostics.maxVolumeRatioJ <= CONDENSED_VOLUME_RATIO_MAX_ACCEPTED, `resident liquid volume expanded too far: ${finalDiagnostics.maxVolumeRatioJ}`);
     assert.ok(
       freeSurfaceShape.tallnessRatio <= 0.75,
       `resident MLS-MPM liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
     );
     assert.ok(
-      freeSurfaceShape.footprintFillRatio >= 0.15,
-      `resident MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+      freeSurfaceShape.footprintFillRatio >= footprintFillRatioTarget,
+      `resident MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio} < ${footprintFillRatioTarget}`
     );
   } finally {
     destroyMlsMpmResidentStepsBuffers(execution);

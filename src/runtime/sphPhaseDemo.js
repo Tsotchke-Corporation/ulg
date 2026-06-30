@@ -8,7 +8,7 @@
 // phase physics. Evidence-only throughout.
 
 import { createReferenceMaterialClosures } from './material/materialClosures.js';
-import { createDerivedMaterialClosure } from './material/materialDerivation.js';
+import { createDerivedMaterialClosure, resolveMaterialSpec } from './material/materialDerivation.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -68,12 +68,12 @@ const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-st
 const H2O_VAPOR_OPTICAL_STATE_MODEL = 'h2o-vapor-condensation-optical-state-v0';
 const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL}:sealed-box-gas-summary-v0`;
 const REDUCED_H2O_DROPLET_RADIUS_M = 1e-6;
+const AVOGADRO_COUNT = 6.02214076e23;
 const AVOGADRO_R = 8.314462618;
 const TAIT_EXPONENT = 7;
 const DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT = 64;
 const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
-const DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD = 7;
-const DEFAULT_INITIAL_MATCHING_MATERIAL_STATE_PARTICLE_BUDGET_MAX = 100000;
+const DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA = 2e-3;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
   mechanics: true,
   gravity: true,
@@ -156,22 +156,37 @@ function volumeEquivalentSphereRadiusM(volumeM3) {
   return Math.cbrt((3 * volume) / (4 * Math.PI));
 }
 
+function sphereVolumeFromRadiusM(radiusM) {
+  const radius = Number(radiusM);
+  if (!(radius > 0)) return 0;
+  return (4 * Math.PI * radius ** 3) / 3;
+}
+
+function materialEntityVolumeM3({ densityKgPerM3, molarMassKgPerMol } = {}) {
+  const density = Number(densityKgPerM3);
+  const molarMass = Number(molarMassKgPerMol);
+  if (!(density > 0) || !(molarMass > 0)) return 0;
+  return molarMass / (density * AVOGADRO_COUNT);
+}
+
 function particleSizeStateFromVolume({
   material = null,
   role = null,
   temperatureK = null,
   restDensityKgPerM3 = null,
   restVolumeM3,
+  mechanicsRestVolumeM3 = null,
   volumeRatioJ = 1,
   pressurePa = 0,
   source = 'material-temperature-rest-density'
 } = {}) {
   const restVolume = Math.max(Number(restVolumeM3) || 0, 0);
+  const mechanicsRestVolume = Number(mechanicsRestVolumeM3);
   const volumeRatio = Math.max(Number(volumeRatioJ) || 1, 1e-12);
   const currentVolumeM3 = restVolume * volumeRatio;
   return {
     schema: 'peercompute.ulg.sph-particle-size-state.v0',
-    status: pressurePa > 0
+    status: Math.abs(volumeRatio - 1) > 1e-12
       ? 'pressure-adjusted-current-volume'
       : 'rest-volume',
     source,
@@ -181,6 +196,9 @@ function particleSizeStateFromVolume({
     restDensityKgPerM3: Number.isFinite(Number(restDensityKgPerM3)) ? Number(restDensityKgPerM3) : null,
     pressurePa: Math.max(Number(pressurePa) || 0, 0),
     restVolumeM3: restVolume,
+    mechanicsRestVolumeM3: Number.isFinite(mechanicsRestVolume) && mechanicsRestVolume > 0
+      ? mechanicsRestVolume
+      : null,
     currentVolumeM3,
     volumeRatioJ: volumeRatio,
     restParticleRadiusM: volumeEquivalentSphereRadiusM(restVolume),
@@ -189,20 +207,37 @@ function particleSizeStateFromVolume({
   };
 }
 
-function fillCube({ material, role = null, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
+function fillCube({
+  material,
+  role = null,
+  min,
+  size,
+  spacing,
+  particlesPerEdge,
+  temperatureK,
+  pressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa,
+  properties,
+  densityKgPerM3,
+  particleSizePlan = null
+}) {
   const particles = [];
   // particlesPerEdge sets the resolution directly (N -> N^3 particles); else derive from spacing.
   const n = Math.max(1, particlesPerEdge != null ? Math.round(particlesPerEdge) : Math.round(size / spacing));
   const step = size / n;
   const cellVolume = step * step * step;
   const massKg = densityKgPerM3 * cellVolume;
+  const visualRestVolumeM3 = Number(particleSizePlan?.restVolumeM3) > 0
+    ? Number(particleSizePlan.restVolumeM3)
+    : cellVolume;
   const initialParticleSizeState = particleSizeStateFromVolume({
     material,
     role,
     temperatureK,
     restDensityKgPerM3: densityKgPerM3,
-    restVolumeM3: cellVolume,
-    source: 'initial-lattice-material-temperature-rest-density'
+    pressurePa,
+    restVolumeM3: visualRestVolumeM3,
+    mechanicsRestVolumeM3: cellVolume,
+    source: particleSizePlan?.particleSizeSource || 'material-state-temperature-pressure-relative-particle-size'
   });
   const particleRadiusM = initialParticleSizeState.restParticleRadiusM;
   const u = specificInternalEnergyJPerKg(properties, temperatureK);
@@ -219,8 +254,16 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
           specificInternalEnergyJPerKg: u,
           temperatureK,
           restDensityKgPerM3: densityKgPerM3, // initial rest density (sets the MLS-MPM particle volume)
+          pressurePa,
           initialParticleSpacingM: step,
           initialCellVolumeM3: cellVolume,
+          continuumCellVolumeM3: cellVolume,
+          visualRestVolumeM3,
+          visualParticleRadiusM: particleRadiusM,
+          visualRestParticleRadiusM: particleRadiusM,
+          materialReferenceParticleRadiusM: Number(particleSizePlan?.materialReferenceParticleRadiusM) || null,
+          materialStateEntityVolumeM3: Number(particleSizePlan?.materialStateEntityVolumeM3) || null,
+          materialVisualScale: Number(particleSizePlan?.materialVisualScale) || null,
           particleRadiusM,
           restParticleRadiusM: particleRadiusM,
           currentCellVolumeM3: particleSizeState.currentVolumeM3,
@@ -237,22 +280,6 @@ function positiveParticleEdge(value, fallback = 1) {
   return Math.max(1, Math.round(Number.isFinite(Number(value)) ? Number(value) : fallback));
 }
 
-function clampInteger(value, min, max) {
-  return Math.max(min, Math.min(max, Math.round(value)));
-}
-
-function adaptiveParticleEdgeBounds(requestedEdge) {
-  const requested = positiveParticleEdge(requestedEdge);
-  const minEdge = requested <= 1 ? 1 : Math.max(2, Math.floor(requested * 0.67));
-  const maxEdge = Math.max(minEdge, Math.ceil(requested * 1.5));
-  return { requested, minEdge, maxEdge };
-}
-
-function cappedAdaptiveParticleEdge({ desiredEdge, requestedEdge }) {
-  const { minEdge, maxEdge } = adaptiveParticleEdgeBounds(requestedEdge);
-  return clampInteger(desiredEdge, minEdge, maxEdge);
-}
-
 function smoothingLengthRatioForTargetNeighborCount(targetNeighborCount) {
   const count = Math.max(1, Number(targetNeighborCount) || DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT);
   // Approximate simple-cubic neighbor count inside the cubic-spline support sphere:
@@ -260,203 +287,14 @@ function smoothingLengthRatioForTargetNeighborCount(targetNeighborCount) {
   return Math.cbrt((3 * count) / (32 * Math.PI));
 }
 
-function logSpacingError(a, b) {
-  if (!(a > 0) || !(b > 0)) return Number.POSITIVE_INFINITY;
-  return Math.abs(Math.log(a / b));
-}
-
-function relativeEdgeDeviation(edge, requestedEdge) {
-  const requested = positiveParticleEdge(requestedEdge);
-  return Math.abs(edge - requested) / Math.max(1, requested);
-}
-
-function matchingMaterialStateCandidate({
-  dropSizeM,
-  baseSizeM,
-  dropEdge,
-  baseEdge,
-  dropRequestedEdge,
-  baseRequestedEdge,
-  targetSpacingM,
-  requestedParticleBudget,
-  strategy = 'adaptive-search',
-  preservedRequestedRole = null
-}) {
-  const dropSpacingM = dropSizeM / dropEdge;
-  const baseSpacingM = baseSizeM / baseEdge;
-  const particleBudget = dropEdge ** 3 + baseEdge ** 3;
-  const spacingMismatch = logSpacingError(dropSpacingM, baseSpacingM);
-  const targetSpacingError = 0.5 * (
-    logSpacingError(dropSpacingM, targetSpacingM)
-    + logSpacingError(baseSpacingM, targetSpacingM)
-  );
-  const budgetDeviation = Math.abs(particleBudget - requestedParticleBudget) / Math.max(1, requestedParticleBudget);
-  const requestedDeviation = (
-    relativeEdgeDeviation(dropEdge, dropRequestedEdge)
-    + relativeEdgeDeviation(baseEdge, baseRequestedEdge)
-  );
-  const score = spacingMismatch * 100 + targetSpacingError * 10 + budgetDeviation + requestedDeviation * 0.25;
-  return {
-    dropEdge,
-    baseEdge,
-    dropSpacingM,
-    baseSpacingM,
-    particleBudget,
-    spacingMismatch,
-    targetSpacingError,
-    budgetDeviation,
-    requestedDeviation,
-    score,
-    strategy,
-    preservedRequestedRole
-  };
-}
-
-function sameSpacingEdgeForAnchor({ anchorSizeM, anchorEdge, pairedSizeM }) {
-  const spacingM = anchorSizeM / Math.max(1, anchorEdge);
-  if (!(spacingM > 0)) return 1;
-  return Math.max(1, Math.round(pairedSizeM / spacingM));
-}
-
-function chooseMatchingMaterialStateEdges({
-  dropSizeM,
-  baseSizeM,
-  dropRequestedParticlesPerEdge,
-  baseRequestedParticlesPerEdge,
-  targetSpacingM,
-  requestedParticleBudget,
-  preserveRequestedEdgeThreshold = DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD,
-  particleBudgetMax = DEFAULT_INITIAL_MATCHING_MATERIAL_STATE_PARTICLE_BUDGET_MAX
-}) {
-  if (!(dropSizeM > 0) || !(baseSizeM > 0) || !(targetSpacingM > 0)) return null;
-  const dropBounds = adaptiveParticleEdgeBounds(dropRequestedParticlesPerEdge);
-  const baseBounds = adaptiveParticleEdgeBounds(baseRequestedParticlesPerEdge);
-  const preservedCandidates = [];
-  const rejectedPreservedCandidates = [];
-  const addPreservedCandidate = (candidate) => {
-    if (!(candidate?.dropEdge > 0) || !(candidate?.baseEdge > 0)) return;
-    if (particleBudgetMax > 0 && candidate.particleBudget > particleBudgetMax) {
-      rejectedPreservedCandidates.push({
-        strategy: candidate.strategy,
-        preservedRequestedRole: candidate.preservedRequestedRole,
-        particleBudget: candidate.particleBudget,
-        particleBudgetMax
-      });
-      return;
-    }
-    preservedCandidates.push(candidate);
-  };
-  if (
-    dropBounds.requested >= preserveRequestedEdgeThreshold
-    && baseBounds.requested >= preserveRequestedEdgeThreshold
-    && dropBounds.requested === baseBounds.requested
-  ) {
-    addPreservedCandidate(matchingMaterialStateCandidate({
-      dropSizeM,
-      baseSizeM,
-      dropEdge: dropBounds.requested,
-      baseEdge: baseBounds.requested,
-      dropRequestedEdge: dropBounds.requested,
-      baseRequestedEdge: baseBounds.requested,
-      targetSpacingM,
-      requestedParticleBudget,
-      strategy: 'preserve-both-requested-edges',
-      preservedRequestedRole: 'both'
-    }));
-    if (preservedCandidates.length > 0) {
-      return {
-        ...preservedCandidates[0],
-        requestedEdgePreservationStatus: 'preserved',
-        rejectedPreservedCandidates
-      };
-    }
-  }
-  if (dropBounds.requested >= preserveRequestedEdgeThreshold) {
-    addPreservedCandidate(matchingMaterialStateCandidate({
-      dropSizeM,
-      baseSizeM,
-      dropEdge: dropBounds.requested,
-      baseEdge: sameSpacingEdgeForAnchor({
-        anchorSizeM: dropSizeM,
-        anchorEdge: dropBounds.requested,
-        pairedSizeM: baseSizeM
-      }),
-      dropRequestedEdge: dropBounds.requested,
-      baseRequestedEdge: baseBounds.requested,
-      targetSpacingM,
-      requestedParticleBudget,
-      strategy: 'preserve-drop-requested-edge',
-      preservedRequestedRole: 'drop'
-    }));
-  }
-  if (baseBounds.requested >= preserveRequestedEdgeThreshold) {
-    addPreservedCandidate(matchingMaterialStateCandidate({
-      dropSizeM,
-      baseSizeM,
-      dropEdge: sameSpacingEdgeForAnchor({
-        anchorSizeM: baseSizeM,
-        anchorEdge: baseBounds.requested,
-        pairedSizeM: dropSizeM
-      }),
-      baseEdge: baseBounds.requested,
-      dropRequestedEdge: dropBounds.requested,
-      baseRequestedEdge: baseBounds.requested,
-      targetSpacingM,
-      requestedParticleBudget,
-      strategy: 'preserve-base-requested-edge',
-      preservedRequestedRole: 'base'
-    }));
-  }
-  if (preservedCandidates.length > 0) {
-    preservedCandidates.sort((a, b) =>
-      a.score - b.score
-      || a.particleBudget - b.particleBudget
-      || (a.preservedRequestedRole === 'drop' ? -1 : 1)
-    );
-    return {
-      ...preservedCandidates[0],
-      requestedEdgePreservationStatus: 'preserved',
-      rejectedPreservedCandidates
-    };
-  }
-  let best = null;
-  for (let dropEdge = dropBounds.minEdge; dropEdge <= dropBounds.maxEdge; dropEdge += 1) {
-    for (let baseEdge = baseBounds.minEdge; baseEdge <= baseBounds.maxEdge; baseEdge += 1) {
-      const candidate = matchingMaterialStateCandidate({
-        dropSizeM,
-        baseSizeM,
-        dropEdge,
-        baseEdge,
-        dropRequestedEdge: dropBounds.requested,
-        baseRequestedEdge: baseBounds.requested,
-        targetSpacingM,
-        requestedParticleBudget
-      });
-      if (
-        !best
-        || candidate.score < best.score - 1e-12
-        || (Math.abs(candidate.score - best.score) <= 1e-12 && candidate.targetSpacingError < best.targetSpacingError)
-      ) {
-        best = candidate;
-      }
-    }
-  }
-  return best
-    ? {
-      ...best,
-      requestedEdgePreservationStatus: rejectedPreservedCandidates.length > 0
-        ? 'blocked-particle-budget'
-        : 'not-requested',
-      rejectedPreservedCandidates
-    }
-    : null;
-}
-
 function resolveInitialParticleSpacingPlan({
   dropSizeM,
   baseSizeM,
   dropDensityKgPerM3,
   baseDensityKgPerM3,
+  dropMaterialState = null,
+  baseMaterialState = null,
+  pressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa,
   dropRequestedParticlesPerEdge,
   baseRequestedParticlesPerEdge,
   adaptiveParticleSpacing = true,
@@ -474,67 +312,101 @@ function resolveInitialParticleSpacingPlan({
   const dropDensity = Math.max(Number(dropDensityKgPerM3) || 0, 1e-9);
   const baseDensity = Math.max(Number(baseDensityKgPerM3) || 0, 1e-9);
   const requestedParticleBudget = dropRequested ** 3 + baseRequested ** 3;
-  const totalMassKg = dropDensity * dropVolumeM3 + baseDensity * baseVolumeM3;
-  const targetParticleMassKg = totalMassKg / Math.max(1, requestedParticleBudget);
-  const targetDensity = totalMassKg / Math.max(dropVolumeM3 + baseVolumeM3, 1e-9);
-  const targetSpacingM = Math.cbrt(targetParticleMassKg / Math.max(targetDensity, 1e-9));
+  const referenceTotalMassKg = dropDensity * dropVolumeM3 + baseDensity * baseVolumeM3;
+  const referenceTargetParticleMassKg = referenceTotalMassKg / Math.max(1, requestedParticleBudget);
+  const referenceTargetDensity = referenceTotalMassKg / Math.max(dropVolumeM3 + baseVolumeM3, 1e-9);
+  const referenceTargetSpacingM = Math.cbrt(referenceTargetParticleMassKg / Math.max(referenceTargetDensity, 1e-9));
+  const requestedReferenceSpacingsM = [
+    dropSizeM / Math.max(1, dropRequested),
+    baseSizeM / Math.max(1, baseRequested)
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  const globalParticleSpacingM = requestedReferenceSpacingsM.length > 0
+    ? Math.min(...requestedReferenceSpacingsM)
+    : referenceTargetSpacingM;
+  const globalParticleVolumeM3 = globalParticleSpacingM ** 3;
+  const globalParticleRadiusM = 0.5 * globalParticleSpacingM;
+  const globalVisualParticleVolumeM3 = sphereVolumeFromRadiusM(globalParticleRadiusM);
 
   const withSupportMetadata = (row) => {
     const spacingM = Number(row.spacingM);
     const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
-    const restVolumeM3 = spacingM > 0 ? spacingM ** 3 : 0;
+    const continuumCellVolumeM3 = spacingM > 0 ? spacingM ** 3 : 0;
+    const density = Math.max(Number(row.densityKgPerM3) || 0, 0);
+    const particleMassKg = density * continuumCellVolumeM3;
+    const materialStateEntityVolumeM3 = materialEntityVolumeM3({
+      densityKgPerM3: density,
+      molarMassKgPerMol: row.materialState?.molarMassKgPerMol
+    });
+    const materialReferenceParticleRadiusM = volumeEquivalentSphereRadiusM(materialStateEntityVolumeM3);
     return {
       ...row,
       targetSmoothingLengthM,
       targetNeighborCount: neighborTarget,
-      restVolumeM3,
-      pressurePa: 0,
+      continuumCellVolumeM3,
+      mechanicsRestVolumeM3: continuumCellVolumeM3,
+      restVolumeM3: globalVisualParticleVolumeM3,
+      particleMassKg,
+      materialStateRestVolumeM3: continuumCellVolumeM3,
+      materialStateEntityVolumeM3,
+      materialReferenceParticleRadiusM,
+      materialStateParticleRadiusM: globalParticleRadiusM,
+      pressurePa: Number.isFinite(Number(row.pressurePa)) ? Number(row.pressurePa) : pressurePa,
       volumeRatioJ: 1,
-      volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(restVolumeM3),
-      pressureAdjustedParticleRadiusM: volumeEquivalentSphereRadiusM(restVolumeM3)
+      volumeEquivalentParticleRadiusM: globalParticleRadiusM,
+      pressureAdjustedParticleRadiusM: globalParticleRadiusM,
+      materialParticleDiameterM: globalParticleSpacingM,
+      blockSizeSource: 'global-particle-spacing-times-particles-per-edge',
+      particleSizeSource: 'global-particle-volume-material-density-mass'
     };
   };
-  const resolveRole = ({ role, sizeM, densityKgPerM3, requestedParticlesPerEdge }) => {
-    const uniformSpacingM = sizeM / requestedParticlesPerEdge;
-    if (!adaptiveParticleSpacing) {
-      return withSupportMetadata({
-        role,
-        requestedParticlesPerEdge,
-        particlesPerEdge: requestedParticlesPerEdge,
-        spacingM: uniformSpacingM,
-        uniformSpacingM,
-        desiredParticlesPerEdge: requestedParticlesPerEdge,
-        densityKgPerM3,
-        effectiveParticleEdgeStatus: 'fixed-requested-particles-per-edge',
-        requestedParticleEdgeLowerBoundApplied: false
-      });
-    }
-    const desiredSpacingM = Math.cbrt(targetParticleMassKg / Math.max(densityKgPerM3, 1e-9));
-    const desiredParticlesPerEdge = Math.max(1, sizeM / Math.max(desiredSpacingM, 1e-9));
-    const adaptiveParticlesPerEdge = cappedAdaptiveParticleEdge({
-      desiredEdge: desiredParticlesPerEdge,
-      requestedEdge: requestedParticlesPerEdge
+  const resolveRole = ({ role, sizeM, densityKgPerM3, materialState, requestedParticlesPerEdge }) => {
+    const uniformSpacingM = globalParticleSpacingM;
+    const blockEdgeM = uniformSpacingM * requestedParticlesPerEdge;
+    const fixedRequestedRow = (status) => withSupportMetadata({
+      role,
+      referenceBlockEdgeM: sizeM,
+      blockEdgeM,
+      blockVolumeM3: blockEdgeM ** 3,
+      requestedParticlesPerEdge,
+      particlesPerEdge: requestedParticlesPerEdge,
+      spacingM: uniformSpacingM,
+      uniformSpacingM,
+      desiredParticlesPerEdge: requestedParticlesPerEdge,
+      densityKgPerM3,
+      materialState,
+      phase: materialState?.phase ?? null,
+      densitySource: materialState?.densitySource ?? null,
+      pressurePa: materialState?.pressurePa ?? pressurePa,
+      effectiveParticleEdgeStatus: status,
+      requestedParticleEdgeLowerBoundApplied: false
     });
-    const requestedParticleEdgeLowerBoundApplied =
-      requestedParticlesPerEdge >= DEFAULT_INITIAL_PRESERVE_REQUESTED_EDGE_THRESHOLD
-      && adaptiveParticlesPerEdge < requestedParticlesPerEdge;
-    const particlesPerEdge = requestedParticleEdgeLowerBoundApplied
-      ? requestedParticlesPerEdge
-      : adaptiveParticlesPerEdge;
+    if (!adaptiveParticleSpacing) {
+      return fixedRequestedRow('fixed-requested-particles-per-edge');
+    }
+    const desiredSpacingM = globalParticleSpacingM;
     return withSupportMetadata({
       role,
+      referenceBlockEdgeM: sizeM,
+      blockEdgeM,
+      blockVolumeM3: blockEdgeM ** 3,
       requestedParticlesPerEdge,
-      particlesPerEdge,
-      spacingM: sizeM / particlesPerEdge,
+      particlesPerEdge: requestedParticlesPerEdge,
+      spacingM: uniformSpacingM,
       uniformSpacingM,
       desiredSpacingM,
-      desiredParticlesPerEdge,
-      adaptiveParticlesPerEdge,
+      desiredParticlesPerEdge: requestedParticlesPerEdge,
+      referenceBlockParticlesPerEdge: sizeM / Math.max(globalParticleSpacingM, 1e-9),
+      adaptiveParticlesPerEdge: requestedParticlesPerEdge,
+      adaptiveSuggestedParticlesPerEdge: requestedParticlesPerEdge,
+      adaptiveWouldAdjustParticlesPerEdge: false,
+      adaptiveParticleSizingDeferred: true,
       densityKgPerM3,
-      effectiveParticleEdgeStatus: requestedParticleEdgeLowerBoundApplied
-        ? 'requested-large-edge-preserved'
-        : 'adaptive-density-target',
-      requestedParticleEdgeLowerBoundApplied
+      materialState,
+      phase: materialState?.phase ?? null,
+      densitySource: materialState?.densitySource ?? null,
+      pressurePa: materialState?.pressurePa ?? pressurePa,
+      effectiveParticleEdgeStatus: 'requested-particle-edge-preserved',
+      requestedParticleEdgeLowerBoundApplied: false
     });
   };
 
@@ -542,58 +414,28 @@ function resolveInitialParticleSpacingPlan({
     role: 'drop',
     sizeM: dropSizeM,
     densityKgPerM3: dropDensity,
+    materialState: dropMaterialState,
     requestedParticlesPerEdge: dropRequested
   });
   let base = resolveRole({
     role: 'base',
     sizeM: baseSizeM,
     densityKgPerM3: baseDensity,
+    materialState: baseMaterialState,
     requestedParticlesPerEdge: baseRequested
   });
-  const matchingMaterialStateEdges = adaptiveParticleSpacing && matchingMaterialState
-    ? chooseMatchingMaterialStateEdges({
-      dropSizeM,
-      baseSizeM,
-      dropRequestedParticlesPerEdge: dropRequested,
-      baseRequestedParticlesPerEdge: baseRequested,
-      targetSpacingM,
-      requestedParticleBudget
-    })
-    : null;
-  const matchingMaterialStateSpacingUnified = Boolean(
-    matchingMaterialStateEdges
-    && matchingMaterialStateEdges.spacingMismatch <= 1e-9
+  let matchingMaterialStateSpacingUnified = Boolean(
+    matchingMaterialState
+    && Math.abs(drop.spacingM - base.spacingM) <= 1e-9
   );
-  if (matchingMaterialStateEdges) {
-    const preservedRequestedRole = matchingMaterialStateEdges.preservedRequestedRole;
-    drop = withSupportMetadata({
-      ...drop,
-      particlesPerEdge: matchingMaterialStateEdges.dropEdge,
-      spacingM: matchingMaterialStateEdges.dropSpacingM,
-      matchingMaterialStateSpacingUnified,
-      effectiveParticleEdgeStatus: preservedRequestedRole === 'drop' || preservedRequestedRole === 'both'
-        ? 'matching-material-preserved-requested-edge'
-        : 'matching-material-state-spacing-unified',
-      requestedParticleEdgeLowerBoundApplied: preservedRequestedRole === 'drop'
-        || preservedRequestedRole === 'both'
-        || drop.requestedParticleEdgeLowerBoundApplied === true
-    });
-    base = withSupportMetadata({
-      ...base,
-      particlesPerEdge: matchingMaterialStateEdges.baseEdge,
-      spacingM: matchingMaterialStateEdges.baseSpacingM,
-      matchingMaterialStateSpacingUnified,
-      effectiveParticleEdgeStatus: preservedRequestedRole === 'base' || preservedRequestedRole === 'both'
-        ? 'matching-material-preserved-requested-edge'
-        : 'matching-material-state-spacing-unified',
-      requestedParticleEdgeLowerBoundApplied: preservedRequestedRole === 'base'
-        || preservedRequestedRole === 'both'
-        || base.requestedParticleEdgeLowerBoundApplied === true
-    });
-  }
+  drop.matchingMaterialStateSpacingUnified = matchingMaterialStateSpacingUnified;
+  base.matchingMaterialStateSpacingUnified = matchingMaterialStateSpacingUnified;
   const roleSpacingM = [drop.spacingM, base.spacingM].filter((value) => Number.isFinite(value) && value > 0);
   const minSpacingM = roleSpacingM.length ? Math.min(...roleSpacingM) : 0;
-  const uncappedSmoothingLengthM = Math.max(drop.targetSmoothingLengthM, base.targetSmoothingLengthM);
+  const uncappedSmoothingLengthM = Math.max(
+    ...[drop.spacingM, base.spacingM]
+      .map((spacingM) => spacingM > 0 ? spacingM * smoothingLengthRatio : 0)
+  );
   const smoothingLengthCapM = minSpacingM > 0 ? minSpacingM * smoothingLengthRatioCap : uncappedSmoothingLengthM;
   const smoothingLengthM = Math.min(uncappedSmoothingLengthM, smoothingLengthCapM || uncappedSmoothingLengthM);
   const estimateNeighborCount = (spacingM) => {
@@ -601,16 +443,57 @@ function resolveInitialParticleSpacingPlan({
     return (4 / 3) * Math.PI * ((2 * smoothingLengthM) / spacingM) ** 3;
   };
   for (const row of [drop, base]) {
+    row.targetSmoothingLengthM = row.spacingM > 0 ? row.spacingM * smoothingLengthRatio : 0;
     row.globalSmoothingLengthM = smoothingLengthM;
     row.globalSmoothingLengthRatio = row.spacingM > 0 ? smoothingLengthM / row.spacingM : 0;
     row.estimatedNeighborCount = estimateNeighborCount(row.spacingM);
   }
+  const totalMassKg = (
+    drop.particleMassKg * drop.particlesPerEdge ** 3
+    + base.particleMassKg * base.particlesPerEdge ** 3
+  );
+  const totalBlockVolumeM3 = (drop.blockVolumeM3 || 0) + (base.blockVolumeM3 || 0);
+  const targetParticleMassKg = totalMassKg / Math.max(1, requestedParticleBudget);
+  const targetDensity = totalMassKg / Math.max(totalBlockVolumeM3, 1e-9);
+  const targetSpacingM = Math.cbrt(targetParticleMassKg / Math.max(targetDensity, 1e-9));
+  const minParticleRadiusM = Math.min(
+    ...[drop.volumeEquivalentParticleRadiusM, base.volumeEquivalentParticleRadiusM]
+      .filter((value) => Number.isFinite(value) && value > 0)
+  );
+  const relativeParticleSize = {
+    schema: 'peercompute.ulg.sph-relative-particle-size-diagnostics.v0',
+    source: 'fixed-global-particle-volume-material-density-derived-mass',
+    dropToBaseRadiusRatio: base.volumeEquivalentParticleRadiusM > 0
+      ? drop.volumeEquivalentParticleRadiusM / base.volumeEquivalentParticleRadiusM
+      : null,
+    baseToDropRadiusRatio: drop.volumeEquivalentParticleRadiusM > 0
+      ? base.volumeEquivalentParticleRadiusM / drop.volumeEquivalentParticleRadiusM
+      : null,
+    dropRadiusRelativeToSmallest: minParticleRadiusM > 0
+      ? drop.volumeEquivalentParticleRadiusM / minParticleRadiusM
+      : null,
+    baseRadiusRelativeToSmallest: minParticleRadiusM > 0
+      ? base.volumeEquivalentParticleRadiusM / minParticleRadiusM
+      : null,
+    dropParticleMassKg: drop.particleMassKg,
+    baseParticleMassKg: base.particleMassKg,
+    dropToBaseMassRatio: base.particleMassKg > 0 ? drop.particleMassKg / base.particleMassKg : null,
+    dropMaterialReferenceParticleRadiusM: drop.materialReferenceParticleRadiusM,
+    baseMaterialReferenceParticleRadiusM: base.materialReferenceParticleRadiusM,
+    dropToBaseMaterialReferenceRadiusRatio: base.materialReferenceParticleRadiusM > 0
+      ? drop.materialReferenceParticleRadiusM / base.materialReferenceParticleRadiusM
+      : null,
+    globalParticleSpacingM,
+    globalParticleVolumeM3,
+    globalVisualParticleRadiusM: globalParticleRadiusM,
+    globalVisualParticleVolumeM3
+  };
 
   return {
     schema: 'peercompute.ulg.sph-initial-particle-spacing-plan.v0',
     status: adaptiveParticleSpacing
-      ? 'material-temperature-target-neighbor-capped'
-      : 'fixed-requested-particles-per-edge',
+      ? 'requested-particle-edges-preserved-global-particle-volume'
+      : 'fixed-requested-particles-per-edge-global-particle-volume',
     adaptiveParticleSpacing,
     targetNeighborCount: neighborTarget,
     smoothingLengthRatio,
@@ -621,36 +504,25 @@ function resolveInitialParticleSpacingPlan({
     smoothingLengthCapped: smoothingLengthM < uncappedSmoothingLengthM - 1e-12,
     matchingMaterialState: Boolean(matchingMaterialState),
     matchingMaterialStateSpacingUnified,
-    matchingMaterialStateSpacingPlan: matchingMaterialStateEdges
-      ? {
-        dropParticlesPerEdge: matchingMaterialStateEdges.dropEdge,
-        baseParticlesPerEdge: matchingMaterialStateEdges.baseEdge,
-        dropSpacingM: matchingMaterialStateEdges.dropSpacingM,
-        baseSpacingM: matchingMaterialStateEdges.baseSpacingM,
-        spacingMismatch: matchingMaterialStateEdges.spacingMismatch,
-        targetSpacingError: matchingMaterialStateEdges.targetSpacingError,
-        particleBudget: matchingMaterialStateEdges.particleBudget,
-        requestedParticleBudget,
-        budgetDeviation: matchingMaterialStateEdges.budgetDeviation,
-        strategy: matchingMaterialStateEdges.strategy,
-        preservedRequestedRole: matchingMaterialStateEdges.preservedRequestedRole,
-        requestedEdgePreservationStatus: matchingMaterialStateEdges.requestedEdgePreservationStatus,
-        rejectedPreservedCandidates: matchingMaterialStateEdges.rejectedPreservedCandidates || []
-      }
-      : null,
+    matchingMaterialStateSpacingPlan: null,
     particleSizePolicy: {
       schema: 'peercompute.ulg.sph-initial-particle-size-policy.v0',
-      status: 'material-temperature-pressure-rest-density-derived',
+      status: 'global-particle-volume-material-density-derived-mass',
       source: 'initial-particle-spacing-plan',
       roleInputs: [
         'material',
         'temperature',
         'phase-rest-density',
-        'target-neighbor-count',
-        'box-support-constraints'
+        'requested-particles-per-edge',
+        'reference-block-geometry'
       ],
-      restVolumeModel: 'particle-mass / phase-rest-density',
-      currentVolumeModel: 'restVolumeM3 * volumeRatioJ',
+      spacingModel: 'single-global-spacing-from-min-reference-block-edge-per-requested-edge',
+      mechanicsRestVolumeModel: 'globalParticleSpacingM^3',
+      visualRestVolumeModel: 'sphere(radius=globalParticleSpacingM/2)',
+      massModel: 'phase-density-at-temperature-pressure * mechanicsRestVolumeM3',
+      currentVolumeModel: 'visualRestVolumeM3 * volumeRatioJ',
+      phaseChangeVolumeModel: 'fixed-particle-count-no-automatic-gas-expansion',
+      gasExpansionHandling: 'gas mass and pressure use species ledgers/fields until an explicit gas-admission or adaptive split policy creates solver particles',
       pressureModel: 'zero-gauge-before-optional-hydrostatic-initialization',
       dynamicPressureSupported: true
     },
@@ -658,6 +530,11 @@ function resolveInitialParticleSpacingPlan({
     targetParticleMassKg,
     targetSpacingM,
     totalMassKg,
+    referenceTotalMassKg,
+    referenceTargetParticleMassKg,
+    referenceTargetSpacingM,
+    pressurePa,
+    relativeParticleSize,
     drop,
     base
   };
@@ -671,18 +548,73 @@ function resolveInitialParticleSpacingPlan({
 // Rest density (kg/m^3) of the stable phase of a material at temperature T, from its closure — so
 // each block starts at the correct packing for whatever material/phase it is (molten metal, ice,
 // liquid water, ...).
-function densityAtTemperatureKgPerM3(props, temperatureK) {
+function materialStateAtTemperaturePressure(props, temperatureK, pressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa) {
+  const pressure = Number.isFinite(Number(pressurePa)) && Number(pressurePa) > 0
+    ? Number(pressurePa)
+    : PHYSICAL_CONSTANTS.standardAtmospherePa;
+  const molarMassKgPerMol = Number(props?.molarMassKgPerMol);
   if (props.idealGas) {
-    return idealGasDensityKgPerM3({
-      pressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
-      temperatureK,
-      molarMassKgPerMol: props.molarMassKgPerMol
-    });
+    return {
+      phase: 'gas',
+      densityKgPerM3: idealGasDensityKgPerM3({
+        pressurePa: pressure,
+        temperatureK,
+        molarMassKgPerMol: props.molarMassKgPerMol
+      }),
+      molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
+      pressurePa: pressure,
+      densitySource: 'material-ideal-gas-law-at-role-temperature-pressure',
+      bulkModulusPa: null,
+      pressureDensityAdjustment: null
+    };
   }
   const u = specificInternalEnergyJPerKg(props, temperatureK);
   const phase = equilibriumFromSpecificEnergy(props, u).stablePhase;
   const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
-  return ph.densityKgPerM3;
+  const phaseName = ph?.name || phase || null;
+  if (phaseName === 'gas' && props.molarMassKgPerMol > 0) {
+    return {
+      phase: phaseName,
+      densityKgPerM3: idealGasDensityKgPerM3({
+        pressurePa: pressure,
+        temperatureK,
+        molarMassKgPerMol: props.molarMassKgPerMol
+      }),
+      molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
+      pressurePa: pressure,
+      densitySource: 'material-molar-mass-ideal-gas-law-at-role-temperature-pressure',
+      bulkModulusPa: null,
+      pressureDensityAdjustment: null
+    };
+  }
+  const baseDensity = Number(ph?.densityKgPerM3);
+  const bulkModulusPa = Number(ph?.bulkModulusPa ?? ph?.eos?.bulkModulusPa);
+  const pressureDeltaPa = pressure - PHYSICAL_CONSTANTS.standardAtmospherePa;
+  const pressureDensityFactor = bulkModulusPa > 0
+    ? Math.exp(Math.max(-0.25, Math.min(0.25, pressureDeltaPa / bulkModulusPa)))
+    : 1;
+  return {
+    phase: phaseName,
+    densityKgPerM3: baseDensity > 0 ? baseDensity * pressureDensityFactor : 0,
+    molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
+    pressurePa: pressure,
+    densitySource: bulkModulusPa > 0
+      ? 'material-phase-density-temperature-with-bulk-modulus-pressure-correction'
+      : 'material-phase-density-temperature',
+    bulkModulusPa: bulkModulusPa > 0 ? bulkModulusPa : null,
+    pressureDensityAdjustment: bulkModulusPa > 0
+      ? {
+        referencePressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
+        pressureDeltaPa,
+        factor: pressureDensityFactor
+      }
+      : null
+  };
+}
+
+function densityAtTemperatureKgPerM3(props, temperatureK, pressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa) {
+  const state = materialStateAtTemperaturePressure(props, temperatureK, pressurePa);
+  return typeof state === 'number' ? state : state.densityKgPerM3;
 }
 
 function roleParticleEdgeDiagnostic(rolePlan, {
@@ -704,10 +636,31 @@ function roleParticleEdgeDiagnostic(rolePlan, {
     blockEdgeM: Number.isFinite(Number(blockEdgeM)) ? Number(blockEdgeM) : null,
     spacingM: Number.isFinite(Number(rolePlan?.spacingM)) ? Number(rolePlan.spacingM) : null,
     uniformSpacingM: Number.isFinite(Number(rolePlan?.uniformSpacingM)) ? Number(rolePlan.uniformSpacingM) : null,
+    continuumCellVolumeM3: Number.isFinite(Number(rolePlan?.continuumCellVolumeM3))
+      ? Number(rolePlan.continuumCellVolumeM3)
+      : null,
+    visualRestVolumeM3: Number.isFinite(Number(rolePlan?.restVolumeM3)) ? Number(rolePlan.restVolumeM3) : null,
     particleRadiusM: Number.isFinite(Number(rolePlan?.volumeEquivalentParticleRadiusM))
       ? Number(rolePlan.volumeEquivalentParticleRadiusM)
       : null,
     densityKgPerM3: Number.isFinite(Number(rolePlan?.densityKgPerM3)) ? Number(rolePlan.densityKgPerM3) : null,
+    pressurePa: Number.isFinite(Number(rolePlan?.pressurePa)) ? Number(rolePlan.pressurePa) : null,
+    phase: rolePlan?.phase || null,
+    densitySource: rolePlan?.densitySource || null,
+    particleMassKg: Number.isFinite(Number(rolePlan?.particleMassKg)) ? Number(rolePlan.particleMassKg) : null,
+    materialStateParticleRadiusM: Number.isFinite(Number(rolePlan?.materialStateParticleRadiusM))
+      ? Number(rolePlan.materialStateParticleRadiusM)
+      : null,
+    materialReferenceParticleRadiusM: Number.isFinite(Number(rolePlan?.materialReferenceParticleRadiusM))
+      ? Number(rolePlan.materialReferenceParticleRadiusM)
+      : null,
+    materialStateEntityVolumeM3: Number.isFinite(Number(rolePlan?.materialStateEntityVolumeM3))
+      ? Number(rolePlan.materialStateEntityVolumeM3)
+      : null,
+    materialVisualScale: Number.isFinite(Number(rolePlan?.materialVisualScale))
+      ? Number(rolePlan.materialVisualScale)
+      : null,
+    particleSizeSource: rolePlan?.particleSizeSource || null,
     effectiveParticleEdgeStatus: rolePlan?.effectiveParticleEdgeStatus || null,
     requestedParticleEdgeLowerBoundApplied: rolePlan?.requestedParticleEdgeLowerBoundApplied === true,
     matchingMaterialStateSpacingUnified: rolePlan?.matchingMaterialStateSpacingUnified === true
@@ -751,7 +704,10 @@ function initialParticleEdgeDiagnostics({
     matchingMaterialStateStrategy: matchingPlan?.strategy || null,
     preservedRequestedRole: matchingPlan?.preservedRequestedRole || null,
     requestedEdgePreservationStatus: matchingPlan?.requestedEdgePreservationStatus || (
-      drop.requestedParticleEdgeLowerBoundApplied || base.requestedParticleEdgeLowerBoundApplied
+      drop.effectiveParticlesPerEdge === drop.requestedParticlesPerEdge
+      && base.effectiveParticlesPerEdge === base.requestedParticlesPerEdge
+        ? 'preserved'
+        : drop.requestedParticleEdgeLowerBoundApplied || base.requestedParticleEdgeLowerBoundApplied
         ? 'preserved'
         : 'not-requested'
     ),
@@ -853,12 +809,16 @@ function initializeSupportedHydrostaticMpmState(demo, {
       particle.mpmF = isotropicMpmFForJ(volumeRatioJ);
       particle.mpmC = new Float64Array(9);
       particle.hydrostaticPressurePa = pressurePa;
+      const visualRestVolumeM3 = Number(particle.visualRestVolumeM3) > 0
+        ? Number(particle.visualRestVolumeM3)
+        : restVolumeM3;
       const particleSizeState = particleSizeStateFromVolume({
         material: particle.material,
         role,
         temperatureK: particle.temperatureK,
         restDensityKgPerM3: restDensity,
-        restVolumeM3,
+        restVolumeM3: visualRestVolumeM3,
+        mechanicsRestVolumeM3: restVolumeM3,
         volumeRatioJ,
         pressurePa,
         source: 'hydrostatic-material-temperature-pressure-rest-density'
@@ -866,6 +826,9 @@ function initializeSupportedHydrostaticMpmState(demo, {
       particle.restParticleRadiusM = particleSizeState.restParticleRadiusM;
       particle.currentCellVolumeM3 = particleSizeState.currentVolumeM3;
       particle.currentParticleRadiusM = particleSizeState.currentParticleRadiusM;
+      particle.visualRestVolumeM3 = particleSizeState.restVolumeM3;
+      particle.visualRestParticleRadiusM = particleSizeState.restParticleRadiusM;
+      particle.visualParticleRadiusM = particleSizeState.currentParticleRadiusM;
       particle.pressureAdjustedParticleRadiusM = particleSizeState.particleRadiusM;
       particle.particleSizeState = particleSizeState;
       particle.hydrostaticInitialization = {
@@ -875,7 +838,8 @@ function initializeSupportedHydrostaticMpmState(demo, {
         depthM,
         pressurePa,
         volumeRatioJ,
-        restVolumeM3,
+        restVolumeM3: visualRestVolumeM3,
+        mechanicsRestVolumeM3: restVolumeM3,
         currentVolumeM3: particleSizeState.currentVolumeM3,
         restParticleRadiusM: particleSizeState.restParticleRadiusM,
         currentParticleRadiusM: particleSizeState.currentParticleRadiusM,
@@ -897,6 +861,8 @@ function initializeSupportedHydrostaticMpmState(demo, {
 }
 
 function resolveSingleMaterialClosure(key, { allowFixtureMaterialProperties = false } = {}) {
+  const spec = resolveMaterialSpec(key);
+  if (spec.phaseModel !== 'element') return createDerivedMaterialClosure(key);
   const Z = zForSymbol(key);
   const elementClosure = Z != null
     ? elementMaterialClosure(Z, { allowReducedEstimates: allowFixtureMaterialProperties })
@@ -1080,15 +1046,14 @@ export function buildSphPhaseDemoState({
   };
   // Box is a rectangular cuboid [Lx, Ly, Lz] (configurable per axis); a scalar edge stays cubic.
   const boxDims = scenario.box.dimensionsM ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
-  const ironEdge = scenario.iron.edgeM;
-  const iceEdge = scenario.ice.edgeM;
+  const referenceIronEdge = scenario.iron.edgeM;
+  const referenceIceEdge = scenario.ice.edgeM;
   const cx = boxDims[0] / 2;
   const cz = boxDims[2] / 2;
 
   // Configurable starting elevation (bottom face) of each block. The base block defaults to resting
-  // on the floor; the drop block defaults to a clear gap above it so it visibly falls.
+  // on the floor; the drop block default is resolved after material particle sizes are known.
   const iceBase = iceBaseHeightM ?? 0;
-  const ironBase = ironBaseHeightM ?? (iceBase + iceEdge + Math.max(iceEdge, 1.0));
 
   // Resolve each block's material to a closure: the reference closures (fe/h2o/air) or, for any
   // other element symbol, a closure DERIVED on the fly from the simulation (elementMaterialClosure:
@@ -1134,16 +1099,22 @@ export function buildSphPhaseDemoState({
     ? Math.max(requestedDropTempK, liquidus + 39)
     : requestedDropTempK;
   const baseTempK = baseTemperatureK ?? scenario.ice.initialTemperatureK;
-  const dropDensityKgPerM3 = densityAtTemperatureKgPerM3(dropProps, dropTempK);
-  const baseDensityKgPerM3 = densityAtTemperatureKgPerM3(baseProps, baseTempK);
+  const initialPressurePa = scenario.gas.pressurePa ?? PHYSICAL_CONSTANTS.standardAtmospherePa;
+  const dropMaterialState = materialStateAtTemperaturePressure(dropProps, dropTempK, initialPressurePa);
+  const baseMaterialState = materialStateAtTemperaturePressure(baseProps, baseTempK, initialPressurePa);
+  const dropDensityKgPerM3 = dropMaterialState.densityKgPerM3;
+  const baseDensityKgPerM3 = baseMaterialState.densityKgPerM3;
   const matchingMaterialState = String(dropMaterial).toLowerCase() === String(baseMaterial).toLowerCase()
     && Math.abs(dropTempK - baseTempK) <= 1e-6
     && Math.abs(dropDensityKgPerM3 - baseDensityKgPerM3) <= Math.max(1e-6, Math.abs(baseDensityKgPerM3) * 1e-6);
   const initialParticleSpacing = resolveInitialParticleSpacingPlan({
-    dropSizeM: ironEdge,
-    baseSizeM: iceEdge,
+    dropSizeM: referenceIronEdge,
+    baseSizeM: referenceIceEdge,
     dropDensityKgPerM3,
     baseDensityKgPerM3,
+    dropMaterialState,
+    baseMaterialState,
+    pressurePa: initialPressurePa,
     dropRequestedParticlesPerEdge: dropParticleEdge,
     baseRequestedParticlesPerEdge: baseParticleEdge,
     adaptiveParticleSpacing,
@@ -1199,25 +1170,61 @@ export function buildSphPhaseDemoState({
   initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationStatus =
     initialParticleSpacing.algorithmMaterialParticleInitializationRows.status;
 
+  const dropBlockEdgeM = Number(initialParticleSpacing.drop.blockEdgeM) > 0
+    ? Number(initialParticleSpacing.drop.blockEdgeM)
+    : referenceIronEdge;
+  const baseBlockEdgeM = Number(initialParticleSpacing.base.blockEdgeM) > 0
+    ? Number(initialParticleSpacing.base.blockEdgeM)
+    : referenceIceEdge;
+  const ironBase = ironBaseHeightM ?? (
+    iceBase + baseBlockEdgeM + Math.max(baseBlockEdgeM, dropBlockEdgeM, 1.0)
+  );
+  const dropBlockVolumeM3 = dropBlockEdgeM ** 3;
+  const baseBlockVolumeM3 = baseBlockEdgeM ** 3;
+  const scenarioWithDerivedBlockGeometry = {
+    ...scenario,
+    box: { ...scenario.box },
+    ice: {
+      ...scenario.ice,
+      edgeM: baseBlockEdgeM,
+      volumeM3: baseBlockVolumeM3,
+      referenceEdgeM: referenceIceEdge,
+      referenceVolumeM3: scenario.ice.volumeM3
+    },
+    iron: {
+      ...scenario.iron,
+      edgeM: dropBlockEdgeM,
+      volumeM3: dropBlockVolumeM3,
+      volumeFractionOfIce: baseBlockVolumeM3 > 0 ? dropBlockVolumeM3 / baseBlockVolumeM3 : null,
+      referenceEdgeM: referenceIronEdge,
+      referenceVolumeM3: scenario.iron.volumeM3,
+      referenceVolumeFractionOfIce: scenario.iron.volumeFractionOfIce
+    }
+  };
+
   const dropParticles = fillCube({
     material: dropMaterial,
     role: 'drop',
-    min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
-    size: ironEdge,
+    min: [cx - dropBlockEdgeM / 2, ironBase, cz - dropBlockEdgeM / 2],
+    size: dropBlockEdgeM,
     particlesPerEdge: initialParticleSpacing.drop.particlesPerEdge,
     temperatureK: dropTempK,
+    pressurePa: initialPressurePa,
     properties: dropProps,
-    densityKgPerM3: dropDensityKgPerM3
+    densityKgPerM3: dropDensityKgPerM3,
+    particleSizePlan: initialParticleSpacing.drop
   });
   const baseParticles = fillCube({
     material: baseMaterial,
     role: 'base',
-    min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
-    size: iceEdge,
+    min: [cx - baseBlockEdgeM / 2, iceBase, cz - baseBlockEdgeM / 2],
+    size: baseBlockEdgeM,
     particlesPerEdge: initialParticleSpacing.base.particlesPerEdge,
     temperatureK: baseTempK,
+    pressurePa: initialPressurePa,
     properties: baseProps,
-    densityKgPerM3: baseDensityKgPerM3
+    densityKgPerM3: baseDensityKgPerM3,
+    particleSizePlan: initialParticleSpacing.base
   });
 
   const all = [...baseParticles, ...dropParticles];
@@ -1228,9 +1235,17 @@ export function buildSphPhaseDemoState({
     p.material = all[index].material;
     p.role = all[index].role;
     p.temperatureK = all[index].temperatureK;
+    p.pressurePa = all[index].pressurePa;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
     p.initialParticleSpacingM = all[index].initialParticleSpacingM;
     p.initialCellVolumeM3 = all[index].initialCellVolumeM3;
+    p.continuumCellVolumeM3 = all[index].continuumCellVolumeM3;
+    p.visualRestVolumeM3 = all[index].visualRestVolumeM3;
+    p.visualParticleRadiusM = all[index].visualParticleRadiusM;
+    p.visualRestParticleRadiusM = all[index].visualRestParticleRadiusM;
+    p.materialReferenceParticleRadiusM = all[index].materialReferenceParticleRadiusM;
+    p.materialStateEntityVolumeM3 = all[index].materialStateEntityVolumeM3;
+    p.materialVisualScale = all[index].materialVisualScale;
     p.particleRadiusM = all[index].particleRadiusM;
     p.restParticleRadiusM = all[index].restParticleRadiusM;
     p.currentCellVolumeM3 = all[index].currentCellVolumeM3;
@@ -1238,7 +1253,7 @@ export function buildSphPhaseDemoState({
     p.particleSizeState = all[index].particleSizeState ? { ...all[index].particleSizeState } : null;
   });
   return {
-    scenario,
+    scenario: scenarioWithDerivedBlockGeometry,
     closures: baseClosures,
     allowFixtureMaterialProperties,
     state,
@@ -1253,8 +1268,8 @@ export function buildSphPhaseDemoState({
       baseRequestedParticlesPerEdge: baseParticleEdge,
       dropParticleCount: dropParticles.length,
       baseParticleCount: baseParticles.length,
-      dropSizeM: ironEdge,
-      baseSizeM: iceEdge
+      dropSizeM: dropBlockEdgeM,
+      baseSizeM: baseBlockEdgeM
     }),
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
@@ -3298,8 +3313,8 @@ function computeDerivedDemoPreflight(demo) {
   const meanWallTempK = wallTemps.reduce((sum, t) => sum + t, 0) / wallTemps.length;
   const adiabatic = scenario.walls.model === 'adiabatic';
 
-  const dropDensity = densityAtTemperatureKgPerM3(dropProps, dropTemp);
-  const baseDensity = densityAtTemperatureKgPerM3(baseProps, baseTemp);
+  const dropDensity = densityAtTemperatureKgPerM3(dropProps, dropTemp, scenario.gas.pressurePa);
+  const baseDensity = densityAtTemperatureKgPerM3(baseProps, baseTemp, scenario.gas.pressurePa);
   const airVolumeM3 = scenario.box.volumeM3 - scenario.iron.volumeM3 - scenario.ice.volumeM3;
   const airDensity = airProps
     ? idealGasDensityKgPerM3({
@@ -3478,6 +3493,17 @@ export function createSphPhaseDemo(options = {}) {
   const mlsMpmLiquidVelocityDiffusionStartS = options.mlsMpmLiquidVelocityDiffusionStartS ?? (20 * mechanicalSubsteps * carrierDt);
   const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
+  const mlsMpmLiquidFreeSurfaceRelaxationAlpha = mechanics === 'mlsmpm'
+    && physicalLawGroups.gravity
+    && physicalLawGroups.pressure
+    && physicalLawGroups.eos
+    ? Math.min(Math.max(
+      Number(options.mlsMpmLiquidFreeSurfaceRelaxationAlpha ?? DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA) || 0,
+      0
+    ), 1)
+    : 0;
+  const mlsMpmLiquidFreeSurfaceTargetDepthM = options.mlsMpmLiquidFreeSurfaceTargetDepthM ?? null;
+  const mlsMpmLiquidFreeSurfaceContactDepthM = options.mlsMpmLiquidFreeSurfaceContactDepthM ?? null;
   const sphLiquidVelocityDiffusionAlpha = options.sphLiquidVelocityDiffusionAlpha ?? 0.04;
   const sphLiquidVelocityDiffusionRadiusM = options.sphLiquidVelocityDiffusionRadiusM ?? (2 * demo.state.smoothingLengthM);
   const sphLiquidWallDampingAlpha = options.sphLiquidWallDampingAlpha ?? 0.3;
@@ -3540,6 +3566,9 @@ export function createSphPhaseDemo(options = {}) {
     mlsMpmLiquidVelocityDiffusionStartS,
     mlsMpmLiquidWallDampingAlpha,
     mlsMpmLiquidWallDampingDistanceM,
+    mlsMpmLiquidFreeSurfaceRelaxationAlpha,
+    mlsMpmLiquidFreeSurfaceTargetDepthM,
+    mlsMpmLiquidFreeSurfaceContactDepthM,
     gravityMPerS2,
     hydrostaticInitialization: hydrostaticInitializationEnabled,
     sphCavitationPressureFloorPa,
@@ -3624,6 +3653,9 @@ export function createSphPhaseDemo(options = {}) {
       liquidVelocityDiffusionStartS: mlsMpmLiquidVelocityDiffusionStartS,
       liquidWallDampingAlpha: physicalLawGroups.viscosity ? mlsMpmLiquidWallDampingAlpha : 0,
       liquidWallDampingDistanceM: mlsMpmLiquidWallDampingDistanceM,
+      liquidFreeSurfaceRelaxationAlpha: mlsMpmLiquidFreeSurfaceRelaxationAlpha,
+      liquidFreeSurfaceTargetDepthM: mlsMpmLiquidFreeSurfaceTargetDepthM,
+      liquidFreeSurfaceContactDepthM: mlsMpmLiquidFreeSurfaceContactDepthM,
       cflFactor: gridCflFactor
     });
   } else {
@@ -3702,11 +3734,12 @@ export function createSphPhaseDemo(options = {}) {
     productClosures: options.productClosures,
     cachedProductClosures: options.cachedProductClosures,
     allowFixtureMaterialProperties: demo.allowFixtureMaterialProperties,
-    allowReducedProductProperties: demo.allowFixtureMaterialProperties
+    allowReducedProductProperties: options.allowReducedProductProperties === true
+      || demo.allowFixtureMaterialProperties
   });
   const discoveredReactions = discovery.reactions;
   for (const [key, closure] of Object.entries(discovery.productClosures)) {
-    if (!demo.allowFixtureMaterialProperties) {
+    if (!demo.allowFixtureMaterialProperties && options.allowReducedProductProperties !== true) {
       requireFirstPrinciplesMaterialProperties(closure.properties, {
         material: key,
         context: 'createSphPhaseDemo.product-material'

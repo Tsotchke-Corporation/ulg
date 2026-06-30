@@ -76,6 +76,7 @@ export function buildAlgorithmMaterialParticleInitializationRows({
       particlesPerEdge: finiteNumber(rolePlan.particlesPerEdge, 0),
       spacingM: finiteNumber(rolePlan.spacingM, 0),
       restVolumeM3: finiteNumber(rolePlan.restVolumeM3, 0),
+      mechanicsRestVolumeM3: finiteNumber(rolePlan.mechanicsRestVolumeM3, rolePlan.continuumCellVolumeM3),
       volumeEquivalentParticleRadiusM: finiteNumber(rolePlan.volumeEquivalentParticleRadiusM, 0),
       pressureAdjustedParticleRadiusM: finiteNumber(rolePlan.pressureAdjustedParticleRadiusM, 0),
       targetSmoothingLengthM: finiteNumber(rolePlan.targetSmoothingLengthM, 0),
@@ -89,8 +90,8 @@ export function buildAlgorithmMaterialParticleInitializationRows({
       crystalAtomsPerConventionalCell: finiteNumber(crystalUnitCell.atomsPerConventionalCell, 0),
       crystalPackingParticleRadiusM,
       particleRadiusPolicy: crystalWarmInput
-        ? 'closure-rest-volume-authoritative-crystal-packing-diagnostic'
-        : 'closure-rest-volume-authoritative',
+        ? 'global-particle-volume-authoritative-crystal-packing-diagnostic'
+        : 'global-particle-volume-authoritative',
       appliedParticleRadiusM: finiteNumber(rolePlan.volumeEquivalentParticleRadiusM, 0),
       strictSourceOfTruth: false,
       provenance: {

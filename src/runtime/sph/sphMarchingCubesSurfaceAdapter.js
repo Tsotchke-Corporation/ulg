@@ -1061,6 +1061,15 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
       0
     ))
   );
+  const extensionDrawIndirectBuffer = result?.drawIndirectBuffer || null;
+  const extensionDrawIndirectBufferByteLength = Math.max(
+    0,
+    Math.round(finiteNumber(
+      result?.drawIndirectBufferByteLength
+        ?? extensionDrawIndirectBuffer?.size,
+      0
+    ))
+  );
   const extensionTriangleCount = Math.max(0, finiteNumber(result?.triangleCount, 0));
   const extensionVertexStrideFloats = positionRows.rowStrideFloats > 0
     ? positionRows.rowStrideFloats
@@ -1134,6 +1143,8 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionVertexCountMode,
     extensionActualVertexCounterBufferRetained: Boolean(extensionActualVertexCounterBuffer),
     extensionActualVertexCounterBufferByteLength,
+    extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
+    extensionDrawIndirectBufferByteLength,
     extensionTriangleCount,
     extensionBufferRetained,
     extensionBufferByteLength: positionRows.bufferByteLength,
@@ -1656,6 +1667,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   readbackMode = NO_FULL_READBACK_MODE,
   compactSummaryReadback = false,
   translateVertexRows = true,
+  allowExtensionDrawIndirectBuffer = false,
   retainVertexRowsBuffer = true,
   retainDrawRowsBuffer = true,
   retainDrawIndirectRowsBuffer = true,
@@ -1693,6 +1705,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       extensionResult?.actualVertexCounterBufferByteLength
         ?? extensionResult?.vertexCounterBufferByteLength
         ?? extensionActualVertexCounterBuffer?.size,
+      0
+    ))
+  );
+  const extensionDrawIndirectBuffer = extensionResult?.drawIndirectBuffer || null;
+  const extensionDrawIndirectBufferByteLength = Math.max(
+    0,
+    Math.round(finiteNumber(
+      extensionResult?.drawIndirectBufferByteLength
+        ?? extensionDrawIndirectBuffer?.size,
       0
     ))
   );
@@ -1734,6 +1755,19 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const vertexRowsByteLength = directCompactPositionDraw ? 0 : translatedVertexRowsByteLength;
   const drawRowsByteLength = SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT;
   const drawIndirectRowsByteLength = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length * Uint32Array.BYTES_PER_ELEMENT;
+  const useExtensionDrawIndirectBuffer = Boolean(
+    directCompactPositionDraw
+      && allowExtensionDrawIndirectBuffer
+      && !compactSummaryReadback
+      && extensionDrawIndirectBuffer
+      && extensionDrawIndirectBufferByteLength >= drawIndirectRowsByteLength
+  );
+  const directCompactPositionDrawIndirectSource = useExtensionDrawIndirectBuffer
+    ? 'webgpu-marching-cubes-extension-draw-indirect-buffer'
+    : 'ulg-compact-position-draw-metadata-kernel';
+  const drawIndirectRowsOwnership = useExtensionDrawIndirectBuffer
+    ? 'extension-owned-retained-buffer'
+    : 'ulg-owned-retained-buffer';
   const markProgress = typeof onProgress === 'function'
     ? (status, extra = {}) => {
       try {
@@ -1749,6 +1783,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
           drawRowsByteLength,
           drawIndirectRowsByteLength,
           directCompactPositionDraw,
+          directCompactPositionDrawIndirectSource,
+          drawIndirectRowsOwnership,
           readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
           compactSummaryReadback: Boolean(compactSummaryReadback),
           ...extra
@@ -1781,24 +1817,49 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       new Float32Array(translatedVertexCount * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length)
     );
   }
+  const initialDrawRows = new Float32Array(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length);
+  if (useExtensionDrawIndirectBuffer) {
+    writeSurfaceDrawRow(initialDrawRows, 0, {
+      surfaceIndex: resolvedSurfaceIndex,
+      materialId: resolvedMaterialId,
+      phaseId: resolvedPhaseId,
+      opticalStateId: resolvedOpticalStateId,
+      vertexOffset: 0,
+      vertexCount: translatedVertexCount,
+      triangleOffset: 0,
+      triangleCount,
+      renderOrder: resolvedRenderOrder,
+      transparencyClassId: resolvedTransparencyClassId,
+      depthWriteFlag: resolvedDepthWriteFlag,
+      status: triangleCount > 0 ? 1 : 0,
+      boundsCenterM: resolvedSurfaceBounds?.centerM ?? [0, 0, 0],
+      boundsRadiusM: resolvedSurfaceBounds?.radiusM ?? 0
+    });
+  }
   const drawRowsBuffer = device.createBuffer({
     label: 'ulg-sph-extension-surface-draw',
     size: Math.max(4, drawRowsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
-  device.queue.writeBuffer(drawRowsBuffer, 0, new Float32Array(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length));
-  const drawIndirectRowsBuffer = device.createBuffer({
-    label: 'ulg-sph-extension-surface-draw-indirect',
-    size: Math.max(4, drawIndirectRowsByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  });
-  device.queue.writeBuffer(drawIndirectRowsBuffer, 0, new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length));
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-extension-surface-translation-params',
-    size: 144,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  if (!sourceVertexCounterBuffer) {
+  device.queue.writeBuffer(drawRowsBuffer, 0, initialDrawRows);
+  const drawIndirectRowsBuffer = useExtensionDrawIndirectBuffer
+    ? extensionDrawIndirectBuffer
+    : device.createBuffer({
+        label: 'ulg-sph-extension-surface-draw-indirect',
+        size: Math.max(4, drawIndirectRowsByteLength),
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      });
+  if (!useExtensionDrawIndirectBuffer) {
+    device.queue.writeBuffer(drawIndirectRowsBuffer, 0, new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length));
+  }
+  const paramsBuffer = useExtensionDrawIndirectBuffer
+    ? null
+    : device.createBuffer({
+        label: 'ulg-sph-extension-surface-translation-params',
+        size: 144,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      });
+  if (!sourceVertexCounterBuffer && !useExtensionDrawIndirectBuffer) {
     sourceVertexCounterBuffer = device.createBuffer({
       label: 'ulg-sph-extension-surface-source-vertex-count',
       size: 4,
@@ -1807,86 +1868,103 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     device.queue.writeBuffer(sourceVertexCounterBuffer, 0, new Uint32Array([sourceVertexCount]));
     ownsSourceVertexCounterBuffer = true;
   }
-  device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
-    vertexCount: sourceVertexCount,
-    sourceStrideFloats,
-    surfaceIndex: resolvedSurfaceIndex,
-    triangleCount,
-    materialId: resolvedMaterialId,
-    phaseId: resolvedPhaseId,
-    opticalStateId: resolvedOpticalStateId,
-    density: resolvedDensity,
-    isolation: resolvedIsolation,
-    sourceVoxelLinearIndex,
-    transparencyClassId: resolvedTransparencyClassId,
-    depthWriteFlag: resolvedDepthWriteFlag,
-    renderOrder: resolvedRenderOrder,
-    fallbackNormal: resolvedFallbackNormal,
-    positionTransform: resolvedPositionTransform,
-    positionClamp: resolvedPositionClamp,
-    surfaceBounds: resolvedSurfaceBounds
-  }));
+  if (!useExtensionDrawIndirectBuffer) {
+    device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
+      vertexCount: sourceVertexCount,
+      sourceStrideFloats,
+      surfaceIndex: resolvedSurfaceIndex,
+      triangleCount,
+      materialId: resolvedMaterialId,
+      phaseId: resolvedPhaseId,
+      opticalStateId: resolvedOpticalStateId,
+      density: resolvedDensity,
+      isolation: resolvedIsolation,
+      sourceVoxelLinearIndex,
+      transparencyClassId: resolvedTransparencyClassId,
+      depthWriteFlag: resolvedDepthWriteFlag,
+      renderOrder: resolvedRenderOrder,
+      fallbackNormal: resolvedFallbackNormal,
+      positionTransform: resolvedPositionTransform,
+      positionClamp: resolvedPositionClamp,
+      surfaceBounds: resolvedSurfaceBounds
+    }));
+  }
   markProgress('extension-surface-translation-buffers-ready');
 
-  const translationPipeline = directCompactPositionDraw
-    ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-compact-surface-draw:v1',
-        label: 'ulg-sph-webgpu-marching-cubes-extension-compact-surface-draw',
-        code: webGpuMarchingCubesExtensionCompactSurfaceDrawWgsl,
-        entryPoint: 'main',
-        bindings: [
-          computeBufferBinding(0, 'storage'),
-          computeBufferBinding(1, 'storage'),
-          computeBufferBinding(2, 'uniform'),
-          computeBufferBinding(3, 'read-only-storage')
-        ]
-      })
-    : createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v1',
-        label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
-        code: webGpuMarchingCubesExtensionSurfaceRowsWgsl,
-        entryPoint: 'main',
-        bindings: [
-          computeBufferBinding(0, 'read-only-storage'),
-          computeBufferBinding(1, 'storage'),
-          computeBufferBinding(2, 'storage'),
-          computeBufferBinding(3, 'storage'),
-          computeBufferBinding(4, 'uniform'),
-          computeBufferBinding(5, 'read-only-storage')
-        ]
-      });
-  const { pipeline, bindGroupLayout } = translationPipeline;
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: directCompactPositionDraw
-      ? [
-          { binding: 0, resource: { buffer: drawRowsBuffer } },
-          { binding: 1, resource: { buffer: drawIndirectRowsBuffer } },
-          { binding: 2, resource: { buffer: paramsBuffer } },
-          { binding: 3, resource: { buffer: sourceVertexCounterBuffer } }
-        ]
-      : [
-          { binding: 0, resource: { buffer: sourceBuffer } },
-          { binding: 1, resource: { buffer: vertexRowsBuffer } },
-          { binding: 2, resource: { buffer: drawRowsBuffer } },
-          { binding: 3, resource: { buffer: drawIndirectRowsBuffer } },
-          { binding: 4, resource: { buffer: paramsBuffer } },
-          { binding: 5, resource: { buffer: sourceVertexCounterBuffer } }
-        ]
-  });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  const workgroupCountX = directCompactPositionDraw
-    ? 1
-    : Math.max(1, Math.ceil(Math.max(1, triangleCount) / EXTENSION_SURFACE_TRANSLATION_WORKGROUP_SIZE));
-  pass.dispatchWorkgroups(workgroupCountX);
-  pass.end();
-  markProgress('extension-surface-translation-command-encoded', { workgroupCountX });
+  const translationPipeline = useExtensionDrawIndirectBuffer
+    ? null
+    : (directCompactPositionDraw
+      ? createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-compact-surface-draw:v1',
+          label: 'ulg-sph-webgpu-marching-cubes-extension-compact-surface-draw',
+          code: webGpuMarchingCubesExtensionCompactSurfaceDrawWgsl,
+          entryPoint: 'main',
+          bindings: [
+            computeBufferBinding(0, 'storage'),
+            computeBufferBinding(1, 'storage'),
+            computeBufferBinding(2, 'uniform'),
+            computeBufferBinding(3, 'read-only-storage')
+          ]
+        })
+      : createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v1',
+          label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
+          code: webGpuMarchingCubesExtensionSurfaceRowsWgsl,
+          entryPoint: 'main',
+          bindings: [
+            computeBufferBinding(0, 'read-only-storage'),
+            computeBufferBinding(1, 'storage'),
+            computeBufferBinding(2, 'storage'),
+            computeBufferBinding(3, 'storage'),
+            computeBufferBinding(4, 'uniform'),
+            computeBufferBinding(5, 'read-only-storage')
+          ]
+        }));
+  const translationPipelineCacheStatus = useExtensionDrawIndirectBuffer
+    ? 'skipped-extension-draw-indirect-buffer'
+    : (translationPipeline.cacheStatus ?? null);
+  let bindGroup = null;
+  let encoder = null;
+  let workgroupCountX = 0;
+  if (useExtensionDrawIndirectBuffer) {
+    markProgress('extension-surface-translation-command-skipped', {
+      reason: 'using extension-owned drawIndirectBuffer for direct compact-position draw',
+      workgroupCountX
+    });
+  } else {
+    const { pipeline, bindGroupLayout } = translationPipeline;
+    bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: directCompactPositionDraw
+        ? [
+            { binding: 0, resource: { buffer: drawRowsBuffer } },
+            { binding: 1, resource: { buffer: drawIndirectRowsBuffer } },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+            { binding: 3, resource: { buffer: sourceVertexCounterBuffer } }
+          ]
+        : [
+            { binding: 0, resource: { buffer: sourceBuffer } },
+            { binding: 1, resource: { buffer: vertexRowsBuffer } },
+            { binding: 2, resource: { buffer: drawRowsBuffer } },
+            { binding: 3, resource: { buffer: drawIndirectRowsBuffer } },
+            { binding: 4, resource: { buffer: paramsBuffer } },
+            { binding: 5, resource: { buffer: sourceVertexCounterBuffer } }
+          ]
+    });
+    encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    workgroupCountX = directCompactPositionDraw
+      ? 1
+      : Math.max(1, Math.ceil(Math.max(1, triangleCount) / EXTENSION_SURFACE_TRANSLATION_WORKGROUP_SIZE));
+    pass.dispatchWorkgroups(workgroupCountX);
+    pass.end();
+    markProgress('extension-surface-translation-command-encoded', { workgroupCountX });
+  }
 
   let vertexRows = new Float32Array();
-  let drawRows = new Float32Array();
+  let drawRows = useExtensionDrawIndirectBuffer ? initialDrawRows : new Float32Array();
   let drawIndirectRows = new Uint32Array();
   let summaryReadback = false;
   let summaryReadbackByteLength = 0;
@@ -1921,7 +1999,10 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     queueCompletionMethod = 'mapAsync(readback-buffer)';
     markProgress('extension-surface-translation-full-readback-complete');
   } else {
-    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
+    if (useExtensionDrawIndirectBuffer) {
+      queueCompletionStatus = 'queue-work-not-required';
+      queueCompletionMethod = 'extension-owned-draw-indirect-buffer';
+    } else if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
       device.queue.submit([encoder.finish()]);
       queueCompletionStatus = 'queue-submitted';
       queueCompletionMethod = 'queue.submit';
@@ -1953,7 +2034,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   }
 
   const cleanup = () => {
-    paramsBuffer.destroy?.();
+    paramsBuffer?.destroy?.();
     if (ownsSourceVertexCounterBuffer) {
       sourceVertexCounterBuffer?.destroy?.();
     }
@@ -1963,7 +2044,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const keepDrawIndirectRowsBuffer = retainDrawIndirectRowsBuffer || noFullReadback;
   if (!keepVertexRowsBuffer) vertexRowsBuffer?.destroy?.();
   if (!keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
-  if (!keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
+  if (!keepDrawIndirectRowsBuffer && !useExtensionDrawIndirectBuffer) drawIndirectRowsBuffer.destroy?.();
   if (deferNoFullCleanup) {
     deferSubmittedWorkCleanup(device, cleanup);
   } else {
@@ -2062,7 +2143,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactPositionRowsSchema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
     compactPositionRowsOwnership: 'extension-owned-retained-buffer',
     vertexRowsBufferClearStatus,
-    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
+    translationPipelineCacheStatus,
+    directCompactPositionDrawIndirectSource,
+    drawIndirectRowsOwnership,
+    extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
+    extensionDrawIndirectBufferByteLength,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
@@ -2097,7 +2182,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexCounterBufferRetained,
     sourceVertexCounterBufferByteLength,
     vertexRowsBufferClearStatus,
-    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
+    translationPipelineCacheStatus,
+    directCompactPositionDrawIndirectSource,
+    drawIndirectRowsOwnership,
+    extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
+    extensionDrawIndirectBufferByteLength,
     triangleCount,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length,
@@ -2112,6 +2201,10 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     drawIndirectRowsByteLength,
     drawIndirectRowsBufferByteLength: keepDrawIndirectRowsBuffer ? drawIndirectRowsByteLength : 0,
     drawIndirectRowsBufferRetained: keepDrawIndirectRowsBuffer,
+    drawIndirectRowsOwnership,
+    directCompactPositionDrawIndirectSource,
+    extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
+    extensionDrawIndirectBufferByteLength,
     compactedVertexRows: noFullReadback ? new Float32Array() : vertexRows,
     compactedVertexRowsByteLength: noFullReadback ? 0 : vertexRows.byteLength,
     compactedVertexRowsBufferByteLength: keepVertexRowsBuffer ? vertexRowsByteLength : 0,
@@ -2162,7 +2255,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     scope: 'sph-extension-surface-buffer-leases'
   });
   const leaseIds = [];
-  const registerRetainedBuffer = ({ resourceKey, resourceKind, buffer, byteLength, rowCount, expectedConsumers }) => {
+  const registerRetainedBuffer = ({
+    resourceKey,
+    resourceKind,
+    buffer,
+    byteLength,
+    rowCount,
+    expectedConsumers,
+    status = 'resident-extension-surface-buffer-retained'
+  }) => {
     registerResidentBufferResource(leaseLedger, {
       resourceKey,
       resourceKind,
@@ -2170,7 +2271,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       ownerStage: 'webgpu-marching-cubes-extension-surface-translation',
       producerStage: 'webgpu-marching-cubes-extension-surface-translation',
       source: 'buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu',
-      status: 'resident-extension-surface-buffer-retained',
+      status,
       retained: true,
       byteLength,
       rowCount,
@@ -2210,11 +2311,16 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   if (keepDrawIndirectRowsBuffer) {
     registerRetainedBuffer({
       resourceKey: drawIndirectRowsResourceKey,
-      resourceKind: 'extension-surface-draw-indirect-buffer',
+      resourceKind: useExtensionDrawIndirectBuffer
+        ? 'extension-owned-draw-indirect-buffer'
+        : 'extension-surface-draw-indirect-buffer',
       buffer: drawIndirectRowsBuffer,
       byteLength: drawIndirectRowsByteLength,
       rowCount: 1,
-      expectedConsumers: ['surface-draw-renderer', 'diagnostics']
+      expectedConsumers: ['surface-draw-renderer', 'diagnostics'],
+      status: useExtensionDrawIndirectBuffer
+        ? 'resident-extension-surface-buffer-borrowed'
+        : 'resident-extension-surface-buffer-retained'
     });
   }
 
@@ -2248,7 +2354,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     surfaceVertices,
     surfaceDraw,
     vertexRowsBufferClearStatus,
-    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
+    translationPipelineCacheStatus,
+    directCompactPositionDrawIndirectSource,
+    drawIndirectRowsOwnership,
+    extensionDrawIndirectBufferRetained: Boolean(extensionDrawIndirectBuffer),
+    extensionDrawIndirectBufferByteLength,
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
     positionClamp: resolvedPositionClamp,
@@ -2308,9 +2418,16 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       }, { force, reason });
     }
     if (keepDrawIndirectRowsBuffer) {
-      destroyResidentBufferWithLease(leaseLedger, drawIndirectRowsResourceKey, () => {
-        destroyBufferOnce(drawIndirectRowsResourceKey, drawIndirectRowsBuffer);
-      }, { force, reason });
+      destroyResidentBufferWithLease(
+        leaseLedger,
+        drawIndirectRowsResourceKey,
+        useExtensionDrawIndirectBuffer
+          ? null
+          : () => {
+              destroyBufferOnce(drawIndirectRowsResourceKey, drawIndirectRowsBuffer);
+            },
+        { force, reason }
+      );
     }
     return refreshLeaseSummary();
   };

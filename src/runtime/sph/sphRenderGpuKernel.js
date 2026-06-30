@@ -550,12 +550,14 @@ function renderVolumeStateForParticle({
   particleIndex,
   massKg,
   restDensityKgPerM3,
+  visualParticleRadiusM = 0,
   phaseId = GPU_PHASE_IDS.unknown,
   maxSupportRadiusM = 0,
   maxGasRadiusM = 0
 } = {}) {
   const fallbackRestVolumeM3 = particleVolumeM3FromMassDensity(massKg, restDensityKgPerM3);
-  let restVolumeM3 = fallbackRestVolumeM3;
+  const visualRestVolumeM3 = particleVolumeM3FromRadius(visualParticleRadiusM);
+  let restVolumeM3 = visualRestVolumeM3 > 0 ? visualRestVolumeM3 : fallbackRestVolumeM3;
   let volumeRatioJ = 1;
   let pressurePa = 0;
   const mechanics = mlsMpmParticleState?.mechanics;
@@ -570,7 +572,7 @@ function renderVolumeStateForParticle({
       const mechanicsRestVolumeM3 = finiteNumber(mechanics[mechanicsOffset + 19], 0);
       const mechanicsPressurePa = finiteNumber(mechanics[mechanicsOffset + 28], 0);
       volumeRatioJ = mechanicsJ > 0 ? mechanicsJ : 1;
-      if (mechanicsRestVolumeM3 > 0) restVolumeM3 = mechanicsRestVolumeM3;
+      if (mechanicsRestVolumeM3 > 0 && !(visualRestVolumeM3 > 0)) restVolumeM3 = mechanicsRestVolumeM3;
       pressurePa = Math.max(mechanicsPressurePa, 0);
     }
   }
@@ -673,12 +675,14 @@ export function extractSphRenderRowsCpu({
     const materialId = sphParticleState.thermo[thermoOffset];
     const phaseId = sphParticleState.thermo[thermoOffset + 1];
     const restDensityKgPerM3 = sphParticleState.thermo[thermoOffset + 3];
+    const visualParticleRadiusM = sphParticleState.thermo[thermoOffset + 11];
     const volumeState = renderVolumeStateForParticle({
       sphParticleState,
       mlsMpmParticleState,
       particleIndex: index,
       massKg,
       restDensityKgPerM3,
+      visualParticleRadiusM,
       phaseId,
       maxSupportRadiusM,
       maxGasRadiusM

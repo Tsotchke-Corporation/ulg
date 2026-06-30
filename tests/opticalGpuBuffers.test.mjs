@@ -40,6 +40,17 @@ function createLookupFixture() {
   return { table, lookup, cpuReference };
 }
 
+function srgbToLinear(value) {
+  const v = Math.max(0, Math.min(1, Number(value)));
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
+function opticalRecordField(table, record, fieldName) {
+  const fieldIndex = table.recordLayout.findIndex((entry) => String(entry).split(':')[0] === fieldName);
+  assert.ok(fieldIndex >= 0, `missing optical record field ${fieldName}`);
+  return table.records[(record.recordIndex * table.recordStrideFloats) + fieldIndex];
+}
+
 function sodiumWarmInputTable() {
   return {
     schema: 'peercompute.ulg.material-property-bank.gpu-warm-input-table.v0',
@@ -220,7 +231,7 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   assert.equal(table.fullPhysicsValidation, false);
 });
 
-test('optical GPU table carries non-authoritative material-bank PBR warm inputs', () => {
+test('optical GPU table consumes non-authoritative material-bank display PBR warm inputs', () => {
   const warmInputTable = sodiumWarmInputTable();
   const table = buildOpticalGpuTable([
     { material: 'Na', phase: 'solid' },
@@ -243,6 +254,10 @@ test('optical GPU table carries non-authoritative material-bank PBR warm inputs'
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.matchedRecordCount, 1);
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.strictSourceOfTruth, false);
   assert.equal(table.materialPropertyBankPbrWarmInputConsumer.shaderBound, false);
+  assert.equal(
+    table.materialPropertyBankPbrWarmInputConsumer.consumedAs,
+    'non-authoritative-display-pbr-warm-input-over-closure-derived-optical-rows'
+  );
   assert.equal(table.materialPropertyBankPbrWarmInputRowCount, 1);
   assert.equal(table.materialPropertyBankPbrWarmInputRows.length, warmInputTable.rows.length);
   assert.equal(table.materialPropertyBankPbrWarmInputRowStrideFloats, 16);
@@ -253,8 +268,21 @@ test('optical GPU table carries non-authoritative material-bank PBR warm inputs'
   assert.ok(Math.abs(sodium.materialPropertyBankPbrWarmInput.baseColorSrgb[2] - 0.72) < 1e-6);
   assert.equal(sodium.materialPropertyBankPbrWarmInput.strictSourceOfTruth, false);
   assert.equal(sodium.materialPropertyBankPbrWarmInputStatus, 'material-bank-pbr-warm-input-attached');
+  assert.equal(sodium.displayPbrSource, 'material-bank-pbr-warm-input');
+  assert.deepEqual(
+    sodium.displayPbr.baseColorSrgb.map((value) => Number(value.toFixed(2))),
+    [0.86, 0.82, 0.72]
+  );
+  assert.ok(sodium.closurePbr.baseColorSrgb.some((value, index) => Math.abs(value - sodium.displayPbr.baseColorSrgb[index]) > 0.01));
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearR') - srgbToLinear(0.86)) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearG') - srgbToLinear(0.82)) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'baseColorLinearB') - srgbToLinear(0.72)) < 1e-6);
+  assert.equal(opticalRecordField(table, sodium, 'metalness'), 1);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'roughness') - 0.31) < 1e-6);
+  assert.ok(Math.abs(opticalRecordField(table, sodium, 'ior') - 1.1) < 1e-6);
   assert.equal(water.materialPropertyBankPbrWarmInput, null);
   assert.equal(water.materialPropertyBankPbrWarmInputStatus, 'no-material-bank-pbr-warm-input');
+  assert.equal(water.displayPbrSource, 'closure-derived-optical-pbr');
 });
 
 test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit when supported', async () => {
@@ -535,7 +563,7 @@ test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment
   assert.match(opticalLookupWgsl, /row5\.x, row4\.y, row4\.x, row5\.w/);
 });
 
-test('optical GPU lookup binds material-bank PBR warm inputs without overriding closure records', async () => {
+test('optical GPU lookup binds material-bank display PBR warm inputs for parity', async () => {
   const table = buildOpticalGpuTable([
     { material: 'Na', phase: 'solid' }
   ], {
@@ -566,6 +594,10 @@ test('optical GPU lookup binds material-bank PBR warm inputs without overriding 
   assert.equal(result.materialPropertyBankPbrWarmInputConsumer.shaderBinding, 4);
   assert.equal(result.materialPropertyBankPbrWarmInputConsumer.shaderRowCount, 1);
   assert.equal(result.materialPropertyBankPbrWarmInputConsumer.bufferSource, 'optical-gpu-table');
+  assert.equal(
+    result.materialPropertyBankPbrWarmInputConsumer.consumedAs,
+    'non-authoritative-shader-bound-display-pbr-warm-input-over-closure-derived-optical-rows'
+  );
   assert.equal(result.materialPropertyBankPbrWarmInputRowCount, 1);
   assert.equal(result.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
   assert.ok(device.bindGroupLayouts.at(-1).entries.some((entry) => entry.binding === 4));

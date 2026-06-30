@@ -12,6 +12,16 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-20 AKDT update: the mounted resident render path reproduced the
+  user-visible "physics steps but particles do not move" failure in explicit
+  Three particle mode. Physics advanced through successive no-full resident
+  batches, but `three-render-row-spheres` retained the previous bridge after
+  the first visual refresh and therefore kept old CPU-owned geometry on screen.
+  This is now fixed by forcing Three point/sphere render-row modes back to
+  `full-parity-readback` on each visual refresh while preserving no-full
+  retained-buffer behavior for WebGPU/native direct consumers. Keep this as a
+  regression gate: a stale retained Three bridge is visual continuity evidence,
+  not live physics-motion evidence.
 - 2026-06-18 AKDT update: the local reference paper
   `plan/cubic-barrier.pdf` was read and routed into
   `plan/todo/cubic-barrier-contact-integration-plan.md`. The PPF/Cubic

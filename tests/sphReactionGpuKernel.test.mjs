@@ -270,6 +270,9 @@ test('SPH reaction table routes only gas-only or explicitly gas product terms to
 
 test('SPH reaction CPU step converts only mutual nearest contact pairs and resets product mechanics', () => {
   const packed = packedThreeParticles();
+  packed.sphParticleState.thermo[11] = 0.03125;
+  packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 11] = 0.046875;
+  packed.sphParticleState.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS * 2 + 11] = 0.0625;
   const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
   const result = runSphReactionStepCpu({
     ...packed,
@@ -284,6 +287,9 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('ab'));
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS * 2], stableOpticalMaterialId('b'));
+  assert.equal(result.thermo[11], 0.03125);
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 11], 0.046875);
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS * 2 + 11], 0.0625);
   assert.ok(Math.abs(result.state[7] - 1166.6667) < 1e-3);
   assert.ok(Math.abs(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7] - 1166.6667) < 1e-3);
   assert.equal(result.reactionLedger.schema, 'peercompute.ulg.sph-gpu-reaction-ledger.v0');
@@ -327,6 +333,11 @@ test('SPH reaction WGSL routes gas products out of visible particle slots', () =
   assert.match(sphReactionStepWgsl, /fn\s+product_term_for_visible_slot/);
   assert.match(sphReactionStepWgsl, /let\s+condensed\s*=\s*term1\.y\s*<\s*0\.5/);
   assert.match(sphReactionStepWgsl, /product_term_for_visible_slot\(reaction_index,\s*local_product_slot\)/);
+});
+
+test('SPH reaction WGSL preserves visual particle radius while resolving product thermo rows', () => {
+  assert.match(sphReactionStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*255\.0,\s*source_row2\.w\)/);
+  assert.match(sphReactionStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*1\.0,\s*source_row2\.w\)/);
 });
 
 test('SPH reaction WGSL can propose reactions from a GPU particle-bin grid', () => {

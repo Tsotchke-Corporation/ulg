@@ -758,7 +758,7 @@ fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: v
   if (!found_material || material_response_count == 0u) {
     out_sph_thermo[index * 3u] = vec4<f32>(material_id, 0.0, 0.0, source_row1.x);
     out_sph_thermo[index * 3u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0);
+    out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 255.0, source_row2.w);
     return;
   }
 
@@ -779,7 +779,7 @@ fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: v
   if (response0.w != 1.0 || response0.z < 0.0) {
     out_sph_thermo[index * 3u] = vec4<f32>(material_id, 0.0, 0.0, source_row1.x);
     out_sph_thermo[index * 3u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0);
+    out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 255.0, source_row2.w);
     return;
   }
   let denom = max(response1.y - response1.x, 1.0e-12);
@@ -806,7 +806,7 @@ fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: v
 
   out_sph_thermo[index * 3u] = vec4<f32>(material_id, phase_id, temperature_k, rest_density);
   out_sph_thermo[index * 3u + 1u] = vec4<f32>(solid, liquid, gas, plasma);
-  out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 1.0, 0.0);
+  out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 1.0, source_row2.w);
 }
 
 fn wall_temperature(face_index: u32) -> f32 {
@@ -1166,7 +1166,7 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
     return ThermalRows(
       vec4<f32>(material_id, 0.0, 0.0, 0.0),
       vec4<f32>(0.0, 0.0, 0.0, 0.0),
-      vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0)
+      vec4<f32>(source_row2.x, source_row2.y, 255.0, source_row2.w)
     );
   }
 
@@ -1188,7 +1188,7 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
     return ThermalRows(
       vec4<f32>(material_id, 0.0, 0.0, 0.0),
       vec4<f32>(0.0, 0.0, 0.0, 0.0),
-      vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0)
+      vec4<f32>(source_row2.x, source_row2.y, 255.0, source_row2.w)
     );
   }
   let denom = max(response1.y - response1.x, 1.0e-12);
@@ -1216,7 +1216,7 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
   return ThermalRows(
     vec4<f32>(material_id, phase_id, temperature_k, rest_density),
     vec4<f32>(solid, liquid, gas, plasma),
-    vec4<f32>(source_row2.x, source_row2.y, 1.0, 0.0)
+    vec4<f32>(source_row2.x, source_row2.y, 1.0, source_row2.w)
   );
 }
 
@@ -3301,18 +3301,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var volume_ratio_j = 1.0;
   var rest_volume_m3 = 0.0;
   var pressure_pa = 0.0;
+  let visual_particle_radius_m = thermo2.w;
   if (thermo0.w > 0.0 && pos_mass.w > 0.0) {
     rest_volume_m3 = pos_mass.w / thermo0.w;
   }
+  if (visual_particle_radius_m > 0.0) {
+    rest_volume_m3 = volume_from_radius_m(visual_particle_radius_m);
+  }
   let bank_rest_volume_m3 = material_bank_rest_volume_for_role(render_domain_id);
-  if (bank_rest_volume_m3 > 0.0) {
+  if (bank_rest_volume_m3 > 0.0 && visual_particle_radius_m <= 0.0) {
     rest_volume_m3 = bank_rest_volume_m3;
   }
   if (params.has_mechanics != 0u) {
     let mechanics4 = mls_mpm_mechanics[particle_index * 8u + 4u];
     let mechanics7 = mls_mpm_mechanics[particle_index * 8u + 7u];
     volume_ratio_j = max(mechanics4.z, 1.0e-9);
-    if (mechanics4.w > 0.0) {
+    if (mechanics4.w > 0.0 && visual_particle_radius_m <= 0.0) {
       rest_volume_m3 = mechanics4.w;
     }
     pressure_pa = max(mechanics7.x, 0.0);
@@ -5986,9 +5990,9 @@ fn g2p_clamp(value: f32, lower: f32, upper: f32) -> f32 {
 }
 
 fn g2p_condensed_target_j(raw_next_j: f32, previous_j: f32) -> f32 {
-  let previous_bounded = g2p_clamp(previous_j, 0.95, 1.049);
-  let lower = max(0.95, previous_bounded / 1.5);
-  let upper = min(1.049, previous_bounded * 1.5);
+  let previous_bounded = g2p_clamp(previous_j, 0.995, 1.005);
+  let lower = max(0.995, previous_bounded / 1.5);
+  let upper = min(1.005, previous_bounded * 1.5);
   return g2p_clamp(raw_next_j, lower, upper);
 }
 

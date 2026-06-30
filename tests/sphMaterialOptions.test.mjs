@@ -13,15 +13,18 @@ test('SPH material options expose element names in dropdown labels', () => {
   assert.ok(labels.includes('Palladium (Pd, Z=46) - derived element'));
   assert.ok(labels.includes('Sodium (Na, Z=11) - derived element'));
   assert.ok(labels.includes('Water (H2O) - derived compound'));
+  assert.ok(labels.includes('Chlorine gas (Cl2) - derived compound'));
 });
 
 test('SPH material options preserve runtime material keys while showing human names', () => {
   const fe = MATERIAL_OPTIONS.find((option) => option.symbol === 'Fe');
   const au = MATERIAL_OPTIONS.find((option) => option.symbol === 'Au');
+  const cl2 = MATERIAL_OPTIONS.find((option) => option.key === 'cl2');
   assert.equal(fe.key, 'fe');
   assert.equal(fe.name, 'Iron');
   assert.equal(au.key, 'Au');
   assert.equal(au.name, 'Gold');
+  assert.equal(cl2.formula, 'Cl2');
 });
 
 test('MoonLab-style element picker metadata carries periodic-table layout', () => {

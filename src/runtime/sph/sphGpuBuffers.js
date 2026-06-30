@@ -332,7 +332,13 @@ export function buildSphGpuParticleBuffers(state, {
       smoothingLengthM,
       representedEntityCount(particle, properties),
       status,
-      0
+      finiteNumber(
+        particle.visualRestParticleRadiusM
+          ?? particle.visualParticleRadiusM
+          ?? particle.restParticleRadiusM
+          ?? particle.particleRadiusM,
+        0
+      )
     ], thermoOffset);
     metadata.push({
       id: particle.id ?? `p${index}`,

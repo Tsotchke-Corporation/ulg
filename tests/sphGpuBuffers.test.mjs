@@ -190,7 +190,7 @@ test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size r
   assert.equal(dropMechanicsRow.schema, 'peercompute.ulg.algorithm-material-mls-mpm-mechanics-row.v0');
   assert.equal(dropMechanicsRow.material, 'fe');
   assert.equal(dropMechanicsRow.particleInitializationRowStatus, 'algorithm-derived-particle-initialization-row-ready');
-  assert.equal(dropMechanicsRow.particleRadiusPolicy, 'closure-rest-volume-authoritative');
+  assert.equal(dropMechanicsRow.particleRadiusPolicy, 'global-particle-volume-authoritative');
   assert.ok(dropMechanicsRow.particleCount > 0);
   assert.ok(dropMechanicsRow.restVolumeM3Mean > 0);
   assert.ok(dropMechanicsRow.soundSpeedMPerSMean > 0);

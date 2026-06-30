@@ -19,9 +19,13 @@ import {
 } from '../src/runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
 import { createSphPhaseViewState } from '../src/runtime/sphPhaseViewState.js';
-import { createDerivedMaterialClosure } from '../src/runtime/material/materialDerivation.js';
+import { createDerivedMaterialClosure, deriveMaterialProperties } from '../src/runtime/material/materialDerivation.js';
 import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
+import {
+  buildMlsMpmGpuParticleBuffers,
+  decodeMlsMpmGpuParticleRows
+} from '../src/runtime/sph/sphGpuBuffers.js';
 
 function near(actual, expected, tolerance = 1e-6) {
   assert.ok(
@@ -60,6 +64,47 @@ test('demo consumes partial cached closures and derives only missing runtime mat
   }
 });
 
+test('elemental fluorine selection resolves to ambient F2 gas for phase and reactions', () => {
+  const fluorine = deriveMaterialProperties('F');
+  assert.equal(fluorine.formula, 'F2');
+  assert.equal(fluorine.idealGas, true);
+  assert.deepEqual(fluorine.phases.map((phase) => phase.name), ['gas']);
+
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'F',
+    baseMaterial: 'Cs',
+    dropTemperatureK: 293.15,
+    baseTemperatureK: 293.15,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    adaptiveParticleSpacing: false
+  });
+  assert.equal(demo.materialProperties.F.formula, 'F2');
+  assert.equal(demo.materialProperties.F.idealGas, true);
+  assert.ok(demo.initialParticleSpacing.drop.densityKgPerM3 < 20);
+  assert.ok(demo.initialParticleSpacing.base.densityKgPerM3 > demo.initialParticleSpacing.drop.densityKgPerM3 * 100);
+
+  const summary = phaseMassSummary(demo);
+  assert.ok(summary.byMaterialPhase.F.gas > 0);
+  assert.equal(summary.byMaterialPhase.F.solid ?? 0, 0);
+  assert.equal(summary.solidFractionByMaterial.F, 0);
+
+  const driver = createSphPhaseDemo({
+    allowFixtureMaterialProperties: true,
+    dropMaterial: 'F',
+    baseMaterial: 'Cs',
+    dropTemperatureK: 293.15,
+    baseTemperatureK: 293.15,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    adaptiveParticleSpacing: false
+  });
+  assert.equal(driver.demo.reactions.length, 1);
+  assert.equal(driver.demo.reactions[0].product, 'csf');
+  assert.equal(driver.demo.reactions[0].stoichiometry.equation, '2 Cs + F2 -> 2 CsF');
+  assert.equal(driver.demo.reactions[0].sedenionScope.reactiveClass, 'reactive');
+});
+
 test('demo initial state: hot molten-iron block on a cold ice block', () => {
   const demo = buildSphPhaseDemoState();
   assert.ok(demo.counts.drop > 0 && demo.counts.base > 0);
@@ -77,7 +122,7 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   assert.ok(minIronY >= maxIceY - 1e-9);
 });
 
-test('demo initial particle spacing adapts to material density at role temperature', () => {
+test('demo initial particle spacing preserves requested edges and derives material-state diagnostics', () => {
   const demo = buildSphPhaseDemoState({
     dropParticleEdge: 3,
     baseParticleEdge: 5
@@ -89,41 +134,90 @@ test('demo initial particle spacing adapts to material density at role temperatu
   const baseParticle = demo.state.particles.find((p) => p.role === 'base');
 
   assert.equal(spacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
-  assert.equal(spacing.status, 'material-temperature-target-neighbor-capped');
+  assert.equal(spacing.status, 'requested-particle-edges-preserved-global-particle-volume');
   assert.equal(spacing.particleSizePolicy.schema, 'peercompute.ulg.sph-initial-particle-size-policy.v0');
+  assert.equal(spacing.particleSizePolicy.status, 'global-particle-volume-material-density-derived-mass');
+  assert.equal(
+    spacing.particleSizePolicy.massModel,
+    'phase-density-at-temperature-pressure * mechanicsRestVolumeM3'
+  );
+  assert.equal(spacing.particleSizePolicy.phaseChangeVolumeModel, 'fixed-particle-count-no-automatic-gas-expansion');
+  assert.match(spacing.particleSizePolicy.gasExpansionHandling, /species ledgers\/fields/);
   assert.equal(spacing.particleSizePolicy.dynamicPressureSupported, true);
-  assert.equal(spacing.drop.pressurePa, 0);
-  assert.equal(spacing.base.pressurePa, 0);
+  assert.equal(spacing.drop.pressurePa, 101325);
+  assert.equal(spacing.base.pressurePa, 101325);
   assert.equal(spacing.drop.volumeRatioJ, 1);
   assert.equal(spacing.base.volumeRatioJ, 1);
   assert.equal(spacing.drop.requestedParticlesPerEdge, 3);
   assert.equal(spacing.base.requestedParticlesPerEdge, 5);
+  assert.equal(spacing.drop.particlesPerEdge, 3);
+  assert.equal(spacing.base.particlesPerEdge, 5);
+  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-particle-edge-preserved');
+  assert.equal(spacing.base.effectiveParticleEdgeStatus, 'requested-particle-edge-preserved');
   assert.equal(spacing.targetNeighborCount, 64);
   assert.ok(spacing.smoothingLengthM > 0);
   assert.ok(spacing.smoothingLengthRatio > 0);
   assert.ok(spacing.drop.targetSmoothingLengthM > 0);
   assert.ok(spacing.base.targetSmoothingLengthM > 0);
   assert.ok(spacing.drop.densityKgPerM3 > spacing.base.densityKgPerM3);
-  assert.ok(spacing.drop.particlesPerEdge > spacing.drop.requestedParticlesPerEdge);
-  assert.ok(spacing.base.particlesPerEdge < spacing.base.requestedParticlesPerEdge);
-  assert.ok(spacing.drop.spacingM < spacing.drop.uniformSpacingM);
-  assert.ok(spacing.base.spacingM > spacing.base.uniformSpacingM);
-  assert.ok(spacing.drop.estimatedNeighborCount >= spacing.targetNeighborCount);
+  assert.equal(spacing.drop.phase, 'liquid');
+  assert.equal(spacing.base.phase, 'solid');
+  assert.match(spacing.drop.densitySource, /material-phase-density/);
+  assert.match(spacing.base.densitySource, /material-phase-density/);
+  assert.equal(spacing.drop.spacingM, spacing.drop.uniformSpacingM);
+  assert.equal(spacing.base.spacingM, spacing.base.uniformSpacingM);
+  near(spacing.drop.materialParticleDiameterM, spacing.drop.spacingM);
+  near(spacing.base.materialParticleDiameterM, spacing.base.spacingM);
+  near(spacing.drop.blockEdgeM, spacing.drop.materialParticleDiameterM * spacing.drop.particlesPerEdge);
+  near(spacing.base.blockEdgeM, spacing.base.materialParticleDiameterM * spacing.base.particlesPerEdge);
+  assert.equal(spacing.drop.blockSizeSource, 'global-particle-spacing-times-particles-per-edge');
+  assert.equal(spacing.base.blockSizeSource, 'global-particle-spacing-times-particles-per-edge');
+  assert.equal(spacing.drop.adaptiveWouldAdjustParticlesPerEdge, false);
+  assert.equal(spacing.base.adaptiveWouldAdjustParticlesPerEdge, false);
+  assert.equal(spacing.drop.adaptiveParticleSizingDeferred, true);
+  assert.equal(spacing.base.adaptiveParticleSizingDeferred, true);
+  assert.ok(spacing.drop.estimatedNeighborCount > 0);
   assert.ok(spacing.base.estimatedNeighborCount > 0);
-  assert.ok(Math.abs(dropMass / baseMass - 1) < 0.15);
+  assert.equal(spacing.relativeParticleSize.schema, 'peercompute.ulg.sph-relative-particle-size-diagnostics.v0');
+  assert.equal(
+    spacing.relativeParticleSize.source,
+    'fixed-global-particle-volume-material-density-derived-mass'
+  );
+  near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
+  near(spacing.relativeParticleSize.dropToBaseRadiusRatio, 1);
+  near(spacing.relativeParticleSize.dropRadiusRelativeToSmallest, 1);
+  near(spacing.relativeParticleSize.globalParticleSpacingM, spacing.drop.spacingM);
+  near(spacing.relativeParticleSize.globalParticleVolumeM3, spacing.drop.mechanicsRestVolumeM3);
+  near(spacing.relativeParticleSize.globalVisualParticleRadiusM, spacing.drop.volumeEquivalentParticleRadiusM);
+  assert.ok(spacing.relativeParticleSize.dropToBaseMassRatio > 1);
+  assert.ok(spacing.drop.materialReferenceParticleRadiusM > 0);
+  assert.ok(spacing.base.materialReferenceParticleRadiusM > 0);
+  near(spacing.drop.particleMassKg, spacing.drop.densityKgPerM3 * spacing.drop.mechanicsRestVolumeM3);
+  near(spacing.base.particleMassKg, spacing.base.densityKgPerM3 * spacing.base.mechanicsRestVolumeM3);
+  near(dropMass, spacing.drop.particleMassKg);
+  near(baseMass, spacing.base.particleMassKg);
   near(dropParticle.initialParticleSpacingM, spacing.drop.spacingM);
   near(baseParticle.initialParticleSpacingM, spacing.base.spacingM);
   near(dropParticle.initialCellVolumeM3, spacing.drop.spacingM ** 3);
+  near(dropParticle.particleSizeState.mechanicsRestVolumeM3, spacing.drop.mechanicsRestVolumeM3);
+  near(dropParticle.particleSizeState.mechanicsRestVolumeM3, spacing.drop.spacingM ** 3);
+  near(dropParticle.continuumCellVolumeM3, spacing.drop.continuumCellVolumeM3);
+  near(dropParticle.visualRestVolumeM3, spacing.drop.restVolumeM3);
   assert.equal(dropParticle.particleSizeState.schema, 'peercompute.ulg.sph-particle-size-state.v0');
   assert.equal(dropParticle.particleSizeState.status, 'rest-volume');
   near(dropParticle.particleSizeState.restVolumeM3, spacing.drop.restVolumeM3);
   near(dropParticle.particleSizeState.currentVolumeM3, spacing.drop.restVolumeM3);
   near(dropParticle.restParticleRadiusM, spacing.drop.volumeEquivalentParticleRadiusM);
   near(dropParticle.currentParticleRadiusM, dropParticle.restParticleRadiusM);
-  assert.ok(dropParticle.particleRadiusM < dropParticle.initialParticleSpacingM);
-  assert.ok(baseParticle.particleRadiusM < baseParticle.initialParticleSpacingM);
+  near(dropParticle.particleRadiusM * 2, dropParticle.initialParticleSpacingM);
+  near(baseParticle.particleRadiusM * 2, baseParticle.initialParticleSpacingM);
+  near(demo.scenario.iron.edgeM, spacing.drop.blockEdgeM);
+  near(demo.scenario.ice.edgeM, spacing.base.blockEdgeM);
   assert.equal(demo.counts.drop, spacing.drop.particlesPerEdge ** 3);
   assert.equal(demo.counts.base, spacing.base.particlesPerEdge ** 3);
+  assert.equal(demo.counts.drop, 3 ** 3);
+  assert.equal(demo.counts.base, 5 ** 3);
   near(demo.state.smoothingLengthM, spacing.smoothingLengthM);
 });
 
@@ -250,16 +344,17 @@ test('demo initial particle spacing carries crystal packing rows for valid solid
   assert.equal(dropRow.material, 'Na');
   assert.equal(dropRow.crystalStructureKey, 'na-bcc-alpha');
   assert.equal(dropRow.crystalPackingFraction, 0.68);
-  assert.equal(dropRow.particleRadiusPolicy, 'closure-rest-volume-authoritative-crystal-packing-diagnostic');
+  assert.equal(dropRow.particleRadiusPolicy, 'global-particle-volume-authoritative-crystal-packing-diagnostic');
   assert.ok(dropRow.crystalPackingParticleRadiusM > 0);
   near(dropRow.appliedParticleRadiusM, dropRow.volumeEquivalentParticleRadiusM);
+  near(dropRow.mechanicsRestVolumeM3, demo.initialParticleSpacing.drop.mechanicsRestVolumeM3);
   assert.equal(
     demo.initialParticleSpacing.particleSizePolicy.algorithmMaterialParticleInitializationRowCount,
     2
   );
 });
 
-test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {
+test('demo initial particle spacing keeps counts fixed while material state changes mass and density', () => {
   const liquidWater = buildSphPhaseDemoState({
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
@@ -297,14 +392,25 @@ test('demo initial particle spacing coarsens low-density hot vapor and can prese
   assert.equal(liquidWater.initialParticleSpacing.matchingMaterialState, true);
   assert.equal(liquidWater.initialParticleSpacing.matchingMaterialStateSpacingUnified, true);
   assert.equal(liquidWater.initialParticleSpacing.drop.particlesPerEdge, 3);
-  assert.equal(liquidWater.initialParticleSpacing.base.particlesPerEdge, 6);
+  assert.equal(liquidWater.initialParticleSpacing.base.particlesPerEdge, 5);
+  assert.equal(liquidWater.counts.drop, 27);
+  assert.equal(liquidWater.counts.base, 125);
   near(liquidWater.initialParticleSpacing.drop.spacingM, liquidWater.initialParticleSpacing.base.spacingM);
   near(liquidDropParticle.initialParticleSpacingM, liquidBaseParticle.initialParticleSpacingM);
+  near(
+    liquidWater.initialParticleSpacing.drop.blockEdgeM,
+    liquidWater.initialParticleSpacing.drop.spacingM * liquidWater.initialParticleSpacing.drop.particlesPerEdge
+  );
+  near(
+    liquidWater.initialParticleSpacing.base.blockEdgeM,
+    liquidWater.initialParticleSpacing.base.spacingM * liquidWater.initialParticleSpacing.base.particlesPerEdge
+  );
   near(liquidDropParticle.particleRadiusM, liquidBaseParticle.particleRadiusM);
   assert.ok(hotVapor.initialParticleSpacing.drop.densityKgPerM3 < liquidWater.initialParticleSpacing.drop.densityKgPerM3);
-  assert.ok(hotVapor.initialParticleSpacing.drop.particlesPerEdge < liquidWater.initialParticleSpacing.drop.particlesPerEdge);
-  assert.ok(hotVapor.initialParticleSpacing.drop.spacingM > liquidWater.initialParticleSpacing.drop.spacingM);
-  assert.equal(fixed.initialParticleSpacing.status, 'fixed-requested-particles-per-edge');
+  assert.equal(hotVapor.initialParticleSpacing.drop.particlesPerEdge, liquidWater.initialParticleSpacing.drop.particlesPerEdge);
+  assert.equal(hotVapor.initialParticleSpacing.drop.spacingM, liquidWater.initialParticleSpacing.drop.spacingM);
+  assert.ok(hotVapor.initialParticleSpacing.drop.particleMassKg < liquidWater.initialParticleSpacing.drop.particleMassKg);
+  assert.equal(fixed.initialParticleSpacing.status, 'fixed-requested-particles-per-edge-global-particle-volume');
   assert.equal(fixed.initialParticleSpacing.matchingMaterialState, false);
   assert.equal(fixed.initialParticleSpacing.matchingMaterialStateSpacingUnified, false);
   assert.equal(fixed.initialParticleSpacing.drop.particlesPerEdge, 3);
@@ -313,7 +419,7 @@ test('demo initial particle spacing coarsens low-density hot vapor and can prese
   assert.equal(fixed.counts.base, 125);
 });
 
-test('same material and temperature initialize with matching physical particle radius', () => {
+test('same material and temperature keep requested edges with shared material-derived size', () => {
   const demo = buildSphPhaseDemoState({
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
@@ -333,20 +439,75 @@ test('same material and temperature initialize with matching physical particle r
 
   assert.equal(spacing.matchingMaterialState, true);
   assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
-  assert.ok(spacing.base.particlesPerEdge !== spacing.base.requestedParticlesPerEdge);
+  assert.equal(spacing.drop.particlesPerEdge, spacing.drop.requestedParticlesPerEdge);
+  assert.equal(spacing.base.particlesPerEdge, spacing.base.requestedParticlesPerEdge);
+  assert.equal(spacing.drop.densityKgPerM3, spacing.base.densityKgPerM3);
   near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.blockEdgeM, spacing.drop.spacingM * 3);
+  near(spacing.base.blockEdgeM, spacing.base.spacingM * 5);
   near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
+  near(spacing.drop.materialReferenceParticleRadiusM, spacing.base.materialReferenceParticleRadiusM);
   near(dropParticle.initialParticleSpacingM, baseParticle.initialParticleSpacingM);
   near(dropParticle.initialCellVolumeM3, baseParticle.initialCellVolumeM3);
   near(dropParticle.particleRadiusM, baseParticle.particleRadiusM);
   assert.equal(dropParticle.material, baseParticle.material);
   assert.equal(dropParticle.temperatureK, baseParticle.temperatureK);
-  near(viewState.particleRadiiM[dropIndex], viewState.particleRadiiM[baseIndex]);
-  near(viewState.materials[dropIndex].particleRadiusM, viewState.materials[baseIndex].particleRadiusM);
+  near(viewState.particleRadiiM[dropIndex], viewState.materials[dropIndex].particleRadiusM);
+  near(viewState.particleRadiiM[baseIndex], viewState.materials[baseIndex].particleRadiusM);
   near(viewState.materials[dropIndex].initialParticleSpacingM, viewState.materials[baseIndex].initialParticleSpacingM);
 });
 
-test('same material high drop edge preserves requested drop edge and matches particle radius', () => {
+test('low requested drop edge uses cell-centered coarse macro-particles without grid snapping', () => {
+  const demo = buildSphPhaseDemoState({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5],
+      ironVolumeFractionOfIce: 1
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 293.15,
+    baseTemperatureK: 293.15,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 2.5,
+    dropParticleEdge: 2,
+    baseParticleEdge: 4
+  });
+  const dropParticles = demo.state.particles.filter((p) => p.role === 'drop');
+  const baseParticles = demo.state.particles.filter((p) => p.role === 'base');
+  const spacing = demo.initialParticleSpacing;
+  const uniqueAxis = (particles, axis) => [...new Set(particles.map((p) => Number(p.x[axis].toFixed(6))))].sort((a, b) => a - b);
+  const centersFromMin = (min, spacingM, count) => Array.from(
+    { length: count },
+    (_, i) => Number((min + (i + 0.5) * spacingM).toFixed(6))
+  );
+  const centeredCenters = (blockEdgeM, spacingM, count) => centersFromMin(
+    2.5 - blockEdgeM / 2,
+    spacingM,
+    count
+  );
+
+  assert.equal(spacing.drop.particlesPerEdge, 2);
+  assert.equal(spacing.base.particlesPerEdge, 4);
+  assert.equal(dropParticles.length, 8);
+  assert.equal(baseParticles.length, 64);
+  near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.materialParticleDiameterM, spacing.drop.spacingM);
+  near(spacing.base.materialParticleDiameterM, spacing.base.spacingM);
+  near(spacing.drop.blockEdgeM, spacing.drop.spacingM * 2);
+  near(spacing.base.blockEdgeM, spacing.base.spacingM * 4);
+  near(spacing.drop.spacingM, 2 * spacing.drop.volumeEquivalentParticleRadiusM);
+  near(spacing.base.spacingM, 2 * spacing.base.volumeEquivalentParticleRadiusM);
+  assert.deepEqual(uniqueAxis(dropParticles, 0), centeredCenters(spacing.drop.blockEdgeM, spacing.drop.spacingM, 2));
+  assert.deepEqual(uniqueAxis(dropParticles, 1), centersFromMin(2.5, spacing.drop.spacingM, 2));
+  assert.deepEqual(uniqueAxis(dropParticles, 2), centeredCenters(spacing.drop.blockEdgeM, spacing.drop.spacingM, 2));
+  assert.deepEqual(uniqueAxis(baseParticles, 0), centeredCenters(spacing.base.blockEdgeM, spacing.base.spacingM, 4));
+  assert.deepEqual(uniqueAxis(baseParticles, 1), centersFromMin(0, spacing.base.spacingM, 4));
+  assert.equal(demo.initialParticleEdgeDiagnostics.requestedEdgePreservationStatus, 'preserved');
+  near(demo.initialParticleEdgeDiagnostics.drop.blockEdgeM, spacing.drop.blockEdgeM);
+  near(demo.initialParticleEdgeDiagnostics.base.blockEdgeM, spacing.base.blockEdgeM);
+});
+
+test('same material high drop edge preserves both requested edges', () => {
   const demo = buildSphPhaseDemoState({
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
@@ -363,26 +524,27 @@ test('same material high drop edge preserves requested drop edge and matches par
 
   assert.equal(spacing.matchingMaterialState, true);
   assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
-  assert.equal(spacing.matchingMaterialStateSpacingPlan.strategy, 'preserve-drop-requested-edge');
-  assert.equal(spacing.matchingMaterialStateSpacingPlan.preservedRequestedRole, 'drop');
+  assert.equal(spacing.matchingMaterialStateSpacingPlan, null);
   assert.equal(spacing.drop.particlesPerEdge, 7);
-  assert.equal(spacing.base.particlesPerEdge, 14);
+  assert.equal(spacing.base.particlesPerEdge, 5);
   assert.equal(demo.counts.drop, 7 ** 3);
-  assert.equal(demo.counts.base, 14 ** 3);
+  assert.equal(demo.counts.base, 5 ** 3);
   near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.blockEdgeM, spacing.drop.spacingM * 7);
+  near(spacing.base.blockEdgeM, spacing.base.spacingM * 5);
   near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
   assert.equal(diagnostics.schema, 'peercompute.ulg.sph-initial-particle-edge-diagnostics.v0');
   assert.equal(diagnostics.status, 'initial-particle-edges-effective');
   assert.equal(diagnostics.requestedDropParticlesPerEdge, 7);
   assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
-  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 14);
-  assert.equal(diagnostics.preservedRequestedRole, 'drop');
+  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 5);
+  assert.equal(diagnostics.preservedRequestedRole, null);
   assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
   assert.equal(viewState.initialParticleEdgeDiagnostics.effectiveDropParticlesPerEdge, 7);
-  assert.equal(viewState.initialParticleEdgeDiagnostics.effectiveBaseParticlesPerEdge, 14);
+  assert.equal(viewState.initialParticleEdgeDiagnostics.effectiveBaseParticlesPerEdge, 5);
 });
 
-test('large requested drop edge is a lower bound for adaptive material spacing', () => {
+test('large requested drop edge is preserved without changing lattice resolution', () => {
   const demo = buildSphPhaseDemoState({
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
@@ -399,11 +561,11 @@ test('large requested drop edge is a lower bound for adaptive material spacing',
   assert.equal(spacing.matchingMaterialState, false);
   assert.equal(spacing.drop.requestedParticlesPerEdge, 7);
   assert.equal(spacing.drop.particlesPerEdge, 7);
-  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-large-edge-preserved');
-  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-particle-edge-preserved');
+  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, false);
   assert.equal(demo.counts.drop, 7 ** 3);
   assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
-  assert.equal(diagnostics.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(diagnostics.drop.requestedParticleEdgeLowerBoundApplied, false);
   assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
 });
 
@@ -422,7 +584,7 @@ test('large requested drop edge remains preserved beyond seven', () => {
   const diagnostics = demo.initialParticleEdgeDiagnostics;
 
   assert.equal(spacing.matchingMaterialState, true);
-  assert.equal(spacing.matchingMaterialStateSpacingPlan.strategy, 'preserve-both-requested-edges');
+  assert.equal(spacing.matchingMaterialStateSpacingPlan, null);
   assert.equal(spacing.drop.particlesPerEdge, 8);
   assert.equal(spacing.base.particlesPerEdge, 8);
   assert.equal(demo.counts.drop, 8 ** 3);
@@ -434,7 +596,7 @@ test('large requested drop edge remains preserved beyond seven', () => {
   assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
 });
 
-test('large non-H2O drop edge preserves requested edge while base adapts', () => {
+test('large non-H2O drop edge preserves both requested edges', () => {
   const demo = buildSphPhaseDemoState({
     dropMaterial: 'fe',
     baseMaterial: 'h2o',
@@ -452,20 +614,20 @@ test('large non-H2O drop edge preserves requested edge while base adapts', () =>
   assert.equal(spacing.matchingMaterialState, false);
   assert.equal(spacing.drop.requestedParticlesPerEdge, 8);
   assert.equal(spacing.drop.particlesPerEdge, 8);
-  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-large-edge-preserved');
-  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, true);
+  assert.equal(spacing.drop.effectiveParticleEdgeStatus, 'requested-particle-edge-preserved');
+  assert.equal(spacing.drop.requestedParticleEdgeLowerBoundApplied, false);
   assert.equal(spacing.base.requestedParticlesPerEdge, 5);
-  assert.equal(spacing.base.particlesPerEdge, 7);
-  assert.equal(spacing.base.effectiveParticleEdgeStatus, 'adaptive-density-target');
+  assert.equal(spacing.base.particlesPerEdge, 5);
+  assert.equal(spacing.base.effectiveParticleEdgeStatus, 'requested-particle-edge-preserved');
   assert.equal(demo.counts.drop, 8 ** 3);
-  assert.equal(demo.counts.base, 7 ** 3);
+  assert.equal(demo.counts.base, 5 ** 3);
   assert.equal(diagnostics.requestedDropParticlesPerEdge, 8);
   assert.equal(diagnostics.requestedBaseParticlesPerEdge, 5);
   assert.equal(diagnostics.effectiveDropParticlesPerEdge, 8);
-  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 7);
+  assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 5);
   assert.equal(diagnostics.requestedEdgePreservationStatus, 'preserved');
   assert.equal(viewState.counts.drop, 8 ** 3);
-  assert.equal(viewState.counts.base, 7 ** 3);
+  assert.equal(viewState.counts.base, 5 ** 3);
 });
 
 test('matching material preserves equal high explicit role edges without inflating benchmark counts', () => {
@@ -483,16 +645,18 @@ test('matching material preserves equal high explicit role edges without inflati
   const diagnostics = demo.initialParticleEdgeDiagnostics;
 
   assert.equal(spacing.matchingMaterialState, true);
-  assert.equal(spacing.matchingMaterialStateSpacingUnified, false);
-  assert.equal(spacing.matchingMaterialStateSpacingPlan.strategy, 'preserve-both-requested-edges');
-  assert.equal(spacing.matchingMaterialStateSpacingPlan.preservedRequestedRole, 'both');
+  assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
+  assert.equal(spacing.matchingMaterialStateSpacingPlan, null);
   assert.equal(spacing.drop.particlesPerEdge, 7);
   assert.equal(spacing.base.particlesPerEdge, 7);
+  near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.blockEdgeM, spacing.drop.spacingM * 7);
+  near(spacing.base.blockEdgeM, spacing.base.spacingM * 7);
   assert.equal(demo.counts.drop, 7 ** 3);
   assert.equal(demo.counts.base, 7 ** 3);
   assert.equal(diagnostics.effectiveDropParticlesPerEdge, 7);
   assert.equal(diagnostics.effectiveBaseParticlesPerEdge, 7);
-  assert.equal(diagnostics.preservedRequestedRole, 'both');
+  assert.equal(diagnostics.preservedRequestedRole, null);
   assert.equal(diagnostics.totalGeneratedParticleCount, 2 * 7 ** 3);
 });
 
@@ -547,7 +711,7 @@ test('demo preflight reports overlapping initial block geometry', () => {
     dropTemperatureK: 300,
     baseTemperatureK: 300,
     iceBaseHeightM: 0,
-    ironBaseHeightM: 0.85,
+    ironBaseHeightM: 0.5,
     dropParticleEdge: 3,
     baseParticleEdge: 5
   });
@@ -758,6 +922,57 @@ test('fluid law groups expose implemented viscosity and pending surface tension'
     driver.demo.lastStepTiming.unsupportedPhysicalLawGroups,
     driver.demo.lastStepTiming.pendingPhysicalLawGroups
   );
+});
+
+test('ambient water demo particles pack and step as liquid MLS-MPM material', () => {
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5],
+      wallFaces: { xMin: 300, xMax: 300, yMin: 300, yMax: 300, zMin: 300, zMax: 300 }
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.2,
+    dropParticleEdge: 2,
+    baseParticleEdge: 2,
+    mechanics: 'mlsmpm',
+    physicalLawGroups: {
+      thermal: false,
+      reactions: false,
+      viscosity: true
+    }
+  });
+  assert.ok(particleThermalState(driver.demo).every((particle) => particle.phase === 'liquid'));
+
+  const packed = buildMlsMpmGpuParticleBuffers(driver.demo.state, {
+    materialProperties: driver.demo.materialProperties,
+    viscosityEnabled: true,
+    mlsMpmArtificialViscosityAlpha: driver.demo.gpuMechanics.mlsMpmArtificialViscosityAlpha,
+    viscosityLengthM: driver.demo.gpuMechanics.gridSpacingM
+  });
+  const rows = decodeMlsMpmGpuParticleRows(packed);
+  assert.ok(rows.every((row) => row.solidFlag === 0));
+  assert.ok(rows.every((row) => row.shearModulusPa === 0));
+  assert.ok(rows.every((row) => row.lameLambdaPa === 0));
+  assert.ok(rows.every((row) => row.eosModelId === 1));
+  assert.ok(rows.every((row) => row.dynamicViscosityPaS > 0));
+
+  driver.step();
+  for (const particle of driver.demo.state.particles) {
+    assert.equal(particle.mpmSolid, false);
+    assert.ok(particle.mpmJ >= 0.995 - 1e-9 && particle.mpmJ <= 1.005 + 1e-9);
+    assert.ok(Math.abs(particle.mpmF[1]) < 1e-12);
+    assert.ok(Math.abs(particle.mpmF[2]) < 1e-12);
+    assert.ok(Math.abs(particle.mpmF[3]) < 1e-12);
+    assert.ok(Math.abs(particle.mpmF[5]) < 1e-12);
+    assert.ok(Math.abs(particle.mpmF[6]) < 1e-12);
+    assert.ok(Math.abs(particle.mpmF[7]) < 1e-12);
+    near(particle.mpmF[0], particle.mpmF[4], 1e-12);
+    near(particle.mpmF[4], particle.mpmF[8], 1e-12);
+  }
 });
 
 test('sealed gas pressure summary derives baseline air pressure from scenario gas closure', () => {

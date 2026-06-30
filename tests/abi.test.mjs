@@ -337,6 +337,7 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
     'temperatureK:f32',
     'restDensityKgPerM3:f32'
   ]);
+  assert.equal(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT[11], 'visualParticleRadiusM:f32');
 });
 
 test('SPH GPU thermal material table ABI exposes closure-derived row layouts', () => {

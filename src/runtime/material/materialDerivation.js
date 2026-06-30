@@ -49,6 +49,29 @@ const MATERIAL_SPECS = Object.freeze({
   }
 });
 
+const ELEMENTAL_MOLECULAR_REFERENCE_SPECS = Object.freeze({
+  H: { formula: 'H2', phaseModel: 'ideal-gas' },
+  N: { formula: 'N2', phaseModel: 'ideal-gas' },
+  O: { formula: 'O2', phaseModel: 'ideal-gas' },
+  F: { formula: 'F2', phaseModel: 'ideal-gas' },
+  Cl: { formula: 'Cl2', phaseModel: 'ideal-gas' },
+  Br: { formula: 'Br2', phaseModel: 'molecular-condensed' },
+  I: { formula: 'I2', phaseModel: 'molecular-condensed' }
+});
+
+export function elementalMolecularMaterialSpec(symbol) {
+  const normalized = typeof symbol === 'string'
+    ? symbol[0].toUpperCase() + symbol.slice(1).toLowerCase()
+    : '';
+  const spec = ELEMENTAL_MOLECULAR_REFERENCE_SPECS[normalized];
+  return spec ? {
+    ...spec,
+    elementSymbol: normalized,
+    elementalMolecularReference: true,
+    source: 'ambient-elemental-molecular-reference-state'
+  } : null;
+}
+
 function addCounts(target, source, multiplier = 1) {
   for (const [Z, count] of Object.entries(source)) {
     target[Z] = (target[Z] || 0) + count * multiplier;
@@ -435,6 +458,8 @@ export function resolveMaterialSpec(materialKey, overrides = {}) {
   const lower = typeof materialKey === 'string' ? materialKey.toLowerCase() : materialKey;
   if (MATERIAL_SPECS[lower]) return MATERIAL_SPECS[lower];
   const symbol = materialKey ? materialKey[0].toUpperCase() + materialKey.slice(1).toLowerCase() : '';
+  const molecularElementSpec = elementalMolecularMaterialSpec(symbol);
+  if (molecularElementSpec) return molecularElementSpec;
   if (zForSymbol(symbol) != null) return { formula: symbol, phaseModel: 'element' };
   if (/^[A-Z][A-Za-z0-9()]*$/.test(materialKey || '')) return { formula: materialKey, phaseModel: 'molecular-condensed' };
   if (/^[a-z0-9()]+$/.test(materialKey || '')) {

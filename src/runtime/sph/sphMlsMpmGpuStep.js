@@ -262,6 +262,27 @@ function uniqueNonEmptyStrings(values = []) {
     .filter(Boolean))];
 }
 
+function normalizeSameDeviceRetainedBufferImportDescriptor(source = null) {
+  if (!source || typeof source !== 'object' || source.sameDevice !== true) return null;
+  const sourceHotBufferKey = typeof source.sourceHotBufferKey === 'string' && source.sourceHotBufferKey.trim()
+    ? source.sourceHotBufferKey.trim()
+    : (
+        typeof source.hotBufferKey === 'string' && source.hotBufferKey.trim()
+          ? source.hotBufferKey.trim()
+          : (
+              typeof source.hotBufferRecordKey === 'string' && source.hotBufferRecordKey.trim()
+                ? source.hotBufferRecordKey.trim()
+                : null
+            )
+      );
+  if (!sourceHotBufferKey) return null;
+  return {
+    ...source,
+    sourceHotBufferKey,
+    sameDevice: true
+  };
+}
+
 function isPressureInterfaceGasCellFieldAdmissionApproved(admission = null) {
   return admission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
     && admission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
@@ -4010,6 +4031,22 @@ function queueEvidenceFromResidentStep(step) {
       || step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
     )
   );
+  const fusedQueueFenceStatus =
+    step?.fusedResidentSequence?.queueFenceStatus
+    ?? step?.stageTiming?.queueFenceStatus?.fusedMechanicsSequence
+    ?? null;
+  const fusedQueueFenceMethod =
+    step?.fusedResidentSequence?.queueFenceMethod
+    ?? step?.stageTiming?.queueFenceMethod?.fusedMechanicsSequence
+    ?? null;
+  if (fusedQueueFenceStatus === 'complete') {
+    return {
+      status: 'queue-work-completed',
+      method: fusedQueueFenceMethod || 'queue.onSubmittedWorkDone',
+      fenceSatisfied: true,
+      satisfactionReason: 'fused-resident-mechanics-sequence-queue-fence-completed'
+    };
+  }
   const candidates = [
     step?.compactGpuSummary,
     step?.residentProductMass,
@@ -4020,6 +4057,7 @@ function queueEvidenceFromResidentStep(step) {
     step?.gridUpdate,
     step?.p2gGridProjection
   ];
+  let firstQueueEvidence = null;
   for (const candidate of candidates) {
     const status = candidate?.queueCompletionStatus
       ?? candidate?.productEventMergeQueueCompletionStatus
@@ -4032,20 +4070,20 @@ function queueEvidenceFromResidentStep(step) {
     if (status || method) {
       const resolvedStatus = status || 'queue-work-completed';
       const resolvedMethod = method || 'queue.onSubmittedWorkDone';
-      if (resolvedStatus === 'queue-submitted-cleanup-deferred' && retainedNoFullWebGpuChain) {
-        return {
-          status: resolvedStatus,
-          method: resolvedMethod,
-          fenceSatisfied: true,
-          satisfactionReason: 'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
-        };
-      }
-      return {
+      const evidence = {
         status: resolvedStatus,
         method: resolvedMethod
       };
+      if (resolvedStatus === 'queue-submitted-cleanup-deferred' && retainedNoFullWebGpuChain) {
+        evidence.fenceSatisfied = true;
+        evidence.satisfactionReason =
+          'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup';
+      }
+      if (!firstQueueEvidence) firstQueueEvidence = evidence;
+      if (evidence.fenceSatisfied === true || residentStepFenceSatisfied(resolvedStatus)) return evidence;
     }
   }
+  if (firstQueueEvidence) return firstQueueEvidence;
   if (step?.backend === 'webgpu') {
     return step.readbackMode === NO_FULL_READBACK_MODE
       ? { status: 'queue-work-completed', method: 'resident-step-retained-webgpu-chain' }
@@ -8221,6 +8259,7 @@ async function executeMechanicsStageWorkerRunner(workerRunner, args) {
 
 function summarizeMechanicsStageLaneResult(stageId, result = {}) {
   const gpuResidentLaneRequirement = result?.gpuResidentLaneRequirement
+    || result?.gpuResidentLane
     || result?.computeExecution?.gpuResidentLaneRequirement
     || null;
   const gpuResidentLaneExecution = result?.gpuResidentLaneExecution
@@ -8231,6 +8270,10 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     || result?.computeExecution?.gpuFence
     || gpuResidentLaneExecution?.gpuFence
     || null;
+  const copyBudget = gpuResidentLaneRequirement?.copyBudget
+    || result?.hotLoopBudget?.copyBudget
+    || result?.webgpu?.copyBudget
+    || null;
   return {
     stageId,
     executionStatus: result?.status || null,
@@ -8238,6 +8281,39 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     residency: gpuResidentLaneRequirement ? 'gpu-lane' : 'cpu-oracle',
     laneId: gpuResidentLaneRequirement?.laneId || gpuResidentLaneExecution?.lease?.laneId || null,
     stateKey: gpuResidentLaneRequirement?.stateKey || gpuResidentLaneExecution?.lease?.stateKey || null,
+    copyBudget: copyBudget ? { ...copyBudget } : null,
+    copyBudgetUploadBytes: finiteNumber(copyBudget?.uploadBytes, 0),
+    copyBudgetReadbackBytes: finiteNumber(copyBudget?.readbackBytes, 0),
+    copyBudgetRetainedBytes: finiteNumber(copyBudget?.retainedBytes, 0),
+    copyBudgetCompactSummaryBytes: finiteNumber(copyBudget?.compactSummaryBytes, 0),
+    stateBufferByteLength: finiteNumber(
+      result?.stateBufferByteLength
+        ?? result?.nextParticleStateBufferByteLength
+        ?? result?.state?.byteLength,
+      0
+    ),
+    thermoBufferByteLength: finiteNumber(
+      result?.thermoBufferByteLength
+        ?? result?.nextParticleThermoBufferByteLength
+        ?? result?.thermo?.byteLength,
+      0
+    ),
+    mechanicsBufferByteLength: finiteNumber(
+      result?.mechanicsBufferByteLength
+        ?? result?.nextParticleMechanicsBufferByteLength
+        ?? result?.mechanics?.byteLength,
+      0
+    ),
+    gridBufferByteLength: finiteNumber(
+      result?.gridBufferByteLength
+        ?? result?.gridNodes?.byteLength,
+      0
+    ),
+    updatedGridBufferByteLength: finiteNumber(
+      result?.updatedGridBufferByteLength
+        ?? result?.updatedGridNodes?.byteLength,
+      0
+    ),
     readbackMode: result?.readbackMode || null,
     fullReadbackPerformed: result?.fullReadbackPerformed === true,
     normalHotLoopReadbackFree: result?.normalHotLoopReadbackFree === true,
@@ -8462,11 +8538,16 @@ function buildMechanicsWorkerCompactPublicationCandidate({
   stageWorkerResidencyStatuses = {},
   workerRunnerSupplied = false,
   workerModuleUrl = null,
+  sameDeviceRetainedBufferImport = null,
   laneId = null,
   stateKey = null
 } = {}) {
   const workerRetainedBufferRefs = workerRetainedRefsFromStageExecution(stageExecution, MECHANICS_STAGE_ORDER);
   const retainedBufferRefs = retainedRefsFromStageExecution(stageExecution, MECHANICS_STAGE_ORDER);
+  const normalizedSameDeviceRetainedBufferImport = normalizeSameDeviceRetainedBufferImportDescriptor(
+    sameDeviceRetainedBufferImport
+  );
+  const sameDeviceRetainedBufferImportAvailable = Boolean(normalizedSameDeviceRetainedBufferImport);
   const hasWorkerSignals = workerRunnerSupplied || workerRetainedBufferRefs.length > 0;
   if (!hasWorkerSignals) return null;
   const stageSummaries = stageExecutionSummariesByStage(stageExecution);
@@ -8530,6 +8611,22 @@ function buildMechanicsWorkerCompactPublicationCandidate({
       ? 'worker-retained-gpu-handles-are-not-main-thread-transferable'
       : blocker,
     sameDeviceMainThreadHandlesAvailable: false,
+    sameDeviceRetainedBufferImportAvailable,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    localSameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
+    localMaterializationStatus: sameDeviceRetainedBufferImportAvailable
+      ? 'same-device-retained-buffer-import-ready'
+      : 'blocked-worker-private-gpu-handles',
+    localMaterializationBlocker: sameDeviceRetainedBufferImportAvailable
+      ? null
+      : 'worker-retained-gpu-handles-are-not-main-thread-transferable',
+    acceptedMaterializationModes: sameDeviceRetainedBufferImportAvailable
+      ? ['same-device-retained-buffer-import']
+      : [],
+    acceptedConsumerModes: sameDeviceRetainedBufferImportAvailable
+      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+      : ['same-worker-lane-retained-buffer-ref'],
     workerLocalRetainedRefsOnly: true,
     compactSummaryStatus: noFullReadback
       ? 'worker-compact-summary-required'
@@ -9005,6 +9102,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerRetainedContinuationSource = null,
   gpuHubResidentStageWorkerRetainedContinuationHotBufferKey = null,
   gpuHubResidentStageWorkerRetainedAccessContract = null,
+  sameDeviceRetainedBufferImport = null,
+  localSameDeviceRetainedBufferImport = null,
   residentAuthorityHost = null,
   includeSpatialGasLedgerProducerStage = false,
   includeGasCellEosProducerStage = false,
@@ -9026,6 +9125,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const taskIdPrefix = stageTaskIdPrefix || `ulg:mechanics-stage-chain:${stepIndex}`;
   const submittedStageTasks = [];
   const stageResults = {};
+  const normalizedSameDeviceRetainedBufferImport = normalizeSameDeviceRetainedBufferImportDescriptor(
+    sameDeviceRetainedBufferImport || localSameDeviceRetainedBufferImport
+  );
   let nativeTaskGraph = null;
   let gpuResidentLaneStagePlanLease = null;
   let gpuResidentLaneStageNodeKernelPlacementPreflight = null;
@@ -9285,7 +9387,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             modulePath,
             taskId: `${taskIdPrefix}:g2p`,
             preferWebGpu: false,
-            readbackMode
+            readbackMode,
+            sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport
           })
         }
       ]
@@ -9554,7 +9657,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         stateKey: laneStagePlanStateKey,
         domainKey: gpuResidentLaneDomainKey,
         preferWebGpu: stepOptions.preferWebGpu === true,
-        readbackMode
+        readbackMode,
+        sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport
       });
       return {
         value: result,
@@ -10132,6 +10236,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   }
   const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
     ...stepOptions,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     p2gStageRunner: (stageOptions) => submitStageTask(
       'p2g',
       createMlsMpmMechanicsP2gStageComputeTask,
@@ -10244,6 +10349,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     stageWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
     workerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
     workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+    sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
     laneId: laneStagePlanId,
     stateKey: laneStagePlanStateKey
   });
@@ -10262,6 +10368,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         sourceTaskId: `${taskIdPrefix}:mechanics-stage-plan`,
         sourceNodeId: 'ulg-mls-mpm-mechanics-law',
         sourceStage: 'g2p',
+        sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
         stageExecution: gpuResidentLaneStagePlanExecution
       });
     } catch (error) {
@@ -10558,6 +10665,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageRejectedStatus: gpuResidentLaneStagePlanRejected?.status || null,
     workerCompactPublicationCandidate,
     workerCompactPublicationCandidateStatus: workerCompactPublicationCandidate?.candidateStatus || null,
+    workerCompactPublicationCandidateSameDeviceRetainedBufferImportAvailable:
+      workerCompactPublicationCandidate?.sameDeviceRetainedBufferImportAvailable === true,
+    workerCompactPublicationCandidateSameDeviceSourceHotBufferKey:
+      workerCompactPublicationCandidate?.sameDeviceSourceHotBufferKey || null,
+    workerCompactPublicationCandidateLocalMaterializationStatus:
+      workerCompactPublicationCandidate?.localMaterializationStatus || null,
+    workerCompactPublicationCandidateAcceptedMaterializationModes:
+      workerCompactPublicationCandidate?.acceptedMaterializationModes || [],
     workerCompactPublication,
     workerCompactPublicationStatus: workerCompactPublication?.status
       || workerCompactPublicationCandidate?.publicationStatus
@@ -10565,6 +10680,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     workerCompactPublicationCommitted: workerCompactPublication?.committed === true,
     workerCompactPublicationHotBufferKey: workerCompactPublication?.hotBufferKey || null,
     workerCompactPublicationCommitDeltaTaskId: workerCompactPublication?.commitDeltaTaskId || null,
+    workerCompactPublicationSameDeviceRetainedBufferImportAvailable:
+      workerCompactPublication?.sameDeviceRetainedBufferImportAvailable === true,
+    workerCompactPublicationSameDeviceSourceHotBufferKey:
+      workerCompactPublication?.sameDeviceSourceHotBufferKey || null,
     workerCompactSummaryStatus: workerCompactPublicationCandidate?.compactSummaryStatus || null,
     pressureInterfaceWorkerCompactPublicationCandidate,
     pressureInterfaceWorkerCompactPublicationCandidateStatus: pressureInterfaceWorkerCompactPublicationCandidate?.candidateStatus || null,

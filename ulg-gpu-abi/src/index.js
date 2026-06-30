@@ -211,7 +211,7 @@ export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
   'smoothingLengthM:f32',
   'representedEntityCount:f32',
   'status:f32',
-  'pad0:f32'
+  'visualParticleRadiusM:f32'
 ]);
 export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

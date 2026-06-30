@@ -1396,7 +1396,7 @@ function writeResolvedThermoRow(thermo, index, materialId, resolved, sourceTherm
   thermo[offset + 8] = sourceThermo2[0];
   thermo[offset + 9] = sourceThermo2[1];
   thermo[offset + 10] = resolved.status;
-  thermo[offset + 11] = 0;
+  thermo[offset + 11] = sourceThermo2[3] ?? 0;
 }
 
 function resetMechanicsForProduct(mechanics, index, massKg, resolved, productMechanics) {
@@ -1707,7 +1707,9 @@ export function runSphReactionStepCpu({
         });
         writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
           sphParticleState.thermo[thermoOffset + 8],
-          sphParticleState.thermo[thermoOffset + 9]
+          sphParticleState.thermo[thermoOffset + 9],
+          sphParticleState.thermo[thermoOffset + 10],
+          sphParticleState.thermo[thermoOffset + 11]
         ]);
         resetMechanicsForProduct(
           mechanics,
@@ -1750,7 +1752,9 @@ export function runSphReactionStepCpu({
       });
       writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
         sphParticleState.thermo[thermoOffset + 8],
-        sphParticleState.thermo[thermoOffset + 9]
+        sphParticleState.thermo[thermoOffset + 9],
+        sphParticleState.thermo[thermoOffset + 10],
+        sphParticleState.thermo[thermoOffset + 11]
       ]);
       resetMechanicsForProduct(
         mechanics,

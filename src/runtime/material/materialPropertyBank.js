@@ -358,7 +358,7 @@ export function buildMaterialPropertyBankGpuWarmInputTable(warmInputs) {
       finiteNumber(color[2]),
       finiteNumber(pbr.metalness),
       finiteNumber(pbr.roughness),
-      finiteNumber(pbr.ior, 1),
+      pbr.ior == null ? 1 : finiteNumber(pbr.ior, 1),
       warmInput.strictSourceOfTruth === true ? 1 : 0,
       MATERIAL_PROPERTY_BANK_GPU_ROW_STATUS.ready,
       0,

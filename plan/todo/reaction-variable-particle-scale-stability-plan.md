@@ -422,6 +422,68 @@ Validation:
 Remaining:
 
 - Add broader long-horizon resident batches for Ca/H2O and other non-alkali or
-  multivalent pairs.
-- Add representative non-water binary reaction products once their resident
-  pressure/product routes have stable browser-ready expectations.
+  multivalent pairs. The current Ca/H2O long-horizon and representative
+  non-water Mg/O2 browser acceptance are recorded below.
+
+## Implementation Status - 2026-06-20 AKDT
+
+Added the first mounted representative non-water binary product browser
+acceptance case:
+
+- `tests/demo.e2e.mjs` now covers hot Mg/O2 -> MgO as a separate mounted
+  resident no-full browser workflow instead of overloading the H2 pressure
+  assertions.
+- The test requires a one-reaction binary-ionic table with balanced
+  `2 Mg + O2 -> 2 MgO` stoichiometry, a condensed `mgo` product term,
+  product-phase metadata, retained resident product-event rows, fixed-capacity
+  reaction-bin diagnostics, and G2P particle-scale policy retention.
+- Because MgO is not a gas product, the acceptance signal is deliberately
+  different from active-metal/H2O: zero gas-product table rows, zero resident
+  gas-species ledger rows, baseline gas-pressure source, render-bound product
+  event buffer, and decoded `mgo` render rows.
+
+Validation:
+
+- `node --check tests/demo.e2e.mjs`
+- `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted non-water binary reaction retains condensed product events" --timeout 300000` passed `1/1` in `40.3s`.
+
+Remaining:
+
+- Optional broadening to additional pairs such as Cl2 or Al/O2 after their
+  UI/product expectations are intentionally selected.
+
+## Implementation Status - 2026-06-20 AKDT
+
+Broadened the mounted representative non-water binary product browser
+acceptance case to Al/O2 and Na/Cl2:
+
+- `tests/demo.e2e.mjs` now runs the condensed-product binary route for Mg/O2
+  and Al/O2. The Al/O2 case uses hot `Al` at `3200 K`, above the current
+  provisional activation threshold, and requires the balanced
+  `4 Al + 3 O2 -> 2 Al2O3` binary-ionic table.
+- `src/visualization/sphMaterialOptions.js` now exposes `cl2` as a selectable
+  first-principles-derived formula material, and the same mounted browser gate
+  covers hot Na/Cl2 -> NaCl with balanced `2 Na + Cl2 -> 2 NaCl`
+  stoichiometry.
+- The shared browser helper asserts condensed product-term metadata, zero
+  gas-product/gas-species rows, baseline gas-pressure source, retained resident
+  product-event rows, render-bound product-event buffers, fixed-capacity
+  reaction-bin diagnostics, G2P particle-scale policy retention, and decoded
+  product render rows for `mgo`, `al2o3`, and `nacl`.
+- A colder Al/O2 probe at `1800 K` built the correct reaction table but did not
+  activate visible Al2O3 product rows, so the browser acceptance now records the
+  intentionally selected activation-compatible UI expectation.
+
+Validation:
+
+- `node --check src/visualization/sphMaterialOptions.js`
+- `node --check tests/sphMaterialOptions.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphMaterialOptions.test.mjs` passed `4/4`.
+- `git diff --check -- tests/demo.e2e.mjs tests/reactionDiscovery.test.mjs`
+- `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted non-water binary reactions retain condensed product events" --timeout 540000` passed `1/1` in `3.9m`.
+
+Remaining:
+
+- Optional broadening to additional binary/non-water pairs after their
+  activation and product-render expectations are intentionally selected.

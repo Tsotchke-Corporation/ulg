@@ -144,7 +144,8 @@ const ironOption = ELEMENT_MATERIAL_OPTIONS.find((option) => option.symbol === '
 export const FORMULA_MATERIAL_OPTIONS = Object.freeze([
   { key: 'h2o', label: 'Water (H2O) - derived compound', kind: 'compound', formula: 'H2O' },
   { key: 'h2', label: 'Hydrogen gas (H2) - first-principles gas', kind: 'compound', formula: 'H2' },
-  { key: 'o2', label: 'Oxygen gas (O2) - first-principles gas', kind: 'compound', formula: 'O2' }
+  { key: 'o2', label: 'Oxygen gas (O2) - first-principles gas', kind: 'compound', formula: 'O2' },
+  { key: 'cl2', label: 'Chlorine gas (Cl2) - derived compound', kind: 'compound', formula: 'Cl2' }
 ]);
 
 export const MATERIAL_OPTIONS = Object.freeze([

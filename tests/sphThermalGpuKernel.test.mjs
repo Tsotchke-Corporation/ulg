@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ULG_CLOSURE_LAW_GRAPH_SCHEMA } from '../ulg-gpu-abi/src/index.js';
+import { sphThermalStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../src/runtime/closureLawGraph.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { stableOpticalMaterialId, GPU_PHASE_IDS } from '../src/runtime/material/opticalGpuBuffers.js';
@@ -433,6 +434,8 @@ test('SPH thermal response graph upload persists phase-response and graph buffer
 
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {
   const packed = packedTwoWaterParticles();
+  packed.thermo[11] = 0.0375;
+  packed.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 11] = 0.04125;
   const table = buildSphThermalMaterialTable(materialProperties);
   const before = totalInternalEnergyJ(packed);
   const beforeTempGap = Math.abs(packed.thermo[2] - packed.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 2]);
@@ -455,6 +458,13 @@ test('SPH thermal CPU table step conserves pair conduction energy and refreshes 
   nearlyEqual(after, before, 1e-4);
   assert.equal(result.thermo[1], GPU_PHASE_IDS.liquid);
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1], GPU_PHASE_IDS.solid);
+  nearlyEqual(result.thermo[11], 0.0375, 1e-8);
+  nearlyEqual(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 11], 0.04125, 1e-8);
+});
+
+test('SPH thermal WGSL preserves visual particle radius while refreshing thermo rows', () => {
+  assert.match(sphThermalStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*255\.0,\s*source_row2\.w\)/);
+  assert.match(sphThermalStepWgsl, /vec4<f32>\(source_row2\.x,\s*source_row2\.y,\s*1\.0,\s*source_row2\.w\)/);
 });
 
 test('SPH thermal CPU pair conduction does not overshoot pair equilibrium', () => {

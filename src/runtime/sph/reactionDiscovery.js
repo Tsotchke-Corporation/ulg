@@ -27,6 +27,7 @@ import {
   discoverReactionCandidates,
   waterReactiveMetalClass
 } from '../chemistry/reactionCandidates.js';
+import { SEDENION_REACTION_SCOPE_FINGERPRINT } from '../chemistry/sedenionReactionScope.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
 import { deriveMaterialProperties, formulaMolarMassKgPerMol, formulaUnitGeometry } from '../material/materialDerivation.js';
@@ -149,7 +150,8 @@ export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
     allowFixtureMaterialProperties: options.allowFixtureMaterialProperties === true,
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
-    strictEnergetics: options.strictEnergetics === true
+    strictEnergetics: options.strictEnergetics === true,
+    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT
   });
 }
 
@@ -264,13 +266,16 @@ function formulaSpecies(atomCounts) {
 
 function parsedFormulaComposition(key, properties) {
   let formula;
+  const formulaInput = typeof properties?.formula === 'string' && properties.formula.length > 0
+    ? properties.formula
+    : key;
   try {
-    formula = describeChemicalFormula(key);
+    formula = describeChemicalFormula(formulaInput);
   } catch {
     return null;
   }
   const single = formula.elementCount === 1 ? formula.elements[0] : null;
-  if (single && single.count === 1) return null;
+  if (single && single.count === 1 && formulaInput === key) return null;
   const phaseNames = properties?.phases?.map((phase) => phase.name) || [];
   const role = single ? roleForElementZ(single.Z, deriveElementProperties(single.Z)) : 'compound';
   const mechanical = properties ? closureMechanicalInputs(properties, role) : {
@@ -450,7 +455,7 @@ function waterReactiveClassForCandidate(candidate, ca, cb) {
 }
 
 function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
-  const discovery = discoverReactionCandidates(keyA, keyB, options);
+  const discovery = discoverReactionCandidates(ca?.formula || keyA, cb?.formula || keyB, options);
   const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
   if (!candidate) return null;
   const primaryProduct = candidate.products.find((product) => sameAtomCounts(product.atomCounts, candidate.productAtomCounts))
@@ -495,12 +500,14 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
       partner: keyB,
       blockedEnergeticsStatus: 'needs-refined-thermochemistry',
       blockedReason: 'strict energetics rejects provisional heuristic reaction energy',
+      sedenionScope: candidate.sedenionScope ?? null,
       stoichiometry: {
         familyId: candidate.familyId,
         equation: candidate.equation,
         reactants: candidate.reactants,
         products: candidate.products,
         atomBalance: candidate.atomBalance,
+        sedenionScope: candidate.sedenionScope ?? null,
         provisionalEnergeticsStatus,
         rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
         scientificValidation: false
@@ -540,12 +547,14 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
       ? `barrier-not-yet-derived-${waterReactiveClass || 'water-reactive-metal'}-reacts-on-exothermic-contact-with-liquid-water`
       : 'stoichiometric-reaction-candidate-derived-energy-pending-derived-barrier',
     phaseRequirements,
+    sedenionScope: candidate.sedenionScope ?? null,
     stoichiometry: {
       familyId: candidate.familyId,
       equation: candidate.equation,
       reactants: candidate.reactants,
       products: candidate.products,
       atomBalance: candidate.atomBalance,
+      sedenionScope: candidate.sedenionScope ?? null,
       provisionalEnergeticsStatus,
       rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
       scientificValidation: false
@@ -722,7 +731,8 @@ export function discoverReactions(keyA, keyB, options = {}) {
     allowFixtureMaterialProperties: options.allowFixtureMaterialProperties === true,
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
-    strictEnergetics: options.strictEnergetics === true
+    strictEnergetics: options.strictEnergetics === true,
+    sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT
   };
   discoveryCache.set(cacheKey, cloneDiscoveryResult(result));
   return result;
@@ -782,6 +792,7 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
       product: strictEnergeticsBlocker.productKey,
       energyModel: strictEnergeticsBlocker.energyModel,
       stoichiometry: strictEnergeticsBlocker.stoichiometry,
+      sedenionScope: strictEnergeticsBlocker.sedenionScope ?? strictEnergeticsBlocker.stoichiometry?.sedenionScope ?? null,
       reason: strictEnergeticsBlocker.blockedReason
     } : null;
     return result;
@@ -793,6 +804,7 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
       product: rx.productKey,
       energyModel: rx.energyModel,
       stoichiometry: rx.stoichiometry,
+      sedenionScope: rx.sedenionScope ?? rx.stoichiometry?.sedenionScope ?? null,
       reason: 'strict energetics rejects provisional heuristic reaction energy'
     };
     return result;
@@ -835,6 +847,7 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     phaseRequirements: rx.phaseRequirements ?? null,
     energyModel: rx.energyModel ?? ENERGY_MODEL_HF,
     specificEnthalpyJPerKg: rx.specificEnthalpyJPerKg,
+    sedenionScope: rx.sedenionScope ?? rx.stoichiometry?.sedenionScope ?? null,
     stoichiometry: rx.stoichiometry ?? null
   });
   const energySource = rx.stoichiometry?.provisionalEnergeticsStatus

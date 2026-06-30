@@ -425,6 +425,28 @@ test('SPH render rows carry MLS-MPM current volume, radius, J, and pressure when
   assert.equal(result.renderRows[15], 125000);
 });
 
+test('SPH render rows prefer explicit visual particle radius before mechanics rest volume', () => {
+  const packed = packedRenderParticles();
+  packed.thermo[11] = 0.04;
+  const mechanics = new Float32Array(3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
+  mechanics[18] = 1;
+  mechanics[19] = 0.001;
+  mechanics[28] = 125000;
+  const result = extractSphRenderRowsCpu({
+    sphParticleState: packed,
+    mlsMpmParticleState: {
+      particleCount: 3,
+      mechanics
+    }
+  });
+  const expectedVolume = (4 * Math.PI * 0.04 ** 3) / 3;
+
+  assert.ok(Math.abs(result.renderRows[12] - expectedVolume) < 1e-10);
+  assert.ok(Math.abs(result.renderRows[13] - 0.04) < 1e-7);
+  assert.equal(result.renderRows[14], 1);
+  assert.equal(result.renderRows[15], 125000);
+});
+
 test('SPH render rows cap runaway MLS-MPM particle scale growth with diagnostics', () => {
   const packed = packedRenderParticles();
   packed.smoothingLengthM = 1;

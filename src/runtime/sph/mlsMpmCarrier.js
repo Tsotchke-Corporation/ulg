@@ -76,8 +76,9 @@ function corotatedCauchyStress(F, mu, lambda) {
   ]);
 }
 const IDENTITY3 = () => new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-const CONDENSED_MIN_VOLUME_RATIO_J = 0.95;
-const CONDENSED_MAX_VOLUME_RATIO_J = 1.049;
+const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-3;
+const CONDENSED_MIN_VOLUME_RATIO_J = 1 - CONDENSED_VOLUME_STRAIN_TOLERANCE;
+const CONDENSED_MAX_VOLUME_RATIO_J = 1 + CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP = 1.5;
 
 // Quadratic B-spline weights (3 nodes/axis) and their offset positions, given fx = x/dx − base.
@@ -157,6 +158,9 @@ export function createMlsMpmCarrier({
   liquidVelocityDiffusionStartS = 0,
   liquidWallDampingAlpha = 0,
   liquidWallDampingDistanceM = null,
+  liquidFreeSurfaceRelaxationAlpha = 0,
+  liquidFreeSurfaceTargetDepthM = null,
+  liquidFreeSurfaceContactDepthM = null,
   cflFactor = 0.6 // max grid-node displacement per step, as a fraction of a cell (stability guard)
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
@@ -179,6 +183,13 @@ export function createMlsMpmCarrier({
   const liquidDiffusionStartS = Math.max(Number(liquidVelocityDiffusionStartS) || 0, 0);
   const wallDampingAlpha = clamp(Number(liquidWallDampingAlpha) || 0, 0, 1);
   const wallDampingDistance = Math.max(Number(liquidWallDampingDistanceM) || (1.5 * dx), 1e-9);
+  const freeSurfaceRelaxationAlpha = clamp(Number(liquidFreeSurfaceRelaxationAlpha) || 0, 0, 1);
+  const freeSurfaceTargetDepth = Number(liquidFreeSurfaceTargetDepthM) > 0
+    ? Number(liquidFreeSurfaceTargetDepthM)
+    : null;
+  const freeSurfaceContactDepth = Number(liquidFreeSurfaceContactDepthM) > 0
+    ? Number(liquidFreeSurfaceContactDepthM)
+    : null;
   const gridMass = new Float64Array(ng);
   const gridMom = new Float64Array(ng * 3); // momentum, then velocity in place
   const activeNodeEpochs = new Uint32Array(ng);
@@ -277,6 +288,71 @@ export function createMlsMpmCarrier({
       p.v[0] *= keep;
       p.v[1] *= keep;
       p.v[2] *= keep;
+    }
+  }
+
+  function applyLiquidFreeSurfaceRelaxation(particles) {
+    if (!(freeSurfaceRelaxationAlpha > 0)) return;
+    const groups = new Map();
+    for (const p of particles) {
+      if (p.mpmSolid || p.mpmCondensed === false) continue;
+      const key = p.material || 'liquid';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+      const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+      const center = [0, 0, 0];
+      let totalMass = 0;
+      let totalRestVolume = 0;
+      for (const p of group) {
+        const mass = Number(p.massKg) > 0 ? Number(p.massKg) : 1;
+        const restVolume = Number(p.mpmVolume0) > 0 ? Number(p.mpmVolume0) : 0;
+        const clearance = particleWallClearanceM(p);
+        totalMass += mass;
+        totalRestVolume += restVolume;
+        for (let axis = 0; axis < 3; axis += 1) {
+          min[axis] = Math.min(min[axis], p.x[axis] - clearance);
+          max[axis] = Math.max(max[axis], p.x[axis] + clearance);
+          center[axis] += mass * p.x[axis];
+        }
+      }
+      if (!(totalMass > 0) || !(totalRestVolume > 0)) continue;
+      for (let axis = 0; axis < 3; axis += 1) center[axis] /= totalMass;
+      const avgCellM = Math.cbrt(totalRestVolume / group.length);
+      const currentX = Math.max(max[0] - min[0], avgCellM);
+      const currentZ = Math.max(max[2] - min[2], avgCellM);
+      const currentArea = currentX * currentZ;
+      const boxArea = Math.max(1e-9, Number(dims[0]) * Number(dims[2]));
+      const targetDepth = freeSurfaceTargetDepth ?? Math.max(
+        1.5 * avgCellM,
+        totalRestVolume / (0.75 * boxArea)
+      );
+      const targetArea = Math.min(
+        0.75 * boxArea,
+        Math.max(currentArea, totalRestVolume / Math.max(targetDepth, 1e-9))
+      );
+      if (!(targetArea > currentArea)) continue;
+      const aspect = Math.max(1e-9, Number(dims[0]) / Math.max(Number(dims[2]), 1e-9));
+      const targetX = Math.min(Number(dims[0]), Math.sqrt(targetArea * aspect));
+      const targetZ = Math.min(Number(dims[2]), targetArea / Math.max(targetX, 1e-9));
+      const growX = Math.min(Math.max(targetX / currentX, 1), 1.08);
+      const growZ = Math.min(Math.max(targetZ / currentZ, 1), 1.08);
+      if (growX <= 1 + 1e-6 && growZ <= 1 + 1e-6) continue;
+      const contactDepth = freeSurfaceContactDepth ?? Math.max(2.5 * targetDepth, 3 * avgCellM);
+      const surfaceY = max[1];
+      for (const p of group) {
+        const depthWeight = Math.min(Math.max((surfaceY - p.x[1]) / Math.max(contactDepth, 1e-9), 0), 1);
+        const relax = freeSurfaceRelaxationAlpha * depthWeight;
+        if (!(relax > 0)) continue;
+        const clearance = particleWallClearanceM(p);
+        const nextX = center[0] + (p.x[0] - center[0]) * (1 + relax * (growX - 1));
+        const nextZ = center[2] + (p.x[2] - center[2]) * (1 + relax * (growZ - 1));
+        p.x[0] = Math.min(Math.max(nextX, clearance), Math.max(clearance, Number(dims[0]) - clearance));
+        p.x[2] = Math.min(Math.max(nextZ, clearance), Math.max(clearance, Number(dims[2]) - clearance));
+      }
     }
   }
 
@@ -468,6 +544,7 @@ export function createMlsMpmCarrier({
         else if (p.x[d] > upper) { p.x[d] = upper; if (p.v[d] > 0) p.v[d] = 0; }
       }
     }
+    applyLiquidFreeSurfaceRelaxation(particles);
     applyLiquidWallDamping(particles);
     applyLiquidVelocityDiffusion(particles, state.time);
     for (const p of particles) {
@@ -503,6 +580,9 @@ export function createMlsMpmCarrier({
     liquidVelocityDiffusionStartS: liquidDiffusionStartS,
     liquidWallDampingAlpha: wallDampingAlpha,
     liquidWallDampingDistanceM: wallDampingDistance,
+    condensedVolumeStrainTolerance: CONDENSED_VOLUME_STRAIN_TOLERANCE,
+    condensedMinVolumeRatioJ: CONDENSED_MIN_VOLUME_RATIO_J,
+    condensedMaxVolumeRatioJ: CONDENSED_MAX_VOLUME_RATIO_J,
     step
   };
 }

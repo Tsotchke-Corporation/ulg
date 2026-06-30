@@ -67,12 +67,12 @@ test('metal + oxygen is discovered as oxide formation', () => {
   assert.equal(materialDerivationSummary(r.productClosures.mgo.properties).fullyLowerLevelDerived, true);
 });
 
-test('element/nonmetal formulas discover balanced binary products generally', () => {
-  const atomicChlorine = discoverReactions('Na', 'Cl', { allowReducedProductProperties: true });
-  assert.equal(atomicChlorine.reactions.length, 1);
-  assert.equal(atomicChlorine.reactions[0].product, 'nacl');
-  assert.equal(atomicChlorine.reactions[0].stoichiometry.equation, 'Na + Cl -> NaCl');
-  assert.equal(atomicChlorine.reactions[0].stoichiometry.atomBalance.balanced, true);
+test('elemental nonmetal material selections discover balanced binary products generally', () => {
+  const elementalChlorine = discoverReactions('Na', 'Cl', { allowReducedProductProperties: true });
+  assert.equal(elementalChlorine.reactions.length, 1);
+  assert.equal(elementalChlorine.reactions[0].product, 'nacl');
+  assert.equal(elementalChlorine.reactions[0].stoichiometry.equation, '2 Na + Cl2 -> 2 NaCl');
+  assert.equal(elementalChlorine.reactions[0].stoichiometry.atomBalance.balanced, true);
 
   const molecularChlorine = discoverReactions('Na', 'Cl2', { allowReducedProductProperties: true });
   assert.equal(molecularChlorine.reactions.length, 1);
@@ -80,6 +80,29 @@ test('element/nonmetal formulas discover balanced binary products generally', ()
   assert.equal(molecularChlorine.reactions[0].stoichiometry.equation, '2 Na + Cl2 -> 2 NaCl');
   assert.equal(molecularChlorine.reactions[0].stoichiometry.atomBalance.balanced, true);
 
+});
+
+test('cesium + fluorine uses elemental F2 and carries sedenion zero-divisor scope', () => {
+  const result = discoverReactions('Cs', 'F', { allowReducedProductProperties: true });
+  assert.equal(result.reactions.length, 1);
+  const rx = result.reactions[0];
+  assert.equal(rx.product, 'csf');
+  assert.equal(rx.stoichiometry.equation, '2 Cs + F2 -> 2 CsF');
+  assert.equal(rx.stoichiometry.atomBalance.balanced, true);
+
+  const scope = rx.sedenionScope;
+  assert.equal(scope.schema, 'peercompute.ulg.sedenion-reaction-scope.v0');
+  assert.equal(scope.status, 'sedenion-zero-divisor-prior');
+  assert.equal(scope.reactiveClass, 'reactive');
+  assert.equal(scope.bondTypePrior, 'ionic');
+  assert.equal(scope.normDefectPrior, -4);
+  assert.equal(scope.zeroDivisorPrior, true);
+  assert.equal(scope.fanoGroup.id, 'fano-line-2-4-6');
+  assert.equal(scope.input.left.elementSymbol, 'Cs');
+  assert.equal(scope.input.right.formula, 'F2');
+  assert.equal(scope.scientificValidation, false);
+  assert.equal(scope.validation.chemistryValidation, false);
+  assert.deepEqual(scope.blockers, []);
 });
 
 test('strict energetics rejects provisional candidate signs but keeps derived family replacements', () => {
@@ -109,6 +132,9 @@ test('strict energetics rejects provisional candidate signs but keeps derived fa
   assert.deepEqual(salt.blockers, ['needs-refined-thermochemistry']);
   assert.equal(salt.blockedReactionCandidate.product, 'nacl');
   assert.equal(salt.blockedReactionCandidate.stoichiometry.equation, '2 Na + Cl2 -> 2 NaCl');
+  assert.equal(salt.blockedReactionCandidate.sedenionScope.schema, 'peercompute.ulg.sedenion-reaction-scope.v0');
+  assert.equal(salt.blockedReactionCandidate.sedenionScope.status, 'sedenion-period-proxy-no-zero-divisor-path');
+  assert.deepEqual(salt.blockedReactionCandidate.sedenionScope.blockers, ['element-to-sedenion-state-bijection-not-derived']);
   assert.match(salt.note, /strict energetics rejects provisional/);
 });
 

@@ -1289,6 +1289,18 @@ Interim status, 2026-06-18 AKDT:
   evidence that the performance path should prefer same-worker retained
   mechanics output/presentation for interactive same-device uses; cross-peer
   replay still requires the separate portable snapshot/materialization plan.
+- 2026-06-30 same-device retained presentation policy: the render ownership
+  resolver now maps unforced `renderUseCase=same-device`,
+  `same-device-mobile`, `same-device-interactive`, `interactive-same-device`,
+  and `mobile` to
+  `presentation-worker-retained-output-presentation-only`. Explicit
+  `renderOwnership=worker-owned-resident-render-producer` remains available
+  for the particle-state producer path, and throughput use cases still default
+  to ComputeManager task submission. The benchmark harness now accepts
+  `ULG_BENCH_RENDER_USE_CASE`; live HTTPS evidence with only
+  `renderUseCase=same-device` reports retained presentation ready, source state
+  transfer `0`, input transfer `96` bytes, skipped legacy draw, direct resident
+  compute mode, and estimated readback bytes per step `0`.
 
 ## ULG-Specific Constraints
 

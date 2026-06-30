@@ -49,6 +49,11 @@ const retainedCompactSnapshotExportRequested = ['1', 'true', 'yes', 'on'].includ
   String(process.env.ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT || '').toLowerCase()
 );
 const renderOwnershipMode = String(process.env.ULG_BENCH_RENDER_OWNERSHIP || '').trim();
+const renderOwnershipUseCase = String(
+  process.env.ULG_BENCH_RENDER_USE_CASE
+    || process.env.ULG_BENCH_PEERCOMPUTE_RENDER_USE_CASE
+    || ''
+).trim();
 const residentInterfaceRefreshWarmupFrames = Number.isFinite(Number(
   process.env.ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES
     ?? process.env.ULG_BENCH_RESIDENT_INTERFACE_REFRESH_WARMUP_FRAMES
@@ -180,6 +185,7 @@ function scenarioUrlForCount(targetCount) {
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
     ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
+    ...(renderOwnershipUseCase ? { renderUseCase: renderOwnershipUseCase } : {}),
     ...(residentInterfaceRefreshWarmupFrames != null
       ? { residentInterfaceRefreshWarmupFrames: String(residentInterfaceRefreshWarmupFrames) }
       : {}),

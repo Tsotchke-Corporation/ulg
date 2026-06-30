@@ -388,6 +388,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRetainedCompactSnapshotReadbackByteLength/);
   assert.match(benchmarkSource, /ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT/);
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
+  assert.match(benchmarkSource, /ULG_BENCH_RENDER_USE_CASE/);
+  assert.match(benchmarkSource, /renderUseCase/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentInterfaceRefreshMode/);

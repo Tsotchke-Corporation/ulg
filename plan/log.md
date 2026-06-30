@@ -33691,3 +33691,41 @@ Next:
 
 - Commit this compact replay contract slice before continuing to the next todo
   item.
+
+## 2026-06-30 AKDT - Same-Device Retained Presentation Use-Case Routing
+
+Status:
+
+- `renderUseCase=same-device`, `same-device-mobile`,
+  `same-device-interactive`, `interactive-same-device`, and `mobile` now
+  default to
+  `presentation-worker-retained-output-presentation-only` when no explicit
+  `renderOwnership` override is supplied.
+- Explicit worker-owned producer and throughput modes remain configurable:
+  PeerCompute can still request `worker-owned-resident-render-producer`, while
+  throughput playback keeps `residentComputeManagerMode=compute-manager`.
+- `scripts/sph-performance-benchmark.mjs` now accepts
+  `ULG_BENCH_RENDER_USE_CASE` / `ULG_BENCH_PEERCOMPUTE_RENDER_USE_CASE` and
+  emits `renderUseCase=...` into scenario URLs.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `25/25` passing.
+- PASS: live HTTPS benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_RENDER_USE_CASE=same-device ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres ULG_BENCH_OUTPUT=/tmp/ulg-same-device-retained-policy-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with scenario/probe `good`,
+  `peerComputeRenderOwnershipPolicyStatus=render-ownership-presentation-worker-retained-output-presentation-only-ready`,
+  `workerOffscreenRenderRowsProducerSourceKind=worker-retained-resident-stage-output`,
+  `workerOffscreenRenderRowsSourceStateTransferBytes=0`,
+  `workerOffscreenRenderRowsInputTransferBytes=96`,
+  `workerOffscreenRetainedStateContinuationApplied=true`,
+  `estimatedReadbackBytesPerStep=0`, `residentStageMs=2.6`, and
+  `probeEngineStepsPerSecond=273.97`.
+
+Next:
+
+- Commit this use-case routing slice before continuing to the next todo item.

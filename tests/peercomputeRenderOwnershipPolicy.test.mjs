@@ -49,7 +49,7 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.residentComputeManagerModeExplicit, false);
 });
 
-test('render ownership policy lets same-device use case imply worker-owned producer', () => {
+test('render ownership policy lets same-device use case prefer retained presentation', () => {
   const pendingPolicy = resolvePeerComputeRenderOwnershipPolicy({
     useCase: 'same-device-mobile'
   });
@@ -60,15 +60,28 @@ test('render ownership policy lets same-device use case imply worker-owned produ
 
   assert.equal(
     pendingPolicy.requestedMode,
-    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+    ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
   );
   assert.equal(pendingPolicy.effectiveMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS);
   assert.equal(pendingPolicy.workerOffscreenPresentationRequested, true);
   assert.equal(pendingPolicy.workerOwnedResidentProducerPending, true);
   assert.equal(pendingPolicy.transitionalRenderRowsActive, true);
+  assert.equal(pendingPolicy.presentationWorkerResidentStagesRequested, true);
+  assert.equal(pendingPolicy.presentationWorkerRetainedOutputPresentationOnlyRequested, true);
+  assert.equal(pendingPolicy.presentationWorkerRetainedOutputPresentationOnlyReady, false);
+  assert.equal(pendingPolicy.residentPlaybackUseCase, 'interactive-presentation');
+  assert.equal(pendingPolicy.residentStepsPerScheduleMax, 4);
   assert.equal(pendingPolicy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(pendingPolicy.residentComputeManagerMode, 'direct');
   assert.equal(readyPolicy.effectiveMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER);
   assert.equal(readyPolicy.workerOwnedResidentProducerPending, false);
+  assert.equal(readyPolicy.presentationWorkerRetainedOutputPresentationOnlyReady, true);
+  assert.equal(readyPolicy.workerOwnedResidentProducerSourceTransferRequired, false);
+  assert.equal(readyPolicy.requiresFreshPhysicsReadback, false);
+  assert.equal(
+    readyPolicy.status,
+    'render-ownership-presentation-worker-retained-output-presentation-only-ready'
+  );
   assert.equal(readyPolicy.residentInterfaceRefreshMode, 'pipelined');
 });
 

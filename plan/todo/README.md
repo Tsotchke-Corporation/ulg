@@ -167,7 +167,14 @@ telemetry reports
 even when retained render rows and retained surface buffers are present. This
 is the plan-change point: move resident render production into the worker-owned
 device path, or first create a validated browser-supported same-device GPU
-object transport.
+object transport. Follow-up completed the use-case routing half of that
+decision: unforced `renderUseCase=same-device`, `same-device-mobile`,
+`same-device-interactive`, `interactive-same-device`, and `mobile` now select
+`presentation-worker-retained-output-presentation-only` so interactive
+same-device playback prefers the same-worker retained G2P presentation path.
+Explicit `renderOwnership=worker-owned-resident-render-producer` remains
+available for the particle-state producer path, and the benchmark can exercise
+the use-case route via `ULG_BENCH_RENDER_USE_CASE`.
 
 Current routing note, 2026-06-28 AKDT: the zero-copy worker presentation track
 has moved from budget-only instrumentation to an opt-in transferred-canvas

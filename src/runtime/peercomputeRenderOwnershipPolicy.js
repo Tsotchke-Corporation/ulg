@@ -200,9 +200,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   ]) || requestedMode;
   const normalizedUseCase = normalizeString(policy.useCase, useCase);
   const normalizedUseCaseKey = normalizedUseCase?.toLowerCase() || null;
-  const sameDeviceWorkerOwnedUseCase = [
+  const sameDeviceInteractiveUseCase = [
     'same-device',
     'same-device-mobile',
+    'same-device-interactive',
+    'interactive-same-device',
     'mobile'
   ].includes(normalizedUseCaseKey);
   let requested = normalizePeerComputeRenderOwnershipMode(rawRequestedMode, null);
@@ -226,8 +228,8 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     false
   );
   if (!requested || requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.AUTO) {
-    requested = sameDeviceWorkerOwnedUseCase
-      ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+    requested = sameDeviceInteractiveUseCase
+      ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
       : ((urlRequestedWorkerOffscreen || policyRequestedWorkerOffscreen)
         ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS
         : ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER);
@@ -358,7 +360,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     'interactive',
     'interactive-worker-presentation',
     'interactive-presentation'
-  ].includes(normalizedUseCaseKey) || sameDeviceWorkerOwnedUseCase;
+  ].includes(normalizedUseCaseKey) || sameDeviceInteractiveUseCase;
   const residentStepOverride = normalizePositiveInteger(
     residentStepsPerScheduleOverride
       ?? policy.residentStepsPerScheduleOverride

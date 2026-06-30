@@ -13360,3 +13360,26 @@ Compact candidate portable snapshot propagation, 2026-06-30 12:05 AKDT:
 - Diff hygiene:
   `git diff --check`
   - Passed.
+
+Same-device retained presentation use-case routing, 2026-06-30 12:10 AKDT:
+
+- Syntax:
+  `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Focused render ownership and benchmark source harness:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `25/25`.
+- Live HTTPS same-device use-case benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_RENDER_USE_CASE=same-device ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres ULG_BENCH_OUTPUT=/tmp/ulg-same-device-retained-policy-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed with scenario/probe `good`,
+    `peerComputeRenderOwnershipPolicyStatus=render-ownership-presentation-worker-retained-output-presentation-only-ready`,
+    `workerOffscreenRenderRowsProducerSourceKind=worker-retained-resident-stage-output`,
+    `workerOffscreenRenderRowsSourceStateTransferBytes=0`,
+    `workerOffscreenRenderRowsInputTransferBytes=96`,
+    `workerOffscreenRenderRowsRetainedStageOutputPreserved=true`,
+    `workerOffscreenRetainedStateContinuationApplied=true`,
+    `estimatedReadbackBytesPerStep=0`, and
+    `probeEngineStepsPerSecond=273.97`.

@@ -45,6 +45,9 @@ const workerOffscreenPresentationRequested = ['1', 'true', 'yes', 'on'].includes
 const presentationWorkerResidentStagesRequested = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES || '').toLowerCase()
 );
+const retainedCompactSnapshotExportRequested = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT || '').toLowerCase()
+);
 const renderOwnershipMode = String(process.env.ULG_BENCH_RENDER_OWNERSHIP || '').trim();
 const isMobile = ['1', 'true', 'yes', 'on'].includes(String(process.env.ULG_BENCH_IS_MOBILE || '').toLowerCase());
 const hasTouch = ['1', 'true', 'yes', 'on'].includes(
@@ -147,6 +150,7 @@ function scenarioUrlForCount(targetCount) {
     residentActiveGrid: '1',
     ...(workerOffscreenPresentationRequested ? { workerOffscreenPresentation: '1' } : {}),
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
+    ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
     ...(measureGpuQueueFence ? { residentQueueFence: '1' } : {}),
     lawt: lawThermal ? '1' : '0',
@@ -453,6 +457,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     peerComputeRenderOwnershipPolicy?.presentationWorkerRetainedOutputPresentationOnlyReady
     ?? renderState?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady
     ?? metric?.rendererInit?.peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady
+    ?? null;
+  const peerComputeRenderOwnershipRetainedCompactSnapshotExportRequested =
+    peerComputeRenderOwnershipPolicy?.retainedCompactSnapshotExportRequested
+    ?? renderState?.peerComputeRenderOwnershipRetainedCompactSnapshotExportRequested
     ?? null;
   const peerComputeRenderOwnershipStatePromotionMode =
     peerComputeRenderOwnershipPolicy?.statePromotionMode
@@ -1436,6 +1444,14 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ? true
       : null
     );
+  const presentationWorkerRetainedOutputPresentationOnlyReadbackFree =
+    renderState?.presentationWorkerRetainedOutputPresentationOnlyReadbackFree
+    ?? (
+      workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput === true
+      && renderRowsReadbackByteLength === 0
+        ? true
+        : null
+    );
   const surfaceDrawSummaryReadbackByteLength = numberOrNull(
     renderState?.surfaceDrawSummaryReadbackByteLength ?? surfaceDraw?.surfaceDrawSummaryReadbackByteLength
   );
@@ -1762,7 +1778,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawNativeMarchingCubesSurfaceTableMaxResolution,
     surfaceDrawNativeMarchingCubesMaxVertexRowsBufferByteLength,
     surfaceDrawNativeMarchingCubesEstimatedMaxVertexRowsBufferByteLength,
-    surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,
+    surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource
+      ?? renderState?.surfaceDrawSource
+      ?? surfaceDraw?.visibleRenderSource
+      ?? surfaceDraw?.source
+      ?? null,
     surfaceDrawReadback: renderState?.surfaceDrawReadback ?? surfaceDraw?.surfaceDrawReadback ?? null,
     renderRowsReadback: renderState?.renderRowsReadback ?? null,
     renderRowsReadbackMode: renderState?.renderRowsReadbackMode ?? null,
@@ -1777,6 +1797,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       renderState?.renderRowsReadbackWorkerOwnedResidentProducerRequired ?? null,
     renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree:
       renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree,
+    presentationWorkerRetainedOutputPresentationOnlyReadbackFree,
     renderRowsReadbackByteLength,
     surfaceDrawSummaryReadback: renderState?.surfaceDrawSummaryReadback ?? surfaceDraw?.surfaceDrawSummaryReadback ?? null,
     surfaceDrawSummaryReadbackByteLength,
@@ -1821,9 +1842,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    peerComputeRenderOwnershipPolicyConfiguredByPeerCompute,
 	    peerComputeRenderOwnershipWorkerOwnedResidentProducerPending,
 	    peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired,
-	    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested,
-	    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady,
-	    peerComputeRenderOwnershipStatePromotionMode,
+    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested,
+    peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady,
+    peerComputeRenderOwnershipRetainedCompactSnapshotExportRequested,
+    peerComputeRenderOwnershipStatePromotionMode,
 	    peerComputeRenderOwnershipAuthoritativeStateMutationExpected,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesRequested,
 	    peerComputeRenderOwnershipPresentationWorkerResidentStagesReady,
@@ -2082,6 +2104,7 @@ async function main() {
       isMobile,
       hasTouch,
       workerOffscreenPresentationRequested,
+      retainedCompactSnapshotExportRequested,
       workerOffscreenFrameTransportBudget: workerOffscreenFrameTransportBudget({
         width: viewportWidth,
         height: viewportHeight,

@@ -2111,6 +2111,19 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentStageChainOnPresentationWorker'),
     false
   );
+  const retainedCompactSnapshotExportRequested = booleanUrlParam(
+    initialHash.get('retainedCompactSnapshotExport')
+      ?? initialQuery.get('retainedCompactSnapshotExport')
+      ?? initialHash.get('retainedCompactSnapshot')
+      ?? initialQuery.get('retainedCompactSnapshot')
+      ?? initialHash.get('presentationWorkerRetainedCompactSnapshotExport')
+      ?? initialQuery.get('presentationWorkerRetainedCompactSnapshotExport')
+      ?? initialHash.get('portableSnapshotExport')
+      ?? initialQuery.get('portableSnapshotExport')
+      ?? initialHash.get('crossPeerSnapshotExport')
+      ?? initialQuery.get('crossPeerSnapshotExport'),
+    false
+  );
   const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy:
       currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
@@ -2120,6 +2133,7 @@ export async function mountSphPhaseDemoOverlay({
     requestedMode: rawRenderOwnershipMode,
     workerOffscreenPresentationRequested: directWorkerOffscreenPresentationEnabled,
     presentationWorkerResidentStagesRequested,
+    retainedCompactSnapshotExportRequested,
     useCase: renderOwnershipUseCase,
     source: rawRenderOwnershipMode
       ? 'sph-phase-demo-url'

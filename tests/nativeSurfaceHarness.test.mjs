@@ -129,6 +129,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /sphPeerComputeRenderOwnershipPolicy/);
   assert.match(policySource, /presentation-worker-retained-output-presentation-only/);
   assert.match(policySource, /statePromotionMode/);
+  assert.match(policySource, /retainedCompactSnapshotExportRequested/);
   assert.match(sceneSource, /sphWorkerOffscreenPresentation/);
   assert.match(sceneSource, /sphWorkerOffscreenRenderRows/);
   assert.match(sceneSource, /sphWorkerOffscreenResidentStage/);
@@ -148,6 +149,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /presentation-worker-retained-state-continuation\.v0/);
   assert.match(sceneSource, /presentation-worker-retained-compact-snapshot-export\.v0/);
   assert.match(sceneSource, /maybeRequestWorkerOffscreenRetainedCompactSnapshotExport/);
+  assert.match(sceneSource, /retainedCompactSnapshotExportRequested !== true/);
   assert.match(sceneSource, /getWorkerOffscreenRetainedCompactSnapshotStatus/);
   assert.match(sceneSource, /worker-retained-portable-materialization-contract\.v0/);
   assert.match(sceneSource, /blocked-portable-compact-buffer-snapshot-required/);
@@ -164,6 +166,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(mountSource, /renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy/);
   assert.match(mountSource, /workerOffscreenPresentation/);
   assert.match(mountSource, /presentationWorkerResidentStages/);
+  assert.match(mountSource, /retainedCompactSnapshotExport/);
   assert.match(probeSource, /peerComputeRenderOwnershipPolicy/);
   assert.match(probeSource, /workerOffscreenPresentation: sceneUserData\.sphWorkerOffscreenPresentation/);
   assert.match(probeSource, /workerOffscreenRenderRows: sceneUserData\.sphWorkerOffscreenRenderRows/);
@@ -208,9 +211,14 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenRetainedStateContinuationCrossPeerReplayStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedCompactSnapshotStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedCompactSnapshotReadbackByteLength/);
+  assert.match(benchmarkSource, /ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT/);
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
+  assert.match(sceneSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
+  assert.match(probeSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
+  assert.match(benchmarkSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
+  assert.match(sceneSource, /resident-render-presentation-worker-retained-output-preserved/);
   assert.match(benchmarkSource, /workerOffscreenRetainedGpuBufferHandoffStatus/);
   assert.match(benchmarkSource, /workerOffscreenRetainedGpuBufferHandoffPlanChangeRequired/);
   assert.match(probeSource, /workerOffscreenRetainedGpuBufferHandoff/);

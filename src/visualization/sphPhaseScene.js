@@ -758,6 +758,8 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   useThreeRenderRowBridge = false,
   useWebGpuRenderRowOverlayBridge = false,
   useWorkerOffscreenPresentation = false,
+  usePresentationWorkerRetainedOutputPresentationOnly = false,
+  workerOffscreenRetainedStageOutputAvailable = false,
   useWorkerOwnedResidentRenderProducer = false,
   useWorkerOwnedResidentParticleStateProducer = false,
   previousThreeRenderRowBridgeVisible = false
@@ -770,6 +772,12 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   const threeBridge = Boolean(useThreeRenderRowBridge);
   const webGpuOverlayBridge = Boolean(useWebGpuRenderRowOverlayBridge);
   const workerOffscreenPresentationBridge = Boolean(useWorkerOffscreenPresentation);
+  const presentationWorkerRetainedOutputPresentationOnlyBridge = Boolean(
+    workerOffscreenPresentationBridge
+    && usePresentationWorkerRetainedOutputPresentationOnly
+    && workerOffscreenRetainedStageOutputAvailable
+  );
+  const effectiveThreeBridge = Boolean(threeBridge && !presentationWorkerRetainedOutputPresentationOnlyBridge);
   const workerOwnedResidentRenderProducerBridge = Boolean(useWorkerOwnedResidentRenderProducer);
   const workerOwnedResidentParticleStateProducerBridge = Boolean(
     workerOwnedResidentRenderProducerBridge
@@ -781,6 +789,7 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   );
   const workerOffscreenRenderRowsTransferBridge = Boolean(
     workerOffscreenPresentationBridge
+    && !presentationWorkerRetainedOutputPresentationOnlyBridge
     && !workerOwnedResidentParticleStateProducerBridge
   );
   const retainPreviousThreeRenderRowBridgeNoFull = false;
@@ -788,7 +797,7 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   if (webGpuOverlayBridge) {
     requestedRenderRowsReadbackModeResolved = RESIDENT_NO_FULL_READBACK_MODE;
   } else if (
-    threeBridge
+    effectiveThreeBridge
     || workerOffscreenRenderRowsTransferBridge
     || workerOwnedResidentRenderRowsSourceTransferBridge
   ) {
@@ -797,7 +806,7 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
   let renderRowsReadbackModeCoercionReason = null;
   if (retainPreviousThreeRenderRowBridgeNoFull) {
     renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-retains-previous-no-full-readback';
-  } else if (threeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE) {
+  } else if (effectiveThreeBridge && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE) {
     renderRowsReadbackModeCoercionReason = 'three-render-row-bridge-requires-fresh-physics-readback';
   } else if (
     workerOwnedResidentRenderRowsSourceTransferBridge
@@ -822,10 +831,12 @@ export function resolveResidentRenderRowBridgeReadbackPlan({
     retainPreviousThreeRenderRowBridgeNoFull,
     previousThreeRenderRowBridgeVisible: Boolean(previousThreeRenderRowBridgeVisible),
     freshPhysicsReadbackRequired:
-      (threeBridge || workerOffscreenRenderRowsTransferBridge || workerOwnedResidentRenderRowsSourceTransferBridge)
+      (effectiveThreeBridge || workerOffscreenRenderRowsTransferBridge || workerOwnedResidentRenderRowsSourceTransferBridge)
       && !webGpuOverlayBridge
       && !retainPreviousThreeRenderRowBridgeNoFull,
     webGpuOverlayNoFullReadback: webGpuOverlayBridge,
+    presentationWorkerRetainedOutputPresentationOnlyReadbackFree:
+      presentationWorkerRetainedOutputPresentationOnlyBridge,
     workerOffscreenPresentationReadbackRequired:
       workerOffscreenRenderRowsTransferBridge && !webGpuOverlayBridge,
     workerOwnedResidentRenderProducerReadbackRequired:
@@ -6481,6 +6492,8 @@ export function createSphPhaseScene(container, {
         policy?.workerOffscreenPresentationRequested ?? null,
       peerComputeRenderOwnershipRetainedGpuBufferHandoffRequested:
         policy?.retainedGpuBufferHandoffRequested ?? null,
+      peerComputeRenderOwnershipRetainedCompactSnapshotExportRequested:
+        policy?.retainedCompactSnapshotExportRequested ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerRequested:
         policy?.workerOwnedResidentProducerRequested ?? null,
       peerComputeRenderOwnershipWorkerOwnedResidentProducerPending:
@@ -6542,7 +6555,10 @@ export function createSphPhaseScene(container, {
       || currentWorkerOffscreenPresentationStatus()?.workerOffscreenRenderRows
       || null;
   }
-  function workerOffscreenRetainedStageOutputMatchesParticleState(sphParticleState = null) {
+  function workerOffscreenRetainedStageOutputStatusForParticleState(
+    sphParticleState = null,
+    { requireSourceStepMatch = false } = {}
+  ) {
     const status = currentWorkerOffscreenRenderRowsStatus();
     const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
     if (
@@ -6553,10 +6569,24 @@ export function createSphPhaseScene(container, {
       || status?.retainedParticleStateStatus !== 'worker-retained-particle-state-ready'
       || Math.max(0, Math.floor(Number(status?.particleCount) || 0)) !== particleCount
     ) {
-      return false;
+      return null;
     }
     const step = sphParticleState?.step ?? 'unknown';
-    return String(status?.sourceCacheKey || '').includes(`sphStep:${step}`);
+    const sourceStepMatchesCurrent = String(status?.sourceCacheKey || '').includes(`sphStep:${step}`);
+    if (requireSourceStepMatch && !sourceStepMatchesCurrent) return null;
+    return {
+      ...status,
+      sourceStepMatchesCurrent
+    };
+  }
+  function workerOffscreenRetainedStageOutputMatchesParticleState(sphParticleState = null) {
+    return Boolean(workerOffscreenRetainedStageOutputStatusForParticleState(
+      sphParticleState,
+      { requireSourceStepMatch: true }
+    ));
+  }
+  function workerOffscreenRetainedStageOutputAvailableForParticleState(sphParticleState = null) {
+    return workerOffscreenRetainedStageOutputStatusForParticleState(sphParticleState) || null;
   }
   function currentWorkerOffscreenRetainedStatePromotionCandidate() {
     return scene.userData.sphWorkerOffscreenRetainedStatePromotionCandidate
@@ -6625,6 +6655,10 @@ export function createSphPhaseScene(container, {
     continuationStatus = currentWorkerOffscreenRetainedStateContinuationStatus(),
     reason = 'presentation-worker-retained-continuation-compact-snapshot-export'
   } = {}) {
+    const policy = scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null;
+    if (policy?.retainedCompactSnapshotExportRequested !== true) {
+      return currentWorkerOffscreenRetainedCompactSnapshotStatus();
+    }
     if (
       continuationStatus?.status !== 'presentation-worker-retained-state-continuation-completed'
       || continuationStatus?.workerRetainedContinuationApplied !== true
@@ -19743,6 +19777,102 @@ export function createSphPhaseScene(container, {
       surfaceDrawDiagnosticMode,
       nativeSurfaceExtractionAllowed
     });
+    const renderOwnershipPolicyForRefresh =
+      scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null;
+    const presentationWorkerRetainedOutputStatus = (
+      renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+    )
+      ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
+      : null;
+    if (presentationWorkerRetainedOutputStatus) {
+      const preservedWorkerRenderRowsStatus = publishWorkerOffscreenRenderRowsStatus({
+        ...presentationWorkerRetainedOutputStatus,
+        retainedStageOutputPreservedByResidentRenderAssembly: true,
+        skippedLegacyDrawForRetainedStageOutput: true
+      });
+      const reason =
+        'presentation-worker retained output already owns display; main-thread render-row readback skipped';
+      const surfaceOverlayPolicy = surfaceDrawOverlayPolicyOverride?.schema
+        ? surfaceDrawOverlayPolicyOverride
+        : resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh: true });
+      sphResidentSurfaceDraw = residentSurfaceDrawUnavailable(reason, {
+        overlayPolicy: surfaceOverlayPolicy
+      });
+      sphResidentSurfaceDraw.status = 'resident-render-presentation-worker-retained-output-preserved';
+      sphResidentSurfaceDraw.source = 'presentation-worker-retained-output';
+      sphResidentSurfaceDraw.visibleRendererBridge = 'worker-owned-presented-canvas';
+      sphResidentSurfaceDraw.visibleRenderSource = 'presentation-worker-retained-output';
+      sphResidentSurfaceDraw.surfaceDrawReadback = false;
+      sphResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
+      sphResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
+      sphResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
+      sphResidentSurfaceDraw.workerOffscreenRetainedStageOutputPreserved = true;
+      sphResidentSurfaceDraw.workerOffscreenRetainedStageOutputSourceStepMatchesCurrent =
+        presentationWorkerRetainedOutputStatus.sourceStepMatchesCurrent ?? null;
+      applyResidentRenderSourceMetadata(sphResidentSurfaceDraw, residentRenderSource);
+      scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
+      sphResidentRenderState = {
+        schema: 'peercompute.ulg.sph-resident-render-state.v0',
+        status: 'resident-render-presentation-worker-retained-output-preserved',
+        source: 'presentation-worker-retained-output',
+        reason,
+        backend: preservedWorkerRenderRowsStatus?.producerSourceKind || 'worker-retained-resident-stage-output',
+        particleCount: presentationWorkerRetainedOutputStatus.particleCount ?? nextSphParticleState?.particleCount ?? 0,
+        surfaceCount: 0,
+        rowStrideFloats: null,
+        renderRowByteLength: 0,
+        renderRowsReadbackByteLength: 0,
+        renderRowsReadback: false,
+        renderRowsReadbackMode: RESIDENT_NO_FULL_READBACK_MODE,
+        renderRowsReadbackRequestedMode: renderRowsReadbackMode ?? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        renderRowsReadbackEffectiveMode: RESIDENT_NO_FULL_READBACK_MODE,
+        renderRowsReadbackCoercionReason:
+          'presentation-worker-retained-output-presentation-only-preserves-worker-frame',
+        renderRowsReadbackForcedForThreeBridge: false,
+        renderRowsReadbackForcedForWorkerOffscreenPresentation: false,
+        renderRowsReadbackForcedForWorkerOwnedResidentProducer: false,
+        renderRowsReadbackWorkerOffscreenPresentationRequired: false,
+        renderRowsReadbackWorkerOwnedResidentProducerRequired: false,
+        renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree: false,
+        renderRowsReadbackRetainedPreviousBridge: false,
+        renderRowsGpuHandoffCopy: false,
+        renderRowsHandoffMode: 'presentation-worker-retained-output',
+        presentationWorkerRetainedOutputPresentationOnlyReadbackFree: true,
+        workerOffscreenRetainedStageOutputPreserved: true,
+        workerOffscreenRetainedStageOutputSourceStepMatchesCurrent:
+          presentationWorkerRetainedOutputStatus.sourceStepMatchesCurrent ?? null,
+        surfaceDrawStatus: sphResidentSurfaceDraw.status,
+        surfaceDrawSource: sphResidentSurfaceDraw.source,
+        surfaceDrawReadback: false,
+        surfaceDrawVisibleRendererBridge: sphResidentSurfaceDraw.visibleRendererBridge,
+        surfaceDrawVisibleRenderSource: sphResidentSurfaceDraw.visibleRenderSource,
+        gpuAuthoritativeState: true,
+        compactRenderReadback: false,
+        normalHotLoopReadbackFree: true,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false,
+        ...peerComputeRenderOwnershipPolicyRenderStateFields(),
+        ...workerOffscreenPresentationRenderStateFields(),
+        ...workerOffscreenRenderRowsRenderStateFields(),
+        ...workerOffscreenRetainedGpuBufferHandoffRenderStateFields(),
+        ...workerOffscreenResidentStageRenderStateFields(),
+        workerOffscreenRenderRowsRetainedStageOutputPreserved: true,
+        workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput: true
+      };
+      applyResidentRenderSourceMetadata(sphResidentRenderState, residentRenderSource);
+      scene.userData.sphResidentRenderState = sphResidentRenderState;
+      markSphResidentRenderProgress('resident-render-presentation-worker-retained-output-preserved', {
+        stage: 'resident-render-refresh',
+        particleCount: sphResidentRenderState.particleCount,
+        renderRowsReadback: false,
+        surfaceDrawReadback: false,
+        sourceStepMatchesCurrent:
+          presentationWorkerRetainedOutputStatus.sourceStepMatchesCurrent ?? null
+      });
+      return sphResidentRenderState;
+    }
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -20078,6 +20208,12 @@ export function createSphPhaseScene(container, {
         useThreeRenderRowBridge: shouldUseThreeRenderRowPointsBridge,
         useWebGpuRenderRowOverlayBridge: shouldUseWebGpuRenderRowOverlayBridge,
         useWorkerOffscreenPresentation: configuredWorkerOffscreenPresentation,
+        usePresentationWorkerRetainedOutputPresentationOnly:
+          scene.userData.sphPeerComputeRenderOwnershipPolicy
+            ?.presentationWorkerRetainedOutputPresentationOnlyReady === true,
+        workerOffscreenRetainedStageOutputAvailable: Boolean(
+          workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
+        ),
         useWorkerOwnedResidentRenderProducer,
         useWorkerOwnedResidentParticleStateProducer,
         previousThreeRenderRowBridgeVisible
@@ -20940,9 +21076,12 @@ export function createSphPhaseScene(container, {
             && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
             && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
           );
-	          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
-	            renderRowsExecution.particleScaleStability ?? null;
+          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
+          nextResidentSurfaceDraw.presentationWorkerRetainedOutputPresentationOnlyReadbackFree = Boolean(
+            renderRowReadbackPlan.presentationWorkerRetainedOutputPresentationOnlyReadbackFree
+          );
+		          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
+		            renderRowsExecution.particleScaleStability ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleStabilityStatus =
 	            renderRowsExecution.particleScaleStability?.status ?? null;
 	          nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCount =
@@ -21720,11 +21859,18 @@ export function createSphPhaseScene(container, {
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
       });
-      const retainedStageOutputAlreadyRendered =
-        workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState);
+      const retainedStageOutputAlreadyRenderedStatus = (
+        scene.userData.sphPeerComputeRenderOwnershipPolicy
+          ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+      )
+        ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
+        : (workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState)
+          ? currentWorkerOffscreenRenderRowsStatus()
+          : null);
+      const retainedStageOutputAlreadyRendered = Boolean(retainedStageOutputAlreadyRenderedStatus);
       const workerOffscreenRenderRowsStatus = retainedStageOutputAlreadyRendered
         ? publishWorkerOffscreenRenderRowsStatus({
-            ...currentWorkerOffscreenRenderRowsStatus(),
+            ...retainedStageOutputAlreadyRenderedStatus,
             retainedStageOutputPreservedByResidentRenderAssembly: true,
             skippedLegacyDrawForRetainedStageOutput: true
           })
@@ -21823,6 +21969,9 @@ export function createSphPhaseScene(container, {
         ),
         renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree: Boolean(
           renderRowReadbackPlan.workerOwnedResidentParticleStateProducerReadbackFree
+        ),
+        presentationWorkerRetainedOutputPresentationOnlyReadbackFree: Boolean(
+          renderRowReadbackPlan.presentationWorkerRetainedOutputPresentationOnlyReadbackFree
         ),
         renderRowsReadbackRetainedPreviousBridge: Boolean(
           sphResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge

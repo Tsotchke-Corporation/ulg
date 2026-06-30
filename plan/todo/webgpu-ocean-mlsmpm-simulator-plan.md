@@ -104,14 +104,25 @@ Tactical status, 2026-06-28 AKDT:
   `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` rows or use a
   peer-local materialization protocol.
   Follow-up wired that compact snapshot export request through the scene,
-  offscreen presentation bridge, and mechanics worker, and the benchmark now
-  waits for a terminal snapshot status. Browser evidence currently blocks at
-  `worker-retained-compact-snapshot-readback-failed`: Chromium rejects
-  `mapAsync` on the retained `sph-state` readback buffer with
-  `A valid external Instance reference no longer exists`. The next slice is a
-  plan decision: either make the presentation worker retain export-owned clone
+  offscreen presentation bridge, and mechanics worker, and the benchmark can
+  wait for a terminal snapshot status when explicitly requested. Browser
+  evidence blocks at `worker-retained-compact-snapshot-readback-failed`:
+  Chromium rejects `mapAsync` on the retained `sph-state` readback buffer with
+  `A valid external Instance reference no longer exists`. Snapshot export is
+  now opt-in via policy/URL/benchmark flags so the normal retained-presentation
+  hot path does not run the failing readback. The next cross-peer slice is still
+  a plan decision: either make the presentation worker retain export-owned clone
   buffers before stage outputs can expire, or bypass worker `mapAsync` with a
   GPU-side publication/materialization path.
+  Follow-up also added a presentation-only fast path for visible retained
+  output: once the worker has rendered a retained G2P frame, main-thread
+  resident render refresh publishes
+  `resident-render-presentation-worker-retained-output-preserved`, skips the
+  legacy Three render-row bridge, keeps `renderRowsReadback=false` and
+  `renderRowsReadbackByteLength=0`, and preserves the worker-owned canvas
+  (`transferControlToOffscreen`, copied display bytes `0`). A same-URL
+  screenshot showed the sky-blue scene, grid, and particles visible while the
+  benchmark summary reported no browser console issues.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

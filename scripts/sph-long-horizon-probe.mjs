@@ -2585,6 +2585,12 @@ async function runBrowserProbe({
               renderState.renderRowsReadbackWorkerOffscreenPresentationRequired ?? null,
             renderRowsReadbackWorkerOwnedResidentProducerRequired:
               renderState.renderRowsReadbackWorkerOwnedResidentProducerRequired ?? null,
+            presentationWorkerRetainedOutputPresentationOnlyReadbackFree:
+              renderState.presentationWorkerRetainedOutputPresentationOnlyReadbackFree ?? null,
+            workerOffscreenRenderRowsRetainedStageOutputPreserved:
+              renderState.workerOffscreenRenderRowsRetainedStageOutputPreserved ?? null,
+            workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput:
+              renderState.workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput ?? null,
             renderRowsReadbackRetainedPreviousBridge: renderState.renderRowsReadbackRetainedPreviousBridge ?? null,
             renderRowsGpuHandoffCopy: renderState.renderRowsGpuHandoffCopy ?? null,
             renderRowsHandoffMode: renderState.renderRowsHandoffMode ?? null,
@@ -3385,6 +3391,12 @@ async function runBrowserProbe({
         const waitStarted = performance.now();
         const timeoutMs = 9000;
         let current = readCurrent();
+        if (!current) {
+          markProbeProgress('worker-retained-compact-snapshot-wait-skipped', {
+            reason: 'retained-compact-snapshot-export-not-requested'
+          });
+          return null;
+        }
         markProbeProgress('worker-retained-compact-snapshot-wait-started', {
           status: current?.status ?? null,
           reason: current?.reason ?? null

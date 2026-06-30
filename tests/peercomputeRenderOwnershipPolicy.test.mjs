@@ -19,6 +19,7 @@ test('render ownership policy defaults to main-thread presentation', () => {
   assert.equal(policy.requestedMode, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER);
   assert.equal(policy.workerOffscreenPresentationRequested, false);
   assert.equal(policy.retainedGpuBufferHandoffRequested, false);
+  assert.equal(policy.retainedCompactSnapshotExportRequested, false);
   assert.equal(policy.displayTransport, ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.MAIN_THREAD_DOM_CANVAS);
   assert.equal(policy.frameCopyBackRejected, true);
 });
@@ -146,10 +147,32 @@ test('render ownership policy exposes presentation-worker retained output as pre
   assert.equal(policy.authoritativeStateMutationExpected, false);
 });
 
+test('render ownership policy makes retained compact snapshot export opt-in', () => {
+  const defaultPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'presentation-worker-retained-output-presentation-only',
+    workerOwnedResidentProducerReady: true
+  });
+  const requestedPolicy = resolvePeerComputeRenderOwnershipPolicy({
+    peercomputePolicy: {
+      requestedMode: 'presentation-worker-retained-output-presentation-only',
+      retainedCompactSnapshotExportRequested: true
+    },
+    workerOwnedResidentProducerReady: true
+  });
+
+  assert.equal(defaultPolicy.presentationWorkerRetainedOutputPresentationOnlyRequested, true);
+  assert.equal(defaultPolicy.retainedCompactSnapshotExportRequested, false);
+  assert.equal(defaultPolicy.portableSnapshotExportRequested, false);
+  assert.equal(requestedPolicy.retainedCompactSnapshotExportRequested, true);
+  assert.equal(requestedPolicy.presentationWorkerRetainedCompactSnapshotExportRequested, true);
+  assert.equal(requestedPolicy.portableSnapshotExportRequested, true);
+});
+
 test('resident authority host summary exposes render ownership policy fields', () => {
   const renderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy: {
-      requestedMode: 'presentation-worker-retained-output-presentation-only'
+      requestedMode: 'presentation-worker-retained-output-presentation-only',
+      retainedCompactSnapshotExportRequested: true
     },
     workerOwnedResidentProducerReady: true
   });
@@ -183,6 +206,7 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipPresentationWorkerResidentStagesReady, true);
   assert.equal(summary.renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested, true);
   assert.equal(summary.renderOwnershipPresentationWorkerRetainedOutputPresentationOnlyReady, true);
+  assert.equal(summary.renderOwnershipRetainedCompactSnapshotExportRequested, true);
   assert.equal(summary.renderOwnershipStatePromotionMode, 'presentation-only');
   assert.equal(summary.renderOwnershipAuthoritativeStateMutationExpected, false);
 });

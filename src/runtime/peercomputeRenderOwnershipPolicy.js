@@ -118,6 +118,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   requestedMode = null,
   workerOffscreenPresentationRequested = false,
   retainedGpuBufferHandoffRequested = null,
+  retainedCompactSnapshotExportRequested = null,
   allowTransitionalRenderRows = true,
   workerOwnedResidentProducerReady = false,
   workerOwnedResidentProducerSourceTransferRequiredOverride = null,
@@ -216,6 +217,16 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       crossWorkerGpuBufferHandoffRequested
     )
     : normalizeBoolean(retainedGpuBufferHandoffRequested, false);
+  const compactSnapshotExportRequested = retainedCompactSnapshotExportRequested == null
+    ? normalizeBoolean(
+      policy.retainedCompactSnapshotExportRequested
+        ?? policy.presentationWorkerRetainedCompactSnapshotExportRequested
+        ?? policy.compactSnapshotExportRequested
+        ?? policy.portableSnapshotExportRequested
+        ?? policy.crossPeerSnapshotExportRequested,
+      false
+    )
+    : normalizeBoolean(retainedCompactSnapshotExportRequested, false);
   const renderRowsTransferRequested =
     effectiveMode === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS;
   const workerOwnedResidentProducerSourceTransferRequired = Boolean(
@@ -295,6 +306,9 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     retainedGpuBufferHandoffRequested: retainedHandoffRequested,
     directGpuBufferHandoffRequested: retainedHandoffRequested,
     crossWorkerGpuBufferHandoffRequested,
+    retainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
+    presentationWorkerRetainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
+    portableSnapshotExportRequested: compactSnapshotExportRequested,
     workerOwnedResidentProducerRequested,
     workerOwnedResidentProducerReady: targetImplementationReady,
     workerOwnedResidentProducerPending:

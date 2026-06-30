@@ -32748,3 +32748,70 @@ Validation:
   `workerOffscreenRetainedCompactSnapshotParticleCount=16`,
   `workerOffscreenRetainedCompactSnapshotReadbackByteLength=0`, and
   `workerOffscreenRetainedCompactSnapshotErrorMessage="sph-state readback failed: Failed to execute 'mapAsync' on 'GPUBuffer': A valid external Instance reference no longer exists."`.
+
+## 2026-06-29 20:58 AKDT - Retained Presentation Fast Path
+
+Status:
+
+- Made presentation-worker retained compact snapshot export opt-in. The normal
+  `presentation-worker-retained-output-presentation-only` path no longer
+  submits the failing worker `mapAsync` snapshot export unless policy, URL, or
+  benchmark flags explicitly request it.
+- Added a retained presentation-only render fast path. Once the presentation
+  worker has rendered a retained G2P frame, main-thread resident render refresh
+  publishes
+  `resident-render-presentation-worker-retained-output-preserved`, skips the
+  legacy Three render-row bridge, and keeps the worker-owned transferred canvas
+  as the visible presentation surface.
+- The readback planner now treats this retained presentation-only path as
+  readback-free even if a Three render-row diagnostic mode was requested, while
+  preserving the old full-readback behavior for transitional worker-offscreen
+  render-row presentation.
+- The benchmark/probe flattening now reports
+  `presentationWorkerRetainedOutputPresentationOnlyReadbackFree`,
+  `workerOffscreenRenderRowsRetainedStageOutputPreserved`, and
+  `workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `git diff --check`
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs tests/offscreenPresentationBridge.test.mjs tests/nativeSurfaceHarness.test.mjs tests/ulgMechanicsResidentStageWorker.test.mjs`
+  with `114/114` tests passing.
+- PASS:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `89/89` tests passing after probe flattening was updated.
+- LIVE:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL=https://127.0.0.1:5173 ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-points ULG_BENCH_OUTPUT=/tmp/ulg-presentation-retained-fastpath-bench3.json ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FAIL_ON_ERROR=0 npm run bench:sph-performance`
+  reported `surfaceDrawStatus=resident-render-presentation-worker-retained-output-preserved`,
+  `surfaceDrawSource=presentation-worker-retained-output`,
+  `surfaceDrawReadback=false`, `renderRowsReadback=false`,
+  `renderRowsReadbackByteLength=0`, `estimatedReadbackBytesPerStep=0`,
+  `renderRowsReadbackMode=no-full-readback`,
+  `presentationWorkerRetainedOutputPresentationOnlyReadbackFree=true`,
+  `workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput=true`,
+  `workerOffscreenRenderRowsRetainedStageOutputPreserved=true`,
+  `workerOffscreenRenderRowsProducerSourceKind=worker-retained-resident-stage-output`,
+  `workerOffscreenPresentationTransport=worker-owned-presented-canvas`,
+  `workerOffscreenPresentationDisplayHandoff=transferControlToOffscreen`,
+  `workerOffscreenPresentationCopiedBytesPerFrame=0`,
+  `workerOffscreenPresentationFrameCopyBackRejected=true`,
+  `residentStageStepsPerSecond=88.49557512788058`, and
+  `browserConsoleIssueCount=0`.
+- LIVE VISUAL:
+  `/tmp/ulg-presentation-retained-fastpath.png` captured the same URL and shows
+  the sky-blue background, grid, and particles visible with the worker
+  presentation canvas layered above the main renderer. The app FPS overlay was
+  in the 40-60 render FPS range during the screenshot probe.
+
+Caveat:
+
+- The one-step performance scenario still reports `status=bad` and
+  `probeStatus=bad` because the probe expects positive displacement and
+  main-thread visible surface samples. That is a probe contract mismatch for
+  this presentation-worker-owned fast path; the hot-path telemetry above shows
+  zero readback and preserved worker presentation.

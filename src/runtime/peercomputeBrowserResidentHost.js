@@ -6588,6 +6588,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       host?.renderOwnershipPolicy?.workerOffscreenPresentationRequested ?? null,
     renderOwnershipRetainedGpuBufferHandoffRequested:
       host?.renderOwnershipPolicy?.retainedGpuBufferHandoffRequested ?? null,
+    renderOwnershipRetainedCompactSnapshotExportRequested:
+      host?.renderOwnershipPolicy?.retainedCompactSnapshotExportRequested ?? null,
     renderOwnershipWorkerOwnedResidentProducerRequested:
       host?.renderOwnershipPolicy?.workerOwnedResidentProducerRequested ?? null,
     renderOwnershipWorkerOwnedResidentProducerPending:

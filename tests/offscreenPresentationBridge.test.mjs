@@ -507,6 +507,109 @@ test('worker offscreen bridge can request retained compact snapshot export', () 
   assert.equal(bridge.retainedCompactSnapshotStatus.readbackByteLength, 256);
 });
 
+test('worker offscreen retained compact snapshot export bypasses mapAsync when local materialization is ready', () => {
+  let worker = null;
+  class FakeWorker {
+    constructor() {
+      this.messages = [];
+      this.listeners = [];
+      worker = this;
+    }
+
+    postMessage(data, transfer = []) {
+      this.messages.push({ data, transfer });
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    terminate() {}
+  }
+
+  const canvas = {
+    style: {},
+    width: 0,
+    height: 0,
+    setAttribute() {},
+    transferControlToOffscreen() {
+      return { offscreen: true };
+    }
+  };
+  const container = {
+    clientWidth: 64,
+    clientHeight: 64,
+    appendChild(child) {
+      child.parentNode = this;
+    },
+    ownerDocument: {
+      createElement(name) {
+        assert.equal(name, 'canvas');
+        return canvas;
+      }
+    }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true,
+    retainedGpuBufferHandoffRequested: false,
+    container,
+    width: 64,
+    height: 64,
+    devicePixelRatio: 1,
+    workerFactory: FakeWorker,
+    navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  const messageCountBeforeExport = worker.messages.length;
+
+  const submitted = bridge.exportRetainedCompactSnapshot({
+    laneId: 'ulg:test:presentation-worker-lane',
+    stateKey: 'ulg:test:presentation-worker-state',
+    cacheKey: 'ulg:test:presentation-worker-cache',
+    particleCount: 2,
+    localMaterializationSource: {
+      schema: 'peercompute.ulg.presentation-worker-retained-local-materialization-source.v0',
+      status: 'presentation-worker-retained-state-continuation-completed',
+      hotBufferKey: 'ulg:test:presentation-worker-hot-buffer',
+      workerRetainedContinuationApplied: true,
+      useWorkerRetainedInput: true,
+      workerRetainedBufferRefs: [
+        'ulg-worker:test:presentation:g2p:state',
+        'ulg-worker:test:presentation:g2p:mechanics'
+      ],
+      crossPeerReplayStatus: 'blocked-portable-compact-buffer-snapshot-required',
+      crossPeerReplayBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable'
+    },
+    reason: 'unit-test-local-materialization'
+  });
+
+  assert.equal(submitted.schema, ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA);
+  assert.equal(
+    submitted.status,
+    'presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready'
+  );
+  assert.equal(submitted.localMaterializationReady, true);
+  assert.equal(submitted.localMaterializationMode, 'same-worker-lane-retained-buffer-ref');
+  assert.equal(submitted.workerReadbackBypassed, true);
+  assert.equal(submitted.workerMapAsyncBypassed, true);
+  assert.equal(submitted.portableSnapshotAvailable, false);
+  assert.equal(submitted.crossPeerReplayReady, false);
+  assert.equal(submitted.readbackByteLength, 0);
+  assert.deepEqual(submitted.workerRetainedBufferRefs, [
+    'ulg-worker:test:presentation:g2p:state',
+    'ulg-worker:test:presentation:g2p:mechanics'
+  ]);
+  assert.equal(worker.messages.length, messageCountBeforeExport);
+  assert.equal(
+    worker.messages.some((entry) => entry.data?.type === 'export-retained-compact-snapshot'),
+    false
+  );
+  assert.equal(
+    bridge.retainedCompactSnapshotStatus.status,
+    'presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready'
+  );
+});
+
 test('worker offscreen retained GPUBuffer handoff fails closed before plan change', () => {
   const blockedClone = resolveUlgWorkerOffscreenRetainedGpuBufferHandoffCapability({
     requested: true,

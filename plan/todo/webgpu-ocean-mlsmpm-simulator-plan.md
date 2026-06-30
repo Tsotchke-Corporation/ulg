@@ -120,7 +120,21 @@ Tactical status, 2026-06-28 AKDT:
   `compactSnapshotExportSourceStatus=worker-retained-compact-snapshot-export-sources-ready`.
   The next cross-peer slice is therefore no longer another clone/lifetime
   change; bypass worker mapped readback with a GPU-side publication or
-  peer-local materialization path.
+  peer-local materialization path. Follow-up implemented the first bypass:
+  once a presentation-worker retained continuation is already applied, the
+  offscreen bridge publishes
+  `presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`
+  with `localMaterializationMode=same-worker-lane-retained-buffer-ref`,
+  `workerMapAsyncBypassed=true`, `readbackByteLength=0`, and
+  `portableSnapshotAvailable=false` instead of posting another worker compact
+  snapshot export. This satisfies the local/same-worker replay contract and
+  leaves portable cross-peer replay blocked until a GPU-side publication or
+  validated compact snapshot path exists. Live HTTPS benchmark evidence with
+  `ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT=1` now reports
+  `probeStatus=good`,
+  `workerOffscreenRetainedCompactSnapshotStatus=presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`,
+  `workerMapAsyncBypassed=true`, `readbackByteLength=0`, and
+  `estimatedReadbackBytesPerStep=0`.
   Follow-up also added a presentation-only fast path for visible retained
   output: once the worker has rendered a retained G2P frame, main-thread
   resident render refresh publishes

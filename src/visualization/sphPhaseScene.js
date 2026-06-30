@@ -6848,7 +6848,7 @@ export function createSphPhaseScene(container, {
     if (
       workerOffscreenRetainedCompactSnapshotExportSignature === signature
       && current
-      && /exported|started|submit-posted|blocked|failed|timeout/.test(String(current.status || ''))
+      && /exported|started|submit-posted|blocked|failed|timeout|local-materialization-ready/.test(String(current.status || ''))
     ) {
       return current;
     }
@@ -6873,6 +6873,13 @@ export function createSphPhaseScene(container, {
     }
     const currentSphState = sphGpuParticleState || scene.userData.sphGpuParticleState || null;
     const currentMlsState = mlsMpmGpuParticleState || scene.userData.mlsMpmGpuParticleState || null;
+    const admissionSameDeviceRetainedBufferImport =
+      admission.sameDeviceRetainedBufferImport
+      || admission.localSameDeviceRetainedBufferImport
+      || admission.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+      || admission.workerRetainedBufferImport?.sameDeviceRetainedBufferImport
+      || admission.workerRetainedBufferImport?.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+      || null;
     workerOffscreenRetainedCompactSnapshotExportSignature = signature;
     const submitted = workerOffscreenPresentationBridge.exportRetainedCompactSnapshot({
       laneId: admission.laneId,
@@ -6888,6 +6895,32 @@ export function createSphPhaseScene(container, {
       dimension: currentSphState?.dimension ?? 3,
       smoothingLengthM: currentSphState?.smoothingLengthM ?? 0,
       timeoutMs: 7000,
+      localMaterializationSource: {
+        schema: 'peercompute.ulg.presentation-worker-retained-local-materialization-source.v0',
+        status: continuationStatus.status || null,
+        source: 'presentation-worker-retained-state-continuation',
+        hotBufferKey: admission.hotBufferKey || null,
+        sourceHotBufferKey: admission.hotBufferKey || null,
+        cacheKey: admission.cacheKey || null,
+        stateKey: admission.stateKey || null,
+        laneId: admission.laneId || null,
+        sourceStageId: 'g2p',
+        workerRetainedContinuationApplied:
+          continuationStatus.workerRetainedContinuationApplied === true,
+        useWorkerRetainedInput: continuationStatus.useWorkerRetainedInput === true,
+        consumerMode: continuationStatus.continuationPlan?.consumerMode || 'same-worker-lane-retained-buffer-ref',
+        workerRetainedBufferRefs: admission.workerRetainedBufferRefs || admission.retainedBufferRefs || [],
+        retainedBufferRefs: admission.retainedBufferRefs || admission.workerRetainedBufferRefs || [],
+        sameDeviceRetainedBufferImport: admissionSameDeviceRetainedBufferImport,
+        localSameDeviceRetainedBufferImport: admissionSameDeviceRetainedBufferImport,
+        sameDeviceRetainedBufferImportAvailable: Boolean(admissionSameDeviceRetainedBufferImport),
+        portableSnapshotRequired: admission.portableSnapshotRequired !== false,
+        portableMaterializationContract: admission.portableMaterializationContract || null,
+        crossPeerReplayStatus:
+          admission.crossPeerReplayStatus || 'blocked-portable-compact-buffer-snapshot-required',
+        crossPeerReplayBlocker:
+          admission.crossPeerReplayBlocker || 'worker-retained-gpu-handles-are-not-cross-peer-portable'
+      },
       reason
     });
     return publishWorkerOffscreenRetainedCompactSnapshotStatus(submitted);

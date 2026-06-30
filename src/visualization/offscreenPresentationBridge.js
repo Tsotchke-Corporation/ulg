@@ -56,6 +56,18 @@ function arrayLikeLength(value) {
     : 0;
 }
 
+function uniqueStringList(values = []) {
+  const out = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = String(value ?? '').trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
 function readArrayLikeNumber(value, index, fallback = 0) {
   if (!value || index < 0 || index >= arrayLikeLength(value)) return fallback;
   return finiteNumber(value[index], fallback);
@@ -141,6 +153,97 @@ function residentParticleStateProducerExpectedPayloadShape({
     colorRows,
     colorRowCount: Math.floor(colorRows.length / ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_COLOR_ROW_FLOATS),
     colorRowsByteLength: colorRows.byteLength
+  };
+}
+
+function sameDeviceRetainedBufferImportFrom(source = null) {
+  return source?.sameDeviceRetainedBufferImport
+    || source?.localSameDeviceRetainedBufferImport
+    || source?.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+    || source?.workerRetainedBufferImport?.sameDeviceRetainedBufferImport
+    || source?.workerRetainedBufferImport?.workerRetainedAccessContract?.sameDeviceRetainedBufferImport
+    || null;
+}
+
+function retainedCompactSnapshotLocalMaterializationStatus({
+  source = null,
+  laneId = null,
+  stateKey = null,
+  cacheKey = null,
+  sourceStageId = 'g2p',
+  particleCount = null,
+  reason = 'export-retained-compact-snapshot',
+  workerDeviceProvided = false
+} = {}) {
+  if (!source || typeof source !== 'object') return null;
+  const sameDeviceRetainedBufferImport = sameDeviceRetainedBufferImportFrom(source);
+  const sameDeviceRetainedBufferImportAvailable = sameDeviceRetainedBufferImport?.sameDevice === true;
+  const workerRetainedBufferRefs = uniqueStringList(
+    source.workerRetainedBufferRefs
+      || source.retainedBufferRefs
+      || source.workerRetainedAccessContract?.workerRetainedBufferRefs
+      || source.workerRetainedBufferImport?.workerRetainedBufferRefs
+      || []
+  );
+  const sameWorkerLocalReady = workerRetainedBufferRefs.length > 0
+    || source.workerRetainedContinuationApplied === true
+    || source.useWorkerRetainedInput === true
+    || source.consumerMode === 'same-worker-lane-retained-buffer-ref';
+  if (!sameDeviceRetainedBufferImportAvailable && !sameWorkerLocalReady) return null;
+  const localMaterializationMode = sameDeviceRetainedBufferImportAvailable
+    ? 'same-device-retained-buffer-import'
+    : 'same-worker-lane-retained-buffer-ref';
+  return {
+    schema: ULG_WORKER_OFFSCREEN_RETAINED_COMPACT_SNAPSHOT_SCHEMA,
+    status: 'presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready',
+    reason,
+    laneId,
+    stateKey,
+    cacheKey,
+    sourceStageId,
+    sourceHotBufferKey: source.sourceHotBufferKey || source.hotBufferKey || null,
+    hotBufferKey: source.hotBufferKey || source.sourceHotBufferKey || null,
+    particleCount,
+    compactBufferSnapshotSchema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+    compactBufferSnapshot: null,
+    portableSnapshotAvailable: false,
+    portableSnapshotRequired: source.portableSnapshotRequired !== false,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus:
+      source.crossPeerReplayStatus || 'blocked-portable-compact-buffer-snapshot-required',
+    crossPeerReplayBlocker:
+      source.crossPeerReplayBlocker || 'worker-retained-gpu-handles-are-not-cross-peer-portable',
+    localMaterializationReady: true,
+    localMaterializationStatus: `${localMaterializationMode}-ready`,
+    localMaterializationMode,
+    localMaterializationBypass: true,
+    workerReadbackBypassed: true,
+    workerMapAsyncBypassed: true,
+    readbackByteLength: 0,
+    sameDeviceRetainedBufferImportAvailable,
+    sameDeviceRetainedBufferImport: sameDeviceRetainedBufferImportAvailable
+      ? sameDeviceRetainedBufferImport
+      : null,
+    sameDeviceSourceHotBufferKey: sameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
+    workerRetainedBufferRefs,
+    workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
+    acceptedConsumerModes: sameDeviceRetainedBufferImportAvailable
+      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+      : ['same-worker-lane-retained-buffer-ref'],
+    acceptedMaterializationModes: sameDeviceRetainedBufferImportAvailable
+      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+      : ['same-worker-lane-retained-buffer-ref'],
+    portableMaterializationContract:
+      source.portableMaterializationContract
+      || source.workerRetainedAccessContract?.portableMaterializationContract
+      || source.workerRetainedBufferImport?.portableMaterializationContract
+      || null,
+    workerDeviceSource: ULG_WORKER_OFFSCREEN_PRESENTATION_RESIDENT_STAGE_TRANSPORT,
+    workerDeviceProvided,
+    updatedAtMs: nowMs(),
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
   };
 }
 
@@ -1149,6 +1252,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       dimension = 3,
       smoothingLengthM = 0,
       timeoutMs = null,
+      localMaterializationSource = null,
+      allowLocalMaterializationBypass = true,
       reason = 'export-retained-compact-snapshot'
     } = {}) {
       if (!requested) {
@@ -1157,6 +1262,21 @@ export function createUlgWorkerOffscreenPresentationBridge({
           reason,
           inputTransport: null
         });
+      }
+      const localMaterialization = allowLocalMaterializationBypass !== false
+        ? retainedCompactSnapshotLocalMaterializationStatus({
+            source: localMaterializationSource,
+            laneId,
+            stateKey,
+            cacheKey,
+            sourceStageId,
+            particleCount,
+            reason,
+            workerDeviceProvided: Boolean(this.worker)
+          })
+        : null;
+      if (localMaterialization) {
+        return this.publishRetainedCompactSnapshotStatus(localMaterialization);
       }
       if (!this.worker) {
         return this.publishRetainedCompactSnapshotStatus({

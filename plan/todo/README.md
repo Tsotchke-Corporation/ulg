@@ -115,7 +115,19 @@ reference no longer exists` even after
 `compactSnapshotExportSourceStatus=worker-retained-compact-snapshot-export-sources-ready`.
 This changes the next cross-peer slice: do not keep cloning more buffers in the
 presentation worker; move to a GPU-side publication/local materialization path
-that avoids worker-side mapped readback on this device.
+that avoids worker-side mapped readback on this device. Follow-up implemented
+the local-materialization half of that plan: after a presentation-worker
+retained continuation has already consumed the admitted worker-retained G2P
+state, compact snapshot export now publishes
+`presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`
+with `localMaterializationMode=same-worker-lane-retained-buffer-ref`,
+`workerMapAsyncBypassed=true`, `readbackByteLength=0`, and
+`portableSnapshotAvailable=false`. Cross-peer replay still needs a GPU-side
+publication or validated portable compact snapshot; do not reopen the worker
+`mapAsync` path as the default next step. Live HTTPS benchmark evidence for
+the retained compact snapshot flag now reports `probeStatus=good`,
+`workerOffscreenRetainedCompactSnapshotStatus=presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`,
+`workerMapAsyncBypassed=true`, and `estimatedReadbackBytesPerStep=0`.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

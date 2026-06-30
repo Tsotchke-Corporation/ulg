@@ -6610,6 +6610,10 @@ export function createSphPhaseScene(container, {
         policy?.residentParticleBridgeTargetBatchTimeS ?? null,
       peerComputeRenderOwnershipResidentInterfaceRefreshMode:
         policy?.residentInterfaceRefreshMode ?? null,
+      peerComputeRenderOwnershipResidentComputeManagerMode:
+        policy?.residentComputeManagerMode ?? null,
+      peerComputeRenderOwnershipResidentComputeManagerModeExplicit:
+        policy?.residentComputeManagerModeExplicit ?? null,
       peerComputeRenderOwnershipTransitionalRenderRowsActive:
         policy?.transitionalRenderRowsActive ?? null,
       peerComputeRenderOwnershipFrameCopyBackRejected:
@@ -7850,6 +7854,10 @@ export function createSphPhaseScene(container, {
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStagesPending ?? null,
       peerComputeRenderOwnershipPresentationWorkerResidentStageTransport:
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.presentationWorkerResidentStageTransport ?? null,
+      peerComputeRenderOwnershipResidentComputeManagerMode:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.residentComputeManagerMode ?? null,
+      peerComputeRenderOwnershipResidentComputeManagerModeExplicit:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy?.residentComputeManagerModeExplicit ?? null,
       workerOffscreenPresentationRequested: configuredWorkerOffscreenPresentation,
       workerOffscreenRetainedGpuBufferHandoffRequested: configuredRetainedGpuBufferHandoff,
       workerOffscreenPresentation: currentWorkerOffscreenPresentationStatus(),
@@ -15867,6 +15875,7 @@ export function createSphPhaseScene(container, {
     preferWebGpu = true,
     force = false,
     computeManager = null,
+    residentComputeManagerMode = null,
     computeTaskModulePath = null,
     computeTaskLaneId = 'ulg:sph-resident:scene',
     computeTaskStateKey = null,
@@ -15957,6 +15966,32 @@ export function createSphPhaseScene(container, {
     const requestedReactionParticleBinMetadataReadback = Boolean(
       reactionParticleBinMetadataReadback
     );
+    const requestedResidentComputeManagerMode = (() => {
+      const rawMode = String(residentComputeManagerMode || '').trim().toLowerCase();
+      if (
+        rawMode === 'direct'
+        || rawMode === 'inline'
+        || rawMode === 'local'
+        || rawMode === 'same-device'
+        || rawMode === 'same-thread'
+        || rawMode === 'resident-direct'
+      ) {
+        return 'direct';
+      }
+      if (
+        rawMode === 'compute-manager'
+        || rawMode === 'computemanager'
+        || rawMode === 'peercompute'
+        || rawMode === 'peer-compute'
+        || rawMode === 'task'
+        || rawMode === 'task-submit'
+        || rawMode === 'task-submission'
+        || rawMode === 'state-manager'
+      ) {
+        return 'compute-manager';
+      }
+      return computeManager ? 'compute-manager' : 'direct';
+    })();
     const requestedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
       activeGridDispatchPlanRefreshMode ?? (
         requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
@@ -15977,6 +16012,12 @@ export function createSphPhaseScene(container, {
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
       compactSummaryMode: requestedCompactSummaryMode,
+      residentComputeManagerMode: requestedResidentComputeManagerMode,
+      residentComputeManagerActive: Boolean(
+        computeManager
+        && typeof computeManager.submitTask === 'function'
+        && requestedResidentComputeManagerMode !== 'direct'
+      ),
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
       reactionParticleBinMetadataReadback:
@@ -16037,6 +16078,16 @@ export function createSphPhaseScene(container, {
       activeGridSafetyCells: normalizedActiveGridSafetyCells
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
+    const residentStepsStartedAtMs = nowMs();
+    const residentStepsStageMs = {};
+    const residentStepsIncrementStage = (key, elapsedMs) => {
+      const elapsed = Number(elapsedMs);
+      if (!Number.isFinite(elapsed)) return;
+      residentStepsStageMs[key] = (Number(residentStepsStageMs[key]) || 0) + elapsed;
+    };
+    const residentStepsMarkStage = (key, startedAtMs) => {
+      residentStepsIncrementStage(key, nowMs() - startedAtMs);
+    };
     const markResidentStepsProgress = (status, extra = {}) => {
       scene.userData.mlsMpmResidentStepsProgress = {
         schema: 'peercompute.ulg.sph-scene-resident-steps-progress.v0',
@@ -16079,22 +16130,27 @@ export function createSphPhaseScene(container, {
     });
     const promise = (async () => {
       markResidentStepsProgress('resident-steps-awaiting-surface-draw-queue-idle');
+      const surfaceDrawSubmitFenceStartedAtMs = nowMs();
       const surfaceDrawSubmitFenceStatus = await awaitResidentSurfaceDrawSubmitFence({
         reason: 'mls-mpm-resident-steps-before-compute',
         stage: 'mls-mpm-resident-steps'
       });
+      residentStepsMarkStage('surfaceDrawSubmitFenceMs', surfaceDrawSubmitFenceStartedAtMs);
       markResidentStepsProgress('resident-steps-surface-draw-queue-idle', {
         surfaceDrawSubmitFenceStatus: surfaceDrawSubmitFenceStatus?.status ?? null,
         surfaceDrawSubmitFenceElapsedMs: surfaceDrawSubmitFenceStatus?.elapsedMs ?? null
       });
       markResidentStepsProgress('resident-steps-requesting-device');
+      const deviceAcquireStartedAtMs = nowMs();
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
+      residentStepsMarkStage('deviceAcquireMs', deviceAcquireStartedAtMs);
       markResidentStepsProgress('resident-steps-device-ready', {
         deviceStatus: resolvedDeviceResult?.status ?? null,
         deviceReason: resolvedDeviceResult?.reason ?? null
       });
+      const sphUploadStartedAtMs = nowMs();
       const resolvedSphUpload = continuationAvailable
         ? continuationUploads.sphParticleUpload
         : preferWebGpu
@@ -16105,10 +16161,12 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphGpuParticleUpload;
+      residentStepsMarkStage('sphUploadMs', sphUploadStartedAtMs);
       markResidentStepsProgress('resident-steps-sph-upload-ready', {
         uploadStatus: resolvedSphUpload?.status ?? null,
         particleCount: resolvedSphUpload?.particleCount ?? sourceSphParticleState?.particleCount ?? null
       });
+      const mlsUploadStartedAtMs = nowMs();
       const resolvedMlsUpload = continuationAvailable
         ? continuationUploads.mlsMpmParticleUpload
         : preferWebGpu
@@ -16119,9 +16177,11 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : mlsMpmGpuParticleUpload;
+      residentStepsMarkStage('mlsUploadMs', mlsUploadStartedAtMs);
       markResidentStepsProgress('resident-steps-mls-upload-ready', {
         uploadStatus: resolvedMlsUpload?.status ?? null
       });
+      const thermalUploadStartedAtMs = nowMs();
       const resolvedThermalResponseGraphUpload = preferWebGpu
         ? await refreshSphThermalResponseGraphBuffers({
           preferWebGpu,
@@ -16130,10 +16190,12 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphThermalResponseGraphUpload;
+      residentStepsMarkStage('thermalUploadMs', thermalUploadStartedAtMs);
       markResidentStepsProgress('resident-steps-thermal-upload-ready', {
         uploadStatus: resolvedThermalResponseGraphUpload?.status ?? null,
         graphCount: resolvedThermalResponseGraphUpload?.graphCount ?? null
       });
+      const mechanicsMaterialUploadStartedAtMs = nowMs();
       const resolvedMechanicsMaterialPhaseUpload = preferWebGpu
         ? await refreshMlsMpmMechanicsMaterialPhaseUpload({
           preferWebGpu,
@@ -16142,6 +16204,7 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : mlsMpmMechanicsMaterialPhaseUpload;
+      residentStepsMarkStage('mechanicsMaterialUploadMs', mechanicsMaterialUploadStartedAtMs);
       markResidentStepsProgress('resident-steps-mechanics-material-upload-ready', {
         uploadStatus: resolvedMechanicsMaterialPhaseUpload?.status ?? null,
         phaseRecordCount: resolvedMechanicsMaterialPhaseUpload?.phaseRecordCount ?? null
@@ -16153,6 +16216,7 @@ export function createSphPhaseScene(container, {
           pressureSolverStatus: effectivePressureInterfaceForceSolver?.status ?? null,
           pressureRowsRetained: Boolean(effectivePressureInterfaceForceRowsBuffer)
         });
+        const pressureRowsStartedAtMs = nowMs();
         pressureForceRowsBorrow = borrowPressureInterfaceForceRowsForStage({
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer,
@@ -16167,6 +16231,7 @@ export function createSphPhaseScene(container, {
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
+        residentStepsMarkStage('pressureRowsMs', pressureRowsStartedAtMs);
         markResidentStepsProgress('resident-steps-running-kernels', {
           pressureRowsUploadStatus: resolvedPressureForceRowsUpload?.status ?? null,
           pressureRowsRetained: Boolean(effectivePressureInterfaceForceRowsBuffer)
@@ -16248,7 +16313,12 @@ export function createSphPhaseScene(container, {
           activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
         let execution = null;
-        if (computeManager && typeof computeManager.submitTask === 'function') {
+        const kernelsStartedAtMs = nowMs();
+        if (
+          computeManager
+          && typeof computeManager.submitTask === 'function'
+          && requestedResidentComputeManagerMode !== 'direct'
+        ) {
           const continuationTaskStateKey = continueFromResidentState
             ? (mlsMpmResidentSteps?.computeManagerTask?.stateKey
               || mlsMpmResidentSteps?.stateManagerCommit?.stateKey
@@ -16360,11 +16430,15 @@ export function createSphPhaseScene(container, {
         } else {
           execution = await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
         }
+        execution.residentComputeManagerMode = requestedResidentComputeManagerMode;
+        execution.residentComputeManagerActive = Boolean(execution.computeManagerTask);
+        residentStepsMarkStage('kernelsWallMs', kernelsStartedAtMs);
         markResidentStepsProgress('resident-steps-kernels-complete', {
           backend: execution?.backend ?? null,
           completedStepCount: execution?.completedStepCount ?? null,
           stageTiming: execution?.finalStep?.stageTiming || null
         });
+        const postKernelPublicationStartedAtMs = nowMs();
         execution.requestedReadbackMode = requestedReadbackMode;
         execution.compactSummaryMode = requestedCompactSummaryMode;
         execution.compactSummaryScope = requestedCompactSummaryScope;
@@ -16543,22 +16617,58 @@ export function createSphPhaseScene(container, {
             throw new Error(`ComputeManager resident-steps same-device source publication skipped: ${skipReason}`);
           }
         }
+        const artifactClearStartedAtMs = nowMs();
         clearMlsMpmResidentExecutionArtifacts({
           preserveBuffers: residentContinuationBuffersFromExecution(execution),
           deferDevice: device || resolvedDeviceResult?.device || null
         });
+        residentStepsMarkStage('artifactClearMs', artifactClearStartedAtMs);
         markResidentStepsProgress('resident-steps-publishing-artifacts', {
           backend: execution?.backend ?? null,
           completedStepCount: execution?.completedStepCount ?? null
         });
+        const artifactPublishStartedAtMs = nowMs();
         publishMlsMpmResidentStepArtifacts(execution.finalStep, signature, {
           stepsExecution: execution,
           stepsSignature: signature
         });
+        residentStepsMarkStage('artifactPublishMs', artifactPublishStartedAtMs);
         markResidentStepsProgress('resident-steps-published', {
           backend: execution?.backend ?? null,
           completedStepCount: execution?.completedStepCount ?? null
         });
+        residentStepsMarkStage('postKernelPublicationMs', postKernelPublicationStartedAtMs);
+        const residentStepsWallMs = nowMs() - residentStepsStartedAtMs;
+        const residentStepsTiming = {
+          schema: 'peercompute.ulg.sph-scene-resident-steps-timing.v0',
+          status: 'resident-steps-timing-collected',
+          totalWallMs: residentStepsWallMs,
+          stageMs: { ...residentStepsStageMs },
+          surfaceDrawSubmitFenceStatus: surfaceDrawSubmitFenceStatus?.status ?? null,
+          surfaceDrawSubmitFenceElapsedMs: surfaceDrawSubmitFenceStatus?.elapsedMs ?? null,
+          continuationAvailable,
+          residentSourceMode,
+          scientificValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        };
+        execution.residentStepsTiming = residentStepsTiming;
+        execution.residentStepsWallMs = residentStepsWallMs;
+        execution.residentStepsStageMs = residentStepsTiming.stageMs;
+        execution.residentStepsSurfaceDrawSubmitFenceMs =
+          residentStepsStageMs.surfaceDrawSubmitFenceMs ?? null;
+        execution.residentStepsDeviceAcquireMs = residentStepsStageMs.deviceAcquireMs ?? null;
+        execution.residentStepsSphUploadMs = residentStepsStageMs.sphUploadMs ?? null;
+        execution.residentStepsMlsUploadMs = residentStepsStageMs.mlsUploadMs ?? null;
+        execution.residentStepsThermalUploadMs = residentStepsStageMs.thermalUploadMs ?? null;
+        execution.residentStepsMechanicsMaterialUploadMs =
+          residentStepsStageMs.mechanicsMaterialUploadMs ?? null;
+        execution.residentStepsPressureRowsMs = residentStepsStageMs.pressureRowsMs ?? null;
+        execution.residentStepsKernelsWallMs = residentStepsStageMs.kernelsWallMs ?? null;
+        execution.residentStepsPostKernelPublicationMs =
+          residentStepsStageMs.postKernelPublicationMs ?? null;
+        execution.residentStepsArtifactClearMs = residentStepsStageMs.artifactClearMs ?? null;
+        execution.residentStepsArtifactPublishMs = residentStepsStageMs.artifactPublishMs ?? null;
         return execution;
       } finally {
         pressureForceRowsBorrow?.release('released-after-mls-mpm-resident-steps-cleanup');
@@ -20157,6 +20267,16 @@ export function createSphPhaseScene(container, {
     skipPressureInterfaceRefresh = false,
     allowNativeSurfaceExtraction = true
   } = {}) {
+    const renderRefreshStartedAtMs = nowMs();
+    const renderRefreshStageMs = {};
+    const renderRefreshIncrementStage = (key, elapsedMs) => {
+      const elapsed = Number(elapsedMs);
+      if (!Number.isFinite(elapsed)) return;
+      renderRefreshStageMs[key] = (Number(renderRefreshStageMs[key]) || 0) + elapsed;
+    };
+    const renderRefreshMarkStage = (key, startedAtMs) => {
+      renderRefreshIncrementStage(key, nowMs() - startedAtMs);
+    };
     const nativeSurfaceExtractionAllowed = allowNativeSurfaceExtraction !== false;
     const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
@@ -20350,9 +20470,11 @@ export function createSphPhaseScene(container, {
       });
       return sphResidentRenderState;
     }
+    const deviceAcquireStartedAtMs = nowMs();
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
+    renderRefreshMarkStage('deviceAcquireMs', deviceAcquireStartedAtMs);
     if (!resolvedDeviceResult?.device) {
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -20495,6 +20617,14 @@ export function createSphPhaseScene(container, {
           readbackMode,
           ...renderDomainExtractionOptions(currentRenderDomainCounts)
         });
+      };
+      const timedExtractRenderRowsForMode = async (readbackMode) => {
+        const startedAtMs = nowMs();
+        try {
+          return await extractRenderRowsForMode(readbackMode);
+        } finally {
+          renderRefreshMarkStage('renderRowsMs', startedAtMs);
+        }
       };
       let requestedRenderFieldSurfaceSummaryMode = ['auto', 'readback', 'skip'].includes(
         String(renderFieldSurfaceSummaryMode || '').toLowerCase()
@@ -20661,7 +20791,7 @@ export function createSphPhaseScene(container, {
         particleCount: nextSphParticleState.particleCount,
         readbackMode: requestedRenderRowsReadbackMode
       });
-      renderRowsExecution = await extractRenderRowsForMode(requestedRenderRowsReadbackMode);
+      renderRowsExecution = await timedExtractRenderRowsForMode(requestedRenderRowsReadbackMode);
       applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
       markSphResidentRenderProgress('resident-render-rows-complete', {
         stage: 'render-rows',
@@ -21000,6 +21130,30 @@ export function createSphPhaseScene(container, {
             targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
             targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null
           });
+          const timedBuildRenderFieldForRows = async () => {
+            const startedAtMs = nowMs();
+            try {
+              return await buildRenderFieldForRows();
+            } finally {
+              renderRefreshMarkStage('renderFieldMs', startedAtMs);
+            }
+          };
+          const timedSummarizeRenderFieldSurfaces = async (options) => {
+            const startedAtMs = nowMs();
+            try {
+              return await summarizeSphRenderFieldSurfacesWebGpu(options);
+            } finally {
+              renderRefreshMarkStage('renderFieldSurfaceSummaryMs', startedAtMs);
+            }
+          };
+          const timedBuildPhysicsMaterialInterfaceField = async (options) => {
+            const startedAtMs = nowMs();
+            try {
+              return await buildSphPhysicsMaterialInterfaceFieldWebGpu(options);
+            } finally {
+              renderRefreshMarkStage('materialInterfaceMs', startedAtMs);
+            }
+          };
         const renderFieldHasPositiveDensity = (execution) => {
           if (!(execution?.fieldRows instanceof Float32Array) || execution.fieldRows.length === 0) return true;
           for (let index = 0; index < execution.fieldRows.length; index += 4) {
@@ -21014,7 +21168,7 @@ export function createSphPhaseScene(container, {
           maxFieldCellCount: surfaceTable.maxFieldCellCount,
           readbackMode: visibleRenderFieldReadbackMode
         });
-        renderFieldExecution = await buildRenderFieldForRows();
+        renderFieldExecution = await timedBuildRenderFieldForRows();
         renderFieldExecution.renderFieldRowsBufferPoolStatus = renderFieldRowsBufferPool?.status ?? null;
         renderFieldExecution.renderFieldRowsBufferPoolReason = renderFieldRowsBufferPool?.reason ?? null;
         renderFieldExecution.renderFieldRowsBufferPoolReused = Boolean(renderFieldRowsBufferPool?.reused);
@@ -21046,7 +21200,7 @@ export function createSphPhaseScene(container, {
             stage: 'render-rows',
             reason: 'empty-field-after-no-row-readback'
           });
-          renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+          renderRowsExecution = await timedExtractRenderRowsForMode('full-parity-readback');
           applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
           markSphResidentRenderProgress('resident-render-rows-retry-complete', {
             stage: 'render-rows',
@@ -21068,7 +21222,7 @@ export function createSphPhaseScene(container, {
             surfaceCount: surfaceTable.surfaceCount,
             totalFieldCells: surfaceTable.totalFieldCells
           });
-          renderFieldExecution = await buildRenderFieldForRows();
+          renderFieldExecution = await timedBuildRenderFieldForRows();
           markSphResidentRenderProgress('resident-render-field-retry-complete', {
             stage: 'render-field',
             surfaceCount: renderFieldExecution.surfaceCount,
@@ -21113,7 +21267,7 @@ export function createSphPhaseScene(container, {
               surfaceCount: renderFieldExecution.surfaceCount,
               totalFieldCells: renderFieldExecution.totalFieldCells
             });
-            renderFieldSurfaceSummary = await summarizeSphRenderFieldSurfacesWebGpu({
+            renderFieldSurfaceSummary = await timedSummarizeRenderFieldSurfaces({
               device: resolvedDeviceResult.device,
               renderField: renderFieldExecution,
               fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
@@ -21145,7 +21299,7 @@ export function createSphPhaseScene(container, {
                 stage: 'render-rows',
                 reason: 'empty-summary-after-no-row-readback'
               });
-              renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+              renderRowsExecution = await timedExtractRenderRowsForMode('full-parity-readback');
               applyResidentRenderSourceMetadata(renderRowsExecution, residentRenderSource);
               markSphResidentRenderProgress('resident-render-rows-retry-complete', {
                 stage: 'render-rows',
@@ -21167,7 +21321,7 @@ export function createSphPhaseScene(container, {
                 surfaceCount: surfaceTable.surfaceCount,
                 totalFieldCells: surfaceTable.totalFieldCells
               });
-              renderFieldExecution = await buildRenderFieldForRows();
+              renderFieldExecution = await timedBuildRenderFieldForRows();
               markSphResidentRenderProgress('resident-render-field-retry-complete', {
                 stage: 'render-field',
                 surfaceCount: renderFieldExecution.surfaceCount,
@@ -21177,7 +21331,7 @@ export function createSphPhaseScene(container, {
               renderFieldExecution.emptyFieldRetryReadback = true;
               renderFieldExecution.emptyFieldRetryReason = 'empty-summary-after-no-row-readback';
               renderFieldSurfaceSummary = renderFieldExecution.fieldRowsBuffer
-                ? await summarizeSphRenderFieldSurfacesWebGpu({
+                ? await timedSummarizeRenderFieldSurfaces({
                   device: resolvedDeviceResult.device,
                   renderField: renderFieldExecution,
                   fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
@@ -21189,7 +21343,7 @@ export function createSphPhaseScene(container, {
             renderFieldSurfaceSummary = null;
           }
           if (renderFieldExecution.renderFieldReadback) {
-            materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+            materialInterfaceField = await timedBuildPhysicsMaterialInterfaceField({
               device: resolvedDeviceResult.device,
               renderField: renderFieldExecution,
               fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer || null,
@@ -21310,6 +21464,7 @@ export function createSphPhaseScene(container, {
         };
       }
       }
+      const surfaceDrawBuildStartedAtMs = nowMs();
       if (renderFieldSource === 'resident-gpu-render-field') {
         const shouldUseWorkerOwnedParticleStatePresentationOnly = Boolean(
           shouldUseResidentRenderRowBridge
@@ -22186,6 +22341,7 @@ export function createSphPhaseScene(container, {
           { renderFieldExecution }
         );
       }
+      renderRefreshMarkStage('surfaceDrawMs', surfaceDrawBuildStartedAtMs);
       applyResidentRenderSourceMetadata(renderFieldExecution, residentRenderSource);
       let retainingPreviousResidentSurfaceDraw = Boolean(
         nextResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
@@ -22293,12 +22449,14 @@ export function createSphPhaseScene(container, {
         stage: 'optical-lookup',
         source: 'resident-render-refresh'
       });
+      const opticalLookupStartedAtMs = nowMs();
       await refreshOpticalGpuLookup({
         preferWebGpu,
         navigatorRef: overrideNavigatorRef,
         device,
         deviceResult: resolvedDeviceResult
       });
+      renderRefreshMarkStage('opticalLookupMs', opticalLookupStartedAtMs);
       markSphResidentRenderProgress('resident-render-optical-lookup-complete', {
         stage: 'optical-lookup',
         source: 'resident-render-refresh'
@@ -22315,6 +22473,7 @@ export function createSphPhaseScene(container, {
         source: 'resident-render-refresh',
         skipped: shouldSkipPressureInterfaceRefresh
       });
+      const pressureInterfaceStartedAtMs = nowMs();
       const pressureInterfaceState = shouldSkipPressureInterfaceRefresh
         ? {
           schema: 'peercompute.ulg.sph-pressure-interface-state.v0',
@@ -22342,6 +22501,7 @@ export function createSphPhaseScene(container, {
           source: 'resident-render-field-pressure-interface-producer',
           sourceCadence: 'visual-render-refresh'
         });
+      renderRefreshMarkStage('pressureInterfaceMs', pressureInterfaceStartedAtMs);
       markSphResidentRenderProgress('resident-render-pressure-interface-complete', {
         stage: 'pressure-interface',
         source: 'resident-render-refresh',
@@ -22352,11 +22512,12 @@ export function createSphPhaseScene(container, {
         scene.userData.sphPeerComputeRenderOwnershipPolicy
           ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
       )
-        ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
-        : (workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState)
-          ? currentWorkerOffscreenRenderRowsStatus()
-          : null);
+          ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
+          : (workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState)
+            ? currentWorkerOffscreenRenderRowsStatus()
+            : null);
       const retainedStageOutputAlreadyRendered = Boolean(retainedStageOutputAlreadyRenderedStatus);
+      const workerOffscreenRenderRowsStartedAtMs = nowMs();
       const workerOffscreenRenderRowsStatus = retainedStageOutputAlreadyRendered
         ? publishWorkerOffscreenRenderRowsStatus({
             ...retainedStageOutputAlreadyRenderedStatus,
@@ -22374,6 +22535,7 @@ export function createSphPhaseScene(container, {
         deviceResult: resolvedDeviceResult,
         reason: 'resident-render-state-assembly'
       });
+      renderRefreshMarkStage('workerOffscreenRenderRowsMs', workerOffscreenRenderRowsStartedAtMs);
       if (configuredWorkerOffscreenPresentation) {
         markSphResidentRenderProgress('resident-render-worker-offscreen-render-rows-submitted', {
           stage: 'worker-offscreen-render-rows',
@@ -22407,6 +22569,7 @@ export function createSphPhaseScene(container, {
       const surfaceDrawLeaseSummary = compactResidentBufferLeaseSummary(
         sphResidentSurfaceDraw?.residentBufferLeaseSummary
       );
+      const renderStateAssemblyStartedAtMs = nowMs();
       markSphResidentRenderProgress('resident-render-state-assembly-fields-ready', {
         stage: 'resident-render-state',
         source: 'resident-render-refresh',
@@ -23146,6 +23309,35 @@ export function createSphPhaseScene(container, {
         phaseChangeValidation: false,
         fullPhysicsValidation: false
       };
+      renderRefreshMarkStage('renderStateAssemblyMs', renderStateAssemblyStartedAtMs);
+      const renderRefreshTotalMs = nowMs() - renderRefreshStartedAtMs;
+      const renderRefreshTiming = {
+        schema: 'peercompute.ulg.sph-resident-render-refresh-timing.v0',
+        status: 'resident-render-refresh-timing-collected',
+        totalMs: renderRefreshTotalMs,
+        stageMs: { ...renderRefreshStageMs },
+        pressureInterfaceSkipped: shouldSkipPressureInterfaceRefresh,
+        workerOffscreenRetainedStageOutputPreserved: retainedStageOutputAlreadyRendered,
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      sphResidentRenderState.renderRefreshTiming = renderRefreshTiming;
+      sphResidentRenderState.renderRefreshTotalMs = renderRefreshTotalMs;
+      sphResidentRenderState.renderRefreshStageMs = renderRefreshTiming.stageMs;
+      sphResidentRenderState.renderRefreshDeviceAcquireMs = renderRefreshStageMs.deviceAcquireMs ?? null;
+      sphResidentRenderState.renderRefreshRenderRowsMs = renderRefreshStageMs.renderRowsMs ?? null;
+      sphResidentRenderState.renderRefreshRenderFieldMs = renderRefreshStageMs.renderFieldMs ?? null;
+      sphResidentRenderState.renderRefreshRenderFieldSurfaceSummaryMs =
+        renderRefreshStageMs.renderFieldSurfaceSummaryMs ?? null;
+      sphResidentRenderState.renderRefreshMaterialInterfaceMs = renderRefreshStageMs.materialInterfaceMs ?? null;
+      sphResidentRenderState.renderRefreshSurfaceDrawMs = renderRefreshStageMs.surfaceDrawMs ?? null;
+      sphResidentRenderState.renderRefreshOpticalLookupMs = renderRefreshStageMs.opticalLookupMs ?? null;
+      sphResidentRenderState.renderRefreshPressureInterfaceMs = renderRefreshStageMs.pressureInterfaceMs ?? null;
+      sphResidentRenderState.renderRefreshWorkerOffscreenRenderRowsMs =
+        renderRefreshStageMs.workerOffscreenRenderRowsMs ?? null;
+      sphResidentRenderState.renderRefreshRenderStateAssemblyMs =
+        renderRefreshStageMs.renderStateAssemblyMs ?? null;
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       markSphResidentRenderProgress('resident-render-state-published', {
         stage: 'resident-render-state',

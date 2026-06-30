@@ -1145,6 +1145,7 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         schema: residentComputeManager.schema ?? null,
         status: residentComputeManager.status ?? null,
         source: residentComputeManager.source ?? null,
+        mode: residentComputeManager.mode ?? null,
         submitTask: residentComputeManager.submitTask ?? null
       } : null,
       residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
@@ -2351,6 +2352,7 @@ async function runBrowserProbe({
             schema: residentComputeManager.schema ?? null,
             status: residentComputeManager.status ?? null,
             source: residentComputeManager.source ?? null,
+            mode: residentComputeManager.mode ?? null,
             submitTask: residentComputeManager.submitTask ?? null
           } : null,
           residentStageOrderTrace: residentStageOrderTrace ? {
@@ -2395,6 +2397,7 @@ async function runBrowserProbe({
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
         nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
+        probeResidentBatchTiming: overlay.__sphProbeResidentBatchTiming || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
         renderModeSelection: overlay.__sphRenderModeSelection || null,
         rendererFrame: sceneUserData.sphRendererFrame || null,
@@ -2440,6 +2443,23 @@ async function runBrowserProbe({
             compactSummaryScope: steps.compactSummaryScope ?? null,
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
+            residentStepsTiming: steps.residentStepsTiming ?? null,
+            residentStepsStageMs: steps.residentStepsStageMs ?? null,
+            residentStepsWallMs: finiteOrNull(steps.residentStepsWallMs),
+            residentStepsSurfaceDrawSubmitFenceMs:
+              finiteOrNull(steps.residentStepsSurfaceDrawSubmitFenceMs),
+            residentStepsDeviceAcquireMs: finiteOrNull(steps.residentStepsDeviceAcquireMs),
+            residentStepsSphUploadMs: finiteOrNull(steps.residentStepsSphUploadMs),
+            residentStepsMlsUploadMs: finiteOrNull(steps.residentStepsMlsUploadMs),
+            residentStepsThermalUploadMs: finiteOrNull(steps.residentStepsThermalUploadMs),
+            residentStepsMechanicsMaterialUploadMs:
+              finiteOrNull(steps.residentStepsMechanicsMaterialUploadMs),
+            residentStepsPressureRowsMs: finiteOrNull(steps.residentStepsPressureRowsMs),
+            residentStepsKernelsWallMs: finiteOrNull(steps.residentStepsKernelsWallMs),
+            residentStepsPostKernelPublicationMs:
+              finiteOrNull(steps.residentStepsPostKernelPublicationMs),
+            residentStepsArtifactClearMs: finiteOrNull(steps.residentStepsArtifactClearMs),
+            residentStepsArtifactPublishMs: finiteOrNull(steps.residentStepsArtifactPublishMs),
             nextActiveGridDispatchPlanHintStatus: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.status ?? null,
             nextActiveGridDispatchPlanHintSource: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.source ?? null,
             nextActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
@@ -2530,6 +2550,22 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeSourceResidentRetentionReason:
               renderState.surfaceDrawRenderBridgeSourceResidentRetentionReason ?? null,
             rendererOwnedDevice: renderState.rendererOwnedDevice ?? null,
+            renderRefreshTiming: renderState.renderRefreshTiming ?? null,
+            renderRefreshStageMs: renderState.renderRefreshStageMs ?? null,
+            renderRefreshTotalMs: finiteOrNull(renderState.renderRefreshTotalMs),
+            renderRefreshDeviceAcquireMs: finiteOrNull(renderState.renderRefreshDeviceAcquireMs),
+            renderRefreshRenderRowsMs: finiteOrNull(renderState.renderRefreshRenderRowsMs),
+            renderRefreshRenderFieldMs: finiteOrNull(renderState.renderRefreshRenderFieldMs),
+            renderRefreshRenderFieldSurfaceSummaryMs:
+              finiteOrNull(renderState.renderRefreshRenderFieldSurfaceSummaryMs),
+            renderRefreshMaterialInterfaceMs: finiteOrNull(renderState.renderRefreshMaterialInterfaceMs),
+            renderRefreshSurfaceDrawMs: finiteOrNull(renderState.renderRefreshSurfaceDrawMs),
+            renderRefreshOpticalLookupMs: finiteOrNull(renderState.renderRefreshOpticalLookupMs),
+            renderRefreshPressureInterfaceMs: finiteOrNull(renderState.renderRefreshPressureInterfaceMs),
+            renderRefreshWorkerOffscreenRenderRowsMs:
+              finiteOrNull(renderState.renderRefreshWorkerOffscreenRenderRowsMs),
+            renderRefreshRenderStateAssemblyMs:
+              finiteOrNull(renderState.renderRefreshRenderStateAssemblyMs),
             renderFieldReadback: renderState.renderFieldReadback ?? null,
             renderFieldStatus: renderState.renderFieldStatus ?? null,
             renderFieldReason: renderState.renderFieldReason ?? null,
@@ -2587,6 +2623,18 @@ async function runBrowserProbe({
               renderState.renderRowsReadbackWorkerOwnedResidentProducerRequired ?? null,
             presentationWorkerRetainedOutputPresentationOnlyReadbackFree:
               renderState.presentationWorkerRetainedOutputPresentationOnlyReadbackFree ?? null,
+            peerComputeRenderOwnershipResidentPlaybackUseCase:
+              renderState.peerComputeRenderOwnershipResidentPlaybackUseCase ?? null,
+            peerComputeRenderOwnershipResidentStepsPerScheduleOverride:
+              renderState.peerComputeRenderOwnershipResidentStepsPerScheduleOverride ?? null,
+            peerComputeRenderOwnershipResidentStepsPerScheduleMax:
+              renderState.peerComputeRenderOwnershipResidentStepsPerScheduleMax ?? null,
+            peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS:
+              renderState.peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS ?? null,
+            peerComputeRenderOwnershipResidentComputeManagerMode:
+              renderState.peerComputeRenderOwnershipResidentComputeManagerMode ?? null,
+            peerComputeRenderOwnershipResidentComputeManagerModeExplicit:
+              renderState.peerComputeRenderOwnershipResidentComputeManagerModeExplicit ?? null,
             workerOffscreenRenderRowsRetainedStageOutputPreserved:
               renderState.workerOffscreenRenderRowsRetainedStageOutputPreserved ?? null,
             workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput:
@@ -3558,8 +3606,21 @@ async function runBrowserProbe({
       }
       for (let batchIndex = 1; batchIndex <= requestedBatches; batchIndex += 1) {
         const started = performance.now();
+        const probeResidentBatchTiming = {
+          schema: 'peercompute.ulg.sph-probe-resident-batch-timing.v0',
+          status: 'resident-batch-timing-started',
+          batchIndex,
+          startedAtMs: started,
+          residentStepsAwaitMs: null,
+          renderRefreshAwaitMs: null,
+          viewportRefreshMs: null,
+          viewportRafMs: null,
+          nativeSurfaceValidationWaitMs: null,
+          totalBeforeSampleMs: null
+        };
         try {
           markProbeProgress('resident-batch-started', { batchIndex, batchSteps: requestedBatchSteps });
+          const residentStepsAwaitStartedAtMs = performance.now();
           execution = await sceneApi.refreshMlsMpmResidentSteps({
             preferWebGpu: true,
             stepCount: requestedBatchSteps,
@@ -3583,6 +3644,8 @@ async function runBrowserProbe({
               || residentExecutionPolicy?.measureFusedSequenceQueueFence
             )
           });
+          probeResidentBatchTiming.residentStepsAwaitMs =
+            performance.now() - residentStepsAwaitStartedAtMs;
           markProbeProgress('resident-batch-completed', {
             batchIndex,
             batchMs: performance.now() - started,
@@ -3604,6 +3667,7 @@ async function runBrowserProbe({
           overlay.__sphUpdateResidentGasPressureSummary?.(overlay.__mlsMpmResidentStep);
           if ((batchIndex % requestedRenderEvery === 0 || batchIndex === requestedBatches) && sceneApi.refreshSphResidentRenderState) {
             markProbeProgress('resident-render-refresh-started', { batchIndex });
+            const renderRefreshAwaitStartedAtMs = performance.now();
             overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
               preferWebGpu: true,
               residentSteps: execution,
@@ -3616,6 +3680,8 @@ async function runBrowserProbe({
               gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
               allowNativeSurfaceExtraction: batchIndex === requestedBatches
             });
+            probeResidentBatchTiming.renderRefreshAwaitMs =
+              performance.now() - renderRefreshAwaitStartedAtMs;
             markProbeProgress('resident-render-refresh-completed', {
               batchIndex,
               status: overlay.__sphResidentRenderState?.status ?? null,
@@ -3641,12 +3707,24 @@ async function runBrowserProbe({
               });
             } else {
               markProbeProgress('resident-render-refresh-viewport-started', { batchIndex });
+              const viewportRefreshStartedAtMs = performance.now();
               sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-render-refresh' });
+              const viewportRafStartedAtMs = performance.now();
               await new Promise((resolve) => requestAnimationFrame(resolve));
+              probeResidentBatchTiming.viewportRafMs =
+                performance.now() - viewportRafStartedAtMs;
+              const nativeSurfaceValidationStartedAtMs = performance.now();
               await waitForNativeSurfaceValidation(batchIndex);
+              probeResidentBatchTiming.nativeSurfaceValidationWaitMs =
+                performance.now() - nativeSurfaceValidationStartedAtMs;
+              probeResidentBatchTiming.viewportRefreshMs =
+                performance.now() - viewportRefreshStartedAtMs;
               markProbeProgress('resident-render-refresh-viewport-completed', { batchIndex });
             }
           }
+          probeResidentBatchTiming.totalBeforeSampleMs = performance.now() - started;
+          probeResidentBatchTiming.status = 'resident-batch-timing-collected';
+          overlay.__sphProbeResidentBatchTiming = probeResidentBatchTiming;
           markProbeProgress('resident-batch-sampling-started', { batchIndex });
           const metric = sample(batchIndex, 'resident-batch', performance.now() - started);
           metrics.push(metric);

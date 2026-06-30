@@ -40,9 +40,11 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.retainedGpuBufferHandoffRequested, false);
   assert.equal(policy.configuredByPeerCompute, false);
   assert.equal(policy.residentPlaybackUseCase, 'interactive-worker-presentation');
-  assert.equal(policy.residentStepsPerScheduleMax, 4);
+  assert.equal(policy.residentStepsPerScheduleMax, 1);
   assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
+  assert.equal(policy.residentComputeManagerMode, 'direct');
+  assert.equal(policy.residentComputeManagerModeExplicit, false);
 });
 
 test('render ownership policy lets same-device use case imply worker-owned producer', () => {
@@ -114,12 +116,16 @@ test('render ownership policy does not preserve local default interface mode as 
 
   assert.equal(initialPolicy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(initialPolicy.residentInterfaceRefreshModeExplicit, false);
+  assert.equal(initialPolicy.residentComputeManagerMode, 'direct');
+  assert.equal(initialPolicy.residentComputeManagerModeExplicit, false);
   assert.equal(
     sceneReadyPolicy.effectiveMode,
     ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
   );
   assert.equal(sceneReadyPolicy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(sceneReadyPolicy.residentInterfaceRefreshModeExplicit, false);
+  assert.equal(sceneReadyPolicy.residentComputeManagerMode, 'direct');
+  assert.equal(sceneReadyPolicy.residentComputeManagerModeExplicit, false);
 });
 
 test('render ownership policy lets PeerCompute select worker-owned resident producer per use case', () => {
@@ -232,7 +238,9 @@ test('render ownership policy exposes presentation-worker retained output as pre
   assert.equal(policy.residentPlaybackUseCase, 'interactive-presentation');
   assert.equal(policy.residentStepsPerScheduleMax, 4);
   assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
+  assert.equal(policy.residentComputeManagerMode, 'direct');
   assert.equal(policy.residentPlaybackCadencePolicy.stepsPerScheduleMax, 4);
+  assert.equal(policy.residentPlaybackCadencePolicy.computeManagerMode, 'direct');
   assert.equal(policy.residentPlaybackCadencePolicy.peercomputeConfigurable, true);
 });
 
@@ -247,7 +255,8 @@ test('render ownership policy keeps retained presentation batch cadence configur
       requestedMode: 'presentation-worker-retained-output-presentation-only',
       residentStepsPerSchedule: 9,
       residentParticleBridgeTargetBatchTimeS: 0.2,
-      residentInterfaceRefreshMode: 'blocking'
+      residentInterfaceRefreshMode: 'blocking',
+      residentComputeManagerMode: 'direct'
     },
     residentStepsPerScheduleMax: 6,
     workerOwnedResidentProducerReady: true
@@ -255,12 +264,15 @@ test('render ownership policy keeps retained presentation batch cadence configur
 
   assert.equal(throughputPolicy.residentPlaybackUseCase, 'throughput');
   assert.equal(throughputPolicy.residentStepsPerScheduleMax, null);
+  assert.equal(throughputPolicy.residentComputeManagerMode, 'compute-manager');
   assert.equal(overridePolicy.residentPlaybackUseCase, 'interactive-presentation');
   assert.equal(overridePolicy.residentStepsPerScheduleOverride, 9);
   assert.equal(overridePolicy.residentStepsPerScheduleMax, 6);
   assert.equal(overridePolicy.residentParticleBridgeTargetBatchTimeS, 0.2);
   assert.equal(overridePolicy.residentInterfaceRefreshMode, 'blocking');
   assert.equal(overridePolicy.residentInterfaceRefreshModeExplicit, true);
+  assert.equal(overridePolicy.residentComputeManagerMode, 'direct');
+  assert.equal(overridePolicy.residentComputeManagerModeExplicit, true);
 });
 
 test('render ownership policy makes retained compact snapshot export opt-in', () => {
@@ -328,4 +340,6 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipResidentPlaybackUseCase, 'interactive-presentation');
   assert.equal(summary.renderOwnershipResidentStepsPerScheduleMax, 4);
   assert.equal(summary.renderOwnershipResidentInterfaceRefreshMode, 'pipelined');
+  assert.equal(summary.renderOwnershipResidentComputeManagerMode, 'direct');
+  assert.equal(summary.renderOwnershipResidentComputeManagerModeExplicit, false);
 });

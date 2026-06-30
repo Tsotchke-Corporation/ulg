@@ -131,6 +131,16 @@ test('resident material interface seeds surface table before full render-row rea
   assert.match(mountSource, /materialInterfaceMaxFieldCells/);
   assert.match(mountSource, /miCells/);
   assert.match(mountSource, /materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy/);
+  assert.match(
+    mountSource,
+    /schedulerResidentInterfaceRefreshMode = currentResidentInterfaceRefreshMode\(\)/,
+    'resident playback scheduler should capture the interface refresh mode once per cycle'
+  );
+  assert.match(
+    mountSource,
+    /skipPressureInterfaceRefresh: true/,
+    'resident playback render refresh should not duplicate the scheduler-owned interface refresh'
+  );
 });
 
 test('resident material interface uses compact active-candidate readback', () => {
@@ -302,6 +312,7 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentInterfaceRefreshMode/);
+  assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentComputeManagerMode/);
   assert.match(sceneSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
   assert.match(sceneSource, /upgradeWorkerOffscreenRenderRowsWhenReady/);
   assert.match(sceneSource, /retainPreviousThreeRenderRowBridgeNoFull/);
@@ -310,13 +321,18 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(sceneSource, /surfaceDrawWorkerOwnedResidentParticleStateProducerPresentationOnly/);
   assert.match(sceneSource, /resident-render-worker-owned-particle-state-producer-presented/);
   assert.match(policySource, /residentInterfaceRefreshMode/);
+  assert.match(policySource, /residentComputeManagerMode/);
   assert.match(policySource, /workerOffscreenRenderRowsUpgradedToWorkerOwnedResidentProducer/);
   assert.match(probeSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
+  assert.match(probeSource, /peerComputeRenderOwnershipResidentComputeManagerMode/);
   assert.match(benchmarkSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
   assert.match(sceneSource, /peerComputeRenderOwnershipResidentStepsPerScheduleMax/);
+  assert.match(sceneSource, /peerComputeRenderOwnershipResidentComputeManagerMode/);
   assert.match(probeSource, /peerComputeRenderOwnershipResidentStepsPerScheduleMax/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentStepsPerScheduleMax/);
   assert.match(mountSource, /residentStepsPerScheduleOverride/);
+  assert.match(mountSource, /currentResidentComputeManagerMode/);
+  assert.match(mountSource, /policy-bypassed-direct-resident-execution/);
   assert.match(mountSource, /Math\.min\(maxSteps, throughputCount\)/);
   assert.match(sceneSource, /resident-render-presentation-worker-retained-output-preserved/);
   assert.match(benchmarkSource, /workerOffscreenRetainedGpuBufferHandoffStatus/);

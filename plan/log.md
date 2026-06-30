@@ -1,5 +1,62 @@
 # ULG Implementation Log
 
+## 2026-06-30 AKDT - Interactive Worker Playback Direct Resident Cadence
+
+Status:
+
+- Added resident render/step timing diagnostics to scene, long-horizon probe,
+  and performance benchmark output. The new fields separate resident wrapper
+  time, inner GPU stage time, render refresh time, and probe viewport/RAF wait
+  time.
+- Confirmed the "1 fps" benchmark aggregate was mostly a headless browser
+  `requestAnimationFrame` wait after viewport refresh, not MLS-MPM or render
+  compute. The smoke benchmark still showed `meanBatchMs=3308`, but also
+  showed `residentStepsAwaitMs=68.2`, `renderRefreshAwaitMs=15.7`, and
+  `viewportRafMs=3222.1`.
+- Scheduler-owned resident playback render refresh now skips the duplicate
+  pressure-interface refresh because the scheduler has already launched the
+  interface update for that resident execution.
+- Render ownership policy now exposes
+  `residentComputeManagerMode` and keeps it PeerCompute/URL configurable.
+  Local interactive worker presentation defaults to `direct`; throughput and
+  explicit PeerCompute task modes can still use `compute-manager`.
+- Interactive worker presentation now caps visible resident playback at one
+  substep per schedule by default, while retained presentation-only keeps the
+  existing batch cap and throughput mode remains uncapped unless configured.
+
+Validation:
+
+- PASS:
+  `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+  `node --check src/visualization/sphPhaseDemoMount.js`
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  and `node --test tests/nativeSurfaceHarness.test.mjs`.
+- PASS:
+  HTTPS live Playwright sample on `https://127.0.0.1:5173` with
+  `workerOffscreenPresentation=1` reported
+  `residentComputeManagerMode=direct`,
+  `computeActive=false`, steady `residentMs` about `5-9 ms`,
+  steady render refresh about `7-12 ms`, and worker frames advancing from
+  `43` to `140` over the final two one-second samples.
+- PASS:
+  `npm run bench:sph-performance` with worker presentation smoke wrote
+  `artifacts/sph-performance-benchmark-direct-worker-playback-smoke.json`
+  with suite gate `pass`, scenario/probe `good`, no probe issues,
+  `peerComputeRenderOwnershipResidentComputeManagerMode=direct`,
+  `residentStageMs=6.4`, and `workerOffscreenRenderRowsReadyFrameCount=6`.
+
+Open:
+
+- First worker-owned render refresh is still cold-start expensive in headless
+  Chromium. The steady-state slideshow regression is fixed for the local
+  interactive path, but the next performance slice should reduce the initial
+  worker presentation/render-row producer warmup and keep the benchmark from
+  treating headless RAF throttling as physics wall time.
+
 ## 2026-06-29 AKDT - Retained Continuation Portability Contract
 
 Status:

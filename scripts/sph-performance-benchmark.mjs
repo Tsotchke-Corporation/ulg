@@ -370,11 +370,73 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const metric = lastMetricWithRenderState(result);
   const renderState = metric?.renderState || null;
   const surfaceDraw = metric?.surfaceDraw || null;
+  const probeResidentBatchTiming = metric?.probeResidentBatchTiming || null;
+  const probeResidentBatchResidentStepsAwaitMs = numberOrNull(
+    probeResidentBatchTiming?.residentStepsAwaitMs
+  );
+  const probeResidentBatchRenderRefreshAwaitMs = numberOrNull(
+    probeResidentBatchTiming?.renderRefreshAwaitMs
+  );
+  const probeResidentBatchViewportRefreshMs = numberOrNull(
+    probeResidentBatchTiming?.viewportRefreshMs
+  );
+  const probeResidentBatchViewportRafMs = numberOrNull(
+    probeResidentBatchTiming?.viewportRafMs
+  );
+  const probeResidentBatchNativeSurfaceValidationWaitMs = numberOrNull(
+    probeResidentBatchTiming?.nativeSurfaceValidationWaitMs
+  );
+  const probeResidentBatchTotalBeforeSampleMs = numberOrNull(
+    probeResidentBatchTiming?.totalBeforeSampleMs
+  );
   const residentStep = metric?.residentStep || null;
   const residentSteps = metric?.residentSteps || null;
   const mechanicsMaterialPhaseUpload = metric?.mlsMpmMechanicsMaterialPhaseUpload || null;
   const effectiveProbeMode = result?.timeline?.probeMode || probeMode;
   const residentStageTiming = residentStep?.stageTiming ?? residentSteps?.finalStepStageTiming ?? null;
+  const residentStepsTiming = residentSteps?.residentStepsTiming ?? null;
+  const residentStepsStageMs = residentSteps?.residentStepsStageMs
+    ?? residentStepsTiming?.stageMs
+    ?? null;
+  const residentStepsWallMs = numberOrNull(
+    residentSteps?.residentStepsWallMs ?? residentStepsTiming?.totalWallMs
+  );
+  const residentStepsSurfaceDrawSubmitFenceMs = numberOrNull(
+    residentSteps?.residentStepsSurfaceDrawSubmitFenceMs
+      ?? residentStepsStageMs?.surfaceDrawSubmitFenceMs
+  );
+  const residentStepsDeviceAcquireMs = numberOrNull(
+    residentSteps?.residentStepsDeviceAcquireMs ?? residentStepsStageMs?.deviceAcquireMs
+  );
+  const residentStepsSphUploadMs = numberOrNull(
+    residentSteps?.residentStepsSphUploadMs ?? residentStepsStageMs?.sphUploadMs
+  );
+  const residentStepsMlsUploadMs = numberOrNull(
+    residentSteps?.residentStepsMlsUploadMs ?? residentStepsStageMs?.mlsUploadMs
+  );
+  const residentStepsThermalUploadMs = numberOrNull(
+    residentSteps?.residentStepsThermalUploadMs ?? residentStepsStageMs?.thermalUploadMs
+  );
+  const residentStepsMechanicsMaterialUploadMs = numberOrNull(
+    residentSteps?.residentStepsMechanicsMaterialUploadMs
+      ?? residentStepsStageMs?.mechanicsMaterialUploadMs
+  );
+  const residentStepsPressureRowsMs = numberOrNull(
+    residentSteps?.residentStepsPressureRowsMs ?? residentStepsStageMs?.pressureRowsMs
+  );
+  const residentStepsKernelsWallMs = numberOrNull(
+    residentSteps?.residentStepsKernelsWallMs ?? residentStepsStageMs?.kernelsWallMs
+  );
+  const residentStepsPostKernelPublicationMs = numberOrNull(
+    residentSteps?.residentStepsPostKernelPublicationMs
+      ?? residentStepsStageMs?.postKernelPublicationMs
+  );
+  const residentStepsArtifactClearMs = numberOrNull(
+    residentSteps?.residentStepsArtifactClearMs ?? residentStepsStageMs?.artifactClearMs
+  );
+  const residentStepsArtifactPublishMs = numberOrNull(
+    residentSteps?.residentStepsArtifactPublishMs ?? residentStepsStageMs?.artifactPublishMs
+  );
   const dispatchTopology = residentStageTiming?.dispatchTopology
     ?? residentStep?.dispatchTopology
     ?? residentSteps?.fusedResidentSequence?.dispatchTopology
@@ -516,6 +578,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     peerComputeRenderOwnershipPolicy?.residentInterfaceRefreshMode
     ?? renderState?.peerComputeRenderOwnershipResidentInterfaceRefreshMode
     ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentInterfaceRefreshMode
+    ?? null;
+  const peerComputeRenderOwnershipResidentComputeManagerMode =
+    peerComputeRenderOwnershipPolicy?.residentComputeManagerMode
+    ?? renderState?.peerComputeRenderOwnershipResidentComputeManagerMode
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentComputeManagerMode
+    ?? null;
+  const peerComputeRenderOwnershipResidentComputeManagerModeExplicit =
+    peerComputeRenderOwnershipPolicy?.residentComputeManagerModeExplicit
+    ?? renderState?.peerComputeRenderOwnershipResidentComputeManagerModeExplicit
+    ?? metric?.rendererInit?.peerComputeRenderOwnershipResidentComputeManagerModeExplicit
     ?? null;
   const peerComputeRenderOwnershipTransitionalRenderRowsActive =
     peerComputeRenderOwnershipPolicy?.transitionalRenderRowsActive
@@ -1554,6 +1626,46 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderState?.surfaceDrawRenderBridgeThreeGeometryByteLength
       ?? surfaceDraw?.renderBridgeThreeGeometryByteLength
   );
+  const renderRefreshTiming = renderState?.renderRefreshTiming ?? null;
+  const renderRefreshStageMs = renderState?.renderRefreshStageMs
+    ?? renderRefreshTiming?.stageMs
+    ?? null;
+  const renderRefreshTotalMs = numberOrNull(
+    renderState?.renderRefreshTotalMs ?? renderRefreshTiming?.totalMs
+  );
+  const renderRefreshDeviceAcquireMs = numberOrNull(
+    renderState?.renderRefreshDeviceAcquireMs ?? renderRefreshStageMs?.deviceAcquireMs
+  );
+  const renderRefreshRenderRowsMs = numberOrNull(
+    renderState?.renderRefreshRenderRowsMs ?? renderRefreshStageMs?.renderRowsMs
+  );
+  const renderRefreshRenderFieldMs = numberOrNull(
+    renderState?.renderRefreshRenderFieldMs ?? renderRefreshStageMs?.renderFieldMs
+  );
+  const renderRefreshRenderFieldSurfaceSummaryMs = numberOrNull(
+    renderState?.renderRefreshRenderFieldSurfaceSummaryMs
+      ?? renderRefreshStageMs?.renderFieldSurfaceSummaryMs
+  );
+  const renderRefreshMaterialInterfaceMs = numberOrNull(
+    renderState?.renderRefreshMaterialInterfaceMs ?? renderRefreshStageMs?.materialInterfaceMs
+  );
+  const renderRefreshSurfaceDrawMs = numberOrNull(
+    renderState?.renderRefreshSurfaceDrawMs ?? renderRefreshStageMs?.surfaceDrawMs
+  );
+  const renderRefreshOpticalLookupMs = numberOrNull(
+    renderState?.renderRefreshOpticalLookupMs ?? renderRefreshStageMs?.opticalLookupMs
+  );
+  const renderRefreshPressureInterfaceMs = numberOrNull(
+    renderState?.renderRefreshPressureInterfaceMs ?? renderRefreshStageMs?.pressureInterfaceMs
+  );
+  const renderRefreshWorkerOffscreenRenderRowsMs = numberOrNull(
+    renderState?.renderRefreshWorkerOffscreenRenderRowsMs
+      ?? renderRefreshStageMs?.workerOffscreenRenderRowsMs
+  );
+  const renderRefreshRenderStateAssemblyMs = numberOrNull(
+    renderState?.renderRefreshRenderStateAssemblyMs
+      ?? renderRefreshStageMs?.renderStateAssemblyMs
+  );
   const estimatedReadbackBytesPerBatch = sumKnownNumbers([
     renderRowsReadbackByteLength,
     surfaceDrawSummaryReadbackByteLength
@@ -1703,7 +1815,41 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
     performanceGate,
+    probeResidentBatchTiming,
+    probeResidentBatchResidentStepsAwaitMs,
+    probeResidentBatchRenderRefreshAwaitMs,
+    probeResidentBatchViewportRefreshMs,
+    probeResidentBatchViewportRafMs,
+    probeResidentBatchNativeSurfaceValidationWaitMs,
+    probeResidentBatchTotalBeforeSampleMs,
     residentStageTiming,
+    residentStepsTiming,
+    residentStepsStageMs,
+    residentStepsWallMs,
+    residentStepsSurfaceDrawSubmitFenceMs,
+    residentStepsDeviceAcquireMs,
+    residentStepsSphUploadMs,
+    residentStepsMlsUploadMs,
+    residentStepsThermalUploadMs,
+    residentStepsMechanicsMaterialUploadMs,
+    residentStepsPressureRowsMs,
+    residentStepsKernelsWallMs,
+    residentStepsPostKernelPublicationMs,
+    residentStepsArtifactClearMs,
+    residentStepsArtifactPublishMs,
+    renderRefreshTiming,
+    renderRefreshStageMs,
+    renderRefreshTotalMs,
+    renderRefreshDeviceAcquireMs,
+    renderRefreshRenderRowsMs,
+    renderRefreshRenderFieldMs,
+    renderRefreshRenderFieldSurfaceSummaryMs,
+    renderRefreshMaterialInterfaceMs,
+    renderRefreshSurfaceDrawMs,
+    renderRefreshOpticalLookupMs,
+    renderRefreshPressureInterfaceMs,
+    renderRefreshWorkerOffscreenRenderRowsMs,
+    renderRefreshRenderStateAssemblyMs,
     dispatchTopologyStatus: dispatchTopology?.status ?? null,
     dispatchesPerSubstep: dispatchTopology?.dispatchesPerSubstep ?? null,
     totalDispatches: dispatchTopology?.totalDispatches ?? null,
@@ -1895,6 +2041,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    peerComputeRenderOwnershipResidentStepsPerScheduleMax,
 	    peerComputeRenderOwnershipResidentParticleBridgeTargetBatchTimeS,
 	    peerComputeRenderOwnershipResidentInterfaceRefreshMode,
+	    peerComputeRenderOwnershipResidentComputeManagerMode,
+	    peerComputeRenderOwnershipResidentComputeManagerModeExplicit,
 	    peerComputeRenderOwnershipTransitionalRenderRowsActive,
 	    workerOffscreenRenderRows,
 	    workerOffscreenRenderRowsStatus,

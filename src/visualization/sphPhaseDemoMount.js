@@ -2177,6 +2177,17 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('residentPostStepInterfaceRefresh')
     ?? null
   );
+  const residentComputeManagerMode = (
+    initialHash.get('residentComputeManagerMode')
+    ?? initialQuery.get('residentComputeManagerMode')
+    ?? initialHash.get('residentPlaybackComputeManagerMode')
+    ?? initialQuery.get('residentPlaybackComputeManagerMode')
+    ?? initialHash.get('residentPlaybackComputeMode')
+    ?? initialQuery.get('residentPlaybackComputeMode')
+    ?? initialHash.get('residentComputeMode')
+    ?? initialQuery.get('residentComputeMode')
+    ?? null
+  );
   const urlMaterialInterfaceMaxFieldCells = positiveIntegerUrlParam(
     initialHash.get('materialInterfaceMaxFieldCells')
       ?? initialQuery.get('materialInterfaceMaxFieldCells')
@@ -2234,6 +2245,7 @@ export async function mountSphPhaseDemoOverlay({
     residentStepsPerScheduleMax,
     residentParticleBridgeTargetBatchTimeS,
     residentInterfaceRefreshMode,
+    residentComputeManagerMode,
     useCase: renderOwnershipUseCase,
     source: rawRenderOwnershipMode
       ? 'sph-phase-demo-url'
@@ -4273,6 +4285,38 @@ export async function mountSphPhaseDemoOverlay({
       : 'blocking';
   }
 
+  function currentResidentComputeManagerMode() {
+    const policy = currentPeerComputeRenderOwnershipPolicy();
+    const rawMode = String(
+      policy?.residentComputeManagerMode
+      ?? policy?.residentPlaybackCadencePolicy?.computeManagerMode
+      ?? ''
+    ).trim().toLowerCase();
+    if (
+      rawMode === 'direct'
+      || rawMode === 'inline'
+      || rawMode === 'local'
+      || rawMode === 'same-device'
+      || rawMode === 'same-thread'
+      || rawMode === 'resident-direct'
+    ) {
+      return 'direct';
+    }
+    if (
+      rawMode === 'compute-manager'
+      || rawMode === 'computemanager'
+      || rawMode === 'peercompute'
+      || rawMode === 'peer-compute'
+      || rawMode === 'task'
+      || rawMode === 'task-submit'
+      || rawMode === 'task-submission'
+      || rawMode === 'state-manager'
+    ) {
+      return 'compute-manager';
+    }
+    return 'compute-manager';
+  }
+
   function currentResidentStepsPerSchedule() {
     let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
     const candidates = [
@@ -5071,14 +5115,28 @@ export async function mountSphPhaseDemoOverlay({
         force: true
       });
     }, RESIDENT_PENDING_WATCHDOG_MS);
-    const residentComputeManagerForSchedule = resolveResidentComputeManager();
+    const residentComputeManagerModeForSchedule = currentResidentComputeManagerMode();
+    const residentComputeManagerForSchedule = residentComputeManagerModeForSchedule === 'direct'
+      ? null
+      : resolveResidentComputeManager();
+    if (residentComputeManagerModeForSchedule === 'direct') {
+      overlay.__sphResidentComputeManager = {
+        schema: 'peercompute.ulg.sph-demo-resident-compute-manager.v0',
+        status: 'policy-bypassed-direct-resident-execution',
+        source: null,
+        submitTask: false,
+        mode: residentComputeManagerModeForSchedule,
+        updatedAtMs: performance.now()
+      };
+    }
     const residentComputeManagerSource = overlay.__sphResidentComputeManager?.source || null;
     const allowPeerComputeStateManagerForSchedule =
-      !residentComputeManagerForSchedule
+      residentComputeManagerModeForSchedule !== 'direct'
+      && (!residentComputeManagerForSchedule
       || residentComputeManagerSource === 'peercompute-resident-authority-host'
       || residentComputeManagerSource === 'residentAuthorityHost.computeManager'
       || residentComputeManagerSource === 'runtime.residentAuthorityHost.computeManager'
-      || residentComputeManagerSource === 'global.__ulgResidentAuthorityHost.computeManager';
+      || residentComputeManagerSource === 'global.__ulgResidentAuthorityHost.computeManager');
     const residentStateManagerForSchedule = resolveResidentStateManager({
       allowPeerComputeAuthorityHost: allowPeerComputeStateManagerForSchedule
     });
@@ -5129,6 +5187,7 @@ export async function mountSphPhaseDemoOverlay({
           residentExecutionPolicy,
           computeManager: residentComputeManagerForSchedule,
           residentStateManager: residentStateManagerForSchedule,
+          residentComputeManagerMode: residentComputeManagerModeForSchedule,
           computeTaskModulePath: computeTaskModulePathForSchedule
         }
       }).then((report) => {
@@ -5149,6 +5208,7 @@ export async function mountSphPhaseDemoOverlay({
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,
       residentAuthorityHost: residentAuthorityHostForSchedule,
+      residentComputeManagerMode: residentComputeManagerModeForSchedule,
       computeTaskModulePath: computeTaskModulePathForSchedule,
       computeTaskLaneId: 'ulg:sph-resident:demo-auto',
       computeTaskDomainKey: 'sph-phase-demo',
@@ -5290,6 +5350,7 @@ export async function mountSphPhaseDemoOverlay({
           || activeViewStateGasPressure
           || (driver?.demo ? gasPressureSummary(driver.demo) : null)
       );
+      const schedulerResidentInterfaceRefreshMode = currentResidentInterfaceRefreshMode();
       const residentInterfaceRefresh = startResidentInterfaceRefresh({
         execution,
         residentGasPressureForRefresh,
@@ -5299,7 +5360,7 @@ export async function mountSphPhaseDemoOverlay({
         generation,
         scheduleToken
       });
-      if (currentResidentInterfaceRefreshMode() === 'blocking') {
+      if (schedulerResidentInterfaceRefreshMode === 'blocking') {
         await residentInterfaceRefresh;
       }
       scheduleContinuation = Boolean(
@@ -5393,7 +5454,8 @@ export async function mountSphPhaseDemoOverlay({
               renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
                 ? 'skip'
                 : 'auto',
-              surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode
+              surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode,
+              skipPressureInterfaceRefresh: true
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;

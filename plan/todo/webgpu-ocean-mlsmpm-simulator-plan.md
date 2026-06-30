@@ -123,6 +123,24 @@ Tactical status, 2026-06-28 AKDT:
   (`transferControlToOffscreen`, copied display bytes `0`). A same-URL
   screenshot showed the sky-blue scene, grid, and particles visible while the
   benchmark summary reported no browser console issues.
+- Follow-up diagnosed the apparent one-frame-per-second playback as two
+  separate effects. The benchmark's large `meanBatchMs` was dominated by a
+  headless browser RAF wait after viewport refresh (`viewportRafMs` around
+  `3.2 s`), while the resident step and render refresh were much smaller.
+  Live playback also showed an actual interactive bottleneck: each visible
+  worker frame was being wrapped in `ComputeManager.submitTask`, producing
+  roughly `95-176 ms` resident wall time even when the inner GPU stage was only
+  about `3 ms`. Render ownership policy now exposes
+  `residentComputeManagerMode` so PeerCompute can choose `direct` or
+  `compute-manager` by use case. The local interactive worker-presentation
+  default is now `direct`, still capped at one visible substep per schedule;
+  throughput and explicit PeerCompute task modes can stay on
+  `compute-manager`. Browser evidence on the H2O/H2O worker-owned sphere path
+  now shows steady direct resident submissions around `5-9 ms`, render refresh
+  around `7-12 ms`, and worker frame counts advancing around `40+ fps` after
+  cold start. Next performance work should target the cold first worker-owned
+  render refresh and make the benchmark distinguish headless RAF throttling
+  from physics/render wall time.
 - Follow-up on the worker-owned H2O/H2O sphere scenario found the remaining
   material-interface freshness bottleneck was the dense visual render-field
   table, not the full render-row readback fallback. A direct HTTPS timing check

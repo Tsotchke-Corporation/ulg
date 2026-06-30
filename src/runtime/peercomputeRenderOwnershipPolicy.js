@@ -133,6 +133,34 @@ function firstPolicyString(policy, keys = []) {
   return null;
 }
 
+function normalizeResidentComputeManagerMode(value, fallback = null) {
+  const normalized = normalizeString(value, null)?.toLowerCase() || null;
+  if (!normalized) return fallback;
+  if (
+    normalized === 'direct'
+    || normalized === 'inline'
+    || normalized === 'local'
+    || normalized === 'same-device'
+    || normalized === 'same-thread'
+    || normalized === 'resident-direct'
+  ) {
+    return 'direct';
+  }
+  if (
+    normalized === 'compute-manager'
+    || normalized === 'computemanager'
+    || normalized === 'peercompute'
+    || normalized === 'peer-compute'
+    || normalized === 'task'
+    || normalized === 'task-submit'
+    || normalized === 'task-submission'
+    || normalized === 'state-manager'
+  ) {
+    return 'compute-manager';
+  }
+  return fallback;
+}
+
 export function resolvePeerComputeRenderOwnershipPolicy({
   peercomputePolicy = null,
   requestedMode = null,
@@ -143,6 +171,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   residentStepsPerScheduleMax = null,
   residentParticleBridgeTargetBatchTimeS = null,
   residentInterfaceRefreshMode = null,
+  residentComputeManagerMode = null,
   upgradeWorkerOffscreenRenderRowsWhenReady = false,
   allowTransitionalRenderRows = true,
   workerOwnedResidentProducerReady = false,
@@ -304,6 +333,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     workerPresentationRequested
     && !throughputPlaybackRequested
   );
+  const residentPlaybackUseCase = throughputPlaybackRequested
+    ? 'throughput'
+    : (interactivePresentationPlayback
+      ? 'interactive-presentation'
+      : (interactiveWorkerPresentationPlayback ? 'interactive-worker-presentation' : (normalizedUseCaseKey || null)));
   const sameDeviceInteractivePlayback = [
     'interactive',
     'interactive-worker-presentation',
@@ -317,13 +351,16 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       ?? policy.presentationStepsPerSchedule,
     null
   );
+  const residentStepMaxDefault = interactivePresentationPlayback
+    ? 4
+    : (interactiveWorkerPresentationPlayback ? 1 : null);
   const residentStepMax = normalizePositiveInteger(
     residentStepsPerScheduleMax
       ?? policy.residentStepsPerScheduleMax
       ?? policy.residentMaxStepsPerSchedule
       ?? policy.residentVisualStepsPerScheduleMax
       ?? policy.presentationStepsPerScheduleMax,
-    interactiveWorkerPresentationPlayback ? 4 : null
+    residentStepMaxDefault
   );
   const residentTargetBatchTimeS = normalizePositiveNumber(
     residentParticleBridgeTargetBatchTimeS
@@ -367,8 +404,49 @@ export function resolvePeerComputeRenderOwnershipPolicy({
           ?? policy.residentPostStepInterfaceRefreshMode
           ?? policy.interfaceRefreshMode
         )
-        : null),
+      : null),
     defaultResidentInterfaceRefreshMode
+  );
+  const policyResidentComputeManagerModeExplicit = Boolean(
+    policy.residentComputeManagerModeExplicit
+    || policy.residentPlaybackCadencePolicy?.computeManagerModeExplicit
+    || policy.residentPlaybackCadencePolicy?.residentComputeManagerModeExplicit
+    || (
+      configuredByPeerCompute
+      && (
+        policy.residentComputeManagerMode != null
+        || policy.residentPlaybackComputeManagerMode != null
+        || policy.residentPlaybackComputeMode != null
+        || policy.residentTaskMode != null
+        || policy.computeManagerMode != null
+        || policy.residentPlaybackCadencePolicy?.computeManagerMode != null
+        || policy.residentPlaybackCadencePolicy?.residentComputeManagerMode != null
+      )
+    )
+  );
+  const rawResidentComputeManagerMode =
+    residentComputeManagerMode
+    ?? (policyResidentComputeManagerModeExplicit
+      ? (
+        policy.residentComputeManagerMode
+        ?? policy.residentPlaybackComputeManagerMode
+        ?? policy.residentPlaybackComputeMode
+        ?? policy.residentTaskMode
+        ?? policy.computeManagerMode
+        ?? policy.residentPlaybackCadencePolicy?.computeManagerMode
+        ?? policy.residentPlaybackCadencePolicy?.residentComputeManagerMode
+      )
+      : null);
+  const residentComputeManagerModeExplicit = Boolean(
+    residentComputeManagerMode != null
+    || policyResidentComputeManagerModeExplicit
+  );
+  const defaultResidentComputeManagerMode = interactiveWorkerPresentationPlayback
+    ? 'direct'
+    : 'compute-manager';
+  const residentComputeManagerModeResolved = normalizeResidentComputeManagerMode(
+    rawResidentComputeManagerMode,
+    defaultResidentComputeManagerMode
   );
   const inputTransport = workerOwnedResidentProducerSelected && targetImplementationReady
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
@@ -467,28 +545,24 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     presentationWorkerResidentStageTransport: presentationWorkerResidentStageChainReady
       ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.PRESENTATION_WORKER_RESIDENT_STAGE_CHAIN
       : null,
-    residentPlaybackUseCase: throughputPlaybackRequested
-      ? 'throughput'
-      : (interactivePresentationPlayback
-        ? 'interactive-presentation'
-        : (interactiveWorkerPresentationPlayback ? 'interactive-worker-presentation' : (normalizedUseCaseKey || null))),
+    residentPlaybackUseCase,
     residentStepsPerScheduleOverride: residentStepOverride,
     residentStepsPerScheduleMax: residentStepMax,
     residentParticleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
     residentInterfaceRefreshMode: residentInterfaceRefreshModeResolved,
     residentInterfaceRefreshModeExplicit,
+    residentComputeManagerMode: residentComputeManagerModeResolved,
+    residentComputeManagerModeExplicit,
     residentPlaybackCadencePolicy: {
       schema: 'peercompute.ulg.resident-playback-cadence-policy.v0',
-      useCase: throughputPlaybackRequested
-        ? 'throughput'
-        : (interactivePresentationPlayback
-          ? 'interactive-presentation'
-          : (interactiveWorkerPresentationPlayback ? 'interactive-worker-presentation' : (normalizedUseCaseKey || null))),
+      useCase: residentPlaybackUseCase,
       stepsPerScheduleOverride: residentStepOverride,
       stepsPerScheduleMax: residentStepMax,
       particleBridgeTargetBatchTimeS: residentTargetBatchTimeS,
       interfaceRefreshMode: residentInterfaceRefreshModeResolved,
       interfaceRefreshModeExplicit: residentInterfaceRefreshModeExplicit,
+      computeManagerMode: residentComputeManagerModeResolved,
+      computeManagerModeExplicit: residentComputeManagerModeExplicit,
       peercomputeConfigurable: true,
       scientificValidation: false,
       sphValidation: false,

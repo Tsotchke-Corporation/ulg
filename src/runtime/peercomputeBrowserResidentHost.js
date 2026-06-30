@@ -6622,6 +6622,10 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       host?.renderOwnershipPolicy?.residentParticleBridgeTargetBatchTimeS ?? null,
     renderOwnershipResidentInterfaceRefreshMode:
       host?.renderOwnershipPolicy?.residentInterfaceRefreshMode ?? null,
+    renderOwnershipResidentComputeManagerMode:
+      host?.renderOwnershipPolicy?.residentComputeManagerMode ?? null,
+    renderOwnershipResidentComputeManagerModeExplicit:
+      host?.renderOwnershipPolicy?.residentComputeManagerModeExplicit ?? null,
     renderOwnershipTransitionalRenderRowsActive:
       host?.renderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,

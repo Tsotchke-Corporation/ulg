@@ -128,6 +128,13 @@ publication or validated portable compact snapshot; do not reopen the worker
 the retained compact snapshot flag now reports `probeStatus=good`,
 `workerOffscreenRetainedCompactSnapshotStatus=presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`,
 `workerMapAsyncBypassed=true`, and `estimatedReadbackBytesPerStep=0`.
+Follow-up tightened the StateManager contract so same-worker retained refs are
+listed as an accepted local materialization mode:
+`localMaterializationStatus=same-worker-lane-retained-buffer-ref-ready`,
+`acceptedLocalMaterializationModes=[same-worker-lane-retained-buffer-ref]`,
+`sameWorkerLocalMaterializationAvailable=true`, and
+`localMaterializationCanBypassSnapshot=true`; portable cross-peer replay remains
+blocked on the separate compact snapshot/GPU-side publication path.
 
 Current routing note, 2026-06-28 AKDT follow-up: the worker-owned canvas now
 draws compact decoded render-row input. The worker accepts

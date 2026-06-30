@@ -8617,13 +8617,13 @@ function buildMechanicsWorkerCompactPublicationCandidate({
     sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
     localMaterializationStatus: sameDeviceRetainedBufferImportAvailable
       ? 'same-device-retained-buffer-import-ready'
-      : 'blocked-worker-private-gpu-handles',
+      : 'same-worker-lane-retained-buffer-ref-ready',
     localMaterializationBlocker: sameDeviceRetainedBufferImportAvailable
       ? null
-      : 'worker-retained-gpu-handles-are-not-main-thread-transferable',
+      : null,
     acceptedMaterializationModes: sameDeviceRetainedBufferImportAvailable
-      ? ['same-device-retained-buffer-import']
-      : [],
+      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+      : ['same-worker-lane-retained-buffer-ref'],
     acceptedConsumerModes: sameDeviceRetainedBufferImportAvailable
       ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
       : ['same-worker-lane-retained-buffer-ref'],

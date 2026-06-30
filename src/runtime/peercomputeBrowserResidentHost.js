@@ -1825,6 +1825,7 @@ function buildWorkerRetainedPortableMaterializationContract({
   const localModes = uniqueStringList(acceptedLocalMaterializationModes);
   const sameDeviceLocalMaterializationAvailable = sameDeviceRetainedBufferImportAvailable === true
     || localModes.includes('same-device-retained-buffer-import');
+  const sameWorkerLocalMaterializationAvailable = localModes.includes('same-worker-lane-retained-buffer-ref');
   return {
     schema: ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA,
     status: 'blocked-portable-compact-buffer-snapshot-required',
@@ -1847,7 +1848,9 @@ function buildWorkerRetainedPortableMaterializationContract({
     acceptedLocalMaterializationModes: localModes,
     sameDeviceLocalMaterializationAvailable,
     sameDeviceRetainedBufferImportAvailable: sameDeviceLocalMaterializationAvailable,
-    localMaterializationCanBypassSnapshot: sameDeviceLocalMaterializationAvailable,
+    sameWorkerLocalMaterializationAvailable,
+    localMaterializationCanBypassSnapshot:
+      sameDeviceLocalMaterializationAvailable || sameWorkerLocalMaterializationAvailable,
     crossPeerReplayReady: false,
     crossPeerReplayStatus: 'blocked-portable-compact-buffer-snapshot-required',
     crossPeerReplayBlocker: 'worker-retained-gpu-handles-are-not-cross-peer-portable',
@@ -1889,9 +1892,13 @@ function buildWorkerRetainedAccessContract({
   const acceptedConsumerModes = sameDevice || sameDeviceMaterializationAvailable
     ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
     : ['same-worker-lane-retained-buffer-ref'];
-  const acceptedMaterializationModes = sameDevice || sameDeviceMaterializationAvailable
-    ? ['same-device-retained-buffer-import']
-    : [];
+  const sameWorkerMaterializationMode = workerLocal !== false
+    ? 'same-worker-lane-retained-buffer-ref'
+    : null;
+  const acceptedMaterializationModes = uniqueStringList([
+    ...(sameDevice || sameDeviceMaterializationAvailable ? ['same-device-retained-buffer-import'] : []),
+    ...(sameWorkerMaterializationMode ? [sameWorkerMaterializationMode] : [])
+  ]);
   const portableMaterializationContract = buildWorkerRetainedPortableMaterializationContract({
     cacheKey,
     stateKey,
@@ -1938,10 +1945,14 @@ function buildWorkerRetainedAccessContract({
     sameDeviceSourceHotBufferKey: normalizedSameDeviceRetainedBufferImport?.sourceHotBufferKey || null,
     localMaterializationStatus: sameDevice || sameDeviceMaterializationAvailable
       ? 'same-device-retained-buffer-import-ready'
-      : 'blocked-worker-private-gpu-handles',
+      : (sameWorkerMaterializationMode
+        ? 'same-worker-lane-retained-buffer-ref-ready'
+        : 'blocked-worker-private-gpu-handles'),
     localMaterializationBlocker: sameDevice || sameDeviceMaterializationAvailable
       ? null
-      : 'worker-retained-gpu-handles-are-not-main-thread-transferable',
+      : (sameWorkerMaterializationMode
+        ? null
+        : 'worker-retained-gpu-handles-are-not-main-thread-transferable'),
     workerContinuationRequired: !sameDevice,
     workerContinuationProtocol: 'same-worker-lane-retained-buffer-ref',
     acceptedConsumerModes,

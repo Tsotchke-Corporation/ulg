@@ -135,6 +135,13 @@ Tactical status, 2026-06-28 AKDT:
   `workerOffscreenRetainedCompactSnapshotStatus=presentation-worker-retained-compact-snapshot-export-bypassed-local-materialization-ready`,
   `workerMapAsyncBypassed=true`, `readbackByteLength=0`, and
   `estimatedReadbackBytesPerStep=0`.
+  Follow-up tightened the StateManager/PeerCompute contract so same-worker
+  retained refs are also listed as an accepted local materialization mode:
+  `localMaterializationStatus=same-worker-lane-retained-buffer-ref-ready`,
+  `acceptedLocalMaterializationModes=[same-worker-lane-retained-buffer-ref]`,
+  `sameWorkerLocalMaterializationAvailable=true`, and
+  `localMaterializationCanBypassSnapshot=true` while cross-peer replay remains
+  blocked on the portable snapshot/publication path.
   Follow-up also added a presentation-only fast path for visible retained
   output: once the worker has rendered a retained G2P frame, main-thread
   resident render refresh publishes

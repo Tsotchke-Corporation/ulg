@@ -3485,7 +3485,11 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   );
   assert.equal(publication.workerRetainedAccessContract.mainThreadGpuHandlesAvailable, false);
   assert.equal(publication.workerRetainedAccessContract.workerContinuationRequired, true);
-  assert.equal(publication.workerRetainedAccessContract.localMaterializationStatus, 'blocked-worker-private-gpu-handles');
+  assert.equal(
+    publication.workerRetainedAccessContract.localMaterializationStatus,
+    'same-worker-lane-retained-buffer-ref-ready'
+  );
+  assert.equal(publication.workerRetainedAccessContract.localMaterializationBlocker, null);
   assert.equal(publication.workerRetainedAccessContract.portableState, false);
   assert.equal(publication.workerRetainedAccessContract.portableSnapshotRequired, true);
   assert.equal(publication.workerRetainedAccessContract.portableSnapshotAvailable, false);
@@ -3508,7 +3512,9 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.deepEqual(publication.workerRetainedAccessContract.acceptedConsumerModes, [
     'same-worker-lane-retained-buffer-ref'
   ]);
-  assert.deepEqual(publication.workerRetainedAccessContract.acceptedMaterializationModes, []);
+  assert.deepEqual(publication.workerRetainedAccessContract.acceptedMaterializationModes, [
+    'same-worker-lane-retained-buffer-ref'
+  ]);
   assert.deepEqual(publication.workerRetainedAccessContract.localBufferRefs, []);
   assert.deepEqual(publication.workerRetainedAccessContract.outputFamilies, candidate.outputFamilies);
   assert.deepEqual(
@@ -3786,12 +3792,17 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     sameDevicePublication.workerRetainedAccessContract.portableMaterializationContract.sameDeviceLocalMaterializationAvailable,
     true
   );
+  assert.equal(
+    sameDevicePublication.workerRetainedAccessContract.portableMaterializationContract.sameWorkerLocalMaterializationAvailable,
+    true
+  );
   assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.acceptedConsumerModes, [
     'same-device-retained-buffer-import',
     'same-worker-lane-retained-buffer-ref'
   ]);
   assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.acceptedMaterializationModes, [
-    'same-device-retained-buffer-import'
+    'same-device-retained-buffer-import',
+    'same-worker-lane-retained-buffer-ref'
   ]);
   assert.deepEqual(sameDevicePublication.workerRetainedAccessContract.localBufferRefs, []);
 
@@ -3809,7 +3820,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(sameDeviceWarmDelta.payload.sameDeviceRetainedBufferImportAvailable, true);
   assert.equal(sameDeviceWarmDelta.payload.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
   assert.deepEqual(sameDeviceWarmDelta.payload.workerRetainedAccessContract.acceptedMaterializationModes, [
-    'same-device-retained-buffer-import'
+    'same-device-retained-buffer-import',
+    'same-worker-lane-retained-buffer-ref'
   ]);
 
   const sameDeviceContinuationPlan = host.planWorkerRetainedContinuation({
@@ -3823,7 +3835,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(sameDeviceContinuationPlan.sameDeviceRetainedBufferImportAvailable, true);
   assert.equal(sameDeviceContinuationPlan.sameDeviceSourceHotBufferKey, sameDeviceSourceHotBufferKey);
   assert.deepEqual(sameDeviceContinuationPlan.acceptedMaterializationModes, [
-    'same-device-retained-buffer-import'
+    'same-device-retained-buffer-import',
+    'same-worker-lane-retained-buffer-ref'
   ]);
   assert.equal(sameDeviceContinuationPlan.mainThreadGpuHandlesAvailable, false);
   assert.equal(sameDeviceContinuationPlan.workerContinuationRequired, true);

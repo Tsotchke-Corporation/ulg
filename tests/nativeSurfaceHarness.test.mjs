@@ -313,6 +313,10 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentInterfaceRefreshMode/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentComputeManagerMode/);
+  assert.match(benchmarkSource, /probeWallTimeAttribution/);
+  assert.match(benchmarkSource, /probe-wall-dominated-by-browser-raf/);
+  assert.match(benchmarkSource, /probeEngineStepsPerSecond/);
+  assert.match(benchmarkSource, /probeResidentBatchViewportNonRafMs/);
   assert.match(sceneSource, /presentationWorkerRetainedOutputPresentationOnlyReadbackFree/);
   assert.match(sceneSource, /upgradeWorkerOffscreenRenderRowsWhenReady/);
   assert.match(sceneSource, /retainPreviousThreeRenderRowBridgeNoFull/);

@@ -389,6 +389,23 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const probeResidentBatchTotalBeforeSampleMs = numberOrNull(
     probeResidentBatchTiming?.totalBeforeSampleMs
   );
+  const probeResidentBatchViewportNonRafMs = (() => {
+    if (probeResidentBatchViewportRefreshMs === null) return null;
+    const excluded = sumKnownNumbers([
+      probeResidentBatchViewportRafMs,
+      probeResidentBatchNativeSurfaceValidationWaitMs
+    ]);
+    return Math.max(0, probeResidentBatchViewportRefreshMs - excluded);
+  })();
+  const probeEngineBatchComponents = [
+    probeResidentBatchResidentStepsAwaitMs,
+    probeResidentBatchRenderRefreshAwaitMs,
+    probeResidentBatchViewportNonRafMs,
+    probeResidentBatchNativeSurfaceValidationWaitMs
+  ];
+  const probeEngineBatchMs = probeEngineBatchComponents.some((value) => value !== null)
+    ? sumKnownNumbers(probeEngineBatchComponents)
+    : null;
   const residentStep = metric?.residentStep || null;
   const residentSteps = metric?.residentSteps || null;
   const mechanicsMaterialPhaseUpload = metric?.mlsMpmMechanicsMaterialPhaseUpload || null;
@@ -456,17 +473,64 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const residentStageStepsPerSecond = residentGpuCompletedStageMs && residentGpuCompletedStageMs > 0
     ? 1000 / residentGpuCompletedStageMs
     : null;
-  const physicsStepsPerSecond = meanBatchMs && meanBatchMs > 0
-    ? (completedStepCount * 1000) / meanBatchMs
+  const probeBatchWallMs = probeResidentBatchTotalBeforeSampleMs ?? meanBatchMs;
+  const probeWallStepsPerSecond = probeBatchWallMs && probeBatchWallMs > 0
+    ? (completedStepCount * 1000) / probeBatchWallMs
     : null;
-  const visualRefreshHzEstimate = meanBatchMs && meanBatchMs > 0
+  const probeEngineStepsPerSecond = probeEngineBatchMs && probeEngineBatchMs > 0
+    ? (completedStepCount * 1000) / probeEngineBatchMs
+    : null;
+  const probeWallRefreshHz = meanBatchMs && meanBatchMs > 0
     ? 1000 / meanBatchMs
     : null;
+  const probeRafShare = probeBatchWallMs && probeResidentBatchViewportRafMs !== null
+    ? probeResidentBatchViewportRafMs / probeBatchWallMs
+    : null;
+  const probeEngineShare = probeBatchWallMs && probeEngineBatchMs !== null
+    ? probeEngineBatchMs / probeBatchWallMs
+    : null;
+  const probeWallOverheadMs = probeBatchWallMs && probeEngineBatchMs !== null
+    ? Math.max(0, probeBatchWallMs - probeEngineBatchMs)
+    : null;
+  const probeWallRafDominated = Boolean(
+    probeResidentBatchViewportRafMs !== null
+    && probeBatchWallMs
+    && probeResidentBatchViewportRafMs >= 250
+    && probeResidentBatchViewportRafMs >= probeBatchWallMs * 0.5
+  );
+  const probeWallTimeAttribution = {
+    schema: 'peercompute.ulg.sph-performance-benchmark-wall-time-attribution.v0',
+    status: probeBatchWallMs == null
+      ? 'probe-wall-attribution-unavailable'
+      : (probeWallRafDominated
+        ? 'probe-wall-dominated-by-browser-raf'
+        : (probeEngineShare !== null && probeEngineShare >= 0.5
+          ? 'probe-wall-dominated-by-engine-work'
+          : 'probe-wall-mixed')),
+    benchmarkWallIncludesBrowserRaf: true,
+    benchmarkWallRateSource: 'probe-total-before-sample',
+    engineRateSource: 'resident-step-plus-render-refresh-minus-browser-raf-wait',
+    totalBeforeSampleMs: probeBatchWallMs,
+    meanBatchMs,
+    engineBatchMs: probeEngineBatchMs,
+    browserRafMs: probeResidentBatchViewportRafMs,
+    viewportRefreshMs: probeResidentBatchViewportRefreshMs,
+    viewportNonRafMs: probeResidentBatchViewportNonRafMs,
+    nativeSurfaceValidationWaitMs: probeResidentBatchNativeSurfaceValidationWaitMs,
+    residentStepsAwaitMs: probeResidentBatchResidentStepsAwaitMs,
+    renderRefreshAwaitMs: probeResidentBatchRenderRefreshAwaitMs,
+    wallOverheadMs: probeWallOverheadMs,
+    rafShare: probeRafShare,
+    engineShare: probeEngineShare,
+    wallStepsPerSecond: probeWallStepsPerSecond,
+    engineStepsPerSecond: probeEngineStepsPerSecond,
+    residentStageStepsPerSecond
+  };
   const workerOffscreenTransportBudget = workerOffscreenFrameTransportBudget({
     width: viewportWidth,
     height: viewportHeight,
     dpr: deviceScaleFactor,
-    refreshHz: visualRefreshHzEstimate
+    refreshHz: workerOffscreenTargetFps
   });
   const peerComputeRenderOwnershipPolicy = metric?.peerComputeRenderOwnershipPolicy
     ?? renderState?.peerComputeRenderOwnershipPolicy
@@ -1809,7 +1873,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     meanBatchMs,
     maxBatchMs: analysis.maxBatchMs ?? null,
     physicsStepsPerSecond: residentStageStepsPerSecond,
-    probeWallStepsPerSecond: physicsStepsPerSecond,
+    probeWallStepsPerSecond,
+    probeEngineStepsPerSecond,
+    probeBatchWallMs,
+    probeEngineBatchMs,
+    probeWallRefreshHz,
+    probeWallTimeAttribution,
     residentStageMs,
     residentGpuQueueFenceMs,
     residentGpuCompletedStageMs,
@@ -1820,6 +1889,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     probeResidentBatchRenderRefreshAwaitMs,
     probeResidentBatchViewportRefreshMs,
     probeResidentBatchViewportRafMs,
+    probeResidentBatchViewportNonRafMs,
     probeResidentBatchNativeSurfaceValidationWaitMs,
     probeResidentBatchTotalBeforeSampleMs,
     residentStageTiming,
@@ -1888,7 +1958,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     activeGridNodeCountSource,
     activeGridRatio,
     activeGridDispatch,
-    visualRefreshHzEstimate,
+    visualRefreshHzEstimate: probeWallRefreshHz,
     compactSummaryMeanBatchShare: analysis.compactSummaryMeanBatchShare ?? null,
     browserConsoleIssueCount,
     browserConsoleIssueCounts: analysis.browserConsoleIssueCounts || {},

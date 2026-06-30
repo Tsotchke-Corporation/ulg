@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-06-30 AKDT - Benchmark RAF Wall-Time Attribution
+
+Status:
+
+- Added `peercompute.ulg.sph-performance-benchmark-wall-time-attribution.v0`
+  to scenario summaries. The benchmark now separates probe wall time from
+  engine-visible work using resident-step await, render-refresh await,
+  viewport non-RAF time, native-surface validation wait, and browser RAF wait.
+- Added headline fields `probeEngineBatchMs`, `probeEngineStepsPerSecond`,
+  `probeBatchWallMs`, `probeWallRefreshHz`,
+  `probeResidentBatchViewportNonRafMs`, and
+  `probeWallTimeAttribution`. Existing wall fields remain for continuity.
+- Stopped feeding RAF-throttled `meanBatchMs` into the worker offscreen
+  frame-copy budget. Scenario copy-back estimates now use the configured
+  worker presentation target FPS, matching the page-level zero-copy budget.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`.
+- PASS:
+  worker-presentation smoke benchmark wrote
+  `artifacts/sph-performance-benchmark-raf-attribution-smoke.json` with
+  scenario/probe `good`, suite gate `pass`,
+  `probeWallTimeAttribution.status=probe-wall-dominated-by-browser-raf`,
+  `probeBatchWallMs=3507.6`, `probeEngineBatchMs=86.1`,
+  `probeResidentBatchViewportRafMs=3420.6`,
+  `probeEngineStepsPerSecond=92.9`, and
+  `residentStageStepsPerSecond=169.5`.
+
+Open:
+
+- This fixes benchmark trust; it does not reduce the cold first
+  worker-owned render refresh. Continue with worker-presentation warmup or the
+  sparse/source-local material-interface builder as the next performance slice.
+
 ## 2026-06-30 AKDT - Interactive Worker Playback Direct Resident Cadence
 
 Status:

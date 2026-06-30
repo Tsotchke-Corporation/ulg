@@ -141,6 +141,16 @@ Tactical status, 2026-06-28 AKDT:
   cold start. Next performance work should target the cold first worker-owned
   render refresh and make the benchmark distinguish headless RAF throttling
   from physics/render wall time.
+  Follow-up completed the benchmark-trust half of that note:
+  scenario summaries now publish
+  `peercompute.ulg.sph-performance-benchmark-wall-time-attribution.v0`,
+  `probeEngineBatchMs`, `probeEngineStepsPerSecond`, and
+  `probeResidentBatchViewportNonRafMs`. The worker-presentation smoke reports
+  `probe-wall-dominated-by-browser-raf`, with about `3.42 s` of RAF wait
+  versus about `86 ms` of engine-visible work. Copy-back budget estimates now
+  use the configured presentation target FPS instead of the throttled headless
+  wall refresh rate. Remaining work is the real cold first worker-owned render
+  refresh and the sparse/source-local material-interface builder.
 - Follow-up on the worker-owned H2O/H2O sphere scenario found the remaining
   material-interface freshness bottleneck was the dense visual render-field
   table, not the full render-row readback fallback. A direct HTTPS timing check

@@ -33447,3 +33447,42 @@ Next:
   algorithm is much smaller than the old dense visual table scan, but the first
   measured diagnostic still costs hundreds of milliseconds from cold pipeline /
   setup work.
+
+## 2026-06-30 AKDT - Material Interface Stage Timing Split
+
+Status:
+
+- Added material-interface refresh stage timing at the standalone scene
+  producer:
+  `renderRowsMs`, `sourceFieldMs`, `candidateFieldMs`, and `totalMs`.
+- Lifted source-field, source-render-field, and candidate pipeline cache status
+  through the probe and benchmark material-interface summary.
+- The diagnostic now distinguishes source-local field cost from compact
+  candidate extraction/readback cost.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: two-batch diagnostic smoke benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, `probeIssues=[]`,
+  `residentStageMs=3.1`, `renderRefreshTotalMs=16.9`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+  On the second diagnostic batch, source-local diagnostics reported
+  `sourceFieldPipelineCacheStatus=pipeline-cache-hit`,
+  `sourceRenderFieldPipelineCacheStatus=pipeline-cache-hit`,
+  `candidatePipelineCacheStatus=pipeline-cache-hit`,
+  `refreshRenderRowsMs=0.6`, `refreshSourceFieldMs=0.6`,
+  `refreshCandidateFieldMs=726.0`, and `refreshTotalMs=729.1`.
+
+Next:
+
+- The remaining material-interface bottleneck is not source-local splat or
+  shader compilation on the measured path. It is compact candidate
+  extraction/readback. The next performance slice should reduce or bypass the
+  CPU compact-candidate readback, likely by carrying candidate/pressure
+  interface consumption GPU-resident.

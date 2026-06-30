@@ -2455,6 +2455,25 @@ async function runBrowserProbe({
             residentMaterialInterfaceState.interfaceSourceFieldRowsBufferBorrowed ?? null,
           interfaceSourceFieldRowsBufferReused:
             residentMaterialInterfaceState.interfaceSourceFieldRowsBufferReused ?? null,
+          sourceFieldPipelineCacheStatus:
+            residentMaterialInterfaceState.sourceFieldPipelineCacheStatus ?? null,
+          sourceRenderFieldPipelineCacheStatus:
+            residentMaterialInterfaceState.sourceRenderFieldPipelineCacheStatus ?? null,
+          candidatePipelineCacheStatus:
+            residentMaterialInterfaceState.candidatePipelineCacheStatus ?? null,
+          materialInterfaceRefreshTotalMs: finiteOrNull(
+            residentMaterialInterfaceState.materialInterfaceRefreshTotalMs
+            ?? residentMaterialInterfaceState.materialInterfaceRefreshStageMs?.totalMs
+          ),
+          materialInterfaceRefreshRenderRowsMs: finiteOrNull(
+            residentMaterialInterfaceState.materialInterfaceRefreshStageMs?.renderRowsMs
+          ),
+          materialInterfaceRefreshSourceFieldMs: finiteOrNull(
+            residentMaterialInterfaceState.materialInterfaceRefreshStageMs?.sourceFieldMs
+          ),
+          materialInterfaceRefreshCandidateFieldMs: finiteOrNull(
+            residentMaterialInterfaceState.materialInterfaceRefreshStageMs?.candidateFieldMs
+          ),
           renderFieldReadback: residentMaterialInterfaceState.renderFieldReadback ?? null,
           renderRowsReadback: residentMaterialInterfaceState.renderRowsReadback ?? null,
           candidateReadbackMode: residentMaterialInterfaceState.candidateReadbackMode ?? null,

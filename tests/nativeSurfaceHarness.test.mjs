@@ -80,6 +80,16 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
   );
   assert.match(
     benchmarkSource,
+    /refreshCandidateFieldMs/,
+    'benchmark should lift material-interface diagnostic stage timings'
+  );
+  assert.match(
+    benchmarkSource,
+    /candidatePipelineCacheStatus/,
+    'benchmark should lift material-interface pipeline cache diagnostics'
+  );
+  assert.match(
+    benchmarkSource,
     /materialInterfaceStatus/,
     'benchmark should distinguish source-field diagnostics from intentional material-interface skips'
   );
@@ -107,6 +117,11 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
     probeSource,
     /sourceRenderFieldStatus/,
     'long-horizon probe should preserve render-field skip status for material-interface diagnostics'
+  );
+  assert.match(
+    probeSource,
+    /materialInterfaceRefreshCandidateFieldMs/,
+    'long-horizon probe should publish compact material-interface refresh stage timings'
   );
 });
 

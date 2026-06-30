@@ -3190,6 +3190,11 @@ function compactMaterialInterfaceFieldSummary(field = null) {
     interfaceSourceFieldRowsBufferPoolReason: field.interfaceSourceFieldRowsBufferPoolReason ?? null,
     interfaceSourceFieldRowsBufferPoolReused: Boolean(field.interfaceSourceFieldRowsBufferPoolReused),
     interfaceSourceFieldRowsBufferPoolByteLength: field.interfaceSourceFieldRowsBufferPoolByteLength ?? 0,
+    sourceFieldPipelineCacheStatus: field.sourceFieldPipelineCacheStatus ?? null,
+    sourceRenderFieldPipelineCacheStatus: field.sourceRenderFieldPipelineCacheStatus ?? null,
+    candidatePipelineCacheStatus: field.candidatePipelineCacheStatus ?? null,
+    materialInterfaceRefreshStageMs: field.materialInterfaceRefreshStageMs ?? null,
+    materialInterfaceRefreshTotalMs: field.materialInterfaceRefreshTotalMs ?? null,
     renderRowsReadback: Boolean(field.renderRowsReadback),
     renderRowsReadbackMode: field.renderRowsReadbackMode ?? null,
     materialInterfaceSurfaceTableSeedStatus: field.materialInterfaceSurfaceTableSeedStatus ?? null,
@@ -9482,6 +9487,15 @@ export function createSphPhaseScene(container, {
     let renderRowsExecution = null;
     let interfaceSourceField = null;
     try {
+      const refreshStartedAtMs = nowMs();
+      const materialInterfaceRefreshStageMs = {
+        schema: 'peercompute.ulg.sph-material-interface-refresh-stage-timing.v0',
+        status: 'material-interface-refresh-stage-timing-collected',
+        renderRowsMs: null,
+        sourceFieldMs: null,
+        candidateFieldMs: null,
+        totalMs: null
+      };
       const reactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
       const reactionSummary = reactionResult?.reactionSummary || null;
       const residentProductMass = finalStep?.residentProductMass || reactionResult?.residentProductMass || null;
@@ -9501,6 +9515,7 @@ export function createSphPhaseScene(container, {
         });
         needsSurfaceTableSeed = !surfaceTableSeedState?.surfaceTable?.schema;
       }
+      const renderRowsStartedAtMs = nowMs();
       renderRowsExecution = await extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
@@ -9518,6 +9533,7 @@ export function createSphPhaseScene(container, {
         readbackMode: needsSurfaceTableSeed ? 'full-parity-readback' : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
         ...renderDomainExtractionOptions(currentRenderDomainCounts)
       });
+      materialInterfaceRefreshStageMs.renderRowsMs = nowMs() - renderRowsStartedAtMs;
       if (surfaceTableSeedState?.materialInterfaceSurfaceTableSeedStatus) {
         renderRowsExecution.materialInterfaceSurfaceTableSeedStatus =
           surfaceTableSeedState.materialInterfaceSurfaceTableSeedStatus;
@@ -9596,6 +9612,7 @@ export function createSphPhaseScene(container, {
           device: resolvedDeviceResult.device,
           surfaceTable: materialInterfaceSurfaceTable
         });
+      const sourceFieldStartedAtMs = nowMs();
       interfaceSourceField = await buildSphMaterialInterfaceSourceFieldLocalWebGpu({
         device: resolvedDeviceResult.device,
         renderRows: renderRowsExecution.renderRows,
@@ -9614,6 +9631,8 @@ export function createSphPhaseScene(container, {
         targetFieldRowsBuffer: materialInterfaceSourceFieldRowsBufferPool?.buffer || null,
         targetFieldRowsBufferByteLength: materialInterfaceSourceFieldRowsBufferPool?.byteLength ?? null
       });
+      materialInterfaceRefreshStageMs.sourceFieldMs = nowMs() - sourceFieldStartedAtMs;
+      const candidateFieldStartedAtMs = nowMs();
       const materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
         device: resolvedDeviceResult.device,
         renderField: interfaceSourceField,
@@ -9621,6 +9640,10 @@ export function createSphPhaseScene(container, {
         sourceCadence,
         candidateReadbackMode: 'compact-active-readback'
       });
+      materialInterfaceRefreshStageMs.candidateFieldMs = nowMs() - candidateFieldStartedAtMs;
+      materialInterfaceRefreshStageMs.totalMs = nowMs() - refreshStartedAtMs;
+      materialInterfaceField.materialInterfaceRefreshStageMs = materialInterfaceRefreshStageMs;
+      materialInterfaceField.materialInterfaceRefreshTotalMs = materialInterfaceRefreshStageMs.totalMs;
       materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
       materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
       materialInterfaceField.materialInterfaceSurfaceTableSeedStatus =

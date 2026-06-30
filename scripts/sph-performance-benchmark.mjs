@@ -1816,6 +1816,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ownMetricValue(materialRenderState, 'sourceRenderFieldReadbackMode'),
     ownMetricValue(renderState, 'sourceRenderFieldReadbackMode')
   );
+  const materialInterfaceRefreshStageMs =
+    materialInterfaceField?.materialInterfaceRefreshStageMs
+    || materialRenderState?.materialInterfaceRefreshStageMs
+    || renderState?.materialInterfaceRefreshStageMs
+    || null;
   const materialInterfaceSourceField = {
     schema: 'peercompute.ulg.sph-performance-material-interface-source-field.v0',
     status: firstNonNullMetricValue(
@@ -1832,6 +1837,45 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     sourceRenderFieldStatus,
     sourceRenderFieldReadback,
     sourceRenderFieldReadbackMode,
+    sourceFieldPipelineCacheStatus: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'sourceFieldPipelineCacheStatus'),
+      ownMetricValue(materialRenderState, 'sourceFieldPipelineCacheStatus'),
+      ownMetricValue(renderState, 'sourceFieldPipelineCacheStatus')
+    ),
+    sourceRenderFieldPipelineCacheStatus: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'sourceRenderFieldPipelineCacheStatus'),
+      ownMetricValue(materialRenderState, 'sourceRenderFieldPipelineCacheStatus'),
+      ownMetricValue(renderState, 'sourceRenderFieldPipelineCacheStatus')
+    ),
+    candidatePipelineCacheStatus: firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'candidatePipelineCacheStatus'),
+      ownMetricValue(materialRenderState, 'candidatePipelineCacheStatus'),
+      ownMetricValue(renderState, 'candidatePipelineCacheStatus')
+    ),
+    refreshTotalMs: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'materialInterfaceRefreshTotalMs'),
+      ownMetricValue(materialRenderState, 'materialInterfaceRefreshTotalMs'),
+      ownMetricValue(renderState, 'materialInterfaceRefreshTotalMs'),
+      ownMetricValue(materialInterfaceRefreshStageMs, 'totalMs')
+    )),
+    refreshRenderRowsMs: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'materialInterfaceRefreshRenderRowsMs'),
+      ownMetricValue(materialRenderState, 'materialInterfaceRefreshRenderRowsMs'),
+      ownMetricValue(renderState, 'materialInterfaceRefreshRenderRowsMs'),
+      ownMetricValue(materialInterfaceRefreshStageMs, 'renderRowsMs')
+    )),
+    refreshSourceFieldMs: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'materialInterfaceRefreshSourceFieldMs'),
+      ownMetricValue(materialRenderState, 'materialInterfaceRefreshSourceFieldMs'),
+      ownMetricValue(renderState, 'materialInterfaceRefreshSourceFieldMs'),
+      ownMetricValue(materialInterfaceRefreshStageMs, 'sourceFieldMs')
+    )),
+    refreshCandidateFieldMs: numberOrNull(firstDefinedMetricValue(
+      ownMetricValue(materialInterfaceField, 'materialInterfaceRefreshCandidateFieldMs'),
+      ownMetricValue(materialRenderState, 'materialInterfaceRefreshCandidateFieldMs'),
+      ownMetricValue(renderState, 'materialInterfaceRefreshCandidateFieldMs'),
+      ownMetricValue(materialInterfaceRefreshStageMs, 'candidateFieldMs')
+    )),
     sourceFieldSchema: firstDefinedMetricValue(
       ownMetricValue(materialInterfaceField, 'interfaceSourceFieldSchema'),
       ownMetricValue(materialInterfaceField, 'sourceFieldSchema'),

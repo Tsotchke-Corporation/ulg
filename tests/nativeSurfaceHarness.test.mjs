@@ -89,9 +89,19 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
     'benchmark should let source-field diagnostics runs disable interface warmup'
   );
   assert.match(
+    benchmarkSource,
+    /ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC/,
+    'benchmark should expose an opt-in resident material-interface diagnostic run'
+  );
+  assert.match(
     probeSource,
     /residentMaterialInterfaceState/,
     'long-horizon probe should sample compact resident material-interface state'
+  );
+  assert.match(
+    probeSource,
+    /resident-material-interface-diagnostic-completed/,
+    'long-horizon probe should be able to force a material-interface diagnostic refresh'
   );
   assert.match(
     probeSource,

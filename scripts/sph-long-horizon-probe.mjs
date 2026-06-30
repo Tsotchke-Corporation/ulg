@@ -1288,6 +1288,7 @@ async function runBrowserProbe({
   compactSummaryScope,
   thermalWallRate,
   measureGpuQueueFence = false,
+  materialInterfaceDiagnostic = false,
   nativeSurfaceDebugMode = 'none',
   nativeSurfaceValidationWaitMs = 0,
   captureFrames,
@@ -1367,6 +1368,7 @@ async function runBrowserProbe({
       compactSummaryScope: requestedCompactSummaryScope,
 	      thermalWallRate: requestedThermalWallRate,
 	      measureGpuQueueFence: requestedMeasureGpuQueueFence,
+	      materialInterfaceDiagnostic: requestedMaterialInterfaceDiagnostic,
 	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
 	      nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
 	      captureFrames: requestedCaptureFrames,
@@ -3675,6 +3677,7 @@ async function runBrowserProbe({
           startedAtMs: started,
           residentStepsAwaitMs: null,
           renderRefreshAwaitMs: null,
+          materialInterfaceDiagnosticMs: null,
           viewportRefreshMs: null,
           viewportRafMs: null,
           nativeSurfaceValidationWaitMs: null,
@@ -3784,6 +3787,36 @@ async function runBrowserProbe({
               markProbeProgress('resident-render-refresh-viewport-completed', { batchIndex });
             }
           }
+          if (
+            requestedMaterialInterfaceDiagnostic
+            && typeof sceneApi.refreshSphResidentMaterialInterfaceState === 'function'
+          ) {
+            markProbeProgress('resident-material-interface-diagnostic-started', { batchIndex });
+            const materialInterfaceDiagnosticStartedAtMs = performance.now();
+            const materialInterfaceState = await sceneApi.refreshSphResidentMaterialInterfaceState({
+              preferWebGpu: true,
+              residentSteps: execution,
+              materialProperties: overlay.__sphPhaseViewState?.materialProperties || {},
+              gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
+              source: 'sph-long-horizon-probe-material-interface-diagnostic',
+              sourceCadence: 'benchmark-diagnostic'
+            });
+            probeResidentBatchTiming.materialInterfaceDiagnosticMs =
+              performance.now() - materialInterfaceDiagnosticStartedAtMs;
+            overlay.__sphResidentMaterialInterfaceState = materialInterfaceState;
+            markProbeProgress('resident-material-interface-diagnostic-completed', {
+              batchIndex,
+              status: materialInterfaceState?.status ?? null,
+              interfaceSourceFieldStatus:
+                materialInterfaceState?.interfaceSourceFieldStatus
+                ?? materialInterfaceState?.sourceFieldStatus
+                ?? null,
+              interfaceSourceFieldBackend:
+                materialInterfaceState?.interfaceSourceFieldBackend
+                ?? materialInterfaceState?.sourceFieldBackend
+                ?? null
+            });
+          }
           probeResidentBatchTiming.totalBeforeSampleMs = performance.now() - started;
           probeResidentBatchTiming.status = 'resident-batch-timing-collected';
           overlay.__sphProbeResidentBatchTiming = probeResidentBatchTiming;
@@ -3869,6 +3902,7 @@ async function runBrowserProbe({
         surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
         nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
         nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
+        materialInterfaceDiagnostic: Boolean(requestedMaterialInterfaceDiagnostic),
         pressureInterfaceDisabled: Boolean(requestedDisablePressureInterface),
         contactBinMetadataReadback: Boolean(requestedContactBinMetadataReadback),
         reactionBinMetadataReadback: Boolean(requestedReactionBinMetadataReadback),
@@ -3913,6 +3947,7 @@ async function runBrowserProbe({
       compactSummaryScope,
       thermalWallRate,
       measureGpuQueueFence,
+      materialInterfaceDiagnostic,
       nativeSurfaceDebugMode,
       nativeSurfaceValidationWaitMs,
       captureFrames,
@@ -7151,6 +7186,11 @@ async function main() {
   );
   const disablePressureInterface = process.env.ULG_PROBE_DISABLE_PRESSURE === '1'
     || process.env.ULG_PROBE_DISABLE_PRESSURE_INTERFACE === '1';
+  const materialInterfaceDiagnostic = booleanEnv(
+    process.env.ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC
+      ?? process.env.ULG_PROBE_FORCE_MATERIAL_INTERFACE_REFRESH,
+    false
+  );
   const contactBinMetadataReadback = booleanEnv(
     process.env.ULG_PROBE_CONTACT_BIN_METADATA_READBACK
       ?? process.env.ULG_PROBE_PRESSURE_INTERFACE_CONTACT_BIN_METADATA_READBACK
@@ -7313,6 +7353,7 @@ async function main() {
         compactSummaryScope,
 	        thermalWallRate,
 	        measureGpuQueueFence,
+	        materialInterfaceDiagnostic,
 	        nativeSurfaceDebugMode,
 	        nativeSurfaceValidationWaitMs,
 	        captureFrames,

@@ -115,6 +115,9 @@ const measureGpuQueueFence = booleanEnv(
   'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',
   probeMode === 'direct-resident'
 );
+const materialInterfaceDiagnosticRequested =
+  booleanEnv('ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC', false)
+  || booleanEnv('ULG_BENCH_FORCE_MATERIAL_INTERFACE_REFRESH', false);
 const requireActiveGridGate = booleanEnv(
   'ULG_BENCH_REQUIRE_ACTIVE_GRID',
   probeMode === 'direct-resident' && fuseResidentMechanicsActiveGrid
@@ -425,6 +428,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const probeResidentBatchRenderRefreshAwaitMs = numberOrNull(
     probeResidentBatchTiming?.renderRefreshAwaitMs
   );
+  const probeResidentBatchMaterialInterfaceDiagnosticMs = numberOrNull(
+    probeResidentBatchTiming?.materialInterfaceDiagnosticMs
+  );
   const probeResidentBatchViewportRefreshMs = numberOrNull(
     probeResidentBatchTiming?.viewportRefreshMs
   );
@@ -448,6 +454,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const probeEngineBatchComponents = [
     probeResidentBatchResidentStepsAwaitMs,
     probeResidentBatchRenderRefreshAwaitMs,
+    probeResidentBatchMaterialInterfaceDiagnosticMs,
     probeResidentBatchViewportNonRafMs,
     probeResidentBatchNativeSurfaceValidationWaitMs
   ];
@@ -567,6 +574,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     nativeSurfaceValidationWaitMs: probeResidentBatchNativeSurfaceValidationWaitMs,
     residentStepsAwaitMs: probeResidentBatchResidentStepsAwaitMs,
     renderRefreshAwaitMs: probeResidentBatchRenderRefreshAwaitMs,
+    materialInterfaceDiagnosticMs: probeResidentBatchMaterialInterfaceDiagnosticMs,
     wallOverheadMs: probeWallOverheadMs,
     rafShare: probeRafShare,
     engineShare: probeEngineShare,
@@ -2064,6 +2072,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     probeResidentBatchTiming,
     probeResidentBatchResidentStepsAwaitMs,
     probeResidentBatchRenderRefreshAwaitMs,
+    probeResidentBatchMaterialInterfaceDiagnosticMs,
     probeResidentBatchViewportRefreshMs,
     probeResidentBatchViewportRafMs,
     probeResidentBatchViewportNonRafMs,
@@ -2491,6 +2500,7 @@ async function main() {
       ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID: fuseResidentMechanicsActiveGrid ? '1' : '0',
       ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE: activeGridDispatchPlanRefreshMode,
       ULG_PROBE_MEASURE_GPU_QUEUE_FENCE: measureGpuQueueFence ? '1' : '0',
+      ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC: materialInterfaceDiagnosticRequested ? '1' : '0',
       ...(fusedActiveGridSafetyCells ? {
         ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS: String(fusedActiveGridSafetyCells)
       } : {}),
@@ -2553,6 +2563,7 @@ async function main() {
       })
     },
     surfaceDrawMode,
+    materialInterfaceDiagnosticRequested,
     fusedResidentMechanicsSequence: fuseResidentMechanicsSequence,
     fusedResidentMechanicsActiveGrid: fuseResidentMechanicsActiveGrid,
     activeGridDispatchPlanRefreshMode,

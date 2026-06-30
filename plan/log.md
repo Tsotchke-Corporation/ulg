@@ -33400,3 +33400,50 @@ Next:
   use case instead of `three-render-row-spheres`. Then continue into cold
   shader/pipeline compile latency and resident pressure-interface force
   coupling.
+
+## 2026-06-30 AKDT - Material Interface Diagnostic Benchmark Mode
+
+Status:
+
+- Added an opt-in long-horizon probe diagnostic that runs
+  `refreshSphResidentMaterialInterfaceState()` after the resident step and
+  normal render refresh, then samples the resulting resident
+  material-interface state.
+- Wired the benchmark flag `ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1` through
+  to `ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC=1`.
+- Benchmark wall-time attribution now includes
+  `materialInterfaceDiagnosticMs`, and scenario summaries expose
+  `probeResidentBatchMaterialInterfaceDiagnosticMs`.
+- This keeps the visible worker-owned PBR sphere path as the render benchmark
+  while measuring the source-local material-interface producer separately. The
+  attempted `metadata` benchmark mode produced no resident timing, and the
+  `three-webgpu-surface-buffers` run exercised the dense visual render-field
+  path (`renderRefreshRenderFieldMs` about `9978 ms`) rather than the
+  source-local material-interface producer.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: diagnostic smoke benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_RENDER_OWNERSHIP=worker-owned-resident-render-producer ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, `probeIssues=[]`,
+  `probeResidentBatchMaterialInterfaceDiagnosticMs=354.4`,
+  `renderRefreshTotalMs=20.5`, `residentStageMs=7.2`,
+  `estimatedReadbackBytesPerStep=0`, and
+  `workerOffscreenRenderRowsStatus=worker-offscreen-resident-particle-state-producer-rendered`.
+  The material-interface source summary reported
+  `status=material-interface-source-field-ready`,
+  `backend=webgpu-source-local`, `sourceLocal=true`, `sourceCount=1024`,
+  `estimatedCellVisits=384000`, `denseCellParticlePairs=6749184`,
+  visit ratio `0.0569`, `renderFieldReadback=false`,
+  `renderRowsReadback=false`, and
+  `candidateReadbackMode=compact-active-readback`.
+
+Next:
+
+- Reduce the remaining first diagnostic refresh cost. The source-local
+  algorithm is much smaller than the old dense visual table scan, but the first
+  measured diagnostic still costs hundreds of milliseconds from cold pipeline /
+  setup work.

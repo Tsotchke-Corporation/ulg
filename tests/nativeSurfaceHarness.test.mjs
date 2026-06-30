@@ -94,8 +94,9 @@ test('resident material interface seeds surface table before full render-row rea
     /materialInterfaceSurfaceTableSeedStatus: field\.materialInterfaceSurfaceTableSeedStatus/,
     'compact material-interface summaries should retain the seed status for probes'
   );
-  assert.match(sceneSource, /SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 24_000/);
+  assert.match(sceneSource, /SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 8_000/);
   assert.match(sceneSource, /function createMaterialInterfaceSurfaceTableForResidentState/);
+  assert.match(sceneSource, /sphMaterialInterfaceSurfaceTablePolicy/);
   assert.match(
     sceneSource,
     /surfaceTable: materialInterfaceSurfaceTable/,
@@ -106,6 +107,10 @@ test('resident material interface seeds surface table before full render-row rea
     /materialInterfaceSurfaceTableTotalFieldCells/,
     'material-interface diagnostics should expose the coarse table cell count'
   );
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  assert.match(mountSource, /materialInterfaceMaxFieldCells/);
+  assert.match(mountSource, /miCells/);
+  assert.match(mountSource, /materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy/);
 });
 
 test('resident material interface uses compact active-candidate readback', () => {

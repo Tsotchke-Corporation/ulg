@@ -49,7 +49,12 @@ import {
 } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import { incandescentColor } from '../material/radiationClosure.js';
-import { computeBufferBinding, createExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  createExplicitComputePipeline,
+  deferSubmittedWorkCleanup
+} from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -824,8 +829,14 @@ function skippedPhysicsMaterialInterfaceField({
     sourceFieldSchema: sourceField?.schema ?? null,
     sourceFieldStatus: sourceField?.status ?? null,
     sourceFieldBackend: sourceField?.backend ?? null,
+    sourceFieldPipelineCacheStatus: sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? sourceField?.pipelineCacheStatus
+      ?? null,
     sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
     sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+    sourceRenderFieldPipelineCacheStatus: sourceRenderField?.pipelineCacheStatus
+      ?? sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? null,
     sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
     sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
     sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
@@ -2050,21 +2061,23 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     candidateCount
   ]));
 
-  const module = device.createShaderModule({
+  const compactCandidateBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(4, 'storage')
+  ];
+  const {
+    pipeline,
+    bindGroupLayout,
+    cacheStatus: pipelineCacheStatus
+  } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-interface-compact-candidates-v1',
     label: 'ulg-sph-interface-compact-candidates',
-    code: sphMaterialInterfaceCompactCandidatesWgsl
-  });
-  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
-    label: 'ulg-sph-interface-compact-candidates',
-    module,
+    code: sphMaterialInterfaceCompactCandidatesWgsl,
     entryPoint: 'main',
-    bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform'),
-      computeBufferBinding(4, 'storage')
-    ]
+    bindings: compactCandidateBindings
   });
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
@@ -2150,6 +2163,7 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
     queueCompletionStatus: 'compact-readback-map-completed',
     queueCompletionMethod: 'mapAsync(compact-candidate-readback-buffer)',
+    pipelineCacheStatus,
     candidateReadback: true,
     candidateReadbackMode: MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE,
     candidateMetadataReadback: true,
@@ -5619,8 +5633,14 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
     sourceFieldSchema: sourceField?.schema ?? null,
     sourceFieldStatus: sourceField?.status ?? null,
     sourceFieldBackend: sourceField?.backend ?? null,
+    sourceFieldPipelineCacheStatus: sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? sourceField?.pipelineCacheStatus
+      ?? null,
     sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
     sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+    sourceRenderFieldPipelineCacheStatus: sourceRenderField?.pipelineCacheStatus
+      ?? sourceField?.sourceRenderFieldPipelineCacheStatus
+      ?? null,
     sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
     sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
     sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
@@ -5634,6 +5654,7 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
     candidateCompactOverflowCount: candidateField.compactCandidateOverflowCount ?? 0,
     candidateCompactFallbackStatus: candidateField.compactFallbackStatus ?? null,
     candidateMetadataReadback: Boolean(candidateField.candidateMetadataReadback),
+    candidatePipelineCacheStatus: candidateField.pipelineCacheStatus ?? null,
     queueCompletionStatus: candidateField.queueCompletionStatus ?? null,
     queueCompletionMethod: candidateField.queueCompletionMethod ?? null,
     normalDerivation: 'physics-owned-field-cell-crossing-candidates',
@@ -5741,18 +5762,23 @@ export async function buildSphRenderFieldWebGpu({
     refEdgeM
   }));
 
-  const module = device.createShaderModule({ label: 'ulg-sph-render-field', code: sphRenderFieldWgsl });
-  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+  const renderFieldBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'uniform'),
+    computeBufferBinding(4, 'read-only-storage')
+  ];
+  const {
+    pipeline,
+    bindGroupLayout,
+    cacheStatus: pipelineCacheStatus
+  } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-render-field-v1',
     label: 'ulg-sph-render-field',
-    module,
+    code: sphRenderFieldWgsl,
     entryPoint: 'main',
-    bindings: [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'storage'),
-        computeBufferBinding(3, 'uniform'),
-        computeBufferBinding(4, 'read-only-storage')
-      ]
+    bindings: renderFieldBindings
   });
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
@@ -5911,6 +5937,7 @@ export async function buildSphRenderFieldWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    pipelineCacheStatus,
     renderFieldDeferredCleanup,
     renderFieldReadback: !noFullReadback,
     fullReadbackPerformed: !noFullReadback,
@@ -6007,6 +6034,7 @@ export async function buildSphMaterialInterfaceSourceFieldWebGpu({
     sourceRenderFieldReadbackMode: sourceRenderField.readbackMode ?? null,
     sourceRenderFieldQueueCompletionStatus: sourceRenderField.queueCompletionStatus ?? null,
     sourceRenderFieldQueueCompletionMethod: sourceRenderField.queueCompletionMethod ?? null,
+    sourceRenderFieldPipelineCacheStatus: sourceRenderField.pipelineCacheStatus ?? null,
     kernelScope: MATERIAL_INTERFACE_SOURCE_FIELD_SCOPE,
     particleCount: sourceRenderField.particleCount,
     productEventCount: sourceRenderField.productEventCount,

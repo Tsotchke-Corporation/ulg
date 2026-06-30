@@ -2177,6 +2177,49 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('residentPostStepInterfaceRefresh')
     ?? null
   );
+  const urlMaterialInterfaceMaxFieldCells = positiveIntegerUrlParam(
+    initialHash.get('materialInterfaceMaxFieldCells')
+      ?? initialQuery.get('materialInterfaceMaxFieldCells')
+      ?? initialHash.get('materialInterfaceFieldCells')
+      ?? initialQuery.get('materialInterfaceFieldCells')
+      ?? initialHash.get('miCells')
+      ?? initialQuery.get('miCells')
+  );
+  const urlMaterialInterfaceMaxResolution = positiveIntegerUrlParam(
+    initialHash.get('materialInterfaceMaxResolution')
+      ?? initialQuery.get('materialInterfaceMaxResolution')
+      ?? initialHash.get('materialInterfaceResolution')
+      ?? initialQuery.get('materialInterfaceResolution')
+      ?? initialHash.get('miRes')
+      ?? initialQuery.get('miRes')
+  );
+  const peerMaterialInterfaceSurfaceTablePolicy =
+    currentResidentAuthorityHostForScene()?.materialInterfaceSurfaceTablePolicy
+    || runtime?.peercomputeMaterialInterfaceSurfaceTablePolicy
+    || runtime?.materialInterfaceSurfaceTablePolicy
+    || null;
+  const initialMaterialInterfaceSurfaceTablePolicy = (
+    peerMaterialInterfaceSurfaceTablePolicy
+    || urlMaterialInterfaceMaxFieldCells
+    || urlMaterialInterfaceMaxResolution
+  )
+    ? {
+      ...(peerMaterialInterfaceSurfaceTablePolicy || {}),
+      source: (urlMaterialInterfaceMaxFieldCells || urlMaterialInterfaceMaxResolution)
+        ? 'url-material-interface-surface-table-policy'
+        : (peerMaterialInterfaceSurfaceTablePolicy?.source || 'peercompute-material-interface-surface-table-policy'),
+      maxFieldCells:
+        urlMaterialInterfaceMaxFieldCells
+        ?? peerMaterialInterfaceSurfaceTablePolicy?.maxFieldCells
+        ?? peerMaterialInterfaceSurfaceTablePolicy?.materialInterfaceMaxFieldCells
+        ?? null,
+      maxResolution:
+        urlMaterialInterfaceMaxResolution
+        ?? peerMaterialInterfaceSurfaceTablePolicy?.maxResolution
+        ?? peerMaterialInterfaceSurfaceTablePolicy?.materialInterfaceMaxResolution
+        ?? null
+    }
+    : null;
   const initialPeerComputeRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy:
       currentResidentAuthorityHostForScene()?.renderOwnershipPolicy
@@ -3245,6 +3288,7 @@ export async function mountSphPhaseDemoOverlay({
     nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
     workerOffscreenPresentation: workerOffscreenPresentationEnabled,
     renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
+    materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
   overlay.__sphScene = scene;
@@ -5724,6 +5768,7 @@ export async function mountSphPhaseDemoOverlay({
       nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
       workerOffscreenPresentation: workerOffscreenPresentationEnabled,
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
+      materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
     overlay.__sphScene = scene;

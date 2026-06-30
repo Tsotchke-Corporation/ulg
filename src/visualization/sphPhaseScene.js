@@ -190,8 +190,8 @@ const SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT = 'rgba8unorm';
 const SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS = 1000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
-export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 24_000;
-export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 18;
+export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 8_000;
+export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 14;
 export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
 export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 32 * 1024 * 1024;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
@@ -6241,6 +6241,32 @@ function opticalGpuLookupSignature(table, lookup) {
   ].join('|');
 }
 
+function positiveIntegerOrDefault(value, fallback) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function resolveMaterialInterfaceSurfaceTablePolicy(policy = null) {
+  const source = policy?.source || policy?.configuredBy || 'scene-default';
+  return {
+    schema: 'peercompute.ulg.material-interface-surface-table-policy.v0',
+    source,
+    maxFieldCells: positiveIntegerOrDefault(
+      policy?.maxFieldCells ?? policy?.materialInterfaceMaxFieldCells,
+      SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT
+    ),
+    maxResolution: positiveIntegerOrDefault(
+      policy?.maxResolution ?? policy?.materialInterfaceMaxResolution,
+      SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT
+    ),
+    defaultMaxFieldCells: SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT,
+    defaultMaxResolution: SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 export function createSphPhaseScene(container, {
   boxEdgeM = 10,
   boxDimsM = null,
@@ -6260,6 +6286,7 @@ export function createSphPhaseScene(container, {
   nativeSurfacePixelValidation = false,
   workerOffscreenPresentation = false,
   renderOwnershipPolicy = null,
+  materialInterfaceSurfaceTablePolicy = null,
   residentAuthorityHost = null,
   navigatorRef = globalThis.navigator
 } = {}) {
@@ -6274,6 +6301,11 @@ export function createSphPhaseScene(container, {
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
   const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
+  const resolvedMaterialInterfaceSurfaceTablePolicy = resolveMaterialInterfaceSurfaceTablePolicy(
+    materialInterfaceSurfaceTablePolicy
+      ?? residentAuthorityHost?.materialInterfaceSurfaceTablePolicy
+      ?? null
+  );
   const threeWebGpuRendererRequiredLimits = resolveThreeWebGpuRendererRequiredLimits({
     rendererWebGpuResidentDevice: enableThreeWebGpuResidentDevice
   });
@@ -6325,6 +6357,7 @@ export function createSphPhaseScene(container, {
   const scene = new Three.Scene();
   let sceneResidentAuthorityHost = residentAuthorityHost || null;
   scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+  scene.userData.sphMaterialInterfaceSurfaceTablePolicy = resolvedMaterialInterfaceSurfaceTablePolicy;
   let sceneRenderOwnershipPolicy = null;
   function resolveSceneRenderOwnershipPolicy(policy = null) {
     sceneRenderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
@@ -6352,6 +6385,11 @@ export function createSphPhaseScene(container, {
   function setResidentAuthorityHost(host = null) {
     sceneResidentAuthorityHost = host || null;
     scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+    if (sceneResidentAuthorityHost?.materialInterfaceSurfaceTablePolicy) {
+      scene.userData.sphMaterialInterfaceSurfaceTablePolicy = resolveMaterialInterfaceSurfaceTablePolicy(
+        sceneResidentAuthorityHost.materialInterfaceSurfaceTablePolicy
+      );
+    }
     resolveSceneRenderOwnershipPolicy(sceneResidentAuthorityHost?.renderOwnershipPolicy || null);
     return sceneResidentAuthorityHost;
   }
@@ -9474,6 +9512,8 @@ export function createSphPhaseScene(container, {
         materialInterfaceSurfaceTable.materialInterfaceMaxResolution ?? null;
       materialInterfaceField.materialInterfaceSurfaceTableMaxFieldCells =
         materialInterfaceSurfaceTable.materialInterfaceMaxFieldCells ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTablePolicy =
+        materialInterfaceSurfaceTable.materialInterfaceSurfaceTablePolicy ?? null;
       materialInterfaceField.materialInterfaceSurfaceTableCoarse =
         Boolean(materialInterfaceSurfaceTable.materialInterfaceCoarseTable);
       materialInterfaceField.residentSurfaceTableTotalFieldCells = surfaceTable.totalFieldCells ?? 0;
@@ -17149,9 +17189,10 @@ export function createSphPhaseScene(container, {
   function createMaterialInterfaceSurfaceTableForResidentState(surfaceState = sphResidentRenderSurfaceState) {
     const fieldBatches = Array.isArray(surfaceState?.fieldBatches) ? surfaceState.fieldBatches : [];
     if (fieldBatches.length === 0) return surfaceState?.surfaceTable || null;
+    const policy = scene.userData.sphMaterialInterfaceSurfaceTablePolicy || resolvedMaterialInterfaceSurfaceTablePolicy;
     const maxResolution = diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
-      maxFieldCells: SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT,
-      maxResolution: SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT
+      maxFieldCells: policy.maxFieldCells,
+      maxResolution: policy.maxResolution
     });
     const table = createRenderFieldSurfaceTableForBatches(fieldBatches, { maxResolution });
     return {
@@ -17162,8 +17203,10 @@ export function createSphPhaseScene(container, {
         surfaceState?.surfaceTableSurfaceCount ?? surfaceState?.surfaceTable?.surfaceCount ?? null,
       sourceSurfaceTableTotalFieldCells:
         surfaceState?.surfaceTableTotalFieldCells ?? surfaceState?.surfaceTable?.totalFieldCells ?? null,
-      materialInterfaceMaxFieldCells: SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT,
+      materialInterfaceSurfaceTablePolicy: policy,
+      materialInterfaceMaxFieldCells: policy.maxFieldCells,
       materialInterfaceMaxResolution: maxResolution,
+      materialInterfaceConfiguredMaxResolution: policy.maxResolution,
       materialInterfaceCoarseTable: true
     };
   }

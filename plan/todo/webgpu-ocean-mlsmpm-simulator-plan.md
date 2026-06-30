@@ -151,6 +151,18 @@ Tactical status, 2026-06-28 AKDT:
   coarse-field-cells-by-particles splat. Next performance work should replace
   that with a sparse/source-local or particle-to-field resident builder rather
   than further candidate-readback tuning.
+- Render-field and compact-candidate pipeline caching now shows cache hits but
+  does not materially move the steady material-interface refresh, so pipeline
+  creation is not the remaining bottleneck. The coarse
+  material-interface/source-field budget is now an explicit
+  `peercompute.ulg.material-interface-surface-table-policy.v0`, configurable
+  through PeerCompute/runtime authority policy or URL aliases
+  `miCells`/`miRes`. The default policy is now `8000` cells / max resolution
+  `14`, which cuts the H2O/H2O worker-owned sphere source table to `6591`
+  cells and steady refresh to roughly `317-562 ms`; an aggressive
+  `miCells=4000&miRes=12` override reached `3993` cells and roughly
+  `283-352 ms` while still producing material-interface rows. Treat this as a
+  bounded tactical policy until the sparse/source-local field builder lands.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

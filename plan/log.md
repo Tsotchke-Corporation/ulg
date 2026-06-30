@@ -32956,3 +32956,47 @@ Next:
   field cell against every particle. The next performance slice should target
   a sparse/source-local material-interface source-field builder or a resident
   particle-to-field splat, not more candidate-readback tuning.
+
+## 2026-06-30 00:08 AKDT - Material-Interface Field Budget Policy
+
+Status:
+
+- Cached the render-field and compact-candidate compute pipelines with the
+  existing per-device `createCachedExplicitComputePipeline()` helper. Live
+  evidence showed later calls report `pipeline-cache-hit`, but steady elapsed
+  time stayed around `1.2 s`, confirming that the remaining cost is the
+  cell-by-particle source-field shader rather than pipeline creation.
+- Added `peercompute.ulg.material-interface-surface-table-policy.v0` for the
+  coarse pressure/material-interface field. The scene accepts the policy from
+  `createSphPhaseScene()`, a resident authority host, runtime policy, or URL
+  aliases `materialInterfaceMaxFieldCells` / `miCells` and
+  `materialInterfaceMaxResolution` / `miRes`.
+- Lowered the default material-interface source-field budget from `24000` cells
+  / resolution `18` to `8000` cells / resolution `14`. This keeps the pressure
+  interface independent from the visual render field while reducing the
+  hot-loop source-field scan.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs`
+- LIVE default policy:
+  same H2O/H2O worker-owned sphere URL reported policy
+  `maxFieldCells=8000`, `maxResolution=14`, effective
+  `materialInterfaceSurfaceTableTotalFieldCells=6591`, `candidateCount=19773`,
+  active first-call candidates `40`, dense candidate bytes `1265472`, compact
+  first-call candidate bytes `2560`, and steady calls around `317-562 ms`.
+- LIVE override:
+  adding `miCells=4000&miRes=12` reported policy source
+  `url-material-interface-surface-table-policy`, effective `3993` cells,
+  active candidates `32`, and steady calls around `283-352 ms`.
+
+Next:
+
+- This is still a tactical bounded-grid policy, not the final physically
+  optimal source-field algorithm. The durable fix remains a sparse/source-local
+  or particle-to-field resident material-interface builder so the cost scales
+  with active material volume instead of full coarse cells times particles.

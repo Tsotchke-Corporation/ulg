@@ -2102,6 +2102,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const fusedResidentSequencePreflightSidecarBlockers = Array.isArray(fusedResidentSequencePreflight?.sidecarBlockers)
     ? fusedResidentSequencePreflight.sidecarBlockers
     : [];
+  const fusedResidentSequenceSidecarFusionPlan = fusedResidentSequencePreflight?.sidecarFusionPlan || null;
   const fusedResidentSequenceBlockedForSidecars = Boolean(
     fusedResidentSequencePreflight?.status === 'blocked-fused-resident-sequence'
     && fusedResidentSequencePreflightSidecarBlockers.length > 0
@@ -2261,6 +2262,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     fusedResidentSequencePreflightFallbackMode: fusedResidentSequencePreflight?.fallbackMode ?? null,
     fusedResidentSequencePreflightBlockers,
     fusedResidentSequencePreflightSidecarBlockers,
+    fusedResidentSequenceSidecarFusionRequired: fusedResidentSequencePreflight?.sidecarFusionRequired ?? null,
+    fusedResidentSequenceSidecarFusionRunnable: fusedResidentSequencePreflight?.sidecarFusionRunnable ?? null,
+    fusedResidentSequenceSidecarFusionPlanStatus: fusedResidentSequencePreflight?.sidecarFusionPlanStatus ?? null,
+    fusedResidentSequenceSidecarFusionStageCount: fusedResidentSequencePreflight?.sidecarFusionStageCount ?? null,
+    fusedResidentSequenceSidecarFusionRequiredStageOrder:
+      [...(fusedResidentSequenceSidecarFusionPlan?.requiredStageOrder || [])],
     fusedResidentSequenceBlockedForSidecars,
     fusedResidentSequenceRequirementSatisfied,
     fusedResidentActiveGridRequirementSatisfied,

@@ -4147,8 +4147,73 @@ test('MLS-MPM resident steps compute task blocks fused sequence when sidecars re
   assert.deepEqual(contract.sidecarBlockers, ['thermal-sidecar', 'reaction-sidecar']);
   assert.equal(contract.thermalAwareFusionRequired, true);
   assert.equal(contract.reactionAwareFusionRequired, true);
+  assert.equal(contract.sidecarFusionRequired, true);
+  assert.equal(contract.sidecarFusionRunnable, false);
+  assert.equal(contract.sidecarFusionPlanStatus, 'sidecar-fusion-plan-ready-execution-blocked');
+  assert.equal(contract.sidecarFusionStageCount, 3);
+  assert.equal(contract.sidecarFusionPlan.schema, 'peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0');
+  assert.deepEqual(contract.sidecarFusionPlan.sidecarBlockers, ['thermal-sidecar', 'reaction-sidecar']);
+  assert.deepEqual(contract.sidecarFusionPlan.requiredStageOrder, [
+    'mechanics-p2g',
+    'mechanics-grid-update',
+    'mechanics-g2p',
+    'thermal-phase',
+    'reaction-product',
+    'mechanics-refresh',
+    'resident-compact-summary-or-active-grid-plan'
+  ]);
+  assert.deepEqual(
+    contract.sidecarFusionPlan.stages.map((stage) => stage.id),
+    ['thermal-phase', 'reaction-product', 'mechanics-refresh']
+  );
+  assert.equal(contract.sidecarFusionPlan.stages[0].implementedInCurrentFusedSequence, false);
   assert.equal(task.webgpu.residentSequenceLaneContract.sequenceRunnable, false);
   assert.equal(task.data.residentSequenceLaneContract.fallbackMode, 'per-step-fused-mechanics-active-grid');
+});
+
+test('MLS-MPM resident steps compute task sidecar fusion plan orders pressure and product blockers', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-pressure-product-sidecar-plan-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'plan-only',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    pressureInterfaceForceRowsBuffer: { label: 'pressure-interface-force-rows' },
+    residentProductMass: {
+      schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+      status: 'resident-product-mass-buffer-retained',
+      productEventBufferRetained: true
+    }
+  });
+
+  const plan = task.webgpu.residentSequenceLaneContract.sidecarFusionPlan;
+  assert.equal(plan.status, 'sidecar-fusion-plan-ready-execution-blocked');
+  assert.equal(plan.required, true);
+  assert.equal(plan.sidecarFusionRunnable, false);
+  assert.deepEqual(plan.sidecarBlockers, ['pressure-interface-force-rows', 'resident-product-mass-sidecar']);
+  assert.deepEqual(
+    plan.stages.map((stage) => stage.id),
+    ['resident-product-mass-eos-p2g', 'pressure-interface-grid-force-consumption']
+  );
+  assert.deepEqual(plan.requiredStageOrder, [
+    'resident-product-mass-eos-p2g',
+    'mechanics-p2g',
+    'pressure-interface-grid-force-consumption',
+    'mechanics-grid-update',
+    'mechanics-g2p',
+    'resident-compact-summary-or-active-grid-plan'
+  ]);
+  assert.equal(plan.stages[0].orderConstraint, 'before-mechanics-p2g');
+  assert.equal(plan.stages[1].orderConstraint, 'before-mechanics-grid-update');
+  assert.equal(plan.stages[1].stateManagerAdmissionRequired, true);
+  assert.equal(task.data.residentSequenceLaneContract.sidecarFusionStageCount, 2);
+  assert.equal(task.lawGraphNode.residentSequenceLaneContract.sidecarFusionRequired, true);
 });
 
 test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {
@@ -6518,6 +6583,16 @@ test('MLS-MPM resident steps avoid full-grid per-step fused fallback when therma
   assert.equal(execution.fusedResidentSequencePreflight.fallbackMode, 'per-step-resident-pass-dag');
   assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarBlockers, ['thermal-sidecar']);
   assert.equal(execution.fusedResidentSequencePreflight.thermalAwareFusionRequired, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionRequired, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionRunnable, false);
+  assert.equal(
+    execution.fusedResidentSequencePreflight.sidecarFusionPlan.status,
+    'sidecar-fusion-plan-ready-execution-blocked'
+  );
+  assert.deepEqual(
+    execution.fusedResidentSequencePreflight.sidecarFusionPlan.stages.map((stage) => stage.id),
+    ['thermal-phase', 'mechanics-refresh']
+  );
   assert.equal(
     execution.finalStep.stageTiming.fusedResidentSequencePreflight.status,
     'blocked-fused-resident-sequence'
@@ -6603,6 +6678,15 @@ test('MLS-MPM resident steps can defer active-grid plan-only summary until final
   assert.equal(execution.fusedResidentSequencePreflight.status, 'blocked-fused-resident-sequence');
   assert.equal(execution.fusedResidentSequencePreflight.fallbackMode, 'per-step-fused-mechanics-active-grid');
   assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarBlockers, ['thermal-sidecar']);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionPlan.stageCount, 2);
+  assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarFusionPlan.requiredStageOrder, [
+    'mechanics-p2g',
+    'mechanics-grid-update',
+    'mechanics-g2p',
+    'thermal-phase',
+    'mechanics-refresh',
+    'resident-compact-summary-or-active-grid-plan'
+  ]);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequencePreflight.fallbackMode, 'per-step-fused-mechanics-active-grid');
   assert.equal(thermalInputs.length, 3);
   assert.equal(execution.stepSummaries.length, 3);

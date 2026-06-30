@@ -130,6 +130,7 @@ const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-re
 const ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA = 'peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0';
 const ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0';
 const ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0';
+const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0';
 export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
@@ -4523,6 +4524,162 @@ function uniqueStringList(values = []) {
   return [...new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
 }
 
+function createFusedResidentSidecarFusionPlan({
+  requested = false,
+  stepCount = 1,
+  readbackMode = FULL_READBACK_MODE,
+  compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
+  activeGridRequested = false,
+  sidecarBlockers = []
+} = {}) {
+  const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  const sidecarFusionRequired = requested === true && normalizedSidecarBlockers.length > 0;
+  const stages = [];
+  const addStage = (stage) => {
+    if (!stage || stages.some((entry) => entry.id === stage.id)) return;
+    stages.push({
+      runtimeTarget: 'webgpu-resident-lane',
+      implementedInCurrentFusedSequence: false,
+      ...stage
+    });
+  };
+
+  if (normalizedSidecarBlockers.includes('resident-product-mass-sidecar')) {
+    addStage({
+      id: 'resident-product-mass-eos-p2g',
+      blocker: 'resident-product-mass-sidecar',
+      lawNodeId: 'ulg-sph-resident-product-mass-law',
+      orderConstraint: 'before-mechanics-p2g',
+      reads: ['resident-product-mass', 'sph-particle-state', 'mls-mpm-mechanics'],
+      writes: ['mls-mpm-grid-momentum'],
+      consumesRetainedBuffers: ['resident-product-mass-buffer'],
+      producesRetainedBuffers: ['mls-mpm-grid-buffer'],
+      fusionRequirement: 'p2g-must-consume-resident-product-mass-eos-sidecar'
+    });
+  }
+
+  if (
+    normalizedSidecarBlockers.includes('pressure-interface-force-rows')
+    || normalizedSidecarBlockers.includes('pressure-interface-force-solver')
+  ) {
+    addStage({
+      id: 'pressure-interface-grid-force-consumption',
+      blocker: normalizedSidecarBlockers.includes('pressure-interface-force-solver')
+        ? 'pressure-interface-force-solver'
+        : 'pressure-interface-force-rows',
+      lawNodeId: 'ulg-pressure-interface-force-law',
+      orderConstraint: 'before-mechanics-grid-update',
+      reads: ['pressure-interface-force-rows', 'mls-mpm-grid-momentum'],
+      writes: ['mls-mpm-grid-velocity'],
+      consumesRetainedBuffers: ['pressure-interface-force-rows-buffer'],
+      producesRetainedBuffers: ['mls-mpm-updated-grid-buffer'],
+      stateManagerAdmissionRequired: true,
+      fusionRequirement: 'grid-update-must-consume-admitted-pressure-force-rows'
+    });
+  }
+
+  if (normalizedSidecarBlockers.includes('thermal-sidecar')) {
+    addStage({
+      id: 'thermal-phase',
+      blocker: 'thermal-sidecar',
+      lawNodeId: 'ulg-sph-thermal-phase-law',
+      orderConstraint: 'after-mechanics-g2p-before-reaction',
+      reads: ['sph-particle-state', 'sph-thermo-phase', 'thermal-material-table'],
+      writes: ['sph-particle-state', 'sph-thermo-phase'],
+      consumesRetainedBuffers: ['g2p-state-buffer', 'source-thermo-buffer'],
+      producesRetainedBuffers: ['thermal-state-buffer', 'thermal-thermo-buffer'],
+      fusionRequirement: 'thermal-runner-must-consume-retained-g2p-state-and-retain-state-thermo'
+    });
+  }
+
+  if (normalizedSidecarBlockers.includes('reaction-sidecar')) {
+    addStage({
+      id: 'reaction-product',
+      blocker: 'reaction-sidecar',
+      lawNodeId: 'ulg-sph-reaction-product-law',
+      orderConstraint: normalizedSidecarBlockers.includes('thermal-sidecar')
+        ? 'after-thermal-phase-before-mechanics-refresh'
+        : 'after-mechanics-g2p-before-mechanics-refresh',
+      reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
+      writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
+      consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
+      producesRetainedBuffers: ['reaction-state-buffer', 'reaction-thermo-buffer', 'resident-product-mass-buffer'],
+      fusionRequirement: 'reaction-runner-must-retain-particle-and-product-mass-outputs'
+    });
+  }
+
+  if (
+    normalizedSidecarBlockers.includes('thermal-sidecar')
+    || normalizedSidecarBlockers.includes('reaction-sidecar')
+  ) {
+    addStage({
+      id: 'mechanics-refresh',
+      blocker: normalizedSidecarBlockers.includes('reaction-sidecar') ? 'reaction-sidecar' : 'thermal-sidecar',
+      lawNodeId: 'ulg-mls-mpm-mechanics-refresh-law',
+      orderConstraint: 'after-thermal-or-reaction-before-next-step-p2g',
+      reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mechanics-material-table'],
+      writes: ['mls-mpm-mechanics'],
+      consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
+      producesRetainedBuffers: ['mechanics-refresh-buffer'],
+      conditionalRequired: 'required-when-thermal-or-reaction-changes-phase-without-mechanics-authority',
+      fusionRequirement: 'mechanics-refresh-must-run-before-next-fused-step'
+    });
+  }
+
+  const requiredStageOrder = [
+    ...(stages.some((stage) => stage.id === 'resident-product-mass-eos-p2g') ? ['resident-product-mass-eos-p2g'] : []),
+    'mechanics-p2g',
+    ...(stages.some((stage) => stage.id === 'pressure-interface-grid-force-consumption')
+      ? ['pressure-interface-grid-force-consumption']
+      : []),
+    'mechanics-grid-update',
+    'mechanics-g2p',
+    ...(stages.some((stage) => stage.id === 'thermal-phase') ? ['thermal-phase'] : []),
+    ...(stages.some((stage) => stage.id === 'reaction-product') ? ['reaction-product'] : []),
+    ...(stages.some((stage) => stage.id === 'mechanics-refresh') ? ['mechanics-refresh'] : []),
+    'resident-compact-summary-or-active-grid-plan'
+  ];
+  const blockers = sidecarFusionRequired
+    ? ['sidecar-fusion-execution-not-implemented']
+    : [];
+  return {
+    schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA,
+    status: sidecarFusionRequired
+      ? 'sidecar-fusion-plan-ready-execution-blocked'
+      : 'sidecar-fusion-not-required',
+    requested: requested === true,
+    required: sidecarFusionRequired,
+    sequenceRunnableWithSidecars: false,
+    sidecarFusionRunnable: !sidecarFusionRequired,
+    stepCount: Math.max(1, Math.round(finiteNumber(stepCount, 1))),
+    readbackMode,
+    compactSummaryMode: normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
+    activeGridRequested: activeGridRequested === true,
+    sidecarBlockers: normalizedSidecarBlockers,
+    blockers,
+    sidecarCount: normalizedSidecarBlockers.length,
+    stageCount: stages.length,
+    stages,
+    requiredStageOrder,
+    requiredMechanicsStages: ['mechanics-p2g', 'mechanics-grid-update', 'mechanics-g2p'],
+    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired,
+    fallbackModeUntilImplemented: sidecarFusionRequired
+      ? 'per-step-resident-pass-dag-or-per-step-fused-mechanics-active-grid'
+      : null,
+    ownershipRules: [
+      'single-authoritative-owner-after-each-stage',
+      'sidecar-writes-must-be-retained-or-admitted-before-next-stage',
+      'state-manager-admission-required-before-cross-stage-authoritative-mutation',
+      'scene-local-execution-must-not-bypass-law-graph-ordering'
+    ],
+    promotionStatus: sidecarFusionRequired
+      ? 'contract-ready-execution-not-promoted'
+      : 'not-required',
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 function createFusedResidentSequencePreflight({
   requested = false,
   stepCount = 1,
@@ -4540,6 +4697,15 @@ function createFusedResidentSequencePreflight({
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
   const sequenceRequested = requested === true;
+  const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  const sidecarFusionPlan = createFusedResidentSidecarFusionPlan({
+    requested: sequenceRequested,
+    stepCount: normalizedStepCount,
+    readbackMode,
+    compactSummaryMode: normalizedCompactSummaryMode,
+    activeGridRequested: requestActiveGridFusedNoFullMechanics,
+    sidecarBlockers: normalizedSidecarBlockers
+  });
   const blockers = [];
   if (sequenceRequested) {
     if (normalizedStepCount <= 1) blockers.push('step-count-not-greater-than-one');
@@ -4552,7 +4718,7 @@ function createFusedResidentSequencePreflight({
     if (sphParticleUpload?.status !== 'webgpu-uploaded') blockers.push('sph-particle-upload-not-resident');
     if (mlsMpmParticleUpload?.status !== 'webgpu-uploaded') blockers.push('mls-mpm-upload-not-resident');
     blockers.push(...uniqueStringList(customRunnerBlockers));
-    blockers.push(...uniqueStringList(sidecarBlockers));
+    blockers.push(...normalizedSidecarBlockers);
   }
   const uniqueBlockers = uniqueStringList(blockers);
   const sequenceRunnable = sequenceRequested && uniqueBlockers.length === 0;
@@ -4589,8 +4755,13 @@ function createFusedResidentSequencePreflight({
       && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
     ),
     blockers: uniqueBlockers,
-    sidecarBlockers: uniqueStringList(sidecarBlockers),
+    sidecarBlockers: normalizedSidecarBlockers,
     customRunnerBlockers: uniqueStringList(customRunnerBlockers),
+    sidecarFusionRequired: sidecarFusionPlan.required,
+    sidecarFusionRunnable: sidecarFusionPlan.sidecarFusionRunnable,
+    sidecarFusionPlanStatus: sidecarFusionPlan.status,
+    sidecarFusionStageCount: sidecarFusionPlan.stageCount,
+    sidecarFusionPlan,
     fallbackMode,
     perStepFusedMechanicsFallbackEligible,
     activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
@@ -4622,6 +4793,14 @@ function createResidentSequenceLaneContract({
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
   const sequenceRequested = fusedResidentSequence === true;
   const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  const sidecarFusionPlan = createFusedResidentSidecarFusionPlan({
+    requested: sequenceRequested,
+    stepCount: normalizedStepCount,
+    readbackMode,
+    compactSummaryMode: normalizedCompactSummaryMode,
+    activeGridRequested: activeGridDispatchPolicy?.enabled === true,
+    sidecarBlockers: normalizedSidecarBlockers
+  });
   const requirementBlockers = [];
   if (sequenceRequested) {
     if (normalizedStepCount <= 1) requirementBlockers.push('step-count-not-greater-than-one');
@@ -4665,6 +4844,11 @@ function createResidentSequenceLaneContract({
     sequenceRunnable,
     blockers,
     sidecarBlockers: normalizedSidecarBlockers,
+    sidecarFusionRequired: sidecarFusionPlan.required,
+    sidecarFusionRunnable: sidecarFusionPlan.sidecarFusionRunnable,
+    sidecarFusionPlanStatus: sidecarFusionPlan.status,
+    sidecarFusionStageCount: sidecarFusionPlan.stageCount,
+    sidecarFusionPlan,
     sequenceMode,
     fallbackMode,
     thermalAwareFusionRequired: blockers.includes('thermal-sidecar'),

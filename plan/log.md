@@ -33827,3 +33827,56 @@ Next:
 - Commit this plan-only summary slice. The next performance boundary remains a
   true sidecar-aware fused resident sequence or the larger Ocean-tiled P2G
   backend.
+
+## 2026-06-30 AKDT - Sidecar Fusion Plan ABI
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0` to the fused
+  resident sequence preflight and ComputeManager resident sequence lane
+  contract.
+- The plan keeps sidecar-blocked fused sequences fail-closed, but now describes
+  the required in-sequence sidecar schedule: resident-product EOS before P2G,
+  pressure-interface force consumption before grid update, thermal after G2P,
+  reaction/product output after thermal or G2P, and mechanics refresh before
+  the next fused step.
+- Probe and benchmark summaries now flatten sidecar fusion required/runnable
+  status, plan status, stage count, and required stage order so live artifacts
+  can distinguish "known sidecar schedule not implemented yet" from unknown
+  fused-sequence failure.
+- This is an ABI and promotion-gate slice. It does not yet run thermal,
+  reaction, pressure-interface, or product-mass sidecars inside a single fused
+  resident sequence.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `69/69` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: live HTTPS benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fusion-plan-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  `residentStageMs=4.9`, `residentStageStepsPerSecond=204.08`,
+  `sidecarFusionRequired=true`, `sidecarFusionRunnable=false`,
+  `sidecarFusionPlanStatus=sidecar-fusion-plan-ready-execution-blocked`,
+  `sidecarFusionStageCount=2`, stage order
+  `mechanics-p2g -> mechanics-grid-update -> mechanics-g2p -> thermal-phase -> mechanics-refresh -> resident-compact-summary-or-active-grid-plan`,
+  `queueFenceBypassedBySidecarFallback=true`, compact-summary
+  `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  The nested two-step direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; the run validates the ABI
+  and hot-loop gate, not physics motion quality.
+
+Next:
+
+- Implement the first executable sidecar fusion stage behind this ABI, likely
+  thermal plus mechanics-refresh inside the lane-owned sequence, while keeping
+  reaction/product and pressure-interface stages blocked until their retained
+  inputs and ownership transitions are proven.

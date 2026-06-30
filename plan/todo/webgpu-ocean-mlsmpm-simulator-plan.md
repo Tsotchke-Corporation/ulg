@@ -1321,6 +1321,17 @@ Interim status, 2026-06-18 AKDT:
   still marking the fused sequence sidecar-blocked. The larger boundary remains
   a real sidecar-aware fused sequence or Ocean-tiled P2G; this is a hot-loop
   readback cleanup, not physics validation.
+- 2026-06-30 sidecar fusion plan ABI: fused resident sequence preflight and
+  lane contracts now carry
+  `peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0`. The plan publishes
+  required stage ordering for resident-product EOS, pressure-interface force
+  rows, thermal, reaction/product output, and mechanics refresh while keeping
+  `sidecarFusionRunnable=false` until execution can honor those writes inside
+  the lane-owned sequence. Live HTTPS evidence shows the thermal sidecar plan
+  in benchmark output with the performance gate still passing. Next executable
+  slice should fuse thermal plus mechanics refresh first; reaction/product and
+  pressure-interface promotion should remain blocked until retained inputs and
+  StateManager admission are proven.
 
 ## ULG-Specific Constraints
 

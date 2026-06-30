@@ -1546,6 +1546,30 @@ async function runBrowserProbe({
         residentAuthorityMechanicsOwner: diagnostics.residentAuthorityMechanicsOwner ?? null,
         residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null
       } : null;
+      const compactSidecarFusionPlan = (plan) => plan ? {
+        schema: plan.schema ?? null,
+        status: plan.status ?? null,
+        requested: plan.requested ?? null,
+        required: plan.required ?? null,
+        sidecarFusionRunnable: plan.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(plan.sidecarBlockers || [])],
+        blockers: [...(plan.blockers || [])],
+        sidecarCount: plan.sidecarCount ?? null,
+        stageCount: plan.stageCount ?? null,
+        requiredStageOrder: [...(plan.requiredStageOrder || [])],
+        stages: Array.isArray(plan.stages)
+          ? plan.stages.map((stage) => ({
+              id: stage.id ?? null,
+              blocker: stage.blocker ?? null,
+              lawNodeId: stage.lawNodeId ?? null,
+              orderConstraint: stage.orderConstraint ?? null,
+              reads: [...(stage.reads || [])],
+              writes: [...(stage.writes || [])],
+              implementedInCurrentFusedSequence: stage.implementedInCurrentFusedSequence ?? null,
+              fusionRequirement: stage.fusionRequirement ?? null
+            }))
+          : []
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -1558,6 +1582,11 @@ async function runBrowserProbe({
         blockers: [...(preflight.blockers || [])],
         sidecarBlockers: [...(preflight.sidecarBlockers || [])],
         customRunnerBlockers: [...(preflight.customRunnerBlockers || [])],
+        sidecarFusionRequired: preflight.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: preflight.sidecarFusionRunnable ?? null,
+        sidecarFusionPlanStatus: preflight.sidecarFusionPlanStatus ?? null,
+        sidecarFusionStageCount: preflight.sidecarFusionStageCount ?? null,
+        sidecarFusionPlan: compactSidecarFusionPlan(preflight.sidecarFusionPlan),
         perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
         thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,
@@ -4961,6 +4990,30 @@ async function runDirectResidentProbe({
         gpuMechanicsSummary: compactMechanicsSummary(g2p.gpuResult?.mechanics || g2p.mechanics)
       } : null;
       let activeCohortRanges = null;
+      const compactSidecarFusionPlan = (plan) => plan ? {
+        schema: plan.schema ?? null,
+        status: plan.status ?? null,
+        requested: plan.requested ?? null,
+        required: plan.required ?? null,
+        sidecarFusionRunnable: plan.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(plan.sidecarBlockers || [])],
+        blockers: [...(plan.blockers || [])],
+        sidecarCount: plan.sidecarCount ?? null,
+        stageCount: plan.stageCount ?? null,
+        requiredStageOrder: [...(plan.requiredStageOrder || [])],
+        stages: Array.isArray(plan.stages)
+          ? plan.stages.map((stage) => ({
+              id: stage.id ?? null,
+              blocker: stage.blocker ?? null,
+              lawNodeId: stage.lawNodeId ?? null,
+              orderConstraint: stage.orderConstraint ?? null,
+              reads: [...(stage.reads || [])],
+              writes: [...(stage.writes || [])],
+              implementedInCurrentFusedSequence: stage.implementedInCurrentFusedSequence ?? null,
+              fusionRequirement: stage.fusionRequirement ?? null
+            }))
+          : []
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -4973,6 +5026,11 @@ async function runDirectResidentProbe({
         blockers: [...(preflight.blockers || [])],
         sidecarBlockers: [...(preflight.sidecarBlockers || [])],
         customRunnerBlockers: [...(preflight.customRunnerBlockers || [])],
+        sidecarFusionRequired: preflight.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: preflight.sidecarFusionRunnable ?? null,
+        sidecarFusionPlanStatus: preflight.sidecarFusionPlanStatus ?? null,
+        sidecarFusionStageCount: preflight.sidecarFusionStageCount ?? null,
+        sidecarFusionPlan: compactSidecarFusionPlan(preflight.sidecarFusionPlan),
         perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
         thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,

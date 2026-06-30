@@ -69,6 +69,45 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
   );
 });
 
+test('resident material interface seeds surface table before full render-row readback fallback', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(sceneSource, /function seedResidentMaterialInterfaceSurfaceTable/);
+  assert.match(sceneSource, /materialInterfaceSeedSourcesFromResidentParticleState/);
+  assert.match(
+    sceneSource,
+    /resident-material-interface-surface-table-seeded-gpu-resident/,
+    'material-interface refresh should publish the readback-free seed status'
+  );
+  assert.match(
+    sceneSource,
+    /surfaceTableSeedState = seedResidentMaterialInterfaceSurfaceTable[\s\S]*needsSurfaceTableSeed = !surfaceTableSeedState\?\.surfaceTable\?\.schema;[\s\S]*readbackMode: needsSurfaceTableSeed \? 'full-parity-readback' : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT/,
+    'resident material-interface refresh should try GPU-resident surface-table seeding before full readback'
+  );
+  assert.match(
+    sceneSource,
+    /materialInterfaceSurfaceTableSeedReadbackFree/,
+    'published material-interface diagnostics should expose readback-free seeding evidence'
+  );
+  assert.match(
+    sceneSource,
+    /materialInterfaceSurfaceTableSeedStatus: field\.materialInterfaceSurfaceTableSeedStatus/,
+    'compact material-interface summaries should retain the seed status for probes'
+  );
+  assert.match(sceneSource, /SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 24_000/);
+  assert.match(sceneSource, /function createMaterialInterfaceSurfaceTableForResidentState/);
+  assert.match(
+    sceneSource,
+    /surfaceTable: materialInterfaceSurfaceTable/,
+    'material-interface source-field extraction should use the coarse pressure-interface table'
+  );
+  assert.match(
+    sceneSource,
+    /materialInterfaceSurfaceTableTotalFieldCells/,
+    'material-interface diagnostics should expose the coarse table cell count'
+  );
+});
+
 test('worker offscreen presentation path requires transferred canvas ownership', () => {
   const bridgeSource = readRepoFile('src/visualization/offscreenPresentationBridge.js');
   const workerSource = readRepoFile('src/services/ulgOffscreenRender.worker.js');

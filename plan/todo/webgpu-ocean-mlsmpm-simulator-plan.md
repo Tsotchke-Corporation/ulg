@@ -123,6 +123,21 @@ Tactical status, 2026-06-28 AKDT:
   (`transferControlToOffscreen`, copied display bytes `0`). A same-URL
   screenshot showed the sky-blue scene, grid, and particles visible while the
   benchmark summary reported no browser console issues.
+- Follow-up on the worker-owned H2O/H2O sphere scenario found the remaining
+  material-interface freshness bottleneck was the dense visual render-field
+  table, not the full render-row readback fallback. A direct HTTPS timing check
+  showed `17907 ms` with `renderRowsReadback=false` and
+  `renderFieldReadback=false` while the material-interface field scanned the
+  `272072`-cell visual table. The standalone pressure/material-interface
+  refresh now seeds surface descriptors from resident particle metadata or
+  scenario material properties, then builds a separate coarse
+  material-interface table capped at `24000` cells / resolution `18`. The same
+  URL now reports `1089.6 ms`, `15760` material-interface cells,
+  `residentSurfaceTableTotalFieldCells=272072`, no render-row/readback, and no
+  captured console issues. This is a tactical fix, not the final sparse
+  interface extractor; the next slice should make interface extraction
+  GPU-local and sparse rather than scanning every particle against every field
+  cell.
 - Render ownership is now a PeerCompute-compatible policy via
   `peercompute.ulg.render-ownership-policy.v0`. The policy can select
   `main-thread-renderer`, `worker-offscreen-render-rows`,

@@ -190,6 +190,8 @@ const SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT = 'rgba8unorm';
 const SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS = 1000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
+export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 24_000;
+export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 18;
 export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
 export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 32 * 1024 * 1024;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
@@ -3165,6 +3167,17 @@ function compactMaterialInterfaceFieldSummary(field = null) {
     sourceRenderFieldReadbackMode: field.sourceRenderFieldReadbackMode ?? null,
     renderRowsReadback: Boolean(field.renderRowsReadback),
     renderRowsReadbackMode: field.renderRowsReadbackMode ?? null,
+    materialInterfaceSurfaceTableSeedStatus: field.materialInterfaceSurfaceTableSeedStatus ?? null,
+    materialInterfaceSurfaceTableSeedSource: field.materialInterfaceSurfaceTableSeedSource ?? null,
+    materialInterfaceSurfaceTableSeedReadbackFree:
+      Boolean(field.materialInterfaceSurfaceTableSeedReadbackFree),
+    materialInterfaceSurfaceTableStatus: field.materialInterfaceSurfaceTableStatus ?? null,
+    materialInterfaceSurfaceTableSurfaceCount: field.materialInterfaceSurfaceTableSurfaceCount ?? null,
+    materialInterfaceSurfaceTableTotalFieldCells: field.materialInterfaceSurfaceTableTotalFieldCells ?? null,
+    materialInterfaceSurfaceTableMaxResolution: field.materialInterfaceSurfaceTableMaxResolution ?? null,
+    materialInterfaceSurfaceTableMaxFieldCells: field.materialInterfaceSurfaceTableMaxFieldCells ?? null,
+    materialInterfaceSurfaceTableCoarse: Boolean(field.materialInterfaceSurfaceTableCoarse),
+    residentSurfaceTableTotalFieldCells: field.residentSurfaceTableTotalFieldCells ?? null,
     renderFieldReadback: Boolean(field.renderFieldReadback),
     renderFieldReadbackMode: field.renderFieldReadbackMode ?? null,
     renderFieldSurfaceSummaryMode: field.renderFieldSurfaceSummaryMode ?? null,
@@ -9314,7 +9327,18 @@ export function createSphPhaseScene(container, {
       const productEventCount = Math.max(0, Math.round(Number(
         residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
       ) || 0));
-      const needsSurfaceTableSeed = !sphResidentRenderSurfaceState?.surfaceTable?.schema;
+      let surfaceTableSeedState = null;
+      let needsSurfaceTableSeed = !sphResidentRenderSurfaceState?.surfaceTable?.schema;
+      if (needsSurfaceTableSeed) {
+        surfaceTableSeedState = seedResidentMaterialInterfaceSurfaceTable({
+          sphParticleState: nextSphParticleState,
+          materialProperties,
+          reactionTable: sphReactionTable,
+          reactionSummary,
+          smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
+        });
+        needsSurfaceTableSeed = !surfaceTableSeedState?.surfaceTable?.schema;
+      }
       renderRowsExecution = await extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
@@ -9332,6 +9356,12 @@ export function createSphPhaseScene(container, {
         readbackMode: needsSurfaceTableSeed ? 'full-parity-readback' : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
         ...renderDomainExtractionOptions(currentRenderDomainCounts)
       });
+      if (surfaceTableSeedState?.materialInterfaceSurfaceTableSeedStatus) {
+        renderRowsExecution.materialInterfaceSurfaceTableSeedStatus =
+          surfaceTableSeedState.materialInterfaceSurfaceTableSeedStatus;
+        renderRowsExecution.materialInterfaceSurfaceTableSeedSource =
+          surfaceTableSeedState.materialInterfaceSurfaceTableSeedSource ?? null;
+      }
       const hasRenderRowsReadback = renderRowsExecution.renderRows instanceof Float32Array
         && renderRowsExecution.renderRows.length > 0;
       if (needsSurfaceTableSeed && hasRenderRowsReadback) {
@@ -9381,6 +9411,10 @@ export function createSphPhaseScene(container, {
           reason: 'resident surface table is not available',
           particleCount: nextSphParticleState.particleCount,
           renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback),
+          materialInterfaceSurfaceTableSeedStatus:
+            surfaceTableSeedState?.materialInterfaceSurfaceTableSeedStatus ?? 'resident-material-interface-surface-table-seed-unavailable',
+          materialInterfaceSurfaceTableSeedSource:
+            surfaceTableSeedState?.materialInterfaceSurfaceTableSeedSource ?? null,
           surfaceCount: 0,
           readySurfaceCount: 0,
           totalSurfaceAreaM2: 0,
@@ -9393,13 +9427,15 @@ export function createSphPhaseScene(container, {
           fullPhysicsValidation: false
         });
       }
+      const materialInterfaceSurfaceTable =
+        createMaterialInterfaceSurfaceTableForResidentState(sphResidentRenderSurfaceState) || surfaceTable;
       interfaceSourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
         device: resolvedDeviceResult.device,
         renderRows: renderRowsExecution.renderRows,
         renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
         productEventBuffer,
         productEventCount,
-        surfaceTable,
+        surfaceTable: materialInterfaceSurfaceTable,
         particleCount: renderRowsExecution.particleCount,
         fieldPadding: FIELD_PADDING,
         refEdgeM,
@@ -9415,6 +9451,31 @@ export function createSphPhaseScene(container, {
       });
       materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
       materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTableSeedStatus =
+        surfaceTableSeedState?.materialInterfaceSurfaceTableSeedStatus
+        ?? sphResidentRenderSurfaceState?.materialInterfaceSurfaceTableSeedStatus
+        ?? (needsSurfaceTableSeed ? 'resident-material-interface-surface-table-seed-fallback-full-readback' : 'resident-material-interface-surface-table-reused');
+      materialInterfaceField.materialInterfaceSurfaceTableSeedSource =
+        surfaceTableSeedState?.materialInterfaceSurfaceTableSeedSource
+        ?? sphResidentRenderSurfaceState?.materialInterfaceSurfaceTableSeedSource
+        ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTableSeedReadbackFree =
+        Boolean(surfaceTableSeedState?.materialInterfaceSurfaceTableSeedStatus)
+        && renderRowsExecution.readbackMode === SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+        && renderRowsExecution.renderRowsReadback !== true;
+      materialInterfaceField.materialInterfaceSurfaceTableStatus =
+        materialInterfaceSurfaceTable.status ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTableSurfaceCount =
+        materialInterfaceSurfaceTable.surfaceCount ?? 0;
+      materialInterfaceField.materialInterfaceSurfaceTableTotalFieldCells =
+        materialInterfaceSurfaceTable.totalFieldCells ?? 0;
+      materialInterfaceField.materialInterfaceSurfaceTableMaxResolution =
+        materialInterfaceSurfaceTable.materialInterfaceMaxResolution ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTableMaxFieldCells =
+        materialInterfaceSurfaceTable.materialInterfaceMaxFieldCells ?? null;
+      materialInterfaceField.materialInterfaceSurfaceTableCoarse =
+        Boolean(materialInterfaceSurfaceTable.materialInterfaceCoarseTable);
+      materialInterfaceField.residentSurfaceTableTotalFieldCells = surfaceTable.totalFieldCells ?? 0;
       materialInterfaceField.interfaceSourceFieldSchema = interfaceSourceField.schema;
       materialInterfaceField.interfaceSourceFieldStatus = interfaceSourceField.status;
       materialInterfaceField.interfaceSourceFieldQueueCompletionStatus = interfaceSourceField.queueCompletionStatus ?? null;
@@ -17084,6 +17145,28 @@ export function createSphPhaseScene(container, {
     return buildSphRenderFieldSurfaceTable(descriptors);
   }
 
+  function createMaterialInterfaceSurfaceTableForResidentState(surfaceState = sphResidentRenderSurfaceState) {
+    const fieldBatches = Array.isArray(surfaceState?.fieldBatches) ? surfaceState.fieldBatches : [];
+    if (fieldBatches.length === 0) return surfaceState?.surfaceTable || null;
+    const maxResolution = diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
+      maxFieldCells: SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT,
+      maxResolution: SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT
+    });
+    const table = createRenderFieldSurfaceTableForBatches(fieldBatches, { maxResolution });
+    return {
+      ...table,
+      status: 'material-interface-coarse-surface-table-ready',
+      sourceSurfaceTableStatus: surfaceState?.status ?? surfaceState?.surfaceTable?.status ?? null,
+      sourceSurfaceTableSurfaceCount:
+        surfaceState?.surfaceTableSurfaceCount ?? surfaceState?.surfaceTable?.surfaceCount ?? null,
+      sourceSurfaceTableTotalFieldCells:
+        surfaceState?.surfaceTableTotalFieldCells ?? surfaceState?.surfaceTable?.totalFieldCells ?? null,
+      materialInterfaceMaxFieldCells: SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT,
+      materialInterfaceMaxResolution: maxResolution,
+      materialInterfaceCoarseTable: true
+    };
+  }
+
   function materialKeysFromReactionTable(reactionTable = null) {
     const keys = new Set();
     for (const record of reactionTable?.metadata || []) {
@@ -17379,6 +17462,108 @@ export function createSphPhaseScene(container, {
       }
     }
     return [...batchesByKey.values()];
+  }
+
+  function materialInterfaceSeedSourcesFromResidentParticleState(
+    sphParticleState = null,
+    materialProperties = null,
+    reactionTable = null
+  ) {
+    const materialMap = buildSphRenderMaterialMap(materialProperties || {}, reactionTable);
+    const metadata = Array.isArray(sphParticleState?.metadata) ? sphParticleState.metadata : [];
+    const seedSources = [];
+    for (let index = 0; index < metadata.length; index += 1) {
+      const meta = metadata[index];
+      if (!meta) continue;
+      const material = meta.material
+        ?? materialKeyForSurfaceMaterialId(meta.materialId, materialProperties, reactionTable, materialMap);
+      if (!material) continue;
+      const phase = meta.phase
+        ?? phaseFromGpuPhaseId(meta.phaseId)
+        ?? materialPropertiesLookup(material, materialProperties)?.phases?.[0]?.name
+        ?? null;
+      seedSources.push({
+        material,
+        phase,
+        renderKey: renderKeyForMaterialPhase(material, phase),
+        renderDomainId: meta.renderDomainId,
+        renderDomainKey: meta.renderDomainKey
+      });
+    }
+    if (seedSources.length > 0) return seedSources;
+    for (const [material, properties] of Object.entries(materialProperties || {})) {
+      const phases = Array.isArray(properties?.phases) && properties.phases.length > 0
+        ? properties.phases
+        : [{ name: null }];
+      for (const phaseRecord of phases) {
+        const phase = phaseRecord?.name ?? null;
+        seedSources.push({
+          material,
+          phase,
+          renderKey: renderKeyForMaterialPhase(material, phase)
+        });
+      }
+    }
+    return seedSources;
+  }
+
+  function seedResidentMaterialInterfaceSurfaceTable({
+    sphParticleState = null,
+    materialProperties = null,
+    reactionTable = null,
+    reactionSummary = null,
+    smoothingLengthM = null
+  } = {}) {
+    const seedSources = materialInterfaceSeedSourcesFromResidentParticleState(
+      sphParticleState,
+      materialProperties,
+      reactionTable
+    );
+    if (seedSources.length === 0) return null;
+    const particleBatches = createResidentMaterialSeedSurfaceBatches({
+      materials: seedSources,
+      renderDomainCounts: currentRenderDomainCounts,
+      smoothingLengthM
+    });
+    const productEventSurfaceBatches = createProductEventSurfaceBatches({
+      baseBatches: particleBatches,
+      reactionSummary,
+      reactionTable,
+      materialProperties,
+      smoothingLengthM
+    });
+    const fieldBatches = createResidentRenderSurfaceBatches({
+      particleBatches,
+      productEventSurfaceBatches,
+      materialProperties,
+      reactionTable,
+      smoothingLengthM
+    });
+    if (fieldBatches.length === 0) return null;
+    rebuildOpticalStateForSurfaceBatches(fieldBatches, {
+      materialProperties,
+      materialPropertyBankGpuWarmInputTable: sphParticleState?.materialPropertyBankWarmInputTable ?? null
+    });
+    const state = captureResidentRenderSurfaceState({
+      particleBatches,
+      fieldBatches,
+      emissiveByMaterial: sphResidentRenderSurfaceState?.emissiveByMaterial || {},
+      materialProperties
+    });
+    state.status = 'resident-render-surface-table-seeded-gpu-resident-material-interface';
+    state.materialInterfaceSurfaceTableSeedStatus = 'resident-material-interface-surface-table-seeded-gpu-resident';
+    state.materialInterfaceSurfaceTableSeedSource = Array.isArray(sphParticleState?.metadata)
+      && sphParticleState.metadata.length > 0
+      ? 'resident-particle-metadata'
+      : 'scenario-material-properties';
+    state.materialInterfaceSurfaceTableSeedMaterialCount = new Set(
+      seedSources.map((source) => source.material).filter(Boolean)
+    ).size;
+    state.materialInterfaceSurfaceTableSeedSourceCount = seedSources.length;
+    state.materialInterfaceSurfaceTableSeedParticleBatchCount = particleBatches.length;
+    state.materialInterfaceSurfaceTableSeedProductEventSurfaceCount = productEventSurfaceBatches.length;
+    scene.userData.sphResidentRenderSurfaceState = sphResidentRenderSurfaceState;
+    return state;
   }
 
   function captureResidentRenderSurfaceState({

@@ -32870,3 +32870,50 @@ Next:
   optimization should replace the render-row/full-readback surface-table seed
   in `refreshSphResidentMaterialInterfaceState()` with a GPU-resident
   particle/material interface extraction path.
+
+## 2026-06-29 23:25 AKDT - Coarse Material-Interface Field
+
+Status:
+
+- Tested the planned GPU-resident surface-table seed path and found a plan
+  change: the live stall was not primarily the seed/full-readback step. A
+  direct HTTPS browser timing check still took `17907 ms` with
+  `renderRowsReadback=false` and `renderFieldReadback=false` because the
+  material-interface source field was built over the visual render-field table
+  (`272072` cells for the H2O/H2O worker-owned sphere scenario).
+- Added metadata/material-property seeding before the legacy full-readback
+  fallback, keeping the fallback only for cases where no resident table can be
+  formed.
+- Split material-interface extraction from visual surface resolution. The
+  standalone pressure/material-interface refresh now builds a separate coarse
+  table capped by `SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT=24000` and
+  `SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT=18`, then passes that table to
+  `buildSphMaterialInterfaceSourceFieldWebGpu()`.
+- Published diagnostics for seed status and coarse-table cell count:
+  `materialInterfaceSurfaceTableSeedStatus`,
+  `materialInterfaceSurfaceTableStatus`,
+  `materialInterfaceSurfaceTableTotalFieldCells`, and
+  `residentSurfaceTableTotalFieldCells`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs`
+- LIVE:
+  `https://100.86.83.35:5173/?drop=h2o&base=h2o&dropn=10&basen=10&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&residentActiveGrid=1&workerOffscreenPresentation=1&lawt=0&lawr=0&lawv=0&lawst=0&surfaceDraw=three-render-row-spheres&blob=1&bg=%2387ceeb`
+  direct browser timing reported material-interface refresh `1089.6 ms`,
+  `renderRowsReadback=false`, `renderFieldReadback=false`,
+  `materialInterfaceSurfaceTableStatus=material-interface-coarse-surface-table-ready`,
+  coarse table cells `15760` vs resident visual table cells `272072`,
+  `worker-offscreen-resident-particle-state-producer-rendered`,
+  `workerRowsFrameCount=8`, `workerRowsParticleCount=2000`, and no captured
+  console issues. The overlay read `render fps 24.3 | physics fps 19.5 |
+  resident fps 19.5` during that check.
+
+Next:
+
+- The refresh is no longer a 14-18 second wall, but `~1.1 s` is still too slow
+  for fresh pressure coupling every visual frame. The next performance slice
+  should make material-interface extraction sparse/GPU-local instead of
+  scanning every particle for every coarse field cell.

@@ -33619,3 +33619,44 @@ Next:
   one producer draw per resident batch, move the next performance slice toward
   retained same-worker mechanics output/presentation instead of further
   main-thread particle-state cache tuning.
+
+## 2026-06-30 AKDT - Presentation-Worker Retained Output Transport Proof
+
+Status:
+
+- Corrected `resolvePeerComputeRenderOwnershipPolicy` so presentation-worker
+  retained-output presentation-only mode reports
+  `workerOwnedResidentProducerSourceTransferRequired=false` and
+  `requiresFreshPhysicsReadback=false` once the presentation-worker resident
+  stage chain is ready.
+- The explicit retained-output smoke now agrees with the measured transport:
+  worker-local G2P output feeds presentation, not a main-thread particle-state
+  upload.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs`
+- PASS: benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=8 ULG_BENCH_WORKER_OFFSCREEN_PRESENTATION=1 ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES=1 ULG_BENCH_RENDER_OWNERSHIP=presentation-worker-retained-output-presentation-only ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC=1 ULG_BENCH_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE=gpu-resident-summary ULG_BENCH_SURFACE_DRAW_MODE=three-render-row-spheres`.
+  Result: suite gate `pass`, scenario `good`, probe `good`,
+  `probeIssues=[]`, `probeBatchWallMs=41.3`, `probeEngineBatchMs=40.1`,
+  `residentStageMs=3.1`, `workerOffscreenRenderRowsProducerSourceKind=worker-retained-resident-stage-output`,
+  `workerOffscreenRenderRowsSourceStateTransferBytes=0`,
+  `workerOffscreenRenderRowsInputTransferBytes=96`,
+  `workerOffscreenRenderRowsRetainedStageOutputPreserved=true`,
+  `workerOffscreenRenderRowsSkippedLegacyDrawForRetainedStageOutput=true`,
+  `peerComputeRenderOwnershipPolicyStatus=render-ownership-presentation-worker-retained-output-presentation-only-ready`,
+  `peerComputeRenderOwnershipWorkerOwnedResidentProducerSourceTransferRequired=false`,
+  `requiresFreshPhysicsReadback=false`, and
+  `workerOffscreenRetainedStateContinuationApplied=true`.
+
+Next:
+
+- This is the significant plan decision point: for interactive same-device
+  worker presentation, the next implementation direction should promote
+  presentation-worker retained output as the preferred path when available.
+  Do not spend more time optimizing main-thread particle-state transfer as the
+  primary performance path except as a fallback. Cross-peer portability remains
+  blocked on compact snapshot/materialization, which should stay separate from
+  the local same-worker path.

@@ -311,7 +311,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     : normalizeBoolean(retainedCompactSnapshotExportRequested, false);
   const renderRowsTransferRequested =
     effectiveMode === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS;
-  const workerOwnedResidentProducerSourceTransferRequired = Boolean(
+  const workerOwnedResidentProducerSourceTransferRequested = Boolean(
     workerOwnedResidentProducerSelected
     && targetImplementationReady
     && normalizeBoolean(
@@ -324,6 +324,15 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     presentationWorkerResidentStageChainRequested
     && workerPresentationRequested
     && targetImplementationReady
+  );
+  const presentationWorkerRetainedOutputPresentationOnlyReady = Boolean(
+    presentationWorkerRetainedOutputPresentationOnlyRequested
+    && targetImplementationReady
+    && presentationWorkerResidentStageChainReady
+  );
+  const workerOwnedResidentProducerSourceTransferRequired = Boolean(
+    workerOwnedResidentProducerSourceTransferRequested
+    && !presentationWorkerRetainedOutputPresentationOnlyReady
   );
   const throughputPlaybackRequested = [
     'throughput',
@@ -550,11 +559,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
       workerOwnedResidentProducerRequested && !targetImplementationReady,
     workerOwnedResidentProducerSourceTransferRequired,
     presentationWorkerRetainedOutputPresentationOnlyRequested,
-    presentationWorkerRetainedOutputPresentationOnlyReady: Boolean(
-      presentationWorkerRetainedOutputPresentationOnlyRequested
-      && targetImplementationReady
-      && presentationWorkerResidentStageChainReady
-    ),
+    presentationWorkerRetainedOutputPresentationOnlyReady,
     statePromotionMode: presentationWorkerRetainedOutputPresentationOnlyRequested
       ? 'presentation-only'
       : (presentationWorkerResidentStageChainRequested

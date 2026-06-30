@@ -235,6 +235,8 @@ test('render ownership policy exposes presentation-worker retained output as pre
   assert.equal(policy.presentationWorkerResidentStagesReady, true);
   assert.equal(policy.presentationWorkerRetainedOutputPresentationOnlyRequested, true);
   assert.equal(policy.presentationWorkerRetainedOutputPresentationOnlyReady, true);
+  assert.equal(policy.workerOwnedResidentProducerSourceTransferRequired, false);
+  assert.equal(policy.requiresFreshPhysicsReadback, false);
   assert.equal(policy.statePromotionMode, 'presentation-only');
   assert.equal(policy.authoritativeStateMutationExpected, false);
   assert.equal(policy.residentPlaybackUseCase, 'interactive-presentation');

@@ -1243,6 +1243,15 @@ Interim status, 2026-06-18 AKDT:
   reports `sourceCacheMissReason=source-cache-empty`, which means the remaining
   80 KiB-class particle-state transfer is a bridge lifecycle/cadence or
   same-worker ownership problem, not an opaque key-hash mismatch.
+- 2026-06-30 presentation-worker retained output transport proof: the explicit
+  `renderOwnership=presentation-worker-retained-output-presentation-only` plus
+  `presentationWorkerResidentStages=1` smoke is `good` and renders from
+  `worker-retained-resident-stage-output` with `sourceStateTransferBytes=0`,
+  `inputTransferBytes=96`, retained G2P output preserved, legacy draw skipped,
+  and `requiresFreshPhysicsReadback=false`. This is the strongest current
+  evidence that the performance path should prefer same-worker retained
+  mechanics output/presentation for interactive same-device uses; cross-peer
+  replay still requires the separate portable snapshot/materialization plan.
 
 ## ULG-Specific Constraints
 

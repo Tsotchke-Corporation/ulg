@@ -1546,6 +1546,25 @@ async function runBrowserProbe({
         residentAuthorityMechanicsOwner: diagnostics.residentAuthorityMechanicsOwner ?? null,
         residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null
       } : null;
+      const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
+        schema: preflight.schema ?? null,
+        status: preflight.status ?? null,
+        sequenceRequested: preflight.sequenceRequested ?? null,
+        sequenceRunnable: preflight.sequenceRunnable ?? null,
+        stepCount: preflight.stepCount ?? null,
+        readbackMode: preflight.readbackMode ?? null,
+        compactSummaryMode: preflight.compactSummaryMode ?? null,
+        fallbackMode: preflight.fallbackMode ?? null,
+        blockers: [...(preflight.blockers || [])],
+        sidecarBlockers: [...(preflight.sidecarBlockers || [])],
+        customRunnerBlockers: [...(preflight.customRunnerBlockers || [])],
+        perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
+        activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
+        thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,
+        reactionAwareFusionRequired: preflight.reactionAwareFusionRequired ?? null,
+        pressureInterfaceAwareFusionRequired: preflight.pressureInterfaceAwareFusionRequired ?? null,
+        residentProductMassAwareFusionRequired: preflight.residentProductMassAwareFusionRequired ?? null
+      } : null;
       const compactStageTiming = (stageTiming) => stageTiming ? {
         totalMs: finiteOrNull(stageTiming.totalMs),
         stageMs: { ...(stageTiming.stageMs || {}) },
@@ -1568,6 +1587,7 @@ async function runBrowserProbe({
         fusedResidentMechanics: stageTiming.fusedResidentMechanics ?? null,
         fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
         fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
+        fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(stageTiming.fusedResidentSequencePreflight),
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -2617,6 +2637,7 @@ async function runBrowserProbe({
                 ? { ...steps.fusedResidentSequence.activeGridIndirectDispatch }
                 : null
             } : null,
+            fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(steps.fusedResidentSequencePreflight),
             finalStepStageTiming: compactStageTiming(steps.finalStep?.stageTiming),
             residentSourceMode: steps.residentSourceMode ?? null,
             nextStep: steps.nextSphParticleState?.step ?? null,
@@ -4940,6 +4961,25 @@ async function runDirectResidentProbe({
         gpuMechanicsSummary: compactMechanicsSummary(g2p.gpuResult?.mechanics || g2p.mechanics)
       } : null;
       let activeCohortRanges = null;
+      const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
+        schema: preflight.schema ?? null,
+        status: preflight.status ?? null,
+        sequenceRequested: preflight.sequenceRequested ?? null,
+        sequenceRunnable: preflight.sequenceRunnable ?? null,
+        stepCount: preflight.stepCount ?? null,
+        readbackMode: preflight.readbackMode ?? null,
+        compactSummaryMode: preflight.compactSummaryMode ?? null,
+        fallbackMode: preflight.fallbackMode ?? null,
+        blockers: [...(preflight.blockers || [])],
+        sidecarBlockers: [...(preflight.sidecarBlockers || [])],
+        customRunnerBlockers: [...(preflight.customRunnerBlockers || [])],
+        perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
+        activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
+        thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,
+        reactionAwareFusionRequired: preflight.reactionAwareFusionRequired ?? null,
+        pressureInterfaceAwareFusionRequired: preflight.pressureInterfaceAwareFusionRequired ?? null,
+        residentProductMassAwareFusionRequired: preflight.residentProductMassAwareFusionRequired ?? null
+      } : null;
       const summarizeSteps = (steps) => steps ? {
         schema: steps.schema ?? null,
         backend: steps.backend ?? null,
@@ -4995,7 +5035,8 @@ async function runDirectResidentProbe({
           activeGridIndirectDispatch: steps.fusedResidentSequence.activeGridIndirectDispatch
             ? { ...steps.fusedResidentSequence.activeGridIndirectDispatch }
             : null
-        } : null
+        } : null,
+        fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(steps.fusedResidentSequencePreflight)
       } : null;
       const summarizeStep = (step) => step ? {
         schema: step.schema ?? null,

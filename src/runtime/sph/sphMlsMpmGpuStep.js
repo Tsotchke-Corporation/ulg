@@ -129,6 +129,7 @@ const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-re
 const ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA = 'peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0';
 const ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0';
 const ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0';
+export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task-result.v0';
@@ -4482,6 +4483,106 @@ function createResidentActiveGridDispatchPolicy({
   };
 }
 
+function fusedResidentSequenceSidecarBlockers({
+  thermalMaterialTable = null,
+  reactionTable = null,
+  pressureInterfaceForceRowsBuffer = null,
+  pressureInterfaceForceSolver = null,
+  residentProductMass = null
+} = {}) {
+  const blockers = [];
+  if (thermalMaterialTable) blockers.push('thermal-sidecar');
+  if (finiteNumber(reactionTable?.reactionCount, 0) > 0) blockers.push('reaction-sidecar');
+  if (pressureInterfaceForceRowsBuffer) blockers.push('pressure-interface-force-rows');
+  if (pressureInterfaceForceSolver) blockers.push('pressure-interface-force-solver');
+  if (residentProductMass) blockers.push('resident-product-mass-sidecar');
+  return blockers;
+}
+
+function uniqueStringList(values = []) {
+  return [...new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
+}
+
+function createFusedResidentSequencePreflight({
+  requested = false,
+  stepCount = 1,
+  readbackMode = FULL_READBACK_MODE,
+  compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
+  preferWebGpu = false,
+  device = null,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  requestPerStepFusedNoFullMechanics = false,
+  requestActiveGridFusedNoFullMechanics = false,
+  customRunnerBlockers = [],
+  sidecarBlockers = []
+} = {}) {
+  const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
+  const sequenceRequested = requested === true;
+  const blockers = [];
+  if (sequenceRequested) {
+    if (normalizedStepCount <= 1) blockers.push('step-count-not-greater-than-one');
+    if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
+      blockers.push('compact-summary-every-step');
+    }
+    if (readbackMode !== NO_FULL_READBACK_MODE) blockers.push('full-readback-requested');
+    if (preferWebGpu !== true) blockers.push('webgpu-not-preferred');
+    if (!(device?.createBuffer && device.queue?.writeBuffer)) blockers.push('webgpu-device-unavailable');
+    if (sphParticleUpload?.status !== 'webgpu-uploaded') blockers.push('sph-particle-upload-not-resident');
+    if (mlsMpmParticleUpload?.status !== 'webgpu-uploaded') blockers.push('mls-mpm-upload-not-resident');
+    blockers.push(...uniqueStringList(customRunnerBlockers));
+    blockers.push(...uniqueStringList(sidecarBlockers));
+  }
+  const uniqueBlockers = uniqueStringList(blockers);
+  const sequenceRunnable = sequenceRequested && uniqueBlockers.length === 0;
+  const perStepFusedMechanicsFallbackEligible = Boolean(
+    sequenceRequested
+    && requestPerStepFusedNoFullMechanics
+    && requestActiveGridFusedNoFullMechanics
+    && readbackMode === NO_FULL_READBACK_MODE
+    && preferWebGpu === true
+    && device?.createBuffer
+    && device.queue?.writeBuffer
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+  );
+  const fallbackMode = sequenceRunnable
+    ? 'fused-no-full-resident-mechanics-sequence'
+    : (perStepFusedMechanicsFallbackEligible
+        ? 'per-step-fused-mechanics-active-grid'
+        : 'per-step-resident-pass-dag');
+  return {
+    schema: ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA,
+    status: sequenceRunnable
+      ? 'fused-resident-sequence-preflight-ready'
+      : (sequenceRequested ? 'blocked-fused-resident-sequence' : 'fused-resident-sequence-not-requested'),
+    sequenceRequested,
+    sequenceRunnable,
+    stepCount: normalizedStepCount,
+    readbackMode,
+    compactSummaryMode: normalizedCompactSummaryMode,
+    preferWebGpu: preferWebGpu === true,
+    deviceReady: Boolean(device?.createBuffer && device.queue?.writeBuffer),
+    residentUploadsReady: Boolean(
+      sphParticleUpload?.status === 'webgpu-uploaded'
+      && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    ),
+    blockers: uniqueBlockers,
+    sidecarBlockers: uniqueStringList(sidecarBlockers),
+    customRunnerBlockers: uniqueStringList(customRunnerBlockers),
+    fallbackMode,
+    perStepFusedMechanicsFallbackEligible,
+    activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
+    thermalAwareFusionRequired: uniqueBlockers.includes('thermal-sidecar'),
+    reactionAwareFusionRequired: uniqueBlockers.includes('reaction-sidecar'),
+    pressureInterfaceAwareFusionRequired:
+      uniqueBlockers.includes('pressure-interface-force-rows')
+      || uniqueBlockers.includes('pressure-interface-force-solver'),
+    residentProductMassAwareFusionRequired: uniqueBlockers.includes('resident-product-mass-sidecar')
+  };
+}
+
 function createResidentSequenceLaneContract({
   laneId,
   stateKey,
@@ -4494,21 +4595,39 @@ function createResidentSequenceLaneContract({
   writeFamilies = [],
   retainedBufferRefs = [],
   activeGridDispatchPolicy = null,
-  fusedResidentSequence = false
+  fusedResidentSequence = false,
+  sidecarBlockers = []
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
   const sequenceRequested = fusedResidentSequence === true;
+  const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  const requirementBlockers = [];
+  if (sequenceRequested) {
+    if (normalizedStepCount <= 1) requirementBlockers.push('step-count-not-greater-than-one');
+    if (readbackMode !== NO_FULL_READBACK_MODE) requirementBlockers.push('full-readback-requested');
+    if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
+      requirementBlockers.push('compact-summary-every-step');
+    }
+    requirementBlockers.push(...normalizedSidecarBlockers);
+  }
+  const blockers = uniqueStringList(requirementBlockers);
   const sequenceRunnable = sequenceRequested
     && normalizedStepCount > 1
     && readbackMode === NO_FULL_READBACK_MODE
-    && normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY;
+    && normalizedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP
+    && blockers.length === 0;
   const activeGridEnabled = activeGridDispatchPolicy?.enabled === true;
   const sequenceMode = sequenceRunnable
     ? (activeGridEnabled
       ? 'fused-no-full-active-grid-mechanics-sequence'
       : 'fused-no-full-full-grid-mechanics-sequence')
     : 'per-step-resident-pass-dag';
+  const fallbackMode = sequenceRunnable
+    ? sequenceMode
+    : (sequenceRequested && activeGridEnabled
+        ? 'per-step-fused-mechanics-active-grid'
+        : 'per-step-resident-pass-dag');
   return {
     schema: ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA,
     authority: 'compute-manager-gpuhub-resident-lane-contract',
@@ -4524,7 +4643,16 @@ function createResidentSequenceLaneContract({
     compactSummaryMode: normalizedCompactSummaryMode,
     sequenceRequested,
     sequenceRunnable,
+    blockers,
+    sidecarBlockers: normalizedSidecarBlockers,
     sequenceMode,
+    fallbackMode,
+    thermalAwareFusionRequired: blockers.includes('thermal-sidecar'),
+    reactionAwareFusionRequired: blockers.includes('reaction-sidecar'),
+    pressureInterfaceAwareFusionRequired:
+      blockers.includes('pressure-interface-force-rows')
+      || blockers.includes('pressure-interface-force-solver'),
+    residentProductMassAwareFusionRequired: blockers.includes('resident-product-mass-sidecar'),
     activeGridDispatchPolicy,
     defaultEnabled: false,
     laneMustRetainBuffers: [...retainedBufferRefs],
@@ -4797,6 +4925,13 @@ export function createMlsMpmResidentStepsComputeTask({
     activeGridDispatchPlanRefreshMode,
     safetyCells: taskStepOptions.activeGridSafetyCells ?? taskStepOptions.fusedActiveGridSafetyCells
   });
+  const residentSequenceSidecarBlockers = fusedResidentSequenceSidecarBlockers({
+    thermalMaterialTable: taskStepOptions.thermalMaterialTable,
+    reactionTable: taskStepOptions.reactionTable,
+    pressureInterfaceForceRowsBuffer: taskStepOptions.pressureInterfaceForceRowsBuffer,
+    pressureInterfaceForceSolver: taskStepOptions.pressureInterfaceForceSolver,
+    residentProductMass: taskStepOptions.residentProductMass ?? taskStepOptions.nextParticleUploads?.residentProductMass ?? null
+  });
   const residentSequenceLaneContract = createResidentSequenceLaneContract({
     laneId,
     stateKey,
@@ -4809,7 +4944,8 @@ export function createMlsMpmResidentStepsComputeTask({
     writeFamilies,
     retainedBufferRefs,
     activeGridDispatchPolicy,
-    fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence)
+    fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence),
+    sidecarBlockers: residentSequenceSidecarBlockers
   });
   const hotLoopBudget = summarizeMlsMpmResidentHotLoopBudget({
     ...taskStepOptions,
@@ -13564,25 +13700,35 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     args.fuseNoFullResidentMechanics
     || (args.fuseNoFullResidentMechanicsSequence && requestActiveGridFusedNoFullMechanics)
   );
-  const useFusedNoFullResidentMechanicsSequence = Boolean(args.fuseNoFullResidentMechanicsSequence)
-    && count > 1
-    && resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP
-    && requestedReadbackMode === NO_FULL_READBACK_MODE
-    && args.preferWebGpu
-    && Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)
-    && sphParticleUpload?.status === 'webgpu-uploaded'
-    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
-    && !args.p2gRunner
-    && !args.gridUpdateRunner
-    && !args.g2pRunner
-    && !args.p2gStageRunner
-    && !args.gridUpdateStageRunner
-    && !args.g2pStageRunner
-    && !args.thermalMaterialTable
-    && !(args.reactionTable?.reactionCount > 0)
-    && !args.pressureInterfaceForceRowsBuffer
-    && !args.pressureInterfaceForceSolver
-    && !residentProductMass;
+  const fusedSequenceCustomRunnerBlockers = [
+    args.p2gRunner ? 'custom-p2g-runner' : null,
+    args.gridUpdateRunner ? 'custom-grid-update-runner' : null,
+    args.g2pRunner ? 'custom-g2p-runner' : null,
+    args.p2gStageRunner ? 'custom-p2g-stage-runner' : null,
+    args.gridUpdateStageRunner ? 'custom-grid-update-stage-runner' : null,
+    args.g2pStageRunner ? 'custom-g2p-stage-runner' : null
+  ];
+  const fusedResidentSequencePreflight = createFusedResidentSequencePreflight({
+    requested: Boolean(args.fuseNoFullResidentMechanicsSequence),
+    stepCount: count,
+    readbackMode: requestedReadbackMode,
+    compactSummaryMode: resolvedCompactSummaryMode,
+    preferWebGpu: args.preferWebGpu === true,
+    device: resolvedDevice,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    requestPerStepFusedNoFullMechanics,
+    requestActiveGridFusedNoFullMechanics,
+    customRunnerBlockers: fusedSequenceCustomRunnerBlockers,
+    sidecarBlockers: fusedResidentSequenceSidecarBlockers({
+      thermalMaterialTable: args.thermalMaterialTable,
+      reactionTable: args.reactionTable,
+      pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
+      pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
+      residentProductMass
+    })
+  });
+  const useFusedNoFullResidentMechanicsSequence = fusedResidentSequencePreflight.sequenceRunnable === true;
   if (useFusedNoFullResidentMechanicsSequence) {
     markSequenceProgress('resident-sequence-fused-mechanics-started', {
       stepCount: count
@@ -13618,6 +13764,10 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     });
     const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
     const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);
+    finalStep.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    if (finalStep.stageTiming) {
+      finalStep.stageTiming.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    }
     const stepSummaries = Array.from({ length: count }, (_, index) => {
       const summary = summarizeResidentStepForSequence(finalStep, index);
       summary.status = index === count - 1
@@ -13669,6 +13819,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       residentBufferLeaseWarnings: [...(finalStep.residentBufferLeaseWarnings || [])],
       residentBufferLeaseBlockers: [...(finalStep.residentBufferLeaseBlockers || [])],
       fusedResidentSequence: finalStep.fusedResidentSequence,
+      fusedResidentSequencePreflight,
       gpuAuthoritativeState: false,
       scientificValidation: false,
       sphValidation: false,
@@ -13743,6 +13894,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     completedStepCount: stepSummaries.length,
     backend: finalStep?.backend || 'cpu-reference'
   });
+  if (finalStep && fusedResidentSequencePreflight.sequenceRequested) {
+    finalStep.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    if (finalStep.stageTiming) {
+      finalStep.stageTiming.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
+    }
+  }
 
   return {
     schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
@@ -13777,6 +13934,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
     residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
+    fusedResidentSequencePreflight,
     gpuAuthoritativeState: false,
     scientificValidation: false,
     sphValidation: false,

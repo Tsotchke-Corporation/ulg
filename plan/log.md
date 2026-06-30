@@ -33729,3 +33729,49 @@ Validation:
 Next:
 
 - Commit this use-case routing slice before continuing to the next todo item.
+
+## 2026-06-30 AKDT - Fused Sequence Sidecar Preflight Contract
+
+Status:
+
+- Resident MLS-MPM multi-step fused sequence requests now produce
+  `peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0`.
+- The runtime preflight reports sidecar blockers, custom runner blockers,
+  whether the fused sequence is runnable, and whether the fallback is
+  `per-step-resident-pass-dag` or
+  `per-step-fused-mechanics-active-grid`.
+- ComputeManager lane contracts now fail closed when thermal, reaction,
+  pressure-interface, or resident-product sidecars require per-step ordering,
+  rather than advertising a runnable fused sequence.
+- Probe and benchmark summaries carry the preflight, and the benchmark gate now
+  accepts sidecar-only active-grid fallback as a valid physical fallback while
+  still failing unrelated fused-sequence blockers.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `67/67` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs` with
+  `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: live HTTPS benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=final-only ULG_BENCH_ACTIVE_GRID_PLAN_REFRESH_MODE=final-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fused-preflight-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite/scenario/probe `pass`/`good`/`good`,
+  `fusedResidentSequencePreflightStatus=blocked-fused-resident-sequence`,
+  `fusedResidentSequencePreflightFallbackMode=per-step-fused-mechanics-active-grid`,
+  blockers `[thermal-sidecar]`,
+  `fusedResidentSequenceBlockedForSidecars=true`,
+  `fusedResidentSequenceRequirementSatisfied=true`,
+  `fusedResidentActiveGridRequirementSatisfied=true`, and
+  `queueFenceBypassedBySidecarFallback=true`.
+
+Next:
+
+- Commit this sidecar preflight slice. The next performance boundary remains a
+  real thermal/reaction-aware fused sequence or the larger Ocean-tiled P2G
+  backend; this change only makes the current fallback explicit and measurable.

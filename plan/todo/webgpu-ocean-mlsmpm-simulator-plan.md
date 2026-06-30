@@ -1301,6 +1301,18 @@ Interim status, 2026-06-18 AKDT:
   `renderUseCase=same-device` reports retained presentation ready, source state
   transfer `0`, input transfer `96` bytes, skipped legacy draw, direct resident
   compute mode, and estimated readback bytes per step `0`.
+- 2026-06-30 fused-sequence sidecar preflight: MLS-MPM resident steps now
+  publish
+  `peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0` when a
+  multi-step fused mechanics sequence is requested. PeerCompute lane contracts
+  fail closed when thermal, reaction, pressure-interface, or resident-product
+  sidecars require per-step ordering, and report whether the fallback is the
+  generic per-step DAG or active-grid per-step mechanics. Probe and benchmark
+  summaries now carry the preflight, and the benchmark gate treats a sidecar-
+  only block with `per-step-fused-mechanics-active-grid` as a valid physical
+  fallback instead of a failed fused-sequence request. This does not implement
+  thermal-aware multi-step fusion; it makes that remaining plan boundary
+  explicit and measurable.
 
 ## ULG-Specific Constraints
 

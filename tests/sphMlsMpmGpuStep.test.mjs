@@ -4085,6 +4085,36 @@ test('MLS-MPM resident steps expose WebGPU-Ocean hot-loop budget diagnostics', a
   assert.equal(activeGridTask.gpuResidentLane.copyBudget.readbackBytes, 0);
 });
 
+test('MLS-MPM resident steps compute task blocks fused sequence when sidecars require per-step ordering', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-sidecar-sequence-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'final-only',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 }
+  });
+
+  const contract = task.gpuResidentLane.residentSequenceLaneContract;
+  assert.equal(contract.sequenceRequested, true);
+  assert.equal(contract.sequenceRunnable, false);
+  assert.equal(contract.status, 'blocked-fused-sequence-requirements-not-met');
+  assert.equal(contract.sequenceMode, 'per-step-resident-pass-dag');
+  assert.equal(contract.fallbackMode, 'per-step-fused-mechanics-active-grid');
+  assert.deepEqual(contract.sidecarBlockers, ['thermal-sidecar', 'reaction-sidecar']);
+  assert.equal(contract.thermalAwareFusionRequired, true);
+  assert.equal(contract.reactionAwareFusionRequired, true);
+  assert.equal(task.webgpu.residentSequenceLaneContract.sequenceRunnable, false);
+  assert.equal(task.data.residentSequenceLaneContract.fallbackMode, 'per-step-fused-mechanics-active-grid');
+});
+
 test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {
   const { options } = noFullReadbackResidentStepFixture();
   const ignoredLaneManager = fakeGpuResidentLaneManager();
@@ -6442,6 +6472,20 @@ test('MLS-MPM resident steps avoid full-grid per-step fused fallback when therma
   });
 
   assert.equal(execution.fusedResidentSequence, undefined);
+  assert.equal(
+    execution.fusedResidentSequencePreflight.schema,
+    'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0'
+  );
+  assert.equal(execution.fusedResidentSequencePreflight.status, 'blocked-fused-resident-sequence');
+  assert.equal(execution.fusedResidentSequencePreflight.sequenceRequested, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sequenceRunnable, false);
+  assert.equal(execution.fusedResidentSequencePreflight.fallbackMode, 'per-step-resident-pass-dag');
+  assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarBlockers, ['thermal-sidecar']);
+  assert.equal(execution.fusedResidentSequencePreflight.thermalAwareFusionRequired, true);
+  assert.equal(
+    execution.finalStep.stageTiming.fusedResidentSequencePreflight.status,
+    'blocked-fused-resident-sequence'
+  );
   assert.equal(execution.finalStep.stageTiming.fusedResidentMechanics, false);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, undefined);
   assert.equal(execution.finalStep.stageTiming.thermalRequested, true);
@@ -6520,6 +6564,10 @@ test('MLS-MPM resident steps can defer active-grid plan-only summary until final
 
   assert.equal(execution.activeGridDispatchPlanRefreshMode, 'final-only');
   assert.equal(execution.fusedResidentSequence, undefined);
+  assert.equal(execution.fusedResidentSequencePreflight.status, 'blocked-fused-resident-sequence');
+  assert.equal(execution.fusedResidentSequencePreflight.fallbackMode, 'per-step-fused-mechanics-active-grid');
+  assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarBlockers, ['thermal-sidecar']);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequencePreflight.fallbackMode, 'per-step-fused-mechanics-active-grid');
   assert.equal(thermalInputs.length, 3);
   assert.equal(execution.stepSummaries.length, 3);
   for (const summary of execution.stepSummaries.slice(0, 2)) {

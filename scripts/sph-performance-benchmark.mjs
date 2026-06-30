@@ -341,7 +341,8 @@ function scenarioPerformanceGate({
   residentStageStepsPerSecond,
   estimatedReadbackBytesPerStep,
   activeGridDispatch,
-  residentStageTiming
+  residentStageTiming,
+  fusedResidentSequenceBlockedForSidecars = false
 }) {
   const blockers = [];
   if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
@@ -349,6 +350,7 @@ function scenarioPerformanceGate({
   }
   if (
     requireQueueFenceGate
+    && fusedResidentSequenceBlockedForSidecars !== true
     && residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence !== 'complete'
   ) {
     blockers.push('queue-fenced-resident-sequence-required');
@@ -396,7 +398,8 @@ function scenarioPerformanceGate({
       residentStageStepsPerSecond,
       estimatedReadbackBytesPerStep,
       activeGridUsed: activeGridDispatch?.useActiveGrid === true,
-      queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null
+      queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null,
+      queueFenceBypassedBySidecarFallback: fusedResidentSequenceBlockedForSidecars === true
     }
   };
 }
@@ -494,6 +497,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const mechanicsMaterialPhaseUpload = metric?.mlsMpmMechanicsMaterialPhaseUpload || null;
   const effectiveProbeMode = result?.timeline?.probeMode || probeMode;
   const residentStageTiming = residentStep?.stageTiming ?? residentSteps?.finalStepStageTiming ?? null;
+  const fusedResidentSequencePreflight = residentSteps?.fusedResidentSequencePreflight
+    ?? residentStageTiming?.fusedResidentSequencePreflight
+    ?? residentStep?.fusedResidentSequencePreflight
+    ?? null;
   const residentStepsTiming = residentSteps?.residentStepsTiming ?? null;
   const residentStepsStageMs = residentSteps?.residentStepsStageMs
     ?? residentStepsTiming?.stageMs
@@ -2089,24 +2096,50 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? (activeGridNodeCount !== null && gridNodeCount !== null && gridNodeCount > 0
       ? activeGridNodeCount / gridNodeCount
       : null);
+  const fusedResidentSequencePreflightBlockers = Array.isArray(fusedResidentSequencePreflight?.blockers)
+    ? fusedResidentSequencePreflight.blockers
+    : [];
+  const fusedResidentSequencePreflightSidecarBlockers = Array.isArray(fusedResidentSequencePreflight?.sidecarBlockers)
+    ? fusedResidentSequencePreflight.sidecarBlockers
+    : [];
+  const fusedResidentSequenceBlockedForSidecars = Boolean(
+    fusedResidentSequencePreflight?.status === 'blocked-fused-resident-sequence'
+    && fusedResidentSequencePreflightSidecarBlockers.length > 0
+    && fusedResidentSequencePreflightBlockers.length === fusedResidentSequencePreflightSidecarBlockers.length
+    && fusedResidentSequencePreflightBlockers.every(
+      (blocker) => fusedResidentSequencePreflightSidecarBlockers.includes(blocker)
+    )
+    && (
+      fusedResidentSequencePreflight?.fallbackMode === 'per-step-resident-pass-dag'
+      || fusedResidentSequencePreflight?.fallbackMode === 'per-step-fused-mechanics-active-grid'
+    )
+  );
+  const fusedResidentSequenceRequirementSatisfied = Boolean(
+    !fuseResidentMechanicsSequence
+    || residentStageTiming?.fusedResidentSequence === true
+    || fusedResidentSequenceBlockedForSidecars
+  );
+  const fusedResidentActiveGridRequirementSatisfied = Boolean(
+    !fuseResidentMechanicsActiveGrid
+    || activeGridDispatch?.useActiveGrid === true
+    || (
+      fusedResidentSequenceBlockedForSidecars
+      && fusedResidentSequencePreflight?.fallbackMode === 'per-step-fused-mechanics-active-grid'
+    )
+  );
   const performanceGate = scenarioPerformanceGate({
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
     estimatedReadbackBytesPerStep,
     activeGridDispatch,
-    residentStageTiming
+    residentStageTiming,
+    fusedResidentSequenceBlockedForSidecars
   });
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
     && residentSteps?.status === 'resident-steps-executed'
     && residentStep?.status === 'resident-step-webgpu-executed'
-    && (
-      !fuseResidentMechanicsSequence
-      || residentStageTiming?.fusedResidentSequence === true
-    )
-    && (
-      !fuseResidentMechanicsActiveGrid
-      || activeGridDispatch?.useActiveGrid === true
-    );
+    && fusedResidentSequenceRequirementSatisfied
+    && fusedResidentActiveGridRequirementSatisfied;
   const benchmarkStatus = exit.code === 0
     && Number(browserConsoleIssueCount ?? 0) === 0
     && Number.isFinite(residentStageMs)
@@ -2224,6 +2257,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     fusedResidentSequence: residentStageTiming?.fusedResidentSequence ?? null,
     fusedResidentSequenceStepCount: residentStageTiming?.fusedResidentSequenceStepCount ?? null,
     fusedResidentSequenceRequested: fuseResidentMechanicsSequence,
+    fusedResidentSequencePreflightStatus: fusedResidentSequencePreflight?.status ?? null,
+    fusedResidentSequencePreflightFallbackMode: fusedResidentSequencePreflight?.fallbackMode ?? null,
+    fusedResidentSequencePreflightBlockers,
+    fusedResidentSequencePreflightSidecarBlockers,
+    fusedResidentSequenceBlockedForSidecars,
+    fusedResidentSequenceRequirementSatisfied,
+    fusedResidentActiveGridRequirementSatisfied,
     fusedResidentActiveGridRequested: fuseResidentMechanicsActiveGrid,
     activeGridDispatchPlanRefreshModeRequested: activeGridDispatchPlanRefreshMode,
     activeGridDispatchPlanRefreshMode: residentStageTiming?.activeGridDispatchPlanRefreshMode ?? null,

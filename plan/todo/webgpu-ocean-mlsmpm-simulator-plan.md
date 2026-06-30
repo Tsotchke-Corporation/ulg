@@ -1135,6 +1135,13 @@ Interim status, 2026-06-18 AKDT:
   table through render-row/full-readback work. Next slice should build a
   GPU-resident particle/material interface extraction path so pressure coupling
   freshness is not gated by a CPU/readback surface-table seed.
+- 2026-06-30 interactive cadence update: interactive worker/presentation and
+  same-device render-ownership use cases now default post-step material/pressure
+  interface refresh to `pipelined`, while strict main-thread/default playback
+  remains `blocking` and explicit PeerCompute/URL overrides still win. This is
+  a scheduler/backpressure fix for the slideshow symptom after source-field
+  budget tuning; it does not remove the durable need for a sparse/source-local
+  material-interface source-field builder.
 
 ## ULG-Specific Constraints
 

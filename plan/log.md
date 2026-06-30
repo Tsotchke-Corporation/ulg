@@ -33000,3 +33000,37 @@ Next:
   optimal source-field algorithm. The durable fix remains a sparse/source-local
   or particle-to-field resident material-interface builder so the cost scales
   with active material volume instead of full coarse cells times particles.
+
+## 2026-06-30 00:18 AKDT - Interactive Interface Refresh Cadence
+
+Status:
+
+- Changed the PeerCompute render ownership cadence default so interactive
+  worker/presentation and same-device use cases resolve post-step
+  material/pressure interface refresh to `pipelined` instead of `blocking`.
+- Kept strict main-thread/default playback on `blocking`, and kept explicit
+  `residentInterfaceRefresh=blocking` / PeerCompute policy overrides
+  authoritative.
+- This addresses the user-visible slideshow mode where a bounded but still
+  expensive material-interface extraction pass can stall the next resident
+  simulation batch. It does not claim the material-interface source-field
+  shader is fast; it moves that producer behind the scheduler backpressure and
+  coalescing path until the sparse/source-local builder lands.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs`
+- LIVE HTTPS served-module probe:
+  `workerOffscreenPresentation=1&renderUseCase=same-device-mobile` resolves
+  `residentInterfaceRefreshMode=pipelined`,
+  `residentInterfaceRefreshModeExplicit=false`, while the main-thread default
+  remains `blocking` and explicit `blocking` remains explicit.
+
+Next:
+
+- Re-measure the mounted H2O/H2O and Cs/F paths on device. If frame pacing is
+  still poor, the next implementation slice should build the resident
+  material-interface source field from sparse/source-local particle ownership
+  instead of scanning every coarse field cell over every particle.

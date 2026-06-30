@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `361`
-- total lines indexed: `275134`
+- total lines indexed: `275194`
 - languages: `{"markdown": 134, "javascript": 114, "text": 92, "json": 20, "c": 1}`
 
 ## Important Files
@@ -48,9 +48,9 @@
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
 - `tests`: 78 files, 52402 lines, symbols=0, tests=78, languages={"text": 78}
-- `src/runtime`: 32 files, 20146 lines, symbols=428, tests=0, languages={"javascript": 32}
+- `src/runtime`: 32 files, 20165 lines, symbols=428, tests=0, languages={"javascript": 32}
 - `src/runtime/sph`: 28 files, 42476 lines, symbols=912, tests=0, languages={"javascript": 28}
-- `plan/todo`: 25 files, 14433 lines, symbols=0, tests=0, languages={"markdown": 25}
+- `plan/todo`: 25 files, 14440 lines, symbols=0, tests=0, languages={"markdown": 25}
 - `src/runtime/material`: 21 files, 6147 lines, symbols=253, tests=0, languages={"javascript": 21}
 - `.`: 10 files, 2249 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
@@ -59,7 +59,7 @@
 - `scripts`: 6 files, 11394 lines, symbols=0, tests=0, languages={"text": 6}
 - `src/visualization`: 5 files, 33022 lines, symbols=624, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 55862 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 55896 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `plan/moot`: 5 files, 1771 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `ulg-gpu-abi/src`: 4 files, 9463 lines, symbols=53, tests=0, languages={"javascript": 4}
 - `data/material-properties/schemas`: 4 files, 314 lines, symbols=0, tests=0, languages={"json": 4}
@@ -77,7 +77,7 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 33003 | `plan/log.md` | markdown |
+| 33037 | `plan/log.md` | markdown |
 | 24510 | `src/visualization/sphPhaseScene.js` | javascript |
 | 13948 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
 | 13342 | `plan/tests.md` | markdown |

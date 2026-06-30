@@ -41,7 +41,7 @@ test('render ownership policy maps local worker canvas requests to transitional 
   assert.equal(policy.configuredByPeerCompute, false);
   assert.equal(policy.residentPlaybackUseCase, 'interactive-worker-presentation');
   assert.equal(policy.residentStepsPerScheduleMax, 4);
-  assert.equal(policy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(policy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(policy.residentInterfaceRefreshModeExplicit, false);
 });
 
@@ -89,7 +89,7 @@ test('render ownership policy does not preserve local default interface mode as 
     source: 'sph-phase-scene'
   });
 
-  assert.equal(initialPolicy.residentInterfaceRefreshMode, 'blocking');
+  assert.equal(initialPolicy.residentInterfaceRefreshMode, 'pipelined');
   assert.equal(initialPolicy.residentInterfaceRefreshModeExplicit, false);
   assert.equal(
     sceneReadyPolicy.effectiveMode,

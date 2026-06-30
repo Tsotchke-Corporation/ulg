@@ -297,6 +297,14 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     workerPresentationRequested
     && !throughputPlaybackRequested
   );
+  const sameDeviceInteractivePlayback = [
+    'interactive',
+    'interactive-worker-presentation',
+    'interactive-presentation',
+    'same-device',
+    'same-device-mobile',
+    'mobile'
+  ].includes(normalizedUseCaseKey);
   const residentStepOverride = normalizePositiveInteger(
     residentStepsPerScheduleOverride
       ?? policy.residentStepsPerScheduleOverride
@@ -336,6 +344,17 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     residentInterfaceRefreshMode != null
     || policyResidentInterfaceRefreshModeExplicit
   );
+  const defaultResidentInterfaceRefreshMode = (
+    (
+      workerOwnedResidentProducerSelected
+      && targetImplementationReady
+    )
+    || interactiveWorkerPresentationPlayback
+    || interactivePresentationPlayback
+    || sameDeviceInteractivePlayback
+  )
+    ? 'pipelined'
+    : 'blocking';
   const residentInterfaceRefreshModeResolved = normalizeResidentInterfaceRefreshMode(
     residentInterfaceRefreshMode
       ?? (policyResidentInterfaceRefreshModeExplicit
@@ -345,7 +364,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
           ?? policy.interfaceRefreshMode
         )
         : null),
-    workerOwnedResidentProducerSelected && targetImplementationReady ? 'pipelined' : 'blocking'
+    defaultResidentInterfaceRefreshMode
   );
   const inputTransport = workerOwnedResidentProducerSelected && targetImplementationReady
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.WORKER_OWNED_RESIDENT_RENDER_PRODUCER

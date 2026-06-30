@@ -1570,6 +1570,33 @@ async function runBrowserProbe({
             }))
           : []
       } : null;
+      const compactSidecarFusionStepEvidence = (evidence) => evidence ? {
+        schema: evidence.schema ?? null,
+        status: evidence.status ?? null,
+        sidecarFusionPlanStatus: evidence.sidecarFusionPlanStatus ?? null,
+        sidecarFusionRequired: evidence.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: evidence.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(evidence.sidecarBlockers || [])],
+        requiredStageOrder: [...(evidence.requiredStageOrder || [])],
+        stageCount: evidence.stageCount ?? null,
+        executedStageCount: evidence.executedStageCount ?? null,
+        passedStageCount: evidence.passedStageCount ?? null,
+        allRequiredStagesPassed: evidence.allRequiredStagesPassed ?? null,
+        promotesFusedSequence: evidence.promotesFusedSequence ?? null,
+        fallbackEvidence: evidence.fallbackEvidence ?? null,
+        stages: Array.isArray(evidence.stages)
+          ? evidence.stages.map((stage) => ({
+              id: stage.id ?? null,
+              status: stage.status ?? null,
+              sourceStatus: stage.sourceStatus ?? null,
+              backend: stage.backend ?? null,
+              executed: stage.executed ?? null,
+              retainedOutputSatisfied: stage.retainedOutputSatisfied ?? null,
+              orderSatisfied: stage.orderSatisfied ?? null,
+              passed: stage.passed ?? null
+            }))
+          : []
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -1617,6 +1644,7 @@ async function runBrowserProbe({
         fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
         fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
         fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(stageTiming.fusedResidentSequencePreflight),
+        sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(stageTiming.sidecarFusionStepEvidence),
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -5014,6 +5042,33 @@ async function runDirectResidentProbe({
             }))
           : []
       } : null;
+      const compactSidecarFusionStepEvidence = (evidence) => evidence ? {
+        schema: evidence.schema ?? null,
+        status: evidence.status ?? null,
+        sidecarFusionPlanStatus: evidence.sidecarFusionPlanStatus ?? null,
+        sidecarFusionRequired: evidence.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: evidence.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(evidence.sidecarBlockers || [])],
+        requiredStageOrder: [...(evidence.requiredStageOrder || [])],
+        stageCount: evidence.stageCount ?? null,
+        executedStageCount: evidence.executedStageCount ?? null,
+        passedStageCount: evidence.passedStageCount ?? null,
+        allRequiredStagesPassed: evidence.allRequiredStagesPassed ?? null,
+        promotesFusedSequence: evidence.promotesFusedSequence ?? null,
+        fallbackEvidence: evidence.fallbackEvidence ?? null,
+        stages: Array.isArray(evidence.stages)
+          ? evidence.stages.map((stage) => ({
+              id: stage.id ?? null,
+              status: stage.status ?? null,
+              sourceStatus: stage.sourceStatus ?? null,
+              backend: stage.backend ?? null,
+              executed: stage.executed ?? null,
+              retainedOutputSatisfied: stage.retainedOutputSatisfied ?? null,
+              orderSatisfied: stage.orderSatisfied ?? null,
+              passed: stage.passed ?? null
+            }))
+          : []
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -5073,6 +5128,8 @@ async function runDirectResidentProbe({
             status: summary.status ?? null,
             backend: summary.backend ?? null,
             compactSummaryAvailable: summary.compactSummaryAvailable ?? null,
+            sidecarFusionStepEvidenceStatus: summary.sidecarFusionStepEvidenceStatus ?? null,
+            sidecarFusionStepEvidencePassedStageCount: summary.sidecarFusionStepEvidencePassedStageCount ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
@@ -5140,6 +5197,7 @@ async function runDirectResidentProbe({
           fusedResidentMechanics: step.stageTiming.fusedResidentMechanics ?? null,
           fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? null,
           fusedResidentSequenceStepCount: step.stageTiming.fusedResidentSequenceStepCount ?? null,
+          sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(step.stageTiming.sidecarFusionStepEvidence),
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }

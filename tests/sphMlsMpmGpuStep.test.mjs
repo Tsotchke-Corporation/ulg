@@ -4765,6 +4765,25 @@ test('MLS-MPM resident step refreshes mechanics after a retained thermal GPU ste
     navigatorRef: webGpuNavigator(),
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
+    sidecarFusionPlan: {
+      schema: 'peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0',
+      status: 'sidecar-fusion-plan-ready-execution-blocked',
+      required: true,
+      sidecarFusionRunnable: false,
+      sidecarBlockers: ['thermal-sidecar'],
+      requiredStageOrder: [
+        'mechanics-p2g',
+        'mechanics-grid-update',
+        'mechanics-g2p',
+        'thermal-phase',
+        'mechanics-refresh',
+        'resident-compact-summary-or-active-grid-plan'
+      ],
+      stages: [
+        { id: 'thermal-phase', blocker: 'thermal-sidecar', lawNodeId: 'ulg-sph-thermal-phase-law' },
+        { id: 'mechanics-refresh', blocker: 'thermal-sidecar', lawNodeId: 'ulg-mls-mpm-mechanics-refresh-law' }
+      ]
+    },
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
     mechanicsMaterialTable,
     thermalStepOptions: {
@@ -4887,6 +4906,14 @@ test('MLS-MPM resident step refreshes mechanics after a retained thermal GPU ste
   assert.equal(mechanicsRefreshCalls, 1);
   assert.equal(step.stageStatus.mechanicsRefresh, 'mechanics-constitutive-refresh-executed');
   assert.equal(step.stageBackends.mechanicsRefresh, 'webgpu');
+  assert.equal(step.sidecarFusionStepEvidence.status, 'sidecar-fusion-step-evidence-ready');
+  assert.equal(step.sidecarFusionStepEvidence.stageCount, 2);
+  assert.equal(step.sidecarFusionStepEvidence.executedStageCount, 2);
+  assert.equal(step.sidecarFusionStepEvidence.passedStageCount, 2);
+  assert.equal(step.sidecarFusionStepEvidence.allRequiredStagesPassed, true);
+  assert.equal(step.sidecarFusionStepEvidence.promotesFusedSequence, false);
+  assert.equal(step.stageTiming.sidecarFusionStepEvidence.status, 'sidecar-fusion-step-evidence-ready');
+  assert.equal(step.diagnostics.sidecarFusionStepEvidencePassedStageCount, 2);
   assert.equal(step.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
   assert.equal(step.diagnostics.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
   assert.equal(step.thermalPhaseTransitionStatus, 'thermal-phase-transition-applied');
@@ -6597,6 +6624,13 @@ test('MLS-MPM resident steps avoid full-grid per-step fused fallback when therma
     execution.finalStep.stageTiming.fusedResidentSequencePreflight.status,
     'blocked-fused-resident-sequence'
   );
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.status, 'sidecar-fusion-step-evidence-partial');
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.stageCount, 2);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.executedStageCount, 1);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.passedStageCount, 1);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.promotesFusedSequence, false);
+  assert.equal(execution.stepSummaries[1].sidecarFusionStepEvidenceStatus, 'sidecar-fusion-step-evidence-partial');
+  assert.equal(execution.stepSummaries[1].sidecarFusionStepEvidencePassedStageCount, 1);
   assert.equal(execution.finalStep.stageTiming.fusedResidentMechanics, false);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, undefined);
   assert.equal(execution.finalStep.stageTiming.thermalRequested, true);

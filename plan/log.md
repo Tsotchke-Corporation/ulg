@@ -33880,3 +33880,52 @@ Next:
   thermal plus mechanics-refresh inside the lane-owned sequence, while keeping
   reaction/product and pressure-interface stages blocked until their retained
   inputs and ownership transitions are proven.
+
+## 2026-06-30 AKDT - Sidecar Fusion Step Evidence
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-fused-resident-sidecar-step-evidence.v0` to
+  resident step execution and stage timing. It compares the sidecar fusion plan
+  with actual per-step stage results and retained output buffers.
+- Thermal and mechanics-refresh stages now report executed/passed evidence
+  only when the corresponding WebGPU stage ran, the expected output buffers
+  were retained, and the planned order was satisfied.
+- Sequence summaries, direct-resident probe output, and performance benchmark
+  output now expose sidecar fusion step evidence status, executed stage count,
+  passed stage count, all-required-stages-passed, and whether the evidence
+  promotes the fused sequence. Promotion remains false in this slice.
+- This proves the thermal plus mechanics-refresh sidecar stages are observable
+  against the new ABI. It still deliberately leaves the multi-step fused
+  sequence blocked until those stages are executed inside the lane-owned fused
+  sequence rather than as fallback evidence.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `69/69` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: live HTTPS benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fusion-evidence-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  `sidecarFusionStepEvidenceStatus=sidecar-fusion-step-evidence-ready`,
+  `sidecarFusionExecutedStageCount=2`, `sidecarFusionPassedStageCount=2`,
+  `sidecarFusionAllRequiredStagesPassed=true`,
+  `sidecarFusionPromotesFusedSequence=false`, `residentStageMs=7.7`,
+  compact-summary `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  The nested two-step direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; this is ABI/execution
+  evidence only.
+
+Next:
+
+- Promote only the thermal plus mechanics-refresh sidecar plan once the
+  sequence runner can consume this evidence without treating fallback
+  execution as a fused multi-step command sequence.

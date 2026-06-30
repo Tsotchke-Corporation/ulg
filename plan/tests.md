@@ -13498,3 +13498,42 @@ Sidecar fusion plan ABI, 2026-06-30 14:35 AKDT:
     compact readback byte length `0`.
   - Caveat: the nested two-step direct probe status remained `bad` with issues
     `missing-max-speed` and `no-positive-displacement`.
+
+Sidecar fusion step evidence, 2026-06-30 15:40 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Syntax:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- Focused resident MLS-MPM:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `69/69`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `18/18`.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `11/11`.
+- Diff hygiene:
+  `git diff --check`
+  - Passed.
+- Live HTTPS sidecar fusion evidence benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fusion-evidence-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, suite gate
+    `pass`, scenario `good`,
+    `sidecarFusionStepEvidenceStatus=sidecar-fusion-step-evidence-ready`,
+    `sidecarFusionExecutedStageCount=2`,
+    `sidecarFusionPassedStageCount=2`,
+    `sidecarFusionAllRequiredStagesPassed=true`,
+    `sidecarFusionPromotesFusedSequence=false`, compact summary
+    `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  - Caveat: the nested two-step direct probe status remained `bad` with issues
+    `missing-max-speed` and `no-positive-displacement`.

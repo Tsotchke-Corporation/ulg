@@ -1332,6 +1332,15 @@ Interim status, 2026-06-18 AKDT:
   slice should fuse thermal plus mechanics refresh first; reaction/product and
   pressure-interface promotion should remain blocked until retained inputs and
   StateManager admission are proven.
+- 2026-06-30 sidecar fusion step evidence: resident steps now emit
+  `peercompute.ulg.mls-mpm-fused-resident-sidecar-step-evidence.v0`, comparing
+  the sidecar fusion plan to actual per-step thermal/mechanics-refresh stage
+  execution and retained output buffers. Live HTTPS direct-resident evidence
+  reports both thermal and mechanics-refresh stages passed while
+  `sidecarFusionPromotesFusedSequence=false`. This is the last evidence slice
+  before promotion: the next code path must move thermal plus mechanics refresh
+  into an explicit sidecar-aware sequence runner instead of counting fallback
+  execution as fused.
 
 ## ULG-Specific Constraints
 

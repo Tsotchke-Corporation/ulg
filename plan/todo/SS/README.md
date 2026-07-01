@@ -45,12 +45,12 @@ Landed checkpoints:
 5. `82044fd` adds retained cross-level coupling candidate rows.
 6. `9d3ea80` wires cross-level prepass orchestration into SS mechanics.
 7. `d752434` filters MLS-MPM P2G by selected Schroeder level assignment.
+8. `e9997a3` enables fused no-full MLS-MPM P2G filtering by retained
+   Schroeder level assignment.
 
 Next implementation queue:
 
-1. Add fused no-full selected-level filtering so SS mechanics can recover the
-   high-throughput resident path instead of falling back to split P2G.
-2. Add adjacent-level conservative restriction/prolongation execution rows and
+1. Add adjacent-level conservative restriction/prolongation execution rows and
    residual counters.
-3. Promote water-to-steam phase-volume migration into a visible SS stress case.
-4. Route reaction/contact/interface work queues through SS active nodes.
+2. Promote water-to-steam phase-volume migration into a visible SS stress case.
+3. Route reaction/contact/interface work queues through SS active nodes.

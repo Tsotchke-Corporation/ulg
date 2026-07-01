@@ -205,16 +205,16 @@ Suggested schemas:
 
 ### Slice 3: Same-Level Mechanics
 
-- Status: partially landed in `55b3a59`, `9d3ea80`, and `d752434`.
+- Status: landed for selected-level fused/split P2G filtering in `55b3a59`,
+  `9d3ea80`, `d752434`, and `e9997a3`.
 - Run existing MLS-MPM/Ocean-style `P2G -> grid update -> G2P` against a single
   selected SS level.
 - Preserve no-full-readback resident operation.
 - Report active level, native `dx`, tile count, particle count, and fallback
   status.
-- Current caveat: selected-level filtering is implemented for split P2G. The
-  fused no-full mechanics path is intentionally disabled when a live SS level
-  assignment is present until the fused P2G shader accepts the same assignment
-  binding and selected-level uniform fields.
+- Current caveat: active-node tiles are planned and exposed, but same-level
+  mechanics still uses dense resident MLS-MPM dispatch over the selected level;
+  active-node consumption inside P2G/G2P remains future work.
 
 ### Slice 4: Adjacent-Level Conservative Coupling
 
@@ -255,19 +255,18 @@ Suggested schemas:
 
 ## Current Implementation Queue
 
-1. Fused no-full selected-level filtering:
-   - pass retained SS level assignments into the fused resident P2G path;
-   - enable the existing P2G filter fields in fused params;
-   - keep dummy assignment rows only for non-SS fused calls;
-   - preserve no-full readback and active-grid dispatch behavior.
-2. Conservative cross-level execution:
+1. Conservative cross-level execution:
    - add compact restriction/prolongation rows for adjacent-level candidates;
    - emit residual counters for mass, volume, momentum, and energy drift;
    - fail closed when parent/child level metadata is missing.
-3. Phase-volume migration:
+2. Phase-volume migration:
    - drive level changes from closure-derived density/pressure/temperature;
    - make water-to-steam expansion migrate levels without particle explosion;
    - preserve fine representation near surfaces, reactions, and walls.
+3. Active-node mechanics consumption:
+   - consume retained SS active-node rows in same-level P2G/G2P dispatch;
+   - keep fused no-full active-grid behavior readback-free;
+   - avoid presentation-owned physics cadence.
 
 ## Acceptance Gates
 

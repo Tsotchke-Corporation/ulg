@@ -33929,3 +33929,65 @@ Next:
 - Promote only the thermal plus mechanics-refresh sidecar plan once the
   sequence runner can consume this evidence without treating fallback
   execution as a fused multi-step command sequence.
+
+## 2026-06-30 AKDT - Thermal Sidecar-Aware Sequence Evidence
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0` as an
+  execution evidence object for the resident multi-step runner. It summarizes
+  sidecar plan completion across steps without setting the true fused resident
+  sequence runnable flag.
+- `createFusedResidentSequencePreflight()` and the ComputeManager resident
+  sequence lane contract now identify the narrow supported candidate:
+  sidecar-only thermal blocking with per-step pass-DAG or per-step fused
+  active-grid mechanics fallback. `sequenceRunnable` remains `false` while the
+  sidecar still lives outside the one-submit fused mechanics sequence.
+- `runMlsMpmResidentStepsWithOptionalWebGpu()` now aggregates per-step
+  sidecar fusion evidence into `sidecarAwareResidentSequence` on the execution
+  result and final stage timing. The object reports step count, passed/partial
+  steps, all-steps-passed, fallback mode, active-grid fallback use, and
+  `promotesFusedResidentSequence=false`.
+- Long-horizon probe output and performance benchmark output now flatten the
+  preflight candidate and final sequence evidence fields so live runs can
+  distinguish "thermal sidecar ordering completed" from "true fused sequence
+  runnable."
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `70/70` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: VPN server availability check: `https://100.86.83.35:5173/` returned
+  HTTP/2 200, `http://100.86.83.35:5174/` returned HTTP/1.1 200, and both
+  listeners were bound to `0.0.0.0`.
+- PASS: live HTTPS sidecar-aware sequence benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-aware-sequence-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  preflight `blocked-fused-resident-sequence`, fallback
+  `per-step-fused-mechanics-active-grid`, `sidecarOnlyBlocked=true`,
+  `sidecarFusionStepEvidenceStatus=sidecar-fusion-step-evidence-ready`,
+  executed/passed sidecar stages `2/2`,
+  `sidecarAwareResidentSequenceStatus=sidecar-aware-resident-sequence-evidence-ready`,
+  mode `thermal-mechanics-refresh-per-step-fused-mechanics-active-grid`,
+  completed/passed sidecar-aware steps `2/2`, `allStepsPassed=true`,
+  `residentStageMs=9.6`, `residentStageStepsPerSecond=104.17`, compact-summary
+  `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  The nested direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; this slice validates the
+  sidecar-aware ordering/evidence contract, not physics motion quality.
+
+Next:
+
+- Replace the sidecar-aware evidence wrapper with an executable thermal plus
+  mechanics-refresh sequence path that actually consumes retained sidecar
+  buffers inside the lane-owned fused runner. Reaction/product and
+  pressure-interface sidecars remain blocked until their own retained input and
+  ownership transitions are proven.

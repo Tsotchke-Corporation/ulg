@@ -1597,6 +1597,34 @@ async function runBrowserProbe({
             }))
           : []
       } : null;
+      const compactSidecarAwareResidentSequence = (sequence) => sequence ? {
+        schema: sequence.schema ?? null,
+        status: sequence.status ?? null,
+        mode: sequence.mode ?? null,
+        sequenceRequested: sequence.sequenceRequested ?? null,
+        sequenceRunnable: sequence.sequenceRunnable ?? null,
+        sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
+        sidecarAwareSequenceExecuted: sequence.sidecarAwareSequenceExecuted ?? null,
+        sidecarAwareSequencePromotesFusedSequence: sequence.sidecarAwareSequencePromotesFusedSequence ?? null,
+        promotesFusedResidentSequence: sequence.promotesFusedResidentSequence ?? null,
+        fallbackMode: sequence.fallbackMode ?? null,
+        activeGridFallbackUsed: sequence.activeGridFallbackUsed ?? null,
+        perStepFusedMechanicsFallbackEligible: sequence.perStepFusedMechanicsFallbackEligible ?? null,
+        sidecarFusionPlanStatus: sequence.sidecarFusionPlanStatus ?? null,
+        sidecarFusionRequired: sequence.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: sequence.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(sequence.sidecarBlockers || [])],
+        requiredStageOrder: [...(sequence.requiredStageOrder || [])],
+        stageCount: sequence.stageCount ?? null,
+        stepCount: sequence.stepCount ?? null,
+        completedStepCount: sequence.completedStepCount ?? null,
+        evidenceStepCount: sequence.evidenceStepCount ?? null,
+        passedStepCount: sequence.passedStepCount ?? null,
+        partialStepCount: sequence.partialStepCount ?? null,
+        missingStepCount: sequence.missingStepCount ?? null,
+        failedStepCount: sequence.failedStepCount ?? null,
+        allStepsPassed: sequence.allStepsPassed ?? null
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -1615,6 +1643,12 @@ async function runBrowserProbe({
         sidecarFusionStageCount: preflight.sidecarFusionStageCount ?? null,
         sidecarFusionPlan: compactSidecarFusionPlan(preflight.sidecarFusionPlan),
         perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
+        sidecarOnlySequenceBlocked: preflight.sidecarOnlySequenceBlocked ?? null,
+        sidecarAwareSequenceCandidate: preflight.sidecarAwareSequenceCandidate ?? null,
+        sidecarAwareSequenceStatus: preflight.sidecarAwareSequenceStatus ?? null,
+        sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
+        sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
+        sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
         thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,
         reactionAwareFusionRequired: preflight.reactionAwareFusionRequired ?? null,
@@ -1645,6 +1679,7 @@ async function runBrowserProbe({
         fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
         fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(stageTiming.fusedResidentSequencePreflight),
         sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(stageTiming.sidecarFusionStepEvidence),
+        sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(stageTiming.sidecarAwareResidentSequence),
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -5069,6 +5104,34 @@ async function runDirectResidentProbe({
             }))
           : []
       } : null;
+      const compactSidecarAwareResidentSequence = (sequence) => sequence ? {
+        schema: sequence.schema ?? null,
+        status: sequence.status ?? null,
+        mode: sequence.mode ?? null,
+        sequenceRequested: sequence.sequenceRequested ?? null,
+        sequenceRunnable: sequence.sequenceRunnable ?? null,
+        sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
+        sidecarAwareSequenceExecuted: sequence.sidecarAwareSequenceExecuted ?? null,
+        sidecarAwareSequencePromotesFusedSequence: sequence.sidecarAwareSequencePromotesFusedSequence ?? null,
+        promotesFusedResidentSequence: sequence.promotesFusedResidentSequence ?? null,
+        fallbackMode: sequence.fallbackMode ?? null,
+        activeGridFallbackUsed: sequence.activeGridFallbackUsed ?? null,
+        perStepFusedMechanicsFallbackEligible: sequence.perStepFusedMechanicsFallbackEligible ?? null,
+        sidecarFusionPlanStatus: sequence.sidecarFusionPlanStatus ?? null,
+        sidecarFusionRequired: sequence.sidecarFusionRequired ?? null,
+        sidecarFusionRunnable: sequence.sidecarFusionRunnable ?? null,
+        sidecarBlockers: [...(sequence.sidecarBlockers || [])],
+        requiredStageOrder: [...(sequence.requiredStageOrder || [])],
+        stageCount: sequence.stageCount ?? null,
+        stepCount: sequence.stepCount ?? null,
+        completedStepCount: sequence.completedStepCount ?? null,
+        evidenceStepCount: sequence.evidenceStepCount ?? null,
+        passedStepCount: sequence.passedStepCount ?? null,
+        partialStepCount: sequence.partialStepCount ?? null,
+        missingStepCount: sequence.missingStepCount ?? null,
+        failedStepCount: sequence.failedStepCount ?? null,
+        allStepsPassed: sequence.allStepsPassed ?? null
+      } : null;
       const compactFusedResidentSequencePreflight = (preflight) => preflight ? {
         schema: preflight.schema ?? null,
         status: preflight.status ?? null,
@@ -5087,6 +5150,12 @@ async function runDirectResidentProbe({
         sidecarFusionStageCount: preflight.sidecarFusionStageCount ?? null,
         sidecarFusionPlan: compactSidecarFusionPlan(preflight.sidecarFusionPlan),
         perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible ?? null,
+        sidecarOnlySequenceBlocked: preflight.sidecarOnlySequenceBlocked ?? null,
+        sidecarAwareSequenceCandidate: preflight.sidecarAwareSequenceCandidate ?? null,
+        sidecarAwareSequenceStatus: preflight.sidecarAwareSequenceStatus ?? null,
+        sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
+        sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
+        sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
         thermalAwareFusionRequired: preflight.thermalAwareFusionRequired ?? null,
         reactionAwareFusionRequired: preflight.reactionAwareFusionRequired ?? null,
@@ -5122,6 +5191,7 @@ async function runDirectResidentProbe({
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],
         residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])],
+        sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(steps.sidecarAwareResidentSequence),
         stepSummaries: Array.isArray(steps.stepSummaries)
           ? steps.stepSummaries.map((summary) => ({
             index: summary.index ?? null,
@@ -5129,7 +5199,10 @@ async function runDirectResidentProbe({
             backend: summary.backend ?? null,
             compactSummaryAvailable: summary.compactSummaryAvailable ?? null,
             sidecarFusionStepEvidenceStatus: summary.sidecarFusionStepEvidenceStatus ?? null,
+            sidecarFusionStepEvidenceExecutedStageCount: summary.sidecarFusionStepEvidenceExecutedStageCount ?? null,
             sidecarFusionStepEvidencePassedStageCount: summary.sidecarFusionStepEvidencePassedStageCount ?? null,
+            sidecarFusionStepEvidenceAllRequiredStagesPassed:
+              summary.sidecarFusionStepEvidenceAllRequiredStagesPassed ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
@@ -5198,6 +5271,7 @@ async function runDirectResidentProbe({
           fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? null,
           fusedResidentSequenceStepCount: step.stageTiming.fusedResidentSequenceStepCount ?? null,
           sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(step.stageTiming.sidecarFusionStepEvidence),
+          sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(step.stageTiming.sidecarAwareResidentSequence),
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }

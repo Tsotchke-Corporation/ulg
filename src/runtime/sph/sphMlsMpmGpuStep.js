@@ -132,6 +132,7 @@ const ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-
 const ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0';
 const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0';
 const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_STEP_EVIDENCE_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-step-evidence.v0';
+const ULG_MLS_MPM_SIDECAR_AWARE_RESIDENT_SEQUENCE_SCHEMA = 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0';
 export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
@@ -4792,6 +4793,118 @@ function createFusedResidentSidecarStepEvidence({
   };
 }
 
+function isResidentSequenceBlockedOnlyBySidecars(blockers = [], sidecarBlockers = []) {
+  const normalizedBlockers = uniqueStringList(blockers);
+  const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  return normalizedBlockers.length > 0
+    && normalizedBlockers.length === normalizedSidecarBlockers.length
+    && normalizedBlockers.every((blocker) => normalizedSidecarBlockers.includes(blocker));
+}
+
+function thermalSidecarAwareSequenceMode({
+  sidecarBlockers = [],
+  activeGridEligible = false,
+  activeGridEnabled = false
+} = {}) {
+  const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
+  if (normalizedSidecarBlockers.length !== 1 || normalizedSidecarBlockers[0] !== 'thermal-sidecar') {
+    return null;
+  }
+  return (activeGridEligible || activeGridEnabled)
+    ? 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid'
+    : 'thermal-mechanics-refresh-per-step-pass-dag';
+}
+
+function createSidecarAwareResidentSequenceEvidence({
+  preflight = null,
+  stepSummaries = [],
+  completedStepCount = 0
+} = {}) {
+  const plan = preflight?.sidecarFusionPlan || null;
+  if (preflight?.sidecarAwareSequenceCandidate !== true || plan?.required !== true) return null;
+  const summaries = Array.isArray(stepSummaries) ? stepSummaries : [];
+  const requiredStageCount = Math.max(0, Math.round(finiteNumber(plan.stageCount, 0)));
+  const expectedStepCount = Math.max(1, Math.round(finiteNumber(preflight.stepCount, summaries.length || 1)));
+  const evidenceByStep = summaries.map((summary, index) => {
+    const status = summary.sidecarFusionStepEvidenceStatus ?? null;
+    const stageCount = Math.max(0, Math.round(finiteNumber(summary.sidecarFusionStepEvidenceStageCount, 0)));
+    const executedStageCount = Math.max(
+      0,
+      Math.round(finiteNumber(summary.sidecarFusionStepEvidenceExecutedStageCount, 0))
+    );
+    const passedStageCount = Math.max(
+      0,
+      Math.round(finiteNumber(summary.sidecarFusionStepEvidencePassedStageCount, 0))
+    );
+    const allRequiredStagesPassed = Boolean(
+      summary.sidecarFusionStepEvidenceAllRequiredStagesPassed
+      || (
+        status === 'sidecar-fusion-step-evidence-ready'
+        && stageCount === requiredStageCount
+        && passedStageCount === requiredStageCount
+      )
+    );
+    return {
+      index,
+      status,
+      stageCount,
+      executedStageCount,
+      passedStageCount,
+      allRequiredStagesPassed
+    };
+  });
+  const passedStepCount = evidenceByStep.filter((step) => step.allRequiredStagesPassed).length;
+  const partialStepCount = evidenceByStep.filter((step) => (
+    !step.allRequiredStagesPassed
+    && (
+      step.status === 'sidecar-fusion-step-evidence-partial'
+      || step.executedStageCount > 0
+      || step.passedStageCount > 0
+    )
+  )).length;
+  const missingStepCount = Math.max(0, expectedStepCount - evidenceByStep.length);
+  const failedStepCount = Math.max(0, expectedStepCount - passedStepCount - partialStepCount - missingStepCount);
+  const allStepsPassed = expectedStepCount > 0
+    && Math.max(0, Math.round(finiteNumber(completedStepCount, summaries.length))) === expectedStepCount
+    && passedStepCount === expectedStepCount;
+  return {
+    schema: ULG_MLS_MPM_SIDECAR_AWARE_RESIDENT_SEQUENCE_SCHEMA,
+    status: allStepsPassed
+      ? 'sidecar-aware-resident-sequence-evidence-ready'
+      : (passedStepCount > 0 || partialStepCount > 0
+          ? 'sidecar-aware-resident-sequence-evidence-partial'
+          : 'sidecar-aware-resident-sequence-evidence-not-ready'),
+    mode: preflight.sidecarAwareSequenceMode ?? null,
+    sequenceRequested: preflight.sequenceRequested === true,
+    sequenceRunnable: false,
+    sidecarAwareSequenceCandidate: true,
+    sidecarAwareSequenceExecuted: evidenceByStep.length > 0,
+    sidecarAwareSequencePromotesFusedSequence: false,
+    promotesFusedResidentSequence: false,
+    promotesFusedSequence: false,
+    fallbackMode: preflight.fallbackMode ?? null,
+    activeGridFallbackUsed: preflight.fallbackMode === 'per-step-fused-mechanics-active-grid',
+    perStepFusedMechanicsFallbackEligible: preflight.perStepFusedMechanicsFallbackEligible === true,
+    sidecarFusionPlanStatus: plan.status ?? null,
+    sidecarFusionRequired: plan.required === true,
+    sidecarFusionRunnable: plan.sidecarFusionRunnable === true,
+    sidecarBlockers: [...(plan.sidecarBlockers || [])],
+    requiredStageOrder: [...(plan.requiredStageOrder || [])],
+    stageCount: requiredStageCount,
+    stepCount: expectedStepCount,
+    completedStepCount: Math.max(0, Math.round(finiteNumber(completedStepCount, summaries.length))),
+    evidenceStepCount: evidenceByStep.length,
+    passedStepCount,
+    partialStepCount,
+    missingStepCount,
+    failedStepCount,
+    allStepsPassed,
+    stepEvidence: evidenceByStep,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 function createFusedResidentSequencePreflight({
   requested = false,
   stepCount = 1,
@@ -4850,6 +4963,16 @@ function createFusedResidentSequencePreflight({
     : (perStepFusedMechanicsFallbackEligible
         ? 'per-step-fused-mechanics-active-grid'
         : 'per-step-resident-pass-dag');
+  const sidecarOnlySequenceBlocked = sequenceRequested
+    && !sequenceRunnable
+    && isResidentSequenceBlockedOnlyBySidecars(uniqueBlockers, normalizedSidecarBlockers);
+  const sidecarAwareSequenceMode = sidecarOnlySequenceBlocked
+    ? thermalSidecarAwareSequenceMode({
+        sidecarBlockers: normalizedSidecarBlockers,
+        activeGridEligible: perStepFusedMechanicsFallbackEligible
+      })
+    : null;
+  const sidecarAwareSequenceCandidate = Boolean(sidecarAwareSequenceMode);
   return {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA,
     status: sequenceRunnable
@@ -4876,6 +4999,14 @@ function createFusedResidentSequencePreflight({
     sidecarFusionPlan,
     fallbackMode,
     perStepFusedMechanicsFallbackEligible,
+    sidecarOnlySequenceBlocked,
+    sidecarAwareSequenceCandidate,
+    sidecarAwareSequenceStatus: sidecarAwareSequenceCandidate
+      ? 'sidecar-aware-sequence-candidate-awaiting-step-evidence'
+      : null,
+    sidecarAwareSequenceMode,
+    sidecarAwareSequencePromotesFusedSequence: false,
+    sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
     activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
     thermalAwareFusionRequired: uniqueBlockers.includes('thermal-sidecar'),
     reactionAwareFusionRequired: uniqueBlockers.includes('reaction-sidecar'),
@@ -4939,6 +5070,16 @@ function createResidentSequenceLaneContract({
     : (sequenceRequested && activeGridEnabled
         ? 'per-step-fused-mechanics-active-grid'
         : 'per-step-resident-pass-dag');
+  const sidecarOnlySequenceBlocked = sequenceRequested
+    && !sequenceRunnable
+    && isResidentSequenceBlockedOnlyBySidecars(blockers, normalizedSidecarBlockers);
+  const sidecarAwareSequenceMode = sidecarOnlySequenceBlocked
+    ? thermalSidecarAwareSequenceMode({
+        sidecarBlockers: normalizedSidecarBlockers,
+        activeGridEnabled
+      })
+    : null;
+  const sidecarAwareSequenceCandidate = Boolean(sidecarAwareSequenceMode);
   return {
     schema: ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA,
     authority: 'compute-manager-gpuhub-resident-lane-contract',
@@ -4963,6 +5104,14 @@ function createResidentSequenceLaneContract({
     sidecarFusionPlan,
     sequenceMode,
     fallbackMode,
+    sidecarOnlySequenceBlocked,
+    sidecarAwareSequenceCandidate,
+    sidecarAwareSequenceStatus: sidecarAwareSequenceCandidate
+      ? 'sidecar-aware-sequence-candidate-awaiting-step-evidence'
+      : null,
+    sidecarAwareSequenceMode,
+    sidecarAwareSequencePromotesFusedSequence: false,
+    sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
     thermalAwareFusionRequired: blockers.includes('thermal-sidecar'),
     reactionAwareFusionRequired: blockers.includes('reaction-sidecar'),
     pressureInterfaceAwareFusionRequired:
@@ -13774,7 +13923,10 @@ function summarizeResidentStepForSequence(step, index) {
     stageBackends: { ...step.stageBackends },
     sidecarFusionStepEvidenceStatus: step.sidecarFusionStepEvidenceStatus ?? null,
     sidecarFusionStepEvidenceStageCount: step.sidecarFusionStepEvidence?.stageCount ?? 0,
+    sidecarFusionStepEvidenceExecutedStageCount: step.sidecarFusionStepEvidence?.executedStageCount ?? 0,
     sidecarFusionStepEvidencePassedStageCount: step.sidecarFusionStepEvidence?.passedStageCount ?? 0,
+    sidecarFusionStepEvidenceAllRequiredStagesPassed:
+      step.sidecarFusionStepEvidence?.allRequiredStagesPassed === true,
     sidecarFusionStepEvidencePromotesFusedSequence: step.sidecarFusionStepEvidence?.promotesFusedSequence === true,
     residentAuthorityLedgerStatus: step.residentAuthorityLedgerStatus ?? null,
     residentAuthorityFamilyOwners: compactResidentAuthorityFamilyOwners(
@@ -14170,6 +14322,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       residentBufferLeaseBlockers: [...(finalStep.residentBufferLeaseBlockers || [])],
       fusedResidentSequence: finalStep.fusedResidentSequence,
       fusedResidentSequencePreflight,
+      sidecarAwareResidentSequence: null,
+      sidecarAwareResidentSequenceStatus: null,
       gpuAuthoritativeState: false,
       scientificValidation: false,
       sphValidation: false,
@@ -14241,9 +14395,24 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     sourceSlot = step.particlePingPong?.nextSlot ?? (sourceSlot === 0 ? 1 : 0);
   }
 
+  const sidecarAwareResidentSequence = createSidecarAwareResidentSequenceEvidence({
+    preflight: fusedResidentSequencePreflight,
+    stepSummaries,
+    completedStepCount: stepSummaries.length
+  });
+  if (finalStep && sidecarAwareResidentSequence) {
+    finalStep.sidecarAwareResidentSequence = sidecarAwareResidentSequence;
+    finalStep.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
+    if (finalStep.stageTiming) {
+      finalStep.stageTiming.sidecarAwareResidentSequence = sidecarAwareResidentSequence;
+      finalStep.stageTiming.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
+    }
+  }
+
   markSequenceProgress('resident-sequence-complete', {
     completedStepCount: stepSummaries.length,
-    backend: finalStep?.backend || 'cpu-reference'
+    backend: finalStep?.backend || 'cpu-reference',
+    sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
   });
   if (finalStep && fusedResidentSequencePreflight.sequenceRequested) {
     finalStep.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
@@ -14286,6 +14455,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
     fusedResidentSequencePreflight,
+    sidecarAwareResidentSequence,
+    sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null,
     gpuAuthoritativeState: false,
     scientificValidation: false,
     sphValidation: false,

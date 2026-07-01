@@ -6749,6 +6749,141 @@ test('MLS-MPM resident steps can defer active-grid plan-only summary until final
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
+test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence after mechanics refresh', async () => {
+  const buffers = manualBuffers({
+    position: [1.25, 1.25, 1.25],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 1000, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    }
+  });
+  const thermalInputs = [];
+  const mechanicsRefreshInputs = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    activeGridSafetyCells: 1,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    mechanicsMaterialTable,
+    thermalStepRunner(args) {
+      thermalInputs.push({
+        sourceStateBuffer: args.sourceStateBuffer?.label ?? null,
+        readbackMode: args.readbackMode
+      });
+      const index = thermalInputs.length;
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer(`aware-thermal-state-${index}`),
+        thermoBuffer: tracker.buffer(`aware-thermal-thermo-${index}`),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+        }
+      };
+    },
+    mechanicsRefreshRunner(args) {
+      mechanicsRefreshInputs.push({
+        sourceStateBuffer: args.sourceStateBuffer?.label ?? null,
+        sourceThermoBuffer: args.sourceThermoBuffer?.label ?? null,
+        readbackMode: args.readbackMode,
+        mechanicsMaterialTable: args.mechanicsMaterialTable
+      });
+      const index = mechanicsRefreshInputs.length;
+      return {
+        schema: 'peercompute.ulg.mls-mpm-mechanics-refresh.v0',
+        backend: 'webgpu',
+        status: 'mechanics-constitutive-refresh-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        mechanics: new Float32Array(),
+        mechanicsBuffer: tracker.buffer(`aware-refreshed-mechanics-${index}`),
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true
+      };
+    }
+  });
+
+  assert.equal(execution.fusedResidentSequence, undefined);
+  assert.equal(execution.fusedResidentSequencePreflight.status, 'blocked-fused-resident-sequence');
+  assert.equal(execution.fusedResidentSequencePreflight.sequenceRunnable, false);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarOnlySequenceBlocked, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareSequenceCandidate, true);
+  assert.equal(
+    execution.fusedResidentSequencePreflight.sidecarAwareSequenceMode,
+    'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid'
+  );
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareSequencePromotesFusedSequence, false);
+  assert.equal(execution.sidecarAwareResidentSequence.schema, 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0');
+  assert.equal(execution.sidecarAwareResidentSequence.status, 'sidecar-aware-resident-sequence-evidence-ready');
+  assert.equal(execution.sidecarAwareResidentSequence.mode, 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid');
+  assert.equal(execution.sidecarAwareResidentSequence.stepCount, 2);
+  assert.equal(execution.sidecarAwareResidentSequence.completedStepCount, 2);
+  assert.equal(execution.sidecarAwareResidentSequence.passedStepCount, 2);
+  assert.equal(execution.sidecarAwareResidentSequence.partialStepCount, 0);
+  assert.equal(execution.sidecarAwareResidentSequence.allStepsPassed, true);
+  assert.equal(execution.sidecarAwareResidentSequence.promotesFusedResidentSequence, false);
+  assert.equal(execution.finalStep.sidecarAwareResidentSequence.status, 'sidecar-aware-resident-sequence-evidence-ready');
+  assert.equal(
+    execution.finalStep.stageTiming.sidecarAwareResidentSequence.status,
+    'sidecar-aware-resident-sequence-evidence-ready'
+  );
+  assert.equal(execution.stepSummaries.length, 2);
+  for (const summary of execution.stepSummaries) {
+    assert.equal(summary.sidecarFusionStepEvidenceStatus, 'sidecar-fusion-step-evidence-ready');
+    assert.equal(summary.sidecarFusionStepEvidenceStageCount, 2);
+    assert.equal(summary.sidecarFusionStepEvidenceExecutedStageCount, 2);
+    assert.equal(summary.sidecarFusionStepEvidencePassedStageCount, 2);
+    assert.equal(summary.sidecarFusionStepEvidenceAllRequiredStagesPassed, true);
+    assert.equal(summary.sidecarFusionStepEvidencePromotesFusedSequence, false);
+  }
+  assert.equal(thermalInputs.length, 2);
+  assert.equal(mechanicsRefreshInputs.length, 2);
+  assert.equal(mechanicsRefreshInputs[0].sourceStateBuffer, 'aware-thermal-state-1');
+  assert.equal(mechanicsRefreshInputs[1].sourceStateBuffer, 'aware-thermal-state-2');
+  assert.equal(mechanicsRefreshInputs[0].mechanicsMaterialTable, mechanicsMaterialTable);
+  assert.equal(mechanicsRefreshInputs[1].readbackMode, 'no-full-readback');
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
 test('MLS-MPM resident steps compactSummaryMode plan-only preserves active-grid hints without readback', async () => {
   const buffers = manualBuffers({
     position: [1.25, 1.25, 1.25],

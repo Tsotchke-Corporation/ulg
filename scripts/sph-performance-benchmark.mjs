@@ -2104,6 +2104,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     : [];
   const fusedResidentSequenceSidecarFusionPlan = fusedResidentSequencePreflight?.sidecarFusionPlan || null;
   const fusedResidentSequenceSidecarFusionStepEvidence = residentStageTiming?.sidecarFusionStepEvidence || null;
+  const sidecarAwareResidentSequence = residentStageTiming?.sidecarAwareResidentSequence
+    || residentSteps?.sidecarAwareResidentSequence
+    || residentStep?.sidecarAwareResidentSequence
+    || null;
   const fusedResidentSequenceBlockedForSidecars = Boolean(
     fusedResidentSequencePreflight?.status === 'blocked-fused-resident-sequence'
     && fusedResidentSequencePreflightSidecarBlockers.length > 0
@@ -2279,6 +2283,30 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       fusedResidentSequenceSidecarFusionStepEvidence?.allRequiredStagesPassed ?? null,
     fusedResidentSequenceSidecarFusionPromotesFusedSequence:
       fusedResidentSequenceSidecarFusionStepEvidence?.promotesFusedSequence ?? null,
+    fusedResidentSequenceSidecarOnlyBlocked:
+      fusedResidentSequencePreflight?.sidecarOnlySequenceBlocked ?? null,
+    sidecarAwareResidentSequenceCandidate:
+      fusedResidentSequencePreflight?.sidecarAwareSequenceCandidate ?? null,
+    sidecarAwareResidentSequencePreflightStatus:
+      fusedResidentSequencePreflight?.sidecarAwareSequenceStatus ?? null,
+    sidecarAwareResidentSequenceMode:
+      sidecarAwareResidentSequence?.mode ?? fusedResidentSequencePreflight?.sidecarAwareSequenceMode ?? null,
+    sidecarAwareResidentSequenceStatus:
+      sidecarAwareResidentSequence?.status ?? null,
+    sidecarAwareResidentSequenceExecuted:
+      sidecarAwareResidentSequence?.sidecarAwareSequenceExecuted ?? null,
+    sidecarAwareResidentSequenceStepCount:
+      sidecarAwareResidentSequence?.stepCount ?? null,
+    sidecarAwareResidentSequenceCompletedStepCount:
+      sidecarAwareResidentSequence?.completedStepCount ?? null,
+    sidecarAwareResidentSequencePassedStepCount:
+      sidecarAwareResidentSequence?.passedStepCount ?? null,
+    sidecarAwareResidentSequencePartialStepCount:
+      sidecarAwareResidentSequence?.partialStepCount ?? null,
+    sidecarAwareResidentSequenceAllStepsPassed:
+      sidecarAwareResidentSequence?.allStepsPassed ?? null,
+    sidecarAwareResidentSequencePromotesFusedSequence:
+      sidecarAwareResidentSequence?.promotesFusedSequence ?? null,
     fusedResidentSequenceBlockedForSidecars,
     fusedResidentSequenceRequirementSatisfied,
     fusedResidentActiveGridRequirementSatisfied,

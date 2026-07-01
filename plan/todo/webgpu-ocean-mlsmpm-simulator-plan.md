@@ -423,6 +423,22 @@ Tactical status, 2026-06-19 AKDT:
   consumer ready, and render bridge reused. This is a safe current-architecture
   cleanup; the larger remaining target is still thermal-aware fused
   sequencing/cadence.
+- Thermal sidecar-aware sequence evidence now has an explicit execution
+  wrapper. The fused resident sequence preflight and ComputeManager lane
+  contract mark the thermal-only sidecar block as a supported
+  `sidecarAwareSequenceCandidate`, while preserving `sequenceRunnable=false`
+  for the true one-submit fused sequence. The resident multi-step runner
+  aggregates per-step thermal plus mechanics-refresh sidecar evidence into
+  `peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0`, and the probe
+  plus benchmark flatten the result. Fresh smoke evidence is suite `complete`,
+  gate `pass`, scenario `good`, preflight
+  `blocked-fused-resident-sequence`, fallback
+  `per-step-fused-mechanics-active-grid`, sidecar executed/passed stages `2/2`,
+  sidecar-aware completed/passed steps `2/2`, `allStepsPassed=true`, compact
+  readback bytes `0`, and VPN HTTPS/HTTP still reachable on `0.0.0.0`. This is
+  evidence and routing, not the final fused sidecar kernel; the next code path
+  must move thermal plus mechanics-refresh consumption into the lane-owned
+  fused runner rather than treating the per-step wrapper as a performance win.
 - Native WebGPU surface validation now has a cadence gate before validation
   command-encoder creation. The render loop inspects readback-smoke and
   offscreen validation pending/pass/retry-exhausted state and only starts GPU

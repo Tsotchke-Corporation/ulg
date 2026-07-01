@@ -452,6 +452,20 @@ Tactical status, 2026-06-19 AKDT:
   it still leaves the actual performance task: move thermal plus
   mechanics-refresh execution out of per-step orchestration and into a fused
   sequence runner that owns retained sidecar buffers.
+- Thermal sidecar direct-runner prerequisites are now explicit. The new
+  `peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-contract.v0` reports
+  that the live thermal-only, fused-active-grid route has the required thermal
+  material table, mechanics material table, sidecar runners, retained stage
+  ordering, and unsupported-sidecar exclusions. Fresh smoke evidence is suite
+  `complete`, gate `pass`, scenario `good`,
+  `sidecarAwareDirectRunnerContractStatus=thermal-sidecar-direct-runner-contract-ready-execution-pending`,
+  `directRunnerEligible=true`, `directRunnerRunnable=false`,
+  `directRunnerSelected=false`, and selection blocker
+  `direct-runner-implementation-pending`, with sidecar stages `2/2`,
+  sidecar-aware steps `2/2`, compact readback bytes `0`, and resident stage
+  `6.1 ms`. The next implementation should select this contract and replace
+  the generic per-step resident call with a dedicated thermal/mechanics-refresh
+  runner for this route only.
 - Native WebGPU surface validation now has a cadence gate before validation
   command-encoder creation. The render loop inspects readback-smoke and
   offscreen validation pending/pass/retry-exhausted state and only starts GPU

@@ -13628,3 +13628,54 @@ Explicit sidecar-aware resident sequence route, 2026-06-30 16:54 AKDT:
   - Caveat: the nested two-step direct probe status remained `bad` with issues
     `missing-max-speed` and `no-positive-displacement`; this test records route
     evidence, not visible motion quality.
+
+Thermal sidecar direct runner contract, 2026-06-30 17:31 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Syntax:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- Focused resident MLS-MPM:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `70/70`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `18/18`.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `11/11`.
+- Diff hygiene:
+  `git diff --check`
+  - Passed.
+- VPN server availability:
+  `curl -k -I --max-time 10 https://100.86.83.35:5173/` and
+  `curl -I --max-time 10 http://100.86.83.35:5174/`
+  - Passed: HTTPS returned HTTP/2 200, HTTP returned HTTP/1.1 200, and
+    `ss -ltnp` showed both listeners on `0.0.0.0`.
+- Live HTTPS direct-runner contract benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-direct-runner-contract-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, suite gate
+    `pass`, scenario `good`, preflight `blocked-fused-resident-sequence`,
+    fallback `per-step-fused-mechanics-active-grid`,
+    `sidecarAwareResidentSequenceStatus=sidecar-aware-resident-sequence-evidence-ready`,
+    `sidecarAwareResidentSequenceActive=true`, runner
+    `resident-sidecar-aware-sequence-loop`, path
+    `explicit-sidecar-aware-per-step-resident-loop`,
+    `sidecarAwareDirectRunnerContractStatus=thermal-sidecar-direct-runner-contract-ready-execution-pending`,
+    `directRunnerEligible=true`, `directRunnerRunnable=false`,
+    `directRunnerSelected=false`,
+    `directRunnerSelectionStatus=direct-runner-implementation-pending`,
+    sidecar stages `2/2`, sidecar-aware steps `2/2`, `residentStageMs=6.1`,
+    `residentStageStepsPerSecond=163.93`, compact summary
+    `mapAsyncWaitMs=null`, and compact readback byte length `0`.
+  - Caveat: the nested two-step direct probe status remained `bad` with issues
+    `missing-max-speed` and `no-positive-displacement`; this test records
+    direct-runner readiness, not visible motion quality.

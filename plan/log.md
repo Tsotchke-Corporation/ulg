@@ -34045,3 +34045,66 @@ Next:
   route into a fused runner implementation that avoids per-step orchestration
   overhead. Keep `sequenceRunnable=false` until that runner owns the retained
   sidecar buffers inside one sequence path.
+
+## 2026-06-30 AKDT - Thermal Sidecar Direct Runner Contract
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-contract.v0`
+  to the sidecar-aware resident sequence path. It records whether the current
+  thermal-only sidecar route has the material tables, sidecar runners, fused
+  active-grid mechanics fallback, and retained-buffer ordering required for a
+  dedicated direct runner.
+- The live thermal sidecar path now reports
+  `directRunnerEligible=true`, `directRunnerRunnable=false`, and
+  `directRunnerSelected=false`. The remaining selection blocker is explicitly
+  `direct-runner-implementation-pending`, not missing sidecar inputs.
+- Runtime preflight, final execution, final stage timing, probe output,
+  benchmark output, and focused tests all expose the direct-runner contract.
+  This makes the next implementation step mechanically gated instead of
+  depending on inferred fallback behavior.
+- This is still not the direct runner itself. It narrows the next code change:
+  implement the direct runner only for the already-eligible thermal plus
+  mechanics-refresh, per-step fused active-grid route, and keep reaction,
+  pressure-interface, and resident-product-mass sidecars out of scope.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `70/70` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: VPN server availability check: `https://100.86.83.35:5173/` returned
+  HTTP/2 200, `http://100.86.83.35:5174/` returned HTTP/1.1 200, and both
+  listeners were bound to `0.0.0.0`.
+- PASS: live HTTPS direct-runner contract benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-direct-runner-contract-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  preflight `blocked-fused-resident-sequence`, fallback
+  `per-step-fused-mechanics-active-grid`,
+  `sidecarAwareResidentSequenceStatus=sidecar-aware-resident-sequence-evidence-ready`,
+  `sidecarAwareResidentSequenceActive=true`, runner
+  `resident-sidecar-aware-sequence-loop`, path
+  `explicit-sidecar-aware-per-step-resident-loop`,
+  `sidecarAwareDirectRunnerContractStatus=thermal-sidecar-direct-runner-contract-ready-execution-pending`,
+  `directRunnerEligible=true`, `directRunnerRunnable=false`,
+  `directRunnerSelected=false`,
+  `directRunnerSelectionStatus=direct-runner-implementation-pending`,
+  sidecar stages `2/2`, sidecar-aware steps `2/2`, `residentStageMs=6.1`,
+  `residentStageStepsPerSecond=163.93`, compact-summary `mapAsyncWaitMs=null`,
+  and compact readback byte length `0`.
+  The nested direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; this records direct-runner
+  readiness, not visible motion quality.
+
+Next:
+
+- Implement the direct runner behind this contract for the thermal-only,
+  fused-active-grid route. Do not broaden it to reaction/product or pressure
+  sidecars until their own direct-runner contracts are present.

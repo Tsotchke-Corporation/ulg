@@ -2108,6 +2108,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     || residentSteps?.sidecarAwareResidentSequence
     || residentStep?.sidecarAwareResidentSequence
     || null;
+  const sidecarAwareDirectRunnerContract = sidecarAwareResidentSequence?.directRunnerContract
+    || residentStageTiming?.sidecarAwareDirectRunnerContract
+    || residentSteps?.sidecarAwareDirectRunnerContract
+    || fusedResidentSequencePreflight?.sidecarAwareDirectRunnerContract
+    || null;
   const fusedResidentSequenceBlockedForSidecars = Boolean(
     fusedResidentSequencePreflight?.status === 'blocked-fused-resident-sequence'
     && fusedResidentSequencePreflightSidecarBlockers.length > 0
@@ -2295,6 +2300,33 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       sidecarAwareResidentSequence?.runner ?? fusedResidentSequencePreflight?.sidecarAwareSequenceRunner ?? null,
     sidecarAwareResidentSequencePath:
       sidecarAwareResidentSequence?.sequencePath ?? fusedResidentSequencePreflight?.sidecarAwareSequencePath ?? null,
+    sidecarAwareDirectRunnerContractStatus:
+      sidecarAwareDirectRunnerContract?.status
+      ?? residentStageTiming?.sidecarAwareDirectRunnerContractStatus
+      ?? residentSteps?.sidecarAwareDirectRunnerContractStatus
+      ?? fusedResidentSequencePreflight?.sidecarAwareDirectRunnerContractStatus
+      ?? null,
+    sidecarAwareDirectRunnerEligible:
+      sidecarAwareDirectRunnerContract?.directRunnerEligible
+      ?? residentSteps?.sidecarAwareDirectRunnerEligible
+      ?? fusedResidentSequencePreflight?.sidecarAwareDirectRunnerEligible
+      ?? null,
+    sidecarAwareDirectRunnerRunnable:
+      sidecarAwareDirectRunnerContract?.directRunnerRunnable
+      ?? residentSteps?.sidecarAwareDirectRunnerRunnable
+      ?? fusedResidentSequencePreflight?.sidecarAwareDirectRunnerRunnable
+      ?? null,
+    sidecarAwareDirectRunnerSelected:
+      sidecarAwareDirectRunnerContract?.directRunnerSelected
+      ?? residentSteps?.sidecarAwareDirectRunnerSelected
+      ?? fusedResidentSequencePreflight?.sidecarAwareDirectRunnerSelected
+      ?? null,
+    sidecarAwareDirectRunnerSelectionStatus:
+      sidecarAwareDirectRunnerContract?.directRunnerSelectionStatus
+      ?? fusedResidentSequencePreflight?.sidecarAwareDirectRunnerSelectionStatus
+      ?? null,
+    sidecarAwareDirectRunnerSelectionBlockers:
+      [...(sidecarAwareDirectRunnerContract?.directRunnerSelectionBlockers || [])],
     sidecarAwareResidentSequenceActive:
       residentStageTiming?.sidecarAwareResidentSequenceActive
       ?? residentSteps?.sidecarAwareResidentSequenceActive

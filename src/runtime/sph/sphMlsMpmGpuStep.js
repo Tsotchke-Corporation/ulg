@@ -133,6 +133,7 @@ const ULG_MLS_MPM_RESIDENT_SEQUENCE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-
 const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-plan.v0';
 const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_STEP_EVIDENCE_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-step-evidence.v0';
 const ULG_MLS_MPM_SIDECAR_AWARE_RESIDENT_SEQUENCE_SCHEMA = 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0';
+const ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-contract.v0';
 export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
@@ -4877,6 +4878,12 @@ function createSidecarAwareResidentSequenceEvidence({
     mode: preflight.sidecarAwareSequenceMode ?? null,
     runner: preflight.sidecarAwareSequenceRunner ?? null,
     sequencePath: preflight.sidecarAwareSequencePath ?? null,
+    directRunnerContract: preflight.sidecarAwareDirectRunnerContract ?? null,
+    directRunnerContractStatus: preflight.sidecarAwareDirectRunnerContract?.status ?? null,
+    directRunnerEligible: preflight.sidecarAwareDirectRunnerContract?.directRunnerEligible ?? null,
+    directRunnerRunnable: preflight.sidecarAwareDirectRunnerContract?.directRunnerRunnable ?? null,
+    directRunnerSelected: preflight.sidecarAwareDirectRunnerContract?.directRunnerSelected ?? null,
+    directRunnerSelectionStatus: preflight.sidecarAwareDirectRunnerContract?.directRunnerSelectionStatus ?? null,
     sequenceRequested: preflight.sequenceRequested === true,
     sequenceRunnable: false,
     sidecarAwareSequenceCandidate: true,
@@ -4902,6 +4909,83 @@ function createSidecarAwareResidentSequenceEvidence({
     failedStepCount,
     allStepsPassed,
     stepEvidence: evidenceByStep,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function createThermalSidecarDirectRunnerContract({
+  preflight = null,
+  thermalMaterialTable = null,
+  mechanicsMaterialTable = null,
+  thermalStepRunner = null,
+  mechanicsRefreshRunner = null,
+  reactionTable = null,
+  pressureInterfaceForceRowsBuffer = null,
+  pressureInterfaceForceSolver = null,
+  residentProductMass = null
+} = {}) {
+  const sidecarAwareCandidate = preflight?.sidecarAwareSequenceCandidate === true;
+  const blockers = [];
+  if (!sidecarAwareCandidate) blockers.push('sidecar-aware-sequence-not-candidate');
+  if (thermalMaterialTable == null) blockers.push('thermal-material-table-missing');
+  if (mechanicsMaterialTable == null) blockers.push('mechanics-material-table-missing');
+  if (typeof thermalStepRunner !== 'function') blockers.push('thermal-step-runner-missing');
+  if (typeof mechanicsRefreshRunner !== 'function') blockers.push('mechanics-refresh-runner-missing');
+  if (reactionTable?.reactionCount > 0) blockers.push('reaction-sidecar-not-supported-by-direct-runner');
+  if (pressureInterfaceForceRowsBuffer) blockers.push('pressure-interface-force-rows-not-supported-by-direct-runner');
+  if (pressureInterfaceForceSolver) blockers.push('pressure-interface-force-solver-not-supported-by-direct-runner');
+  if (residentProductMass) blockers.push('resident-product-mass-not-supported-by-direct-runner');
+  if (preflight?.fallbackMode !== 'per-step-fused-mechanics-active-grid') {
+    blockers.push('per-step-fused-active-grid-route-required');
+  }
+  const uniqueBlockers = uniqueStringList(blockers);
+  const eligible = sidecarAwareCandidate && uniqueBlockers.length === 0;
+  return {
+    schema: ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_CONTRACT_SCHEMA,
+    status: eligible
+      ? 'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+      : (sidecarAwareCandidate
+          ? 'thermal-sidecar-direct-runner-contract-blocked'
+          : 'thermal-sidecar-direct-runner-not-candidate'),
+    mode: preflight?.sidecarAwareSequenceMode ?? null,
+    requiredRoute: 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid',
+    sidecarAwareSequenceCandidate: sidecarAwareCandidate,
+    directRunnerEligible: eligible,
+    directRunnerRunnable: false,
+    directRunnerSelected: false,
+    directRunnerSelectionStatus: eligible
+      ? 'direct-runner-implementation-pending'
+      : 'direct-runner-requirements-not-met',
+    directRunnerSelectionBlockers: eligible
+      ? ['direct-runner-implementation-pending']
+      : uniqueBlockers,
+    blockers: uniqueBlockers,
+    sidecarBlockers: [...(preflight?.sidecarBlockers || [])],
+    sidecarFusionPlanStatus: preflight?.sidecarFusionPlanStatus ?? null,
+    requiredStageOrder: [...(preflight?.sidecarFusionPlan?.requiredStageOrder || [])],
+    requiredRunnerStages: [
+      'fused-mechanics-step',
+      'thermal-phase',
+      'mechanics-refresh',
+      'resident-compact-summary-or-active-grid-plan'
+    ],
+    requiredRetainedBuffers: [
+      'g2p-state-buffer',
+      'g2p-mechanics-buffer',
+      'thermal-state-buffer',
+      'thermal-thermo-buffer',
+      'mechanics-refresh-buffer'
+    ],
+    unsupportedSidecars: [
+      'reaction-sidecar',
+      'pressure-interface-force-sidecar',
+      'resident-product-mass-sidecar'
+    ],
+    currentRoute: preflight?.sidecarAwareSequencePath ?? null,
+    currentRunner: preflight?.sidecarAwareSequenceRunner ?? null,
+    fallbackMode: preflight?.fallbackMode ?? null,
+    genericRouteActiveUntilDirectRunnerSelected: true,
     scientificValidation: false,
     fullPhysicsValidation: false
   };
@@ -13946,6 +14030,10 @@ function summarizeResidentStepForSequence(step, index) {
     sidecarAwareResidentSequenceMode: step.sidecarAwareResidentSequenceMode ?? null,
     sidecarAwareResidentSequenceRunner: step.sidecarAwareResidentSequenceRunner ?? null,
     sidecarAwareResidentSequencePath: step.sidecarAwareResidentSequencePath ?? null,
+    sidecarAwareDirectRunnerContractStatus: step.sidecarAwareDirectRunnerContractStatus ?? null,
+    sidecarAwareDirectRunnerEligible: step.sidecarAwareDirectRunnerContract?.directRunnerEligible ?? null,
+    sidecarAwareDirectRunnerRunnable: step.sidecarAwareDirectRunnerContract?.directRunnerRunnable ?? null,
+    sidecarAwareDirectRunnerSelected: step.sidecarAwareDirectRunnerContract?.directRunnerSelected ?? null,
     residentAuthorityLedgerStatus: step.residentAuthorityLedgerStatus ?? null,
     residentAuthorityFamilyOwners: compactResidentAuthorityFamilyOwners(
       step.residentAuthorityFamilyOwners || step.residentAuthoritySummary?.familyOwners
@@ -14248,6 +14336,24 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       residentProductMass
     })
   });
+  const sidecarAwareDirectRunnerContract = createThermalSidecarDirectRunnerContract({
+    preflight: fusedResidentSequencePreflight,
+    thermalMaterialTable: args.thermalMaterialTable,
+    mechanicsMaterialTable: args.mechanicsMaterialTable,
+    thermalStepRunner: args.thermalStepRunner ?? runSphThermalStepWebGpu,
+    mechanicsRefreshRunner: args.mechanicsRefreshRunner ?? runMlsMpmMechanicsRefreshWithOptionalWebGpu,
+    reactionTable: args.reactionTable,
+    pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
+    pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
+    residentProductMass
+  });
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerEligible = sidecarAwareDirectRunnerContract.directRunnerEligible;
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerRunnable = sidecarAwareDirectRunnerContract.directRunnerRunnable;
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerSelected = sidecarAwareDirectRunnerContract.directRunnerSelected;
+  fusedResidentSequencePreflight.sidecarAwareDirectRunnerSelectionStatus =
+    sidecarAwareDirectRunnerContract.directRunnerSelectionStatus;
   const useFusedNoFullResidentMechanicsSequence = fusedResidentSequencePreflight.sequenceRunnable === true;
   if (useFusedNoFullResidentMechanicsSequence) {
     markSequenceProgress('resident-sequence-fused-mechanics-started', {
@@ -14344,6 +14450,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       sidecarAwareResidentSequenceMode: null,
       sidecarAwareResidentSequenceRunner: null,
       sidecarAwareResidentSequencePath: null,
+      sidecarAwareDirectRunnerContract,
+      sidecarAwareDirectRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
       sidecarAwareResidentSequence: null,
       sidecarAwareResidentSequenceStatus: null,
       gpuAuthoritativeState: false,
@@ -14360,7 +14468,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       stepCount: count,
       mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
       runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
-      sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null
+      sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null,
+      directRunnerContractStatus: sidecarAwareDirectRunnerContract.status
     });
   }
 
@@ -14374,6 +14483,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       summarizeStep,
       sidecarAwareSequenceMode: useSidecarAwareResidentSequence
         ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+        : null,
+      sidecarAwareDirectRunnerContractStatus: useSidecarAwareResidentSequence
+        ? sidecarAwareDirectRunnerContract.status
         : null
     });
     const stepArgs = {
@@ -14391,6 +14503,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       sidecarAwareSequenceMode: useSidecarAwareResidentSequence
         ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
         : null,
+      sidecarAwareDirectRunnerContract: useSidecarAwareResidentSequence
+        ? sidecarAwareDirectRunnerContract
+        : null,
       sequenceIndex: index,
       sequenceStepCount: count,
       onResidentStageProgress(progress = {}) {
@@ -14400,6 +14515,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
           summarizeStep,
           sidecarAwareSequenceMode: useSidecarAwareResidentSequence
             ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+            : null,
+          sidecarAwareDirectRunnerContractStatus: useSidecarAwareResidentSequence
+            ? sidecarAwareDirectRunnerContract.status
             : null
         });
       }
@@ -14417,6 +14535,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     step.sidecarAwareResidentSequencePath = useSidecarAwareResidentSequence
       ? fusedResidentSequencePreflight.sidecarAwareSequencePath
       : null;
+    step.sidecarAwareDirectRunnerContract = useSidecarAwareResidentSequence
+      ? sidecarAwareDirectRunnerContract
+      : null;
+    step.sidecarAwareDirectRunnerContractStatus = useSidecarAwareResidentSequence
+      ? sidecarAwareDirectRunnerContract.status
+      : null;
     if (step.stageTiming && useSidecarAwareResidentSequence) {
       step.stageTiming.sidecarAwareResidentSequenceActive = true;
       step.stageTiming.sidecarAwareResidentSequenceMode = fusedResidentSequencePreflight.sidecarAwareSequenceMode;
@@ -14424,6 +14548,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       step.stageTiming.sidecarAwareResidentSequencePath = fusedResidentSequencePreflight.sidecarAwareSequencePath;
       step.stageTiming.sidecarAwareResidentSequenceStepIndex = index;
       step.stageTiming.sidecarAwareResidentSequenceStepCount = count;
+      step.stageTiming.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
+      step.stageTiming.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
     }
     stepSummaries.push(summarizeResidentStepForSequence(step, index));
     markSequenceProgress(useSidecarAwareResidentSequence
@@ -14435,6 +14561,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       stageTiming: step.stageTiming || null,
       sidecarAwareSequenceMode: useSidecarAwareResidentSequence
         ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+        : null,
+      sidecarAwareDirectRunnerContractStatus: useSidecarAwareResidentSequence
+        ? sidecarAwareDirectRunnerContract.status
         : null
     });
     const carriedResidentProductMass = step.nextParticleUploads?.residentProductMass ?? step.residentProductMass ?? null;
@@ -14469,9 +14598,13 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   if (finalStep && sidecarAwareResidentSequence) {
     finalStep.sidecarAwareResidentSequence = sidecarAwareResidentSequence;
     finalStep.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
+    finalStep.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
+    finalStep.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
     if (finalStep.stageTiming) {
       finalStep.stageTiming.sidecarAwareResidentSequence = sidecarAwareResidentSequence;
       finalStep.stageTiming.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
+      finalStep.stageTiming.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
+      finalStep.stageTiming.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
     }
   }
 
@@ -14487,6 +14620,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
       runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
       sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null,
+      directRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
       sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
     });
   }
@@ -14541,6 +14675,11 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     sidecarAwareResidentSequencePath: useSidecarAwareResidentSequence
       ? fusedResidentSequencePreflight.sidecarAwareSequencePath
       : null,
+    sidecarAwareDirectRunnerContract,
+    sidecarAwareDirectRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
+    sidecarAwareDirectRunnerEligible: sidecarAwareDirectRunnerContract.directRunnerEligible,
+    sidecarAwareDirectRunnerRunnable: sidecarAwareDirectRunnerContract.directRunnerRunnable,
+    sidecarAwareDirectRunnerSelected: sidecarAwareDirectRunnerContract.directRunnerSelected,
     sidecarAwareResidentSequence,
     sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null,
     gpuAuthoritativeState: false,

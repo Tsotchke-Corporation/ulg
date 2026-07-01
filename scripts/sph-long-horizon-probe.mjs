@@ -1597,12 +1597,40 @@ async function runBrowserProbe({
             }))
           : []
       } : null;
+      const compactThermalSidecarDirectRunnerContract = (contract) => contract ? {
+        schema: contract.schema ?? null,
+        status: contract.status ?? null,
+        mode: contract.mode ?? null,
+        requiredRoute: contract.requiredRoute ?? null,
+        sidecarAwareSequenceCandidate: contract.sidecarAwareSequenceCandidate ?? null,
+        directRunnerEligible: contract.directRunnerEligible ?? null,
+        directRunnerRunnable: contract.directRunnerRunnable ?? null,
+        directRunnerSelected: contract.directRunnerSelected ?? null,
+        directRunnerSelectionStatus: contract.directRunnerSelectionStatus ?? null,
+        directRunnerSelectionBlockers: [...(contract.directRunnerSelectionBlockers || [])],
+        blockers: [...(contract.blockers || [])],
+        sidecarBlockers: [...(contract.sidecarBlockers || [])],
+        requiredRunnerStages: [...(contract.requiredRunnerStages || [])],
+        requiredRetainedBuffers: [...(contract.requiredRetainedBuffers || [])],
+        unsupportedSidecars: [...(contract.unsupportedSidecars || [])],
+        currentRoute: contract.currentRoute ?? null,
+        currentRunner: contract.currentRunner ?? null,
+        fallbackMode: contract.fallbackMode ?? null,
+        genericRouteActiveUntilDirectRunnerSelected:
+          contract.genericRouteActiveUntilDirectRunnerSelected ?? null
+      } : null;
       const compactSidecarAwareResidentSequence = (sequence) => sequence ? {
         schema: sequence.schema ?? null,
         status: sequence.status ?? null,
         mode: sequence.mode ?? null,
         runner: sequence.runner ?? null,
         sequencePath: sequence.sequencePath ?? null,
+        directRunnerContract: compactThermalSidecarDirectRunnerContract(sequence.directRunnerContract),
+        directRunnerContractStatus: sequence.directRunnerContractStatus ?? null,
+        directRunnerEligible: sequence.directRunnerEligible ?? null,
+        directRunnerRunnable: sequence.directRunnerRunnable ?? null,
+        directRunnerSelected: sequence.directRunnerSelected ?? null,
+        directRunnerSelectionStatus: sequence.directRunnerSelectionStatus ?? null,
         sequenceRequested: sequence.sequenceRequested ?? null,
         sequenceRunnable: sequence.sequenceRunnable ?? null,
         sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
@@ -1651,6 +1679,13 @@ async function runBrowserProbe({
         sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
         sidecarAwareSequenceRunner: preflight.sidecarAwareSequenceRunner ?? null,
         sidecarAwareSequencePath: preflight.sidecarAwareSequencePath ?? null,
+        sidecarAwareDirectRunnerContract:
+          compactThermalSidecarDirectRunnerContract(preflight.sidecarAwareDirectRunnerContract),
+        sidecarAwareDirectRunnerContractStatus: preflight.sidecarAwareDirectRunnerContractStatus ?? null,
+        sidecarAwareDirectRunnerEligible: preflight.sidecarAwareDirectRunnerEligible ?? null,
+        sidecarAwareDirectRunnerRunnable: preflight.sidecarAwareDirectRunnerRunnable ?? null,
+        sidecarAwareDirectRunnerSelected: preflight.sidecarAwareDirectRunnerSelected ?? null,
+        sidecarAwareDirectRunnerSelectionStatus: preflight.sidecarAwareDirectRunnerSelectionStatus ?? null,
         sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
         sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
@@ -1688,6 +1723,9 @@ async function runBrowserProbe({
         sidecarAwareResidentSequenceMode: stageTiming.sidecarAwareResidentSequenceMode ?? null,
         sidecarAwareResidentSequenceRunner: stageTiming.sidecarAwareResidentSequenceRunner ?? null,
         sidecarAwareResidentSequencePath: stageTiming.sidecarAwareResidentSequencePath ?? null,
+        sidecarAwareDirectRunnerContract:
+          compactThermalSidecarDirectRunnerContract(stageTiming.sidecarAwareDirectRunnerContract),
+        sidecarAwareDirectRunnerContractStatus: stageTiming.sidecarAwareDirectRunnerContractStatus ?? null,
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -5112,12 +5150,40 @@ async function runDirectResidentProbe({
             }))
           : []
       } : null;
+      const compactThermalSidecarDirectRunnerContract = (contract) => contract ? {
+        schema: contract.schema ?? null,
+        status: contract.status ?? null,
+        mode: contract.mode ?? null,
+        requiredRoute: contract.requiredRoute ?? null,
+        sidecarAwareSequenceCandidate: contract.sidecarAwareSequenceCandidate ?? null,
+        directRunnerEligible: contract.directRunnerEligible ?? null,
+        directRunnerRunnable: contract.directRunnerRunnable ?? null,
+        directRunnerSelected: contract.directRunnerSelected ?? null,
+        directRunnerSelectionStatus: contract.directRunnerSelectionStatus ?? null,
+        directRunnerSelectionBlockers: [...(contract.directRunnerSelectionBlockers || [])],
+        blockers: [...(contract.blockers || [])],
+        sidecarBlockers: [...(contract.sidecarBlockers || [])],
+        requiredRunnerStages: [...(contract.requiredRunnerStages || [])],
+        requiredRetainedBuffers: [...(contract.requiredRetainedBuffers || [])],
+        unsupportedSidecars: [...(contract.unsupportedSidecars || [])],
+        currentRoute: contract.currentRoute ?? null,
+        currentRunner: contract.currentRunner ?? null,
+        fallbackMode: contract.fallbackMode ?? null,
+        genericRouteActiveUntilDirectRunnerSelected:
+          contract.genericRouteActiveUntilDirectRunnerSelected ?? null
+      } : null;
       const compactSidecarAwareResidentSequence = (sequence) => sequence ? {
         schema: sequence.schema ?? null,
         status: sequence.status ?? null,
         mode: sequence.mode ?? null,
         runner: sequence.runner ?? null,
         sequencePath: sequence.sequencePath ?? null,
+        directRunnerContract: compactThermalSidecarDirectRunnerContract(sequence.directRunnerContract),
+        directRunnerContractStatus: sequence.directRunnerContractStatus ?? null,
+        directRunnerEligible: sequence.directRunnerEligible ?? null,
+        directRunnerRunnable: sequence.directRunnerRunnable ?? null,
+        directRunnerSelected: sequence.directRunnerSelected ?? null,
+        directRunnerSelectionStatus: sequence.directRunnerSelectionStatus ?? null,
         sequenceRequested: sequence.sequenceRequested ?? null,
         sequenceRunnable: sequence.sequenceRunnable ?? null,
         sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
@@ -5166,6 +5232,13 @@ async function runDirectResidentProbe({
         sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
         sidecarAwareSequenceRunner: preflight.sidecarAwareSequenceRunner ?? null,
         sidecarAwareSequencePath: preflight.sidecarAwareSequencePath ?? null,
+        sidecarAwareDirectRunnerContract:
+          compactThermalSidecarDirectRunnerContract(preflight.sidecarAwareDirectRunnerContract),
+        sidecarAwareDirectRunnerContractStatus: preflight.sidecarAwareDirectRunnerContractStatus ?? null,
+        sidecarAwareDirectRunnerEligible: preflight.sidecarAwareDirectRunnerEligible ?? null,
+        sidecarAwareDirectRunnerRunnable: preflight.sidecarAwareDirectRunnerRunnable ?? null,
+        sidecarAwareDirectRunnerSelected: preflight.sidecarAwareDirectRunnerSelected ?? null,
+        sidecarAwareDirectRunnerSelectionStatus: preflight.sidecarAwareDirectRunnerSelectionStatus ?? null,
         sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
         sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
@@ -5207,6 +5280,12 @@ async function runDirectResidentProbe({
         sidecarAwareResidentSequenceMode: steps.sidecarAwareResidentSequenceMode ?? null,
         sidecarAwareResidentSequenceRunner: steps.sidecarAwareResidentSequenceRunner ?? null,
         sidecarAwareResidentSequencePath: steps.sidecarAwareResidentSequencePath ?? null,
+        sidecarAwareDirectRunnerContract:
+          compactThermalSidecarDirectRunnerContract(steps.sidecarAwareDirectRunnerContract),
+        sidecarAwareDirectRunnerContractStatus: steps.sidecarAwareDirectRunnerContractStatus ?? null,
+        sidecarAwareDirectRunnerEligible: steps.sidecarAwareDirectRunnerEligible ?? null,
+        sidecarAwareDirectRunnerRunnable: steps.sidecarAwareDirectRunnerRunnable ?? null,
+        sidecarAwareDirectRunnerSelected: steps.sidecarAwareDirectRunnerSelected ?? null,
         sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(steps.sidecarAwareResidentSequence),
         stepSummaries: Array.isArray(steps.stepSummaries)
           ? steps.stepSummaries.map((summary) => ({
@@ -5223,6 +5302,10 @@ async function runDirectResidentProbe({
             sidecarAwareResidentSequenceMode: summary.sidecarAwareResidentSequenceMode ?? null,
             sidecarAwareResidentSequenceRunner: summary.sidecarAwareResidentSequenceRunner ?? null,
             sidecarAwareResidentSequencePath: summary.sidecarAwareResidentSequencePath ?? null,
+            sidecarAwareDirectRunnerContractStatus: summary.sidecarAwareDirectRunnerContractStatus ?? null,
+            sidecarAwareDirectRunnerEligible: summary.sidecarAwareDirectRunnerEligible ?? null,
+            sidecarAwareDirectRunnerRunnable: summary.sidecarAwareDirectRunnerRunnable ?? null,
+            sidecarAwareDirectRunnerSelected: summary.sidecarAwareDirectRunnerSelected ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
@@ -5296,6 +5379,9 @@ async function runDirectResidentProbe({
           sidecarAwareResidentSequenceMode: step.stageTiming.sidecarAwareResidentSequenceMode ?? null,
           sidecarAwareResidentSequenceRunner: step.stageTiming.sidecarAwareResidentSequenceRunner ?? null,
           sidecarAwareResidentSequencePath: step.stageTiming.sidecarAwareResidentSequencePath ?? null,
+          sidecarAwareDirectRunnerContract:
+            compactThermalSidecarDirectRunnerContract(step.stageTiming.sidecarAwareDirectRunnerContract),
+          sidecarAwareDirectRunnerContractStatus: step.stageTiming.sidecarAwareDirectRunnerContractStatus ?? null,
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }

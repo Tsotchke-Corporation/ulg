@@ -27,6 +27,10 @@ interactive path.
   `probeWallStepsPerSecond=55.40`, `probeEngineStepsPerSecond=56.98`,
   `estimatedReadbackBytesPerStep=0`, and
   `surfaceDrawStatus=resident-render-presentation-worker-retained-output-preserved`.
+- A normal smoke-scale default scene run also passed at `1024` particles:
+  `probeWallStepsPerSecond=42.37`, `probeEngineStepsPerSecond=43.57`,
+  `residentStageMs=10.8`, `renderRefreshAwaitMs=1.4`, and
+  `renderRowsReadbackByteLength=0`.
 
 ## Implication
 

@@ -134,6 +134,7 @@ const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA = 'peercompute.ulg.mls-mpm-
 const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_STEP_EVIDENCE_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sidecar-step-evidence.v0';
 const ULG_MLS_MPM_SIDECAR_AWARE_RESIDENT_SEQUENCE_SCHEMA = 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0';
 const ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-contract.v0';
+const ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_STEP_SCHEMA = 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-step.v0';
 export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
@@ -4923,7 +4924,9 @@ function createThermalSidecarDirectRunnerContract({
   reactionTable = null,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
-  residentProductMass = null
+  residentProductMass = null,
+  gpuResidentLaneManager = null,
+  directRunnerImplementationAvailable = false
 } = {}) {
   const sidecarAwareCandidate = preflight?.sidecarAwareSequenceCandidate === true;
   const blockers = [];
@@ -4936,30 +4939,40 @@ function createThermalSidecarDirectRunnerContract({
   if (pressureInterfaceForceRowsBuffer) blockers.push('pressure-interface-force-rows-not-supported-by-direct-runner');
   if (pressureInterfaceForceSolver) blockers.push('pressure-interface-force-solver-not-supported-by-direct-runner');
   if (residentProductMass) blockers.push('resident-product-mass-not-supported-by-direct-runner');
+  if (gpuResidentLaneManager) blockers.push('gpu-resident-lane-manager-not-supported-by-direct-runner');
   if (preflight?.fallbackMode !== 'per-step-fused-mechanics-active-grid') {
     blockers.push('per-step-fused-active-grid-route-required');
   }
   const uniqueBlockers = uniqueStringList(blockers);
   const eligible = sidecarAwareCandidate && uniqueBlockers.length === 0;
+  const runnable = eligible && directRunnerImplementationAvailable === true;
+  const selected = runnable;
   return {
     schema: ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_CONTRACT_SCHEMA,
-    status: eligible
+    status: runnable
+      ? 'thermal-sidecar-direct-runner-selected'
+      : (eligible
       ? 'thermal-sidecar-direct-runner-contract-ready-execution-pending'
       : (sidecarAwareCandidate
           ? 'thermal-sidecar-direct-runner-contract-blocked'
-          : 'thermal-sidecar-direct-runner-not-candidate'),
+          : 'thermal-sidecar-direct-runner-not-candidate')),
     mode: preflight?.sidecarAwareSequenceMode ?? null,
     requiredRoute: 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid',
     sidecarAwareSequenceCandidate: sidecarAwareCandidate,
     directRunnerEligible: eligible,
-    directRunnerRunnable: false,
-    directRunnerSelected: false,
-    directRunnerSelectionStatus: eligible
-      ? 'direct-runner-implementation-pending'
-      : 'direct-runner-requirements-not-met',
-    directRunnerSelectionBlockers: eligible
-      ? ['direct-runner-implementation-pending']
-      : uniqueBlockers,
+    directRunnerImplementationAvailable: directRunnerImplementationAvailable === true,
+    directRunnerRunnable: runnable,
+    directRunnerSelected: selected,
+    directRunnerSelectionStatus: selected
+      ? 'direct-runner-selected'
+      : (eligible
+          ? 'direct-runner-implementation-pending'
+          : 'direct-runner-requirements-not-met'),
+    directRunnerSelectionBlockers: selected
+      ? []
+      : (eligible
+          ? ['direct-runner-implementation-pending']
+          : uniqueBlockers),
     blockers: uniqueBlockers,
     sidecarBlockers: [...(preflight?.sidecarBlockers || [])],
     sidecarFusionPlanStatus: preflight?.sidecarFusionPlanStatus ?? null,
@@ -13990,6 +14003,367 @@ function cloneMlsMpmParticleStateForNext(source, step) {
   };
 }
 
+async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  gridSpacingM = sphParticleState?.smoothingLengthM,
+  boxDimsM = DEFAULT_BOX_DIMS_M,
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2 ?? DEFAULT_GRAVITY_M_PER_S2,
+  cflFactor = mlsMpmParticleState?.gridCflFactor || DEFAULT_CFL_FACTOR,
+  internalPressureScale = 1,
+  preferWebGpu = true,
+  device = null,
+  summaryRunner = runMlsMpmResidentSummaryWebGpu,
+  cohortRanges = null,
+  thermalMaterialTable = null,
+  thermalStepRunner = runSphThermalStepWebGpu,
+  thermalStepOptions = {},
+  mechanicsMaterialTable = null,
+  mechanicsRefreshRunner = runMlsMpmMechanicsRefreshWithOptionalWebGpu,
+  mechanicsRefreshOptions = {},
+  sourceSlot = sphParticleUpload?.slot ?? 0,
+  readbackMode = NO_FULL_READBACK_MODE,
+  p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
+  sequenceIndex = null,
+  sequenceStepCount = null,
+  fuseNoFullResidentMechanicsActiveGrid = false,
+  fuseNoFullResidentActiveGrid = false,
+  activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
+  activeGridSafetyCells = undefined,
+  fusedActiveGridSafetyCells = undefined,
+  sidecarFusionPlan = null,
+  sidecarAwareDirectRunnerContract = null,
+  onResidentStageProgress = null
+} = {}) {
+  assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  assertResidentCpuMirrorGuards({
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    preferWebGpu,
+    readbackMode
+  });
+  const resolvedDevice = device;
+  if (!(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)) {
+    throw new Error('Thermal sidecar direct runner requires an already acquired WebGPU device');
+  }
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
+  const dtSeconds = finiteNumber(dt, 0);
+  const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  if (requestedReadbackMode !== NO_FULL_READBACK_MODE) {
+    throw new Error('Thermal sidecar direct runner requires no-full-readback mode');
+  }
+  const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
+  const resolvedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
+    activeGridDispatchPlanRefreshMode
+  );
+  const activeGridDispatchPlanRefreshFinalStep = sequenceIndex == null
+    || sequenceStepCount == null
+    || Math.max(0, Math.round(finiteNumber(sequenceIndex, 0))) >= Math.max(0, Math.round(finiteNumber(sequenceStepCount, 1)) - 1);
+  const stageTimingStartMs = nowMs();
+  const stageMs = {};
+  const markStageProgress = (status, extra = {}) => {
+    if (typeof onResidentStageProgress !== 'function') return;
+    try {
+      onResidentStageProgress({
+        schema: 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-stage-progress.v0',
+        status,
+        sequenceIndex,
+        sequenceStepCount,
+        sourceSlot,
+        readbackMode: requestedReadbackMode,
+        compactSummaryScope: resolvedCompactSummaryScope,
+        directRunnerContractStatus: sidecarAwareDirectRunnerContract?.status ?? null,
+        updatedAtMs: nowMs(),
+        ...extra
+      });
+    } catch {
+      // Diagnostic progress must never affect the physics step.
+    }
+  };
+  const recordStageMs = (name, startMs) => {
+    stageMs[name] = Math.max(0, nowMs() - startMs);
+    return stageMs[name];
+  };
+  const timedStage = async (name, runStage) => {
+    const startMs = nowMs();
+    markStageProgress('thermal-sidecar-direct-runner-stage-started', { stage: name });
+    try {
+      const result = await runStage();
+      markStageProgress('thermal-sidecar-direct-runner-stage-complete', {
+        stage: name,
+        elapsedMs: recordStageMs(name, startMs)
+      });
+      return result;
+    } catch (error) {
+      markStageProgress('thermal-sidecar-direct-runner-stage-error', {
+        stage: name,
+        elapsedMs: recordStageMs(name, startMs),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  };
+
+  const fusedMechanics = await timedStage('fusedMechanics', () => runFusedNoFullMlsMpmMechanicsWebGpu({
+    device: resolvedDevice,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    gridSpacingM,
+    boxDimsM: dims,
+    dt: dtSeconds,
+    gravityMPerS2: gravity,
+    cflFactor,
+    internalPressureScale,
+    fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
+    activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
+    p2gBackend
+  }));
+  stageMs.p2gGridProjection = 0;
+  stageMs.gridUpdate = 0;
+  stageMs.g2pReconstruction = 0;
+  const p2gGridProjection = fusedMechanics.p2gGridProjection;
+  const gridUpdate = fusedMechanics.gridUpdate;
+  const g2pReconstruction = fusedMechanics.g2pReconstruction;
+
+  const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+  if (!g2pOutput.stateBuffer) {
+    throw new Error('Thermal sidecar direct runner requires retained G2P state output');
+  }
+  const thermalStep = await timedStage('thermalStep', () => thermalStepRunner({
+    device: resolvedDevice,
+    sphParticleState,
+    thermalMaterialTable,
+    sphParticleUpload,
+    sourceStateBuffer: g2pOutput.stateBuffer,
+    sourceThermoBuffer: sphParticleUpload.thermoBuffer,
+    boxDimsM: dims,
+    dtS: dtSeconds,
+    retainOutputParticleBuffers: true,
+    readbackMode: requestedReadbackMode,
+    ...thermalStepOptions
+  }));
+
+  const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+  if (!(thermalOutput.stateBuffer && thermalOutput.thermoBuffer && g2pOutput.mechanicsBuffer)) {
+    throw new Error('Thermal sidecar direct runner requires retained thermal state, thermo, and G2P mechanics buffers');
+  }
+  const mechanicsRefreshStep = await timedStage('mechanicsRefresh', () => mechanicsRefreshRunner({
+    device: resolvedDevice,
+    sphParticleState,
+    mlsMpmParticleState,
+    mechanicsMaterialTable,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    sourceStateBuffer: thermalOutput.stateBuffer,
+    sourceThermoBuffer: thermalOutput.thermoBuffer,
+    sourceMechanicsBuffer: g2pOutput.mechanicsBuffer,
+    preferWebGpu,
+    retainOutputParticleBuffers: true,
+    readbackMode: requestedReadbackMode,
+    ...mechanicsRefreshOptions
+  }));
+
+  const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
+  const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
+  const compactSummaryRequested = requestedReadbackMode === NO_FULL_READBACK_MODE
+    && typeof summaryRunner === 'function';
+  const activeGridDispatchPlanRefreshRequested = resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP
+    || (
+      resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY
+      && activeGridDispatchPlanRefreshFinalStep
+    );
+  const activeGridDispatchPlanOnlyEligible = requestedReadbackMode === NO_FULL_READBACK_MODE
+    && !compactSummaryRequested
+    && fusedMechanics.activeGridDispatch?.useActiveGrid === true;
+  const activeGridDispatchPlanOnlyRequested = activeGridDispatchPlanOnlyEligible
+    && activeGridDispatchPlanRefreshRequested;
+  const activeGridDispatchPlanRefreshSkippedReason = activeGridDispatchPlanOnlyEligible && !activeGridDispatchPlanOnlyRequested
+    ? (
+      resolvedActiveGridDispatchPlanRefreshMode === MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE
+        ? 'active-grid-plan-refresh-disabled'
+        : 'active-grid-plan-refresh-deferred-until-final-step'
+    )
+    : null;
+  let compactGpuSummary = null;
+  stageMs.compactSummary = 0;
+  if (compactSummaryRequested && (hasWebGpuLikeSummaryDevice || customSummaryRunner)) {
+    try {
+      compactGpuSummary = await timedStage('compactSummary', () => summaryRunner({
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        gridUpdate,
+        g2pReconstruction,
+        thermalStep,
+        reactionStep: null,
+        mechanicsRefreshStep,
+        cohortRanges,
+        summaryScope: resolvedCompactSummaryScope,
+        activeGridDispatchPlan: fusedMechanics.activeGridDispatch?.useActiveGrid === true
+          ? {
+            requested: true,
+            dt: dtSeconds,
+            stepCount: 1,
+            gravityMPerS2: gravity,
+            safetyCells: fusedMechanics.activeGridDispatch.safetyCells
+              ?? fusedActiveGridSafetyCells
+              ?? activeGridSafetyCells
+          }
+          : false
+      }));
+    } catch (error) {
+      compactGpuSummary = {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'compact-summary-unavailable',
+        reason: error instanceof Error ? error.message : String(error),
+        compactGpuSummaryAvailable: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+  } else if (activeGridDispatchPlanOnlyRequested && hasWebGpuLikeSummaryDevice) {
+    try {
+      compactGpuSummary = await timedStage('compactSummary', () => runMlsMpmResidentSummaryWebGpu({
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        gridUpdate,
+        g2pReconstruction,
+        thermalStep,
+        reactionStep: null,
+        mechanicsRefreshStep,
+        cohortRanges,
+        summaryScope: resolvedCompactSummaryScope,
+        readCompactSummary: false,
+        activeGridDispatchPlan: {
+          requested: true,
+          dt: dtSeconds,
+          stepCount: 1,
+          gravityMPerS2: gravity,
+          safetyCells: fusedMechanics.activeGridDispatch.safetyCells
+            ?? fusedActiveGridSafetyCells
+            ?? activeGridSafetyCells
+        }
+      }));
+    } catch (error) {
+      compactGpuSummary = {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'compact-summary-plan-only-unavailable',
+        reason: error instanceof Error ? error.message : String(error),
+        compactGpuSummaryAvailable: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+  }
+
+  const stageTiming = {
+    schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
+    totalMs: Math.max(0, nowMs() - stageTimingStartMs),
+    stageMs: { ...stageMs },
+    queueFenceMs: {
+      compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
+    },
+    compactSummaryTiming: compactGpuSummary?.timing ?? null,
+    fusedResidentMechanics: true,
+    thermalSidecarDirectRunner: true,
+    sidecarAwareDirectRunnerContract,
+    sidecarAwareDirectRunnerContractStatus: sidecarAwareDirectRunnerContract?.status ?? null,
+    dispatchTopology: fusedMechanics.dispatchTopology
+      || p2gGridProjection?.residentDispatchTopology
+      || gridUpdate?.residentDispatchTopology
+      || g2pReconstruction?.residentDispatchTopology
+      || null,
+    activeGridDispatch: fusedMechanics.activeGridDispatch || null,
+    activeGridIndirectDispatch: fusedMechanics.activeGridIndirectDispatch || null,
+    requestedReadbackMode,
+    preferWebGpu,
+    compactSummaryRequested,
+    activeGridDispatchPlanOnlyRequested,
+    activeGridDispatchPlanOnlyEligible,
+    activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
+    activeGridDispatchPlanRefreshRequested,
+    activeGridDispatchPlanRefreshFinalStep,
+    activeGridDispatchPlanRefreshSkippedReason,
+    compactSummaryScope: resolvedCompactSummaryScope,
+    thermalRequested: true,
+    mechanicsRefreshRequested: true,
+    reactionRequested: false,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+
+  const step = await timedStage('residentStepEnvelope', () => residentStepEnvelope({
+    sphParticleState,
+    mlsMpmParticleState,
+    p2gGridProjection,
+    gridUpdate,
+    g2pReconstruction,
+    thermalStep,
+    reactionStep: null,
+    mechanicsRefreshStep,
+    inputResidentProductMass: null,
+    compactGpuSummary,
+    dt: dtSeconds,
+    gravityMPerS2: gravity,
+    boxDimsM: dims,
+    cflFactor,
+    preferWebGpu,
+    device: resolvedDevice,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    sourceSlot,
+    pressureInterfaceForceSolver: null,
+    internalPressureScale,
+    sidecarFusionPlan,
+    stageTiming
+  }));
+  const execution = {
+    schema: ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_STEP_SCHEMA,
+    status: 'thermal-sidecar-direct-runner-step-executed',
+    sequenceIndex,
+    sequenceStepCount,
+    directRunnerContractStatus: sidecarAwareDirectRunnerContract?.status ?? null,
+    fusedMechanics: true,
+    thermalStep: true,
+    mechanicsRefresh: true,
+    activeGridUsed: fusedMechanics.activeGridDispatch?.useActiveGrid === true,
+    readbackMode: requestedReadbackMode,
+    compactSummaryRequested,
+    activeGridDispatchPlanOnlyRequested,
+    genericResidentStepEntrypointBypassed: true,
+    fullPhysicsValidation: false
+  };
+  step.thermalSidecarDirectRunner = execution;
+  step.thermalSidecarDirectRunnerStatus = execution.status;
+  if (step.stageTiming) {
+    step.stageTiming.thermalSidecarDirectRunner = execution;
+    step.stageTiming.thermalSidecarDirectRunnerStatus = execution.status;
+  }
+  return step;
+}
+
 function compactResidentAuthorityFamilyOwners(familyOwners = {}) {
   return Object.fromEntries(
     Object.entries(familyOwners || {}).map(([family, owner]) => [family, {
@@ -14034,6 +14408,9 @@ function summarizeResidentStepForSequence(step, index) {
     sidecarAwareDirectRunnerEligible: step.sidecarAwareDirectRunnerContract?.directRunnerEligible ?? null,
     sidecarAwareDirectRunnerRunnable: step.sidecarAwareDirectRunnerContract?.directRunnerRunnable ?? null,
     sidecarAwareDirectRunnerSelected: step.sidecarAwareDirectRunnerContract?.directRunnerSelected ?? null,
+    thermalSidecarDirectRunnerStatus: step.thermalSidecarDirectRunnerStatus ?? null,
+    thermalSidecarDirectRunnerGenericEntrypointBypassed:
+      step.thermalSidecarDirectRunner?.genericResidentStepEntrypointBypassed ?? null,
     residentAuthorityLedgerStatus: step.residentAuthorityLedgerStatus ?? null,
     residentAuthorityFamilyOwners: compactResidentAuthorityFamilyOwners(
       step.residentAuthorityFamilyOwners || step.residentAuthoritySummary?.familyOwners
@@ -14345,7 +14722,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     reactionTable: args.reactionTable,
     pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
     pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
-    residentProductMass
+    residentProductMass,
+    gpuResidentLaneManager: args.gpuResidentLaneManager,
+    directRunnerImplementationAvailable: true
   });
   fusedResidentSequencePreflight.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
   fusedResidentSequencePreflight.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
@@ -14463,22 +14842,29 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   }
 
   const useSidecarAwareResidentSequence = fusedResidentSequencePreflight.sidecarAwareSequenceCandidate === true;
+  const useThermalSidecarDirectRunner = useSidecarAwareResidentSequence
+    && sidecarAwareDirectRunnerContract.directRunnerSelected === true;
   if (useSidecarAwareResidentSequence) {
-    markSequenceProgress('resident-sequence-sidecar-aware-started', {
+    markSequenceProgress(useThermalSidecarDirectRunner
+      ? 'resident-sequence-thermal-sidecar-direct-runner-started'
+      : 'resident-sequence-sidecar-aware-started', {
       stepCount: count,
       mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
       runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
       sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null,
-      directRunnerContractStatus: sidecarAwareDirectRunnerContract.status
+      directRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
+      directRunnerSelected: useThermalSidecarDirectRunner
     });
   }
 
   for (let index = 0; index < count; index += 1) {
     const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
-    markSequenceProgress(useSidecarAwareResidentSequence
+    markSequenceProgress(useThermalSidecarDirectRunner
+      ? 'resident-sequence-thermal-sidecar-direct-runner-step-started'
+      : (useSidecarAwareResidentSequence
       ? 'resident-sequence-sidecar-aware-step-started'
-      : 'resident-sequence-step-started', {
+      : 'resident-sequence-step-started'), {
       stepIndex: index,
       summarizeStep,
       sidecarAwareSequenceMode: useSidecarAwareResidentSequence
@@ -14486,7 +14872,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         : null,
       sidecarAwareDirectRunnerContractStatus: useSidecarAwareResidentSequence
         ? sidecarAwareDirectRunnerContract.status
-        : null
+        : null,
+      directRunnerSelected: useThermalSidecarDirectRunner
     });
     const stepArgs = {
       ...args,
@@ -14523,7 +14910,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       }
     };
     if (!summarizeStep) stepArgs.summaryRunner = null;
-    const step = await runMlsMpmResidentStepWithOptionalWebGpu(stepArgs);
+    const step = useThermalSidecarDirectRunner
+      ? await runThermalSidecarDirectResidentStepWithOptionalWebGpu(stepArgs)
+      : await runMlsMpmResidentStepWithOptionalWebGpu(stepArgs);
     step.sequenceIndex = index;
     step.sidecarAwareResidentSequenceActive = useSidecarAwareResidentSequence;
     step.sidecarAwareResidentSequenceMode = useSidecarAwareResidentSequence
@@ -14550,11 +14939,14 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       step.stageTiming.sidecarAwareResidentSequenceStepCount = count;
       step.stageTiming.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
       step.stageTiming.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
+      step.stageTiming.sidecarAwareDirectRunnerSelected = useThermalSidecarDirectRunner;
     }
     stepSummaries.push(summarizeResidentStepForSequence(step, index));
-    markSequenceProgress(useSidecarAwareResidentSequence
+    markSequenceProgress(useThermalSidecarDirectRunner
+      ? 'resident-sequence-thermal-sidecar-direct-runner-step-complete'
+      : (useSidecarAwareResidentSequence
       ? 'resident-sequence-sidecar-aware-step-complete'
-      : 'resident-sequence-step-complete', {
+      : 'resident-sequence-step-complete'), {
       stepIndex: index,
       summarizeStep,
       backend: step.backend,
@@ -14564,7 +14956,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         : null,
       sidecarAwareDirectRunnerContractStatus: useSidecarAwareResidentSequence
         ? sidecarAwareDirectRunnerContract.status
-        : null
+        : null,
+      directRunnerSelected: useThermalSidecarDirectRunner
     });
     const carriedResidentProductMass = step.nextParticleUploads?.residentProductMass ?? step.residentProductMass ?? null;
     if (finalStep && !retainIntermediateSteps) {
@@ -14600,11 +14993,13 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     finalStep.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
     finalStep.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
     finalStep.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
+    finalStep.sidecarAwareDirectRunnerSelected = useThermalSidecarDirectRunner;
     if (finalStep.stageTiming) {
       finalStep.stageTiming.sidecarAwareResidentSequence = sidecarAwareResidentSequence;
       finalStep.stageTiming.sidecarAwareResidentSequenceStatus = sidecarAwareResidentSequence.status;
       finalStep.stageTiming.sidecarAwareDirectRunnerContract = sidecarAwareDirectRunnerContract;
       finalStep.stageTiming.sidecarAwareDirectRunnerContractStatus = sidecarAwareDirectRunnerContract.status;
+      finalStep.stageTiming.sidecarAwareDirectRunnerSelected = useThermalSidecarDirectRunner;
     }
   }
 
@@ -14614,13 +15009,16 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
   });
   if (useSidecarAwareResidentSequence) {
-    markSequenceProgress('resident-sequence-sidecar-aware-complete', {
+    markSequenceProgress(useThermalSidecarDirectRunner
+      ? 'resident-sequence-thermal-sidecar-direct-runner-complete'
+      : 'resident-sequence-sidecar-aware-complete', {
       completedStepCount: stepSummaries.length,
       backend: finalStep?.backend || 'cpu-reference',
       mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
       runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
       sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null,
       directRunnerContractStatus: sidecarAwareDirectRunnerContract.status,
+      directRunnerSelected: useThermalSidecarDirectRunner,
       sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
     });
   }

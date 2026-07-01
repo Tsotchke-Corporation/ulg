@@ -1726,6 +1726,10 @@ async function runBrowserProbe({
         sidecarAwareDirectRunnerContract:
           compactThermalSidecarDirectRunnerContract(stageTiming.sidecarAwareDirectRunnerContract),
         sidecarAwareDirectRunnerContractStatus: stageTiming.sidecarAwareDirectRunnerContractStatus ?? null,
+        sidecarAwareDirectRunnerSelected: stageTiming.sidecarAwareDirectRunnerSelected ?? null,
+        thermalSidecarDirectRunnerStatus: stageTiming.thermalSidecarDirectRunnerStatus ?? null,
+        thermalSidecarDirectRunnerGenericEntrypointBypassed:
+          stageTiming.thermalSidecarDirectRunner?.genericResidentStepEntrypointBypassed ?? null,
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -5306,6 +5310,9 @@ async function runDirectResidentProbe({
             sidecarAwareDirectRunnerEligible: summary.sidecarAwareDirectRunnerEligible ?? null,
             sidecarAwareDirectRunnerRunnable: summary.sidecarAwareDirectRunnerRunnable ?? null,
             sidecarAwareDirectRunnerSelected: summary.sidecarAwareDirectRunnerSelected ?? null,
+            thermalSidecarDirectRunnerStatus: summary.thermalSidecarDirectRunnerStatus ?? null,
+            thermalSidecarDirectRunnerGenericEntrypointBypassed:
+              summary.thermalSidecarDirectRunnerGenericEntrypointBypassed ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
@@ -5382,6 +5389,10 @@ async function runDirectResidentProbe({
           sidecarAwareDirectRunnerContract:
             compactThermalSidecarDirectRunnerContract(step.stageTiming.sidecarAwareDirectRunnerContract),
           sidecarAwareDirectRunnerContractStatus: step.stageTiming.sidecarAwareDirectRunnerContractStatus ?? null,
+          sidecarAwareDirectRunnerSelected: step.stageTiming.sidecarAwareDirectRunnerSelected ?? null,
+          thermalSidecarDirectRunnerStatus: step.stageTiming.thermalSidecarDirectRunnerStatus ?? null,
+          thermalSidecarDirectRunnerGenericEntrypointBypassed:
+            step.stageTiming.thermalSidecarDirectRunner?.genericResidentStepEntrypointBypassed ?? null,
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }

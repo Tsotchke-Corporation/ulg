@@ -6869,22 +6869,22 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   );
   assert.equal(
     execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerContractStatus,
-    'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+    'thermal-sidecar-direct-runner-selected'
   );
   assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerEligible, true);
-  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerRunnable, false);
-  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerSelected, false);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerRunnable, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareDirectRunnerSelected, true);
   assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareSequencePromotesFusedSequence, false);
   assert.equal(execution.sidecarAwareResidentSequenceActive, true);
   assert.equal(execution.sidecarAwareResidentSequenceRunner, 'resident-sidecar-aware-sequence-loop');
   assert.equal(execution.sidecarAwareResidentSequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
   assert.equal(
     execution.sidecarAwareDirectRunnerContractStatus,
-    'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+    'thermal-sidecar-direct-runner-selected'
   );
   assert.equal(execution.sidecarAwareDirectRunnerEligible, true);
-  assert.equal(execution.sidecarAwareDirectRunnerRunnable, false);
-  assert.equal(execution.sidecarAwareDirectRunnerSelected, false);
+  assert.equal(execution.sidecarAwareDirectRunnerRunnable, true);
+  assert.equal(execution.sidecarAwareDirectRunnerSelected, true);
   assert.equal(execution.sidecarAwareResidentSequence.schema, 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0');
   assert.equal(execution.sidecarAwareResidentSequence.status, 'sidecar-aware-resident-sequence-evidence-ready');
   assert.equal(execution.sidecarAwareResidentSequence.mode, 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid');
@@ -6892,13 +6892,14 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   assert.equal(execution.sidecarAwareResidentSequence.sequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
   assert.equal(
     execution.sidecarAwareResidentSequence.directRunnerContractStatus,
-    'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+    'thermal-sidecar-direct-runner-selected'
   );
   assert.equal(execution.sidecarAwareResidentSequence.directRunnerEligible, true);
-  assert.equal(execution.sidecarAwareResidentSequence.directRunnerRunnable, false);
+  assert.equal(execution.sidecarAwareResidentSequence.directRunnerRunnable, true);
+  assert.equal(execution.sidecarAwareResidentSequence.directRunnerSelected, true);
   assert.deepEqual(
     execution.sidecarAwareResidentSequence.directRunnerContract.directRunnerSelectionBlockers,
-    ['direct-runner-implementation-pending']
+    []
   );
   assert.equal(execution.sidecarAwareResidentSequence.stepCount, 2);
   assert.equal(execution.sidecarAwareResidentSequence.completedStepCount, 2);
@@ -6918,7 +6919,16 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   );
   assert.equal(
     execution.finalStep.stageTiming.sidecarAwareDirectRunnerContractStatus,
-    'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+    'thermal-sidecar-direct-runner-selected'
+  );
+  assert.equal(execution.finalStep.stageTiming.sidecarAwareDirectRunnerSelected, true);
+  assert.equal(
+    execution.finalStep.stageTiming.thermalSidecarDirectRunnerStatus,
+    'thermal-sidecar-direct-runner-step-executed'
+  );
+  assert.equal(
+    execution.finalStep.stageTiming.thermalSidecarDirectRunner.genericResidentStepEntrypointBypassed,
+    true
   );
   assert.equal(execution.stepSummaries.length, 2);
   for (const summary of execution.stepSummaries) {
@@ -6933,22 +6943,24 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     assert.equal(summary.sidecarAwareResidentSequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
     assert.equal(
       summary.sidecarAwareDirectRunnerContractStatus,
-      'thermal-sidecar-direct-runner-contract-ready-execution-pending'
+      'thermal-sidecar-direct-runner-selected'
     );
     assert.equal(summary.sidecarAwareDirectRunnerEligible, true);
-    assert.equal(summary.sidecarAwareDirectRunnerRunnable, false);
-    assert.equal(summary.sidecarAwareDirectRunnerSelected, false);
+    assert.equal(summary.sidecarAwareDirectRunnerRunnable, true);
+    assert.equal(summary.sidecarAwareDirectRunnerSelected, true);
+    assert.equal(summary.thermalSidecarDirectRunnerStatus, 'thermal-sidecar-direct-runner-step-executed');
+    assert.equal(summary.thermalSidecarDirectRunnerGenericEntrypointBypassed, true);
   }
-  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-sidecar-aware-started'));
+  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-thermal-sidecar-direct-runner-started'));
   assert.equal(
-    progressEvents.filter((event) => event.status === 'resident-sequence-sidecar-aware-step-started').length,
+    progressEvents.filter((event) => event.status === 'resident-sequence-thermal-sidecar-direct-runner-step-started').length,
     2
   );
   assert.equal(
-    progressEvents.filter((event) => event.status === 'resident-sequence-sidecar-aware-step-complete').length,
+    progressEvents.filter((event) => event.status === 'resident-sequence-thermal-sidecar-direct-runner-step-complete').length,
     2
   );
-  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-sidecar-aware-complete'));
+  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-thermal-sidecar-direct-runner-complete'));
   assert.equal(thermalInputs.length, 2);
   assert.equal(mechanicsRefreshInputs.length, 2);
   assert.equal(mechanicsRefreshInputs[0].sourceStateBuffer, 'aware-thermal-state-1');

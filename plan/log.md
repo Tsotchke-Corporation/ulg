@@ -34108,3 +34108,75 @@ Next:
 - Implement the direct runner behind this contract for the thermal-only,
   fused-active-grid route. Do not broaden it to reaction/product or pressure
   sidecars until their own direct-runner contracts are present.
+
+## 2026-06-30 AKDT - Thermal Sidecar Direct Runner Selected
+
+Status:
+
+- Implemented the dedicated thermal sidecar direct runner for the eligible
+  non-lane route. The resident multi-step loop now selects it when the
+  sidecar-aware thermal path has retained thermal/material tables,
+  mechanics-refresh support, no reaction/product or pressure-interface
+  sidecars, no GPU resident lane manager, and the active-grid per-step fused
+  mechanics fallback is available.
+- The direct runner bypasses the generic resident-step entrypoint for this
+  route and explicitly runs fused mechanics, retained thermal, retained
+  mechanics refresh, and compact-summary or active-grid-plan work in the
+  direct runner. Runtime, stage timing, probe output, benchmark output, and
+  step summaries now expose
+  `thermalSidecarDirectRunnerStatus=thermal-sidecar-direct-runner-step-executed`
+  and `thermalSidecarDirectRunnerGenericEntrypointBypassed=true`.
+- The direct-runner contract now reports
+  `thermal-sidecar-direct-runner-selected`,
+  `directRunnerRunnable=true`, `directRunnerSelected=true`, and an empty
+  selection blocker list for this eligible path.
+- This still deliberately blocks the lane-managed PeerCompute path with
+  `gpu-resident-lane-manager-not-supported-by-direct-runner`, and it does not
+  promote `sequenceRunnable=true`. The next architectural boundary is either
+  lane/fence ownership for this direct runner or a real one-submit sidecar
+  fusion path; this slice only removes generic per-step entrypoint overhead for
+  the already-eligible thermal route.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `70/70` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: VPN server availability check: `https://100.86.83.35:5173/` returned
+  HTTP/2 200, `http://100.86.83.35:5174/` returned HTTP/1.1 200, and both
+  listeners were bound to `0.0.0.0`.
+- PASS: live HTTPS direct-runner benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-thermal-sidecar-direct-runner-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  preflight `blocked-fused-resident-sequence`, fallback
+  `per-step-fused-mechanics-active-grid`,
+  `sidecarAwareResidentSequenceStatus=sidecar-aware-resident-sequence-evidence-ready`,
+  `sidecarAwareResidentSequenceActive=true`, runner
+  `resident-sidecar-aware-sequence-loop`, path
+  `explicit-sidecar-aware-per-step-resident-loop`,
+  `sidecarAwareDirectRunnerContractStatus=thermal-sidecar-direct-runner-selected`,
+  `directRunnerEligible=true`, `directRunnerRunnable=true`,
+  `directRunnerSelected=true`,
+  `directRunnerSelectionStatus=direct-runner-selected`,
+  `directRunnerSelectionBlockers=[]`,
+  `thermalSidecarDirectRunnerStatus=thermal-sidecar-direct-runner-step-executed`,
+  `thermalSidecarDirectRunnerGenericEntrypointBypassed=true`, sidecar stages
+  `2/2`, sidecar-aware steps `2/2`, `residentStageMs=4.7`,
+  `residentStageStepsPerSecond=212.77`, compact-summary `mapAsyncWaitMs=null`,
+  and compact readback byte length `0`.
+  The nested direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; this records route
+  selection and hot-loop evidence, not visible motion quality.
+
+Next:
+
+- Decide the next ownership boundary before widening this path: either adapt
+  the direct runner to PeerCompute lane/fence ownership, or keep it as a
+  non-lane bridge and move the thermal plus mechanics-refresh work into the
+  true one-submit sidecar fusion path.

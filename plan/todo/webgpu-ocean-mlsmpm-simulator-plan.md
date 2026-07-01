@@ -1384,6 +1384,17 @@ Interim status, 2026-06-18 AKDT:
   before promotion: the next code path must move thermal plus mechanics refresh
   into an explicit sidecar-aware sequence runner instead of counting fallback
   execution as fused.
+- 2026-06-30 thermal sidecar direct runner selected: the thermal-only,
+  non-lane, active-grid per-step fused mechanics path now selects a dedicated
+  direct runner and bypasses the generic resident-step entrypoint while keeping
+  zero compact readback. Live HTTPS evidence reports
+  `thermal-sidecar-direct-runner-selected`,
+  `thermal-sidecar-direct-runner-step-executed`,
+  `thermalSidecarDirectRunnerGenericEntrypointBypassed=true`, sidecar stages
+  `2/2`, and `residentStageStepsPerSecond=212.77`. This is still not the true
+  fused sequence: PeerCompute lane ownership remains blocked for this direct
+  runner, and `sequenceRunnable` stays false until sidecar writes are owned
+  inside a one-submit sequence or the direct runner is made lane/fence-aware.
 
 ## ULG-Specific Constraints
 

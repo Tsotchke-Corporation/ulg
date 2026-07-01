@@ -2327,6 +2327,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ?? null,
     sidecarAwareDirectRunnerSelectionBlockers:
       [...(sidecarAwareDirectRunnerContract?.directRunnerSelectionBlockers || [])],
+    thermalSidecarDirectRunnerStatus:
+      residentStageTiming?.thermalSidecarDirectRunnerStatus
+      ?? residentStep?.thermalSidecarDirectRunnerStatus
+      ?? null,
+    thermalSidecarDirectRunnerGenericEntrypointBypassed:
+      residentStageTiming?.thermalSidecarDirectRunnerGenericEntrypointBypassed
+      ?? residentStageTiming?.thermalSidecarDirectRunner?.genericResidentStepEntrypointBypassed
+      ?? residentStep?.thermalSidecarDirectRunnerGenericEntrypointBypassed
+      ?? residentStep?.thermalSidecarDirectRunner?.genericResidentStepEntrypointBypassed
+      ?? null,
     sidecarAwareResidentSequenceActive:
       residentStageTiming?.sidecarAwareResidentSequenceActive
       ?? residentSteps?.sidecarAwareResidentSequenceActive

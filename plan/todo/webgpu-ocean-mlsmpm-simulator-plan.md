@@ -439,6 +439,19 @@ Tactical status, 2026-06-19 AKDT:
   evidence and routing, not the final fused sidecar kernel; the next code path
   must move thermal plus mechanics-refresh consumption into the lane-owned
   fused runner rather than treating the per-step wrapper as a performance win.
+- The thermal sidecar-aware path is now an explicit runner route instead of an
+  inferred generic fallback. Preflight, lane contract, stage timing, sequence
+  output, benchmark, and probe fields report
+  `sidecarAwareSequenceRunner=resident-sidecar-aware-sequence-loop` and
+  `sidecarAwareSequencePath=explicit-sidecar-aware-per-step-resident-loop`.
+  Focused tests assert the sidecar-aware progress lifecycle. Fresh smoke
+  evidence is suite `complete`, gate `pass`, scenario `good`,
+  `sidecarAwareResidentSequenceActive=true`, runner/path present, sidecar
+  stages `2/2`, sidecar-aware steps `2/2`, compact readback bytes `0`, and
+  resident stage `5.8 ms`. This closes the route/ownership visibility slice;
+  it still leaves the actual performance task: move thermal plus
+  mechanics-refresh execution out of per-step orchestration and into a fused
+  sequence runner that owns retained sidecar buffers.
 - Native WebGPU surface validation now has a cadence gate before validation
   command-encoder creation. The render loop inspects readback-smoke and
   offscreen validation pending/pass/retry-exhausted state and only starts GPU

@@ -6767,6 +6767,7 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   });
   const thermalInputs = [];
   const mechanicsRefreshInputs = [];
+  const progressEvents = [];
   const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
@@ -6793,6 +6794,9 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     activeGridSafetyCells: 1,
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
     mechanicsMaterialTable,
+    onResidentStageProgress(event) {
+      progressEvents.push(event);
+    },
     thermalStepRunner(args) {
       thermalInputs.push({
         sourceStateBuffer: args.sourceStateBuffer?.label ?? null,
@@ -6851,10 +6855,23 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     execution.fusedResidentSequencePreflight.sidecarAwareSequenceMode,
     'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid'
   );
+  assert.equal(
+    execution.fusedResidentSequencePreflight.sidecarAwareSequenceRunner,
+    'resident-sidecar-aware-sequence-loop'
+  );
+  assert.equal(
+    execution.fusedResidentSequencePreflight.sidecarAwareSequencePath,
+    'explicit-sidecar-aware-per-step-resident-loop'
+  );
   assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareSequencePromotesFusedSequence, false);
+  assert.equal(execution.sidecarAwareResidentSequenceActive, true);
+  assert.equal(execution.sidecarAwareResidentSequenceRunner, 'resident-sidecar-aware-sequence-loop');
+  assert.equal(execution.sidecarAwareResidentSequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
   assert.equal(execution.sidecarAwareResidentSequence.schema, 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0');
   assert.equal(execution.sidecarAwareResidentSequence.status, 'sidecar-aware-resident-sequence-evidence-ready');
   assert.equal(execution.sidecarAwareResidentSequence.mode, 'thermal-mechanics-refresh-per-step-fused-mechanics-active-grid');
+  assert.equal(execution.sidecarAwareResidentSequence.runner, 'resident-sidecar-aware-sequence-loop');
+  assert.equal(execution.sidecarAwareResidentSequence.sequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
   assert.equal(execution.sidecarAwareResidentSequence.stepCount, 2);
   assert.equal(execution.sidecarAwareResidentSequence.completedStepCount, 2);
   assert.equal(execution.sidecarAwareResidentSequence.passedStepCount, 2);
@@ -6866,6 +6883,11 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     execution.finalStep.stageTiming.sidecarAwareResidentSequence.status,
     'sidecar-aware-resident-sequence-evidence-ready'
   );
+  assert.equal(execution.finalStep.stageTiming.sidecarAwareResidentSequenceActive, true);
+  assert.equal(
+    execution.finalStep.stageTiming.sidecarAwareResidentSequenceRunner,
+    'resident-sidecar-aware-sequence-loop'
+  );
   assert.equal(execution.stepSummaries.length, 2);
   for (const summary of execution.stepSummaries) {
     assert.equal(summary.sidecarFusionStepEvidenceStatus, 'sidecar-fusion-step-evidence-ready');
@@ -6874,7 +6896,20 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
     assert.equal(summary.sidecarFusionStepEvidencePassedStageCount, 2);
     assert.equal(summary.sidecarFusionStepEvidenceAllRequiredStagesPassed, true);
     assert.equal(summary.sidecarFusionStepEvidencePromotesFusedSequence, false);
+    assert.equal(summary.sidecarAwareResidentSequenceActive, true);
+    assert.equal(summary.sidecarAwareResidentSequenceRunner, 'resident-sidecar-aware-sequence-loop');
+    assert.equal(summary.sidecarAwareResidentSequencePath, 'explicit-sidecar-aware-per-step-resident-loop');
   }
+  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-sidecar-aware-started'));
+  assert.equal(
+    progressEvents.filter((event) => event.status === 'resident-sequence-sidecar-aware-step-started').length,
+    2
+  );
+  assert.equal(
+    progressEvents.filter((event) => event.status === 'resident-sequence-sidecar-aware-step-complete').length,
+    2
+  );
+  assert.ok(progressEvents.some((event) => event.status === 'resident-sequence-sidecar-aware-complete'));
   assert.equal(thermalInputs.length, 2);
   assert.equal(mechanicsRefreshInputs.length, 2);
   assert.equal(mechanicsRefreshInputs[0].sourceStateBuffer, 'aware-thermal-state-1');

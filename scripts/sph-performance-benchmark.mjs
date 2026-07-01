@@ -2291,6 +2291,14 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       fusedResidentSequencePreflight?.sidecarAwareSequenceStatus ?? null,
     sidecarAwareResidentSequenceMode:
       sidecarAwareResidentSequence?.mode ?? fusedResidentSequencePreflight?.sidecarAwareSequenceMode ?? null,
+    sidecarAwareResidentSequenceRunner:
+      sidecarAwareResidentSequence?.runner ?? fusedResidentSequencePreflight?.sidecarAwareSequenceRunner ?? null,
+    sidecarAwareResidentSequencePath:
+      sidecarAwareResidentSequence?.sequencePath ?? fusedResidentSequencePreflight?.sidecarAwareSequencePath ?? null,
+    sidecarAwareResidentSequenceActive:
+      residentStageTiming?.sidecarAwareResidentSequenceActive
+      ?? residentSteps?.sidecarAwareResidentSequenceActive
+      ?? null,
     sidecarAwareResidentSequenceStatus:
       sidecarAwareResidentSequence?.status ?? null,
     sidecarAwareResidentSequenceExecuted:

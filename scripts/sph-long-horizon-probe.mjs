@@ -1601,6 +1601,8 @@ async function runBrowserProbe({
         schema: sequence.schema ?? null,
         status: sequence.status ?? null,
         mode: sequence.mode ?? null,
+        runner: sequence.runner ?? null,
+        sequencePath: sequence.sequencePath ?? null,
         sequenceRequested: sequence.sequenceRequested ?? null,
         sequenceRunnable: sequence.sequenceRunnable ?? null,
         sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
@@ -1647,6 +1649,8 @@ async function runBrowserProbe({
         sidecarAwareSequenceCandidate: preflight.sidecarAwareSequenceCandidate ?? null,
         sidecarAwareSequenceStatus: preflight.sidecarAwareSequenceStatus ?? null,
         sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
+        sidecarAwareSequenceRunner: preflight.sidecarAwareSequenceRunner ?? null,
+        sidecarAwareSequencePath: preflight.sidecarAwareSequencePath ?? null,
         sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
         sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
@@ -1680,6 +1684,10 @@ async function runBrowserProbe({
         fusedResidentSequencePreflight: compactFusedResidentSequencePreflight(stageTiming.fusedResidentSequencePreflight),
         sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(stageTiming.sidecarFusionStepEvidence),
         sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(stageTiming.sidecarAwareResidentSequence),
+        sidecarAwareResidentSequenceActive: stageTiming.sidecarAwareResidentSequenceActive ?? null,
+        sidecarAwareResidentSequenceMode: stageTiming.sidecarAwareResidentSequenceMode ?? null,
+        sidecarAwareResidentSequenceRunner: stageTiming.sidecarAwareResidentSequenceRunner ?? null,
+        sidecarAwareResidentSequencePath: stageTiming.sidecarAwareResidentSequencePath ?? null,
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
@@ -5108,6 +5116,8 @@ async function runDirectResidentProbe({
         schema: sequence.schema ?? null,
         status: sequence.status ?? null,
         mode: sequence.mode ?? null,
+        runner: sequence.runner ?? null,
+        sequencePath: sequence.sequencePath ?? null,
         sequenceRequested: sequence.sequenceRequested ?? null,
         sequenceRunnable: sequence.sequenceRunnable ?? null,
         sidecarAwareSequenceCandidate: sequence.sidecarAwareSequenceCandidate ?? null,
@@ -5154,6 +5164,8 @@ async function runDirectResidentProbe({
         sidecarAwareSequenceCandidate: preflight.sidecarAwareSequenceCandidate ?? null,
         sidecarAwareSequenceStatus: preflight.sidecarAwareSequenceStatus ?? null,
         sidecarAwareSequenceMode: preflight.sidecarAwareSequenceMode ?? null,
+        sidecarAwareSequenceRunner: preflight.sidecarAwareSequenceRunner ?? null,
+        sidecarAwareSequencePath: preflight.sidecarAwareSequencePath ?? null,
         sidecarAwareSequencePromotesFusedSequence: preflight.sidecarAwareSequencePromotesFusedSequence ?? null,
         sidecarAwareSequenceSupportedBlockers: [...(preflight.sidecarAwareSequenceSupportedBlockers || [])],
         activeGridFallbackRequested: preflight.activeGridFallbackRequested ?? null,
@@ -5191,6 +5203,10 @@ async function runDirectResidentProbe({
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],
         residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])],
+        sidecarAwareResidentSequenceActive: steps.sidecarAwareResidentSequenceActive ?? null,
+        sidecarAwareResidentSequenceMode: steps.sidecarAwareResidentSequenceMode ?? null,
+        sidecarAwareResidentSequenceRunner: steps.sidecarAwareResidentSequenceRunner ?? null,
+        sidecarAwareResidentSequencePath: steps.sidecarAwareResidentSequencePath ?? null,
         sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(steps.sidecarAwareResidentSequence),
         stepSummaries: Array.isArray(steps.stepSummaries)
           ? steps.stepSummaries.map((summary) => ({
@@ -5203,6 +5219,10 @@ async function runDirectResidentProbe({
             sidecarFusionStepEvidencePassedStageCount: summary.sidecarFusionStepEvidencePassedStageCount ?? null,
             sidecarFusionStepEvidenceAllRequiredStagesPassed:
               summary.sidecarFusionStepEvidenceAllRequiredStagesPassed ?? null,
+            sidecarAwareResidentSequenceActive: summary.sidecarAwareResidentSequenceActive ?? null,
+            sidecarAwareResidentSequenceMode: summary.sidecarAwareResidentSequenceMode ?? null,
+            sidecarAwareResidentSequenceRunner: summary.sidecarAwareResidentSequenceRunner ?? null,
+            sidecarAwareResidentSequencePath: summary.sidecarAwareResidentSequencePath ?? null,
             activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
               ? { ...summary.stageTiming.activeGridIndirectDispatch }
               : null,
@@ -5272,6 +5292,10 @@ async function runDirectResidentProbe({
           fusedResidentSequenceStepCount: step.stageTiming.fusedResidentSequenceStepCount ?? null,
           sidecarFusionStepEvidence: compactSidecarFusionStepEvidence(step.stageTiming.sidecarFusionStepEvidence),
           sidecarAwareResidentSequence: compactSidecarAwareResidentSequence(step.stageTiming.sidecarAwareResidentSequence),
+          sidecarAwareResidentSequenceActive: step.stageTiming.sidecarAwareResidentSequenceActive ?? null,
+          sidecarAwareResidentSequenceMode: step.stageTiming.sidecarAwareResidentSequenceMode ?? null,
+          sidecarAwareResidentSequenceRunner: step.stageTiming.sidecarAwareResidentSequenceRunner ?? null,
+          sidecarAwareResidentSequencePath: step.stageTiming.sidecarAwareResidentSequencePath ?? null,
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }

@@ -4875,6 +4875,8 @@ function createSidecarAwareResidentSequenceEvidence({
           ? 'sidecar-aware-resident-sequence-evidence-partial'
           : 'sidecar-aware-resident-sequence-evidence-not-ready'),
     mode: preflight.sidecarAwareSequenceMode ?? null,
+    runner: preflight.sidecarAwareSequenceRunner ?? null,
+    sequencePath: preflight.sidecarAwareSequencePath ?? null,
     sequenceRequested: preflight.sequenceRequested === true,
     sequenceRunnable: false,
     sidecarAwareSequenceCandidate: true,
@@ -5005,6 +5007,12 @@ function createFusedResidentSequencePreflight({
       ? 'sidecar-aware-sequence-candidate-awaiting-step-evidence'
       : null,
     sidecarAwareSequenceMode,
+    sidecarAwareSequenceRunner: sidecarAwareSequenceCandidate
+      ? 'resident-sidecar-aware-sequence-loop'
+      : null,
+    sidecarAwareSequencePath: sidecarAwareSequenceCandidate
+      ? 'explicit-sidecar-aware-per-step-resident-loop'
+      : null,
     sidecarAwareSequencePromotesFusedSequence: false,
     sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
     activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
@@ -5110,6 +5118,12 @@ function createResidentSequenceLaneContract({
       ? 'sidecar-aware-sequence-candidate-awaiting-step-evidence'
       : null,
     sidecarAwareSequenceMode,
+    sidecarAwareSequenceRunner: sidecarAwareSequenceCandidate
+      ? 'resident-sidecar-aware-sequence-loop'
+      : null,
+    sidecarAwareSequencePath: sidecarAwareSequenceCandidate
+      ? 'explicit-sidecar-aware-per-step-resident-loop'
+      : null,
     sidecarAwareSequencePromotesFusedSequence: false,
     sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
     thermalAwareFusionRequired: blockers.includes('thermal-sidecar'),
@@ -13928,6 +13942,10 @@ function summarizeResidentStepForSequence(step, index) {
     sidecarFusionStepEvidenceAllRequiredStagesPassed:
       step.sidecarFusionStepEvidence?.allRequiredStagesPassed === true,
     sidecarFusionStepEvidencePromotesFusedSequence: step.sidecarFusionStepEvidence?.promotesFusedSequence === true,
+    sidecarAwareResidentSequenceActive: step.sidecarAwareResidentSequenceActive === true,
+    sidecarAwareResidentSequenceMode: step.sidecarAwareResidentSequenceMode ?? null,
+    sidecarAwareResidentSequenceRunner: step.sidecarAwareResidentSequenceRunner ?? null,
+    sidecarAwareResidentSequencePath: step.sidecarAwareResidentSequencePath ?? null,
     residentAuthorityLedgerStatus: step.residentAuthorityLedgerStatus ?? null,
     residentAuthorityFamilyOwners: compactResidentAuthorityFamilyOwners(
       step.residentAuthorityFamilyOwners || step.residentAuthoritySummary?.familyOwners
@@ -14322,6 +14340,10 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       residentBufferLeaseBlockers: [...(finalStep.residentBufferLeaseBlockers || [])],
       fusedResidentSequence: finalStep.fusedResidentSequence,
       fusedResidentSequencePreflight,
+      sidecarAwareResidentSequenceActive: false,
+      sidecarAwareResidentSequenceMode: null,
+      sidecarAwareResidentSequenceRunner: null,
+      sidecarAwareResidentSequencePath: null,
       sidecarAwareResidentSequence: null,
       sidecarAwareResidentSequenceStatus: null,
       gpuAuthoritativeState: false,
@@ -14332,12 +14354,27 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     };
   }
 
+  const useSidecarAwareResidentSequence = fusedResidentSequencePreflight.sidecarAwareSequenceCandidate === true;
+  if (useSidecarAwareResidentSequence) {
+    markSequenceProgress('resident-sequence-sidecar-aware-started', {
+      stepCount: count,
+      mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
+      runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
+      sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null
+    });
+  }
+
   for (let index = 0; index < count; index += 1) {
     const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
-    markSequenceProgress('resident-sequence-step-started', {
+    markSequenceProgress(useSidecarAwareResidentSequence
+      ? 'resident-sequence-sidecar-aware-step-started'
+      : 'resident-sequence-step-started', {
       stepIndex: index,
-      summarizeStep
+      summarizeStep,
+      sidecarAwareSequenceMode: useSidecarAwareResidentSequence
+        ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+        : null
     });
     const stepArgs = {
       ...args,
@@ -14351,25 +14388,54 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       fuseNoFullResidentMechanics: requestPerStepFusedNoFullMechanics,
       activeGridDispatchPlanRefreshMode: resolvedActiveGridDispatchPlanRefreshMode,
       sidecarFusionPlan: fusedResidentSequencePreflight.sidecarFusionPlan || null,
+      sidecarAwareSequenceMode: useSidecarAwareResidentSequence
+        ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+        : null,
       sequenceIndex: index,
       sequenceStepCount: count,
       onResidentStageProgress(progress = {}) {
         markSequenceProgress(progress.status || 'resident-stage-progress', {
           ...progress,
           stepIndex: progress.stepIndex ?? progress.sequenceIndex ?? index,
-          summarizeStep
+          summarizeStep,
+          sidecarAwareSequenceMode: useSidecarAwareResidentSequence
+            ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+            : null
         });
       }
     };
     if (!summarizeStep) stepArgs.summaryRunner = null;
     const step = await runMlsMpmResidentStepWithOptionalWebGpu(stepArgs);
     step.sequenceIndex = index;
+    step.sidecarAwareResidentSequenceActive = useSidecarAwareResidentSequence;
+    step.sidecarAwareResidentSequenceMode = useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+      : null;
+    step.sidecarAwareResidentSequenceRunner = useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequenceRunner
+      : null;
+    step.sidecarAwareResidentSequencePath = useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequencePath
+      : null;
+    if (step.stageTiming && useSidecarAwareResidentSequence) {
+      step.stageTiming.sidecarAwareResidentSequenceActive = true;
+      step.stageTiming.sidecarAwareResidentSequenceMode = fusedResidentSequencePreflight.sidecarAwareSequenceMode;
+      step.stageTiming.sidecarAwareResidentSequenceRunner = fusedResidentSequencePreflight.sidecarAwareSequenceRunner;
+      step.stageTiming.sidecarAwareResidentSequencePath = fusedResidentSequencePreflight.sidecarAwareSequencePath;
+      step.stageTiming.sidecarAwareResidentSequenceStepIndex = index;
+      step.stageTiming.sidecarAwareResidentSequenceStepCount = count;
+    }
     stepSummaries.push(summarizeResidentStepForSequence(step, index));
-    markSequenceProgress('resident-sequence-step-complete', {
+    markSequenceProgress(useSidecarAwareResidentSequence
+      ? 'resident-sequence-sidecar-aware-step-complete'
+      : 'resident-sequence-step-complete', {
       stepIndex: index,
       summarizeStep,
       backend: step.backend,
-      stageTiming: step.stageTiming || null
+      stageTiming: step.stageTiming || null,
+      sidecarAwareSequenceMode: useSidecarAwareResidentSequence
+        ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+        : null
     });
     const carriedResidentProductMass = step.nextParticleUploads?.residentProductMass ?? step.residentProductMass ?? null;
     if (finalStep && !retainIntermediateSteps) {
@@ -14414,6 +14480,16 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     backend: finalStep?.backend || 'cpu-reference',
     sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
   });
+  if (useSidecarAwareResidentSequence) {
+    markSequenceProgress('resident-sequence-sidecar-aware-complete', {
+      completedStepCount: stepSummaries.length,
+      backend: finalStep?.backend || 'cpu-reference',
+      mode: fusedResidentSequencePreflight.sidecarAwareSequenceMode ?? null,
+      runner: fusedResidentSequencePreflight.sidecarAwareSequenceRunner ?? null,
+      sequencePath: fusedResidentSequencePreflight.sidecarAwareSequencePath ?? null,
+      sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null
+    });
+  }
   if (finalStep && fusedResidentSequencePreflight.sequenceRequested) {
     finalStep.fusedResidentSequencePreflight = fusedResidentSequencePreflight;
     if (finalStep.stageTiming) {
@@ -14455,6 +14531,16 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
     fusedResidentSequencePreflight,
+    sidecarAwareResidentSequenceActive: useSidecarAwareResidentSequence,
+    sidecarAwareResidentSequenceMode: useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequenceMode
+      : null,
+    sidecarAwareResidentSequenceRunner: useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequenceRunner
+      : null,
+    sidecarAwareResidentSequencePath: useSidecarAwareResidentSequence
+      ? fusedResidentSequencePreflight.sidecarAwareSequencePath
+      : null,
     sidecarAwareResidentSequence,
     sidecarAwareResidentSequenceStatus: sidecarAwareResidentSequence?.status ?? null,
     gpuAuthoritativeState: false,

@@ -33991,3 +33991,57 @@ Next:
   buffers inside the lane-owned fused runner. Reaction/product and
   pressure-interface sidecars remain blocked until their own retained input and
   ownership transitions are proven.
+
+## 2026-06-30 AKDT - Explicit Sidecar-Aware Resident Sequence Route
+
+Status:
+
+- Promoted the thermal-only sidecar candidate from post-hoc evidence to an
+  explicit runner route in the resident multi-step loop. The preflight and lane
+  contract now expose `sidecarAwareSequenceRunner=resident-sidecar-aware-sequence-loop`
+  and `sidecarAwareSequencePath=explicit-sidecar-aware-per-step-resident-loop`.
+- The resident loop now emits sidecar-aware progress statuses, stamps each step
+  and final stage timing with active mode/runner/path fields, and returns
+  `sidecarAwareResidentSequenceActive=true` when this route is selected.
+- Focused coverage now asserts the sidecar-aware start/step/complete progress
+  lifecycle and verifies the returned runner/path fields on the execution,
+  final stage timing, and per-step summaries.
+- This remains a per-step sidecar-aware route, not the final one-submit fused
+  sidecar kernel. It is now explicit enough for PeerCompute policy to select or
+  reject by route instead of inferring behavior from generic fallback evidence.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `70/70` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `11/11`
+  passing.
+- PASS: `git diff --check`
+- PASS: live HTTPS sidecar-aware runner benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-aware-runner-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`, preflight
+  `blocked-fused-resident-sequence`, fallback
+  `per-step-fused-mechanics-active-grid`,
+  `sidecarAwareResidentSequenceActive=true`,
+  runner `resident-sidecar-aware-sequence-loop`, path
+  `explicit-sidecar-aware-per-step-resident-loop`,
+  `sidecarFusionStepEvidenceStatus=sidecar-fusion-step-evidence-ready`,
+  sidecar stages `2/2`, sidecar-aware completed/passed steps `2/2`,
+  `allStepsPassed=true`, `residentStageMs=5.8`,
+  `residentStageStepsPerSecond=172.41`, compact-summary `mapAsyncWaitMs=null`,
+  and compact readback byte length `0`.
+  The nested direct probe still reports `probeStatus=bad` with
+  `missing-max-speed` and `no-positive-displacement`; this records route and
+  ordering evidence only.
+
+Next:
+
+- Move the thermal plus mechanics-refresh work from this explicit per-step
+  route into a fused runner implementation that avoids per-step orchestration
+  overhead. Keep `sequenceRunnable=false` until that runner owns the retained
+  sidecar buffers inside one sequence path.

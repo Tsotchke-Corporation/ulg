@@ -1,5 +1,6 @@
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
@@ -29,6 +30,7 @@ export {
 };
 
 export const MLS_MPM_GPU_GRID_NODE_FLOATS = MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.length;
+const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 export const ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-p2g-backend-policy.v0';
 export const MLS_MPM_P2G_BACKEND_CPU_REFERENCE = 'cpu-reference';
@@ -158,6 +160,30 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function normalizeSchroederLevelFilter({
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null
+} = {}) {
+  const filterEnabled = schroederLevelAssignment
+    && Number.isFinite(Number(schroederSelectedLevel));
+  const assignmentStrideFloats = Math.max(1, Math.round(finiteNumber(
+    schroederLevelAssignment?.assignmentStrideFloats,
+    SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
+  )));
+  return {
+    enabled: Boolean(filterEnabled),
+    selectedLevel: Math.round(finiteNumber(schroederSelectedLevel, 0)),
+    assignmentStrideFloats
+  };
+}
+
+function particlePassesSchroederLevelFilter(particleIndex, filter, assignmentRows = null) {
+  if (!filter?.enabled) return true;
+  if (!(assignmentRows instanceof Float32Array)) return false;
+  const offset = particleIndex * filter.assignmentStrideFloats;
+  return Math.round(finiteNumber(assignmentRows[offset], Number.NaN)) === filter.selectedLevel;
 }
 
 function assertPackedInputs({ sphParticleState, mlsMpmParticleState }) {
@@ -575,7 +601,8 @@ function outputEnvelope({
   residentProductMassCoupledUnplacedMassKg = null,
   residentProductMassProductEventBufferDeviceMismatch = false,
   residentProductMassProductEventBufferSourceDeviceId = null,
-  residentProductMassProductEventBufferConsumerDeviceId = null
+  residentProductMassProductEventBufferConsumerDeviceId = null,
+  schroederLevelFilter = null
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const resolvedP2gBackendPolicy = p2gBackendPolicy || resolveMlsMpmP2gBackendPolicy({
@@ -610,6 +637,9 @@ function outputEnvelope({
     gridNodeStrideBytes: MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     gridNodes,
     internalPressureScale,
+    schroederLevelFilter: schroederLevelFilter ? { ...schroederLevelFilter } : null,
+    schroederLevelFilterEnabled: schroederLevelFilter?.enabled === true,
+    schroederSelectedLevel: schroederLevelFilter?.enabled === true ? schroederLevelFilter.selectedLevel : null,
     readbackMode,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
@@ -649,11 +679,20 @@ export function projectMlsMpmP2gGridCpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
   internalPressureScale = 1,
-  p2gBackend = MLS_MPM_P2G_BACKEND_CPU_REFERENCE
+  p2gBackend = MLS_MPM_P2G_BACKEND_CPU_REFERENCE,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
   const dtSeconds = finiteNumber(dt, 0);
+  const schroederFilter = normalizeSchroederLevelFilter({ schroederLevelAssignment, schroederSelectedLevel });
+  const schroederAssignmentRows = schroederLevelAssignment?.assignments instanceof Float32Array
+    ? schroederLevelAssignment.assignments
+    : null;
+  if (schroederFilter.enabled && !(schroederAssignmentRows instanceof Float32Array)) {
+    throw new TypeError('CPU MLS-MPM P2G Schroeder level filtering requires assignment rows');
+  }
   const p2gBackendPolicy = resolveMlsMpmP2gBackendPolicy({
     requestedBackend: p2gBackend === MLS_MPM_P2G_BACKEND_CPU_REFERENCE
       ? MLS_MPM_P2G_BACKEND_CPU_REFERENCE
@@ -675,6 +714,9 @@ export function projectMlsMpmP2gGridCpu({
   };
 
   for (let particleIndex = 0; particleIndex < sphParticleState.particleCount; particleIndex += 1) {
+    if (!particlePassesSchroederLevelFilter(particleIndex, schroederFilter, schroederAssignmentRows)) {
+      continue;
+    }
     const stateOffset = particleIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = particleIndex * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const mechanicsOffset = particleIndex * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
@@ -780,6 +822,7 @@ export function projectMlsMpmP2gGridCpu({
     internalPressureScale,
     p2gBackendPolicy,
     residentProductMass,
+    schroederLevelFilter: schroederFilter,
     residentProductMassProductEventCount: productMassContribution.productEventCount,
     residentProductMassCoupledEventCount: productMassContribution.coupledEventCount,
     residentProductMassCoupledUnplacedMassKg: productMassContribution.coupledUnplacedMassKg
@@ -797,8 +840,15 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function createProjectionParamsArray(gridSpec, particleCount, dt, productEventCount = 0, internalPressureScale = 1) {
-  const buffer = new ArrayBuffer(48);
+function createProjectionParamsArray(
+  gridSpec,
+  particleCount,
+  dt,
+  productEventCount = 0,
+  internalPressureScale = 1,
+  schroederLevelFilter = null
+) {
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridSpec.gridNodeCount, true);
@@ -811,6 +861,14 @@ function createProjectionParamsArray(gridSpec, particleCount, dt, productEventCo
   view.setFloat32(32, finiteNumber(dt, 0), true);
   view.setUint32(36, Math.max(0, Math.round(finiteNumber(productEventCount, 0))), true);
   view.setFloat32(40, finiteNumber(internalPressureScale, 1), true);
+  view.setUint32(44, schroederLevelFilter?.enabled === true ? 1 : 0, true);
+  view.setInt32(48, Math.round(finiteNumber(schroederLevelFilter?.selectedLevel, 0)), true);
+  view.setUint32(52, Math.max(1, Math.round(finiteNumber(
+    schroederLevelFilter?.assignmentStrideFloats,
+    SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
+  ))), true);
+  view.setUint32(56, 0, true);
+  view.setUint32(60, 0, true);
   return buffer;
 }
 
@@ -820,6 +878,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   mlsMpmParticleState,
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -847,6 +907,16 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     ? mlsMpmParticleUpload.mechanicsBuffer
     : null;
   const productEventRows = productEventRowsFromResidentProductMass(residentProductMass);
+  const schroederFilter = normalizeSchroederLevelFilter({ schroederLevelAssignment, schroederSelectedLevel });
+  const schroederAssignmentRows = schroederLevelAssignment?.assignments instanceof Float32Array
+    ? schroederLevelAssignment.assignments
+    : null;
+  const borrowedSchroederAssignmentBuffer = schroederFilter.enabled
+    ? (schroederLevelAssignment?.assignmentBuffer || null)
+    : null;
+  if (schroederFilter.enabled && !borrowedSchroederAssignmentBuffer && !(schroederAssignmentRows instanceof Float32Array)) {
+    throw new TypeError('WebGPU MLS-MPM P2G Schroeder level filtering requires retained assignment buffer or assignment rows');
+  }
   const rawBorrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
   const productEventBufferMismatch = rawBorrowedProductEventBuffer && !(productEventRows instanceof Float32Array)
     ? webGpuDeviceMismatchInfo({
@@ -873,6 +943,14 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         ? productEventRows
         : EMPTY_PRODUCT_EVENT_STORAGE_ROWS
     ), device);
+  const schroederAssignmentBuffer = borrowedSchroederAssignmentBuffer
+    || writeStorageBuffer(
+      device,
+      schroederFilter.enabled
+        ? 'ulg-mls-mpm-p2g-schroeder-level-assignments-in'
+        : 'ulg-mls-mpm-p2g-schroeder-level-assignments-dummy',
+      schroederFilter.enabled ? schroederAssignmentRows : new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
+    );
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
@@ -885,7 +963,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-params',
-    size: 48,
+    size: 64,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
@@ -904,7 +982,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       sphParticleState.particleCount,
       dt,
       productEventCount,
-      internalPressureScale
+      internalPressureScale,
+      schroederFilter
     ));
     const p2gBindings = [
       computeBufferBinding(0, 'read-only-storage'),
@@ -913,24 +992,25 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'uniform'),
       computeBufferBinding(5, 'read-only-storage'),
-      computeBufferBinding(6, 'storage')
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v1',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v2',
       label: 'ulg-mls-mpm-p2g-grid-projection',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v1',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v2',
       label: 'ulg-mls-mpm-p2g-product-event-scatter',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'scatter_product_events',
       bindings: p2gBindings
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v1',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v2',
       label: 'ulg-mls-mpm-p2g-grid-finalize',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'finalize_grid',
@@ -943,7 +1023,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         { binding: 3, resource: { buffer: accumulatorBuffer } },
         { binding: 4, resource: { buffer: paramsBuffer } },
         { binding: 5, resource: { buffer: productEventBuffer } },
-        { binding: 6, resource: { buffer: gridBuffer } }
+        { binding: 6, resource: { buffer: gridBuffer } },
+        { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
     const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });
@@ -1001,7 +1082,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         : 0,
       residentProductMassProductEventBufferDeviceMismatch: productEventBufferMismatch.mismatch,
       residentProductMassProductEventBufferSourceDeviceId: productEventBufferMismatch.sourceDeviceId,
-      residentProductMassProductEventBufferConsumerDeviceId: productEventBufferMismatch.consumerDeviceId
+      residentProductMassProductEventBufferConsumerDeviceId: productEventBufferMismatch.consumerDeviceId,
+      schroederLevelFilter: schroederFilter
     });
     if (retainGridBuffer) {
       projection.gridBuffer = gridBuffer;
@@ -1016,6 +1098,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
       if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
       if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
+      if (!borrowedSchroederAssignmentBuffer) schroederAssignmentBuffer.destroy?.();
       if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
       accumulatorBuffer.destroy?.();
       paramsBuffer.destroy?.();
@@ -1123,6 +1206,9 @@ function executionFromProjection(projection, {
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
     gridNodes: projection?.gridNodes ?? new Float32Array(),
     internalPressureScale: projection?.internalPressureScale ?? 1,
+    schroederLevelFilter: projection?.schroederLevelFilter ?? null,
+    schroederLevelFilterEnabled: projection?.schroederLevelFilterEnabled === true,
+    schroederSelectedLevel: projection?.schroederSelectedLevel ?? null,
     readbackMode: projection?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: projection?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: projection?.normalHotLoopReadbackFree ?? false,
@@ -1168,6 +1254,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   mlsMpmParticleState,
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -1196,6 +1284,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         dt,
         residentProductMass,
         internalPressureScale,
+        schroederLevelAssignment,
+        schroederSelectedLevel,
         p2gBackend: MLS_MPM_P2G_BACKEND_CPU_REFERENCE
       });
     }
@@ -1256,6 +1346,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       mlsMpmParticleState,
       sphParticleUpload,
       mlsMpmParticleUpload,
+      schroederLevelAssignment,
+      schroederSelectedLevel,
       gridSpacingM,
       boxDimsM,
       dt,

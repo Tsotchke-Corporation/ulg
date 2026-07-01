@@ -461,6 +461,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       status: 'resident-step-stubbed',
       gridSpacingM: options.gridSpacingM,
       readbackMode: options.readbackMode,
+      schroederSelectedLevel: options.schroederSelectedLevel,
       hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
@@ -494,6 +495,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].gridSpacingM, 1);
+  assert.equal(calls[0].schroederSelectedLevel, 2);
+  assert.equal(calls[0].schroederLevelAssignment.schema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
   assert.equal(calls[0].readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(calls[0].preferWebGpu, true);
   assert.equal(calls[0].schroederCrossLevelCoupling.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);

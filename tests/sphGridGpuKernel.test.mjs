@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mlsMpmP2gGridProjectionWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -289,6 +290,9 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /internal_pressure_scale: f32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> product_events/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_filter_enabled: u32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_particle_enabled/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /max\(row7\.x, 0\.0\)/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(0\.0, sound_speed_m_per_s \* sound_speed_m_per_s/);
@@ -417,6 +421,38 @@ test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', as
     productEventBuffer.size,
     SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
+});
+
+test('WebGPU MLS-MPM P2G can filter particles by retained Schroeder level assignment', async () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers();
+  const device = fakeP2gDevice();
+  const assignmentBuffer = { label: 'retained-schroeder-assignment-buffer' };
+  const projection = await runMlsMpmP2gGridProjectionWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2],
+    readbackMode: 'no-full-readback',
+    schroederLevelAssignment: {
+      particleCount: 1,
+      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+      assignmentBuffer
+    },
+    schroederSelectedLevel: 2
+  });
+
+  assert.equal(projection.backend, 'webgpu');
+  assert.equal(projection.schroederLevelFilterEnabled, true);
+  assert.equal(projection.schroederSelectedLevel, 2);
+  assert.equal(projection.schroederLevelFilter.assignmentStrideFloats, SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
+  assert.equal(
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-p2g-schroeder-level-assignments-dummy'),
+    false
+  );
+  assert.ok(device.bindGroups[0].entries.some((entry) => (
+    entry.binding === 7 && entry.resource.buffer === assignmentBuffer
+  )));
 });
 
 test('WebGPU MLS-MPM P2G reports Ocean-tiled fallback before the replacement kernel exists', async () => {

@@ -89,7 +89,7 @@ function wgslScalarParamStructByteLengths(wgslSource, structName) {
     for (const field of fields) {
       const fieldMatch = field.match(/^[_A-Za-z][_A-Za-z0-9]*:\s*([A-Za-z0-9_<>]+),?$/);
       assert.ok(fieldMatch, `${structName} has an unsupported field declaration: ${field}`);
-      assert.match(fieldMatch[1], /^(u32|f32)$/, `${structName} must stay scalar-only for this ABI guard`);
+      assert.match(fieldMatch[1], /^(u32|i32|f32)$/, `${structName} must stay scalar-only for this ABI guard`);
       offset += 4;
     }
     byteLengths.push(Math.ceil(offset / 16) * 16);
@@ -104,7 +104,7 @@ const CONTRACTS = [
     label: 'ulg-mls-mpm-p2g-params',
     factory: 'createProjectionParamsArray',
     wgslStruct: 'P2gProjectionParams',
-    bytes: 48
+    bytes: 64
   },
   {
     file: 'src/runtime/sph/sphGridUpdateGpuKernel.js',

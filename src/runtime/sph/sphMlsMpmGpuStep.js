@@ -1,4 +1,5 @@
 import {
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
@@ -126,6 +127,7 @@ export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP = 'every-step';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_NONE = 'none';
 const P2G_ACCUMULATOR_COMPONENTS = 4;
+const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
 const ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA = 'peercompute.ulg.mls-mpm-resident-dispatch-topology.v0';
 const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0';
@@ -1505,9 +1507,9 @@ function replaceRequiredWgsl(source, search, replacement, label) {
 function createActiveGridP2gProjectionWgsl() {
   const withParams = replaceRequiredWgsl(
     mlsMpmP2gGridProjectionWgsl,
-    `  pad1: u32,
+    `  pad2: u32,
 };`,
-    `  pad1: u32,
+    `  pad2: u32,
   active_start_i: u32,
   active_start_j: u32,
   active_start_k: u32,
@@ -1629,7 +1631,7 @@ const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl(
 const mlsMpmGridUpdateActiveGridWgsl = createActiveGridUpdateWgsl();
 
 function createFusedP2gParamsArray(gridSpec, particleCount, dt, internalPressureScale = 1) {
-  const buffer = new ArrayBuffer(48);
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridSpec.gridNodeCount, true);
@@ -1642,11 +1644,16 @@ function createFusedP2gParamsArray(gridSpec, particleCount, dt, internalPressure
   view.setFloat32(32, finiteNumber(dt, 0), true);
   view.setUint32(36, 0, true);
   view.setFloat32(40, finiteNumber(internalPressureScale, 1), true);
+  view.setUint32(44, 0, true);
+  view.setInt32(48, 0, true);
+  view.setUint32(52, SCHROEDER_LEVEL_ASSIGNMENT_FLOATS, true);
+  view.setUint32(56, 0, true);
+  view.setUint32(60, 0, true);
   return buffer;
 }
 
 function createFusedActiveP2gParamsArray(gridSpec, particleCount, dt, internalPressureScale, activeGridDispatch) {
-  const buffer = new ArrayBuffer(80);
+  const buffer = new ArrayBuffer(96);
   new Uint8Array(buffer).set(new Uint8Array(createFusedP2gParamsArray(
     gridSpec,
     particleCount,
@@ -1654,13 +1661,14 @@ function createFusedActiveP2gParamsArray(gridSpec, particleCount, dt, internalPr
     internalPressureScale
   )));
   const view = new DataView(buffer);
-  view.setUint32(48, activeGridDispatch.activeStart[0], true);
-  view.setUint32(52, activeGridDispatch.activeStart[1], true);
-  view.setUint32(56, activeGridDispatch.activeStart[2], true);
-  view.setUint32(60, activeGridDispatch.activeCount[0], true);
-  view.setUint32(64, activeGridDispatch.activeCount[1], true);
-  view.setUint32(68, activeGridDispatch.activeCount[2], true);
-  view.setUint32(72, activeGridDispatch.activeNodeCount, true);
+  view.setUint32(64, activeGridDispatch.activeStart[0], true);
+  view.setUint32(68, activeGridDispatch.activeStart[1], true);
+  view.setUint32(72, activeGridDispatch.activeStart[2], true);
+  view.setUint32(76, activeGridDispatch.activeCount[0], true);
+  view.setUint32(80, activeGridDispatch.activeCount[1], true);
+  view.setUint32(84, activeGridDispatch.activeCount[2], true);
+  view.setUint32(88, activeGridDispatch.activeNodeCount, true);
+  view.setUint32(92, 0, true);
   return buffer;
 }
 
@@ -2029,7 +2037,8 @@ function canUseFusedNoFullMechanicsPath({
   pressureInterfaceForceRowsBuffer,
   pressureInterfaceForceSolver,
   pressureInterfaceGridForceAdmission,
-  residentProductMass
+  residentProductMass,
+  schroederLevelAssignment
 }) {
   return requestedReadbackMode === NO_FULL_READBACK_MODE
     && preferWebGpu
@@ -2042,7 +2051,8 @@ function canUseFusedNoFullMechanicsPath({
     && !pressureInterfaceForceRowsBuffer
     && !pressureInterfaceForceSolver
     && !pressureInterfaceGridForceAdmission
-    && !residentProductMass;
+    && !residentProductMass
+    && !schroederLevelAssignment;
 }
 
 async function runFusedNoFullMlsMpmMechanicsWebGpu({
@@ -2701,6 +2711,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
+  const schroederAssignmentBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
+    new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS),
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  );
   const pressureRowsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
@@ -2717,6 +2733,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
     productEventBuffer,
+    schroederAssignmentBuffer,
     pressureRowsBuffer,
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
@@ -2739,12 +2756,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'uniform'),
       computeBufferBinding(5, 'read-only-storage'),
-      computeBufferBinding(6, 'storage')
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v1'
-        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v1',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v2'
+        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v2',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
         : 'ulg-mls-mpm-p2g-grid-projection',
@@ -2756,8 +2774,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v1'
-        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v1',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v2'
+        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v2',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
         : 'ulg-mls-mpm-p2g-grid-finalize',
@@ -2769,7 +2787,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     });
     const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v1',
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v2',
         label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
         code: mlsMpmP2gGridProjectionActiveGridWgsl,
         entryPoint: 'clear_accumulators',
@@ -2834,7 +2852,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
           { binding: 4, resource: { buffer: p2gParamsBuffer } },
           { binding: 5, resource: { buffer: productEventBuffer } },
-          { binding: 6, resource: { buffer: gridBuffer } }
+          { binding: 6, resource: { buffer: gridBuffer } },
+          { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
       });
       const p2gFinalizeBindGroup = device.createBindGroup({
@@ -2846,7 +2865,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
           { binding: 4, resource: { buffer: p2gParamsBuffer } },
           { binding: 5, resource: { buffer: productEventBuffer } },
-          { binding: 6, resource: { buffer: gridBuffer } }
+          { binding: 6, resource: { buffer: gridBuffer } },
+          { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
       });
       const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
@@ -2859,7 +2879,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
             { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
             { binding: 4, resource: { buffer: p2gParamsBuffer } },
             { binding: 5, resource: { buffer: productEventBuffer } },
-            { binding: 6, resource: { buffer: gridBuffer } }
+            { binding: 6, resource: { buffer: gridBuffer } },
+            { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
           ]
         })
         : null;
@@ -3370,6 +3391,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       gridUpdateParamsBuffer,
       g2pParamsBuffer,
       productEventBuffer,
+      schroederAssignmentBuffer,
       pressureRowsBuffer,
       ...statePingBuffers.filter((buffer) => buffer !== finalStateBuffer),
       ...mechanicsPingBuffers.filter((buffer) => buffer !== finalMechanicsBuffer)
@@ -13070,6 +13092,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   mlsMpmParticleState,
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -13240,7 +13264,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver,
       pressureInterfaceGridForceAdmission,
-      residentProductMass
+      residentProductMass,
+      schroederLevelAssignment
     });
     if (useFusedNoFullMechanics) {
       fusedMechanics = await timedStage('fusedMechanics', () => runFusedNoFullMlsMpmMechanicsWebGpu({
@@ -13269,6 +13294,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     mlsMpmParticleState,
     sphParticleUpload,
     mlsMpmParticleUpload,
+    schroederLevelAssignment,
+    schroederSelectedLevel,
     gridSpacingM,
     boxDimsM: dims,
     dt: dtSeconds,

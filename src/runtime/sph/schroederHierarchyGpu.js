@@ -1015,6 +1015,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     preferWebGpu: true,
     device,
     readbackMode,
+    schroederLevelAssignment: resolvedLevelAssignment,
+    schroederSelectedLevel: plan.selectedLevel,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,

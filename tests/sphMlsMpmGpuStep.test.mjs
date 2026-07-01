@@ -6272,7 +6272,11 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.stepSummaries[0].fusedResidentSequence, true);
   assert.equal(device.submissions.length, 1);
   assert.equal(device.dispatches.length, 8);
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 8);
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments'
+    && buffer.destroyed
+  )));
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 9);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });

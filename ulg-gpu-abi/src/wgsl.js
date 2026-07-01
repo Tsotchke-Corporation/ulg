@@ -4763,7 +4763,11 @@ struct P2gProjectionParams {
   dt: f32,
   resident_product_event_count: u32,
   internal_pressure_scale: f32,
+  schroeder_filter_enabled: u32,
+  schroeder_selected_level: i32,
+  schroeder_assignment_stride_floats: u32,
   pad1: u32,
+  pad2: u32,
 };
 
 struct StressRows {
@@ -4779,6 +4783,7 @@ struct StressRows {
 @group(0) @binding(4) var<uniform> params: P2gProjectionParams;
 @group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
 
 const P2G_ATOMIC_SCALE: f32 = 65536.0;
 const P2G_ATOMIC_INV_SCALE: f32 = 1.0 / P2G_ATOMIC_SCALE;
@@ -4811,6 +4816,16 @@ fn p2g_storage_index(i: u32, j: u32, k: u32) -> u32 {
 
 fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
   return true;
+}
+
+fn p2g_particle_enabled(particle_index: u32) -> bool {
+  if (params.schroeder_filter_enabled == 0u) {
+    return true;
+  }
+  let stride = max(params.schroeder_assignment_stride_floats, 1u);
+  let assignment_offset = particle_index * stride;
+  let level = i32(round(schroeder_level_assignments[assignment_offset]));
+  return level == params.schroeder_selected_level;
 }
 
 fn p2g_finalize_node_index(global_index: u32) -> u32 {
@@ -4961,6 +4976,9 @@ fn corotated_stress(
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= params.particle_count) {
+    return;
+  }
+  if (!p2g_particle_enabled(particle_index)) {
     return;
   }
 

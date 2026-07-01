@@ -13731,3 +13731,32 @@ Thermal sidecar direct runner selected, 2026-06-30 17:45 AKDT:
     `missing-max-speed` and `no-positive-displacement`; this test records
     direct-runner route selection and hot-loop evidence, not visible motion
     quality.
+
+Direct-resident plan-only active-grid motion evidence, 2026-06-30 17:51 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Syntax:
+  `node --check tests/nativeSurfaceHarness.test.mjs`
+  - Passed.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `12/12`.
+- Live HTTPS direct-resident active-grid motion benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-direct-resident-active-grid-motion-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, suite gate
+    `pass`, scenario `good`, `probeStatus=good`, `probeIssues=[]`,
+    `motionSpeedEvidenceSource=active-grid-predicted-motion`,
+    `motionDisplacementEvidenceSource=active-grid-predicted-motion`,
+    `directResidentNoReadbackActiveGridMotionEvidenceAvailable=true`,
+    `activeGridPredictedMaxDisplacementM=0.00000122583125`,
+    `activeGridPredictedMaxSpeedMPerS=0.0024516625`,
+    `residentStageMs=4.9`, `residentStageStepsPerSecond=204.08`, and compact
+    readback byte length `0`.
+  - Caveat: this is no-readback route evidence only. It does not replace
+    compact-summary or visual motion validation when those diagnostics are
+    present.

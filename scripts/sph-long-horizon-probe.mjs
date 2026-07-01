@@ -6117,11 +6117,22 @@ function analyzeTimeline(timeline, {
         .map((gap) => gap - centerToSupportGapOffsetYM)
         .filter(Number.isFinite)
     : [];
+  const residentStageTimingForMetric = (metric) => (
+    metric?.residentStep?.stageTiming
+    ?? metric?.residentSteps?.finalStepStageTiming
+    ?? metric?.residentSteps?.finalStep?.stageTiming
+    ?? null
+  );
+  const residentStageTimings = metrics
+    .map((metric) => residentStageTimingForMetric(metric))
+    .filter(Boolean);
+  const activeGridDispatches = residentStageTimings
+    .map((stageTiming) => stageTiming?.activeGridDispatch)
+    .filter((dispatch) => dispatch?.useActiveGrid === true);
   const activeNodeSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.activeGridNodeCount))
     .concat(metrics.map((metric) => finiteMetric(
-      metric?.residentStep?.stageTiming?.activeGridDispatch?.activeNodeCount
-        ?? metric?.residentSteps?.finalStepStageTiming?.activeGridDispatch?.activeNodeCount
+      residentStageTimingForMetric(metric)?.activeGridDispatch?.activeNodeCount
         ?? metric?.residentSteps?.fusedResidentSequence?.activeGridDispatch?.activeNodeCount
     )))
     .filter(Number.isFinite);
@@ -6131,6 +6142,35 @@ function analyzeTimeline(timeline, {
     metric?.residentStep?.stageTiming?.compactSummaryRequested === false
     || metric?.residentSteps?.finalStepStageTiming?.compactSummaryRequested === false
   ));
+  const activeGridPredictedMotionSeries = activeGridDispatches
+    .map((dispatch) => finiteVector3(dispatch?.predictedMotionM))
+    .filter(Boolean)
+    .map((vector) => Math.hypot(...vector))
+    .filter(Number.isFinite);
+  const activeGridPredictedSpeedSeries = activeGridDispatches
+    .flatMap((dispatch) => {
+      const explicitSpeed = finiteMetric(dispatch?.maxSpeedMPerS);
+      const predictedMotion = finiteVector3(dispatch?.predictedMotionM);
+      const predictedMotionM = predictedMotion ? Math.hypot(...predictedMotion) : null;
+      const horizonS = finiteMetric(dispatch?.horizonS);
+      const derivedSpeed = Number.isFinite(predictedMotionM) && Number.isFinite(horizonS) && horizonS > 0
+        ? predictedMotionM / horizonS
+        : null;
+      return [explicitSpeed, derivedSpeed].filter(Number.isFinite);
+    });
+  const activeGridPredictedMaxDisplacementM = activeGridPredictedMotionSeries.length
+    ? Math.max(...activeGridPredictedMotionSeries)
+    : null;
+  const activeGridPredictedMaxSpeedMPerS = activeGridPredictedSpeedSeries.length
+    ? Math.max(...activeGridPredictedSpeedSeries)
+    : null;
+  const directResidentNoReadbackActiveGridMotionEvidenceAvailable = Boolean(
+    directResident
+    && compactSummaryDisabled
+    && activeGridDispatches.length > 0
+    && Number.isFinite(activeGridPredictedMaxDisplacementM)
+    && activeGridPredictedMaxDisplacementM > 0
+  );
   const renderRowMotionSamples = metrics
     .map((metric, index) => {
       const renderState = metric?.renderState || null;
@@ -6215,15 +6255,29 @@ function analyzeTimeline(timeline, {
     ? Math.max(...renderRowMotionSpeedsMPerS)
     : null;
   const motionMaxSpeedObservedMPerS = maxSpeedObservedMPerS
-    ?? (compactSummaryDisabled ? renderRowEstimatedMaxSpeedMPerS : null);
+    ?? (compactSummaryDisabled ? renderRowEstimatedMaxSpeedMPerS : null)
+    ?? (directResidentNoReadbackActiveGridMotionEvidenceAvailable ? activeGridPredictedMaxSpeedMPerS : null);
   const motionMaxDisplacementObservedM = maxDisplacementObservedM
-    ?? (compactSummaryDisabled ? renderRowMaxDisplacementM : null);
+    ?? (compactSummaryDisabled ? renderRowMaxDisplacementM : null)
+    ?? (directResidentNoReadbackActiveGridMotionEvidenceAvailable ? activeGridPredictedMaxDisplacementM : null);
   const motionSpeedEvidenceSource = maxSpeedObservedMPerS != null
     ? 'resident-compact-summary'
-    : (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null ? 'decoded-render-rows' : null);
+    : (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null
+        ? 'decoded-render-rows'
+        : (
+          directResidentNoReadbackActiveGridMotionEvidenceAvailable && activeGridPredictedMaxSpeedMPerS != null
+            ? 'active-grid-predicted-motion'
+            : null
+        ));
   const motionDisplacementEvidenceSource = maxDisplacementObservedM != null
     ? 'resident-compact-summary'
-    : (compactSummaryDisabled && renderRowMaxDisplacementM != null ? 'decoded-render-rows' : null);
+    : (compactSummaryDisabled && renderRowMaxDisplacementM != null
+        ? 'decoded-render-rows'
+        : (
+          directResidentNoReadbackActiveGridMotionEvidenceAvailable
+            ? 'active-grid-predicted-motion'
+            : null
+        ));
   const renderRowMotionEvidenceAvailable = (
     compactSummaryDisabled
     && (renderRowEstimatedMaxSpeedMPerS != null || renderRowMaxDisplacementM != null)
@@ -7439,6 +7493,9 @@ function analyzeTimeline(timeline, {
     motionDisplacementEvidenceSource,
     compactSummaryDisabled,
     renderRowMotionEvidenceAvailable,
+    directResidentNoReadbackActiveGridMotionEvidenceAvailable,
+    activeGridPredictedMaxDisplacementM,
+    activeGridPredictedMaxSpeedMPerS,
     renderRowMotionSampleCount: renderRowMotionSamples.length,
     renderRowMaxCenterDisplacementM,
     renderRowMaxBoundsCenterDisplacementM,

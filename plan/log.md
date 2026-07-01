@@ -34180,3 +34180,47 @@ Next:
   the direct runner to PeerCompute lane/fence ownership, or keep it as a
   non-lane bridge and move the thermal plus mechanics-refresh work into the
   true one-submit sidecar fusion path.
+
+## 2026-06-30 AKDT - Direct-Resident Plan-Only Motion Evidence
+
+Status:
+
+- Fixed the long-horizon probe classification for direct-resident,
+  plan-only/no-full-readback runs. These runs intentionally skip compact motion
+  diagnostics, so the probe now accepts active-grid predicted motion as
+  no-readback motion evidence when the active-grid planner publishes positive
+  predicted displacement.
+- The analysis now labels this evidence as
+  `active-grid-predicted-motion` and publishes
+  `directResidentNoReadbackActiveGridMotionEvidenceAvailable`,
+  `activeGridPredictedMaxDisplacementM`, and
+  `activeGridPredictedMaxSpeedMPerS`. The benchmark flattener carries those
+  fields so future smoke artifacts explain why `probeStatus=good`.
+- This is a classification/evidence fix, not full motion validation. Compact
+  summaries or visual sampling are still required for higher-confidence motion
+  quality checks.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check tests/nativeSurfaceHarness.test.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `12/12`
+  passing.
+- PASS: live HTTPS direct-resident active-grid motion benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-direct-resident-active-grid-motion-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, suite gate `pass`, scenario `good`,
+  `probeStatus=good`, `probeIssues=[]`,
+  `motionSpeedEvidenceSource=active-grid-predicted-motion`,
+  `motionDisplacementEvidenceSource=active-grid-predicted-motion`,
+  `directResidentNoReadbackActiveGridMotionEvidenceAvailable=true`,
+  `activeGridPredictedMaxDisplacementM=0.00000122583125`,
+  `activeGridPredictedMaxSpeedMPerS=0.0024516625`,
+  `residentStageMs=4.9`, `residentStageStepsPerSecond=204.08`, and compact
+  readback byte length `0`.
+
+Next:
+
+- Keep this as probe evidence only. Do not use active-grid prediction as a
+  substitute for physics validation when compact diagnostics or visual output
+  are available.

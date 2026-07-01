@@ -520,6 +520,32 @@ test('native WebGPU browser probe analyzes captured frames without artifact outp
   );
 });
 
+test('direct resident plan-only probes use active-grid prediction as no-readback motion evidence', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+
+  assert.match(
+    probeSource,
+    /directResidentNoReadbackActiveGridMotionEvidenceAvailable/,
+    'direct-resident plan-only probes should publish a specific no-readback active-grid evidence flag'
+  );
+  assert.match(
+    probeSource,
+    /active-grid-predicted-motion/,
+    'direct-resident plan-only probes should label active-grid prediction as the motion evidence source'
+  );
+  assert.match(
+    benchmarkSource,
+    /activeGridPredictedMaxDisplacementM: analysis\.activeGridPredictedMaxDisplacementM/,
+    'benchmark summaries should flatten active-grid predicted displacement evidence'
+  );
+  assert.match(
+    benchmarkSource,
+    /motionSpeedEvidenceSource: analysis\.motionSpeedEvidenceSource/,
+    'benchmark summaries should expose the motion evidence source'
+  );
+});
+
 test('native WebGPU browser-frame validation publishes back into scene state', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');

@@ -1395,6 +1395,12 @@ Interim status, 2026-06-18 AKDT:
   fused sequence: PeerCompute lane ownership remains blocked for this direct
   runner, and `sequenceRunnable` stays false until sidecar writes are owned
   inside a one-submit sequence or the direct runner is made lane/fence-aware.
+- 2026-06-30 direct-resident plan-only motion evidence: long-horizon probe
+  analysis now treats active-grid predicted motion as no-readback route
+  evidence for direct-resident plan-only runs, so the thermal direct-runner
+  smoke reports `probeStatus=good` and `probeIssues=[]` without compact motion
+  readback. Keep this scoped to route/probe classification; physics validation
+  still needs compact diagnostics or visual sampling.
 
 ## ULG-Specific Constraints
 

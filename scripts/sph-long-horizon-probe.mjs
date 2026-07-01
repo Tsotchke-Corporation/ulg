@@ -4631,6 +4631,11 @@ async function runDirectResidentProbe({
   const consoleCapture = createBrowserConsoleCapture();
   page.on('console', (message) => {
     consoleCapture.recordConsole(message);
+    if (process.env.ULG_PROBE_STREAM_BROWSER_CONSOLE === '1') {
+      const type = typeof message?.type === 'function' ? message.type() : 'console';
+      const text = typeof message?.text === 'function' ? message.text() : String(message || '');
+      process.stderr.write(`[browser:${type}] ${text}\n`);
+    }
   });
   page.on('pageerror', (error) => {
     consoleCapture.recordPageError(error);
@@ -4668,6 +4673,18 @@ async function runDirectResidentProbe({
       const positiveInteger = (value, fallback) => {
         const number = Math.round(Number(value));
         return Number.isFinite(number) && number > 0 ? number : fallback;
+      };
+      const progress = (phase, fields = {}) => {
+        if (defaults?.directResidentProgressLog !== true) return;
+        try {
+          console.info(`[ulg-direct-resident-progress] ${JSON.stringify({
+            phase,
+            t: performance.now(),
+            ...fields
+          })}`);
+        } catch {
+          console.info(`[ulg-direct-resident-progress] ${phase}`);
+        }
       };
       const normalizedMechanicsMode = (value) => {
         const mode = String(value || '').trim().toLowerCase();
@@ -5545,7 +5562,67 @@ async function runDirectResidentProbe({
       let mlsMpmParticleUpload = null;
       let thermalResponseGraphUpload = null;
       let device = null;
+      let directResidentCleanupQueueFence = null;
+      let directResidentCleanupGpuResourceDestroySkipped = false;
+      const awaitDirectResidentCleanupQueueFence = async () => {
+        if (requestedMeasureGpuQueueFence) return null;
+        if (!device?.queue || typeof device.queue.onSubmittedWorkDone !== 'function') {
+          return {
+            schema: 'peercompute.ulg.direct-resident-cleanup-queue-fence.v0',
+            status: 'unavailable',
+            method: null,
+            reason: 'queue-on-submitted-work-done-unavailable',
+            requestedMeasureGpuQueueFence
+          };
+        }
+        const timeoutMs = 15000;
+        const started = performance.now();
+        let timeoutHandle = null;
+        let timedOut = false;
+        try {
+          progress('cleanup-queue-fence-start', { timeoutMs });
+          await Promise.race([
+            device.queue.onSubmittedWorkDone(),
+            new Promise((_, reject) => {
+              timeoutHandle = setTimeout(() => {
+                timedOut = true;
+                reject(new Error('direct-resident-cleanup-queue-fence-timeout'));
+              }, timeoutMs);
+            })
+          ]);
+          progress('cleanup-queue-fence-complete', { durationMs: performance.now() - started });
+          return {
+            schema: 'peercompute.ulg.direct-resident-cleanup-queue-fence.v0',
+            status: 'complete',
+            method: 'queue.onSubmittedWorkDone-before-direct-resident-cleanup',
+            durationMs: performance.now() - started,
+            timeoutMs,
+            requestedMeasureGpuQueueFence
+          };
+        } catch (error) {
+          progress(timedOut ? 'cleanup-queue-fence-timeout' : 'cleanup-queue-fence-error', {
+            durationMs: performance.now() - started,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          return {
+            schema: 'peercompute.ulg.direct-resident-cleanup-queue-fence.v0',
+            status: timedOut ? 'timeout' : 'error',
+            method: 'queue.onSubmittedWorkDone-before-direct-resident-cleanup',
+            durationMs: performance.now() - started,
+            timeoutMs,
+            requestedMeasureGpuQueueFence,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        } finally {
+          if (timeoutHandle != null) clearTimeout(timeoutHandle);
+        }
+      };
       try {
+        progress('setup-start', {
+          batches: requestedBatches,
+          batchSteps: requestedBatchSteps,
+          measureGpuQueueFence: requestedMeasureGpuQueueFence
+        });
         const driver = createSphPhaseDemo(driverOptions);
         const preflight = driver.preflight();
         const viewState = createSphPhaseViewState(driver);
@@ -5560,6 +5637,10 @@ async function runDirectResidentProbe({
           surfaceTensionEnabled: viewState.physicalLawGroups?.surfaceTension
         });
         const deviceResult = await requestOpticalGpuDevice(navigator);
+        progress('device-request-complete', {
+          status: deviceResult?.status ?? null,
+          hasDevice: Boolean(deviceResult?.device)
+        });
         if (!deviceResult?.device) {
           return {
             schema: 'peercompute.ulg.sph-history-long-horizon-probe.v0',
@@ -5763,6 +5844,7 @@ async function runDirectResidentProbe({
           const started = performance.now();
           try {
             previousExecution = execution;
+            progress('resident-batch-start', { batchIndex });
             execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
               sphParticleState,
               mlsMpmParticleState,
@@ -5813,12 +5895,23 @@ async function runDirectResidentProbe({
               reactionParticleBinMetadataReadback:
                 Boolean(requestedReactionBinMetadataReadback)
             });
+            progress('resident-batch-execution-complete', {
+              batchIndex,
+              elapsedMs: performance.now() - started,
+              status: execution?.status ?? null,
+              queueFenceStatus:
+                execution?.finalStep?.stageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null
+            });
             metrics.push(sample({
               batchIndex,
               phase: 'resident-batch',
               batchMs: performance.now() - started,
               execution
             }));
+            progress('resident-batch-sample-complete', {
+              batchIndex,
+              elapsedMs: performance.now() - started
+            });
             sphParticleState = execution.nextSphParticleState;
             mlsMpmParticleState = execution.nextMlsMpmParticleState;
             sphParticleUpload = execution.nextParticleUploads?.sphParticleUpload ?? null;
@@ -5856,19 +5949,32 @@ async function runDirectResidentProbe({
           }
         }
       } finally {
-        if (previousExecution && previousExecution !== execution) {
-          destroyMlsMpmResidentStepsBuffers(previousExecution);
+        directResidentCleanupQueueFence = await awaitDirectResidentCleanupQueueFence();
+        directResidentCleanupGpuResourceDestroySkipped =
+          directResidentCleanupQueueFence?.status === 'timeout'
+          || directResidentCleanupQueueFence?.status === 'error';
+        if (!directResidentCleanupGpuResourceDestroySkipped) {
+          progress('cleanup-destroy-start');
+          if (previousExecution && previousExecution !== execution) {
+            destroyMlsMpmResidentStepsBuffers(previousExecution);
+          }
+          if (execution) {
+            destroyMlsMpmResidentStepsBuffers(execution);
+          } else {
+            destroySphGpuParticleBuffers(sphParticleUpload);
+            destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
+          }
+          destroySphThermalResponseGraphBuffers(thermalResponseGraphUpload);
+          device?.destroy?.();
+          progress('cleanup-destroy-complete');
         }
-        if (execution) {
-          destroyMlsMpmResidentStepsBuffers(execution);
-        } else {
-          destroySphGpuParticleBuffers(sphParticleUpload);
-          destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
-        }
-        destroySphThermalResponseGraphBuffers(thermalResponseGraphUpload);
-        device?.destroy?.();
       }
 
+      progress('returning-timeline', {
+        status: errors.length ? 'completed-with-errors' : 'complete',
+        metricCount: metrics.length,
+        cleanupQueueFenceStatus: directResidentCleanupQueueFence?.status ?? null
+      });
       return {
         schema: 'peercompute.ulg.sph-history-long-horizon-probe.v0',
         status: errors.length ? 'completed-with-errors' : 'complete',
@@ -5884,6 +5990,8 @@ async function runDirectResidentProbe({
         fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells ?? null,
         activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
         measureGpuQueueFence: requestedMeasureGpuQueueFence,
+        directResidentCleanupQueueFence,
+        directResidentCleanupGpuResourceDestroySkipped,
         contactBinMetadataReadback: Boolean(requestedContactBinMetadataReadback),
         reactionBinMetadataReadback: Boolean(requestedReactionBinMetadataReadback),
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
@@ -5922,7 +6030,8 @@ async function runDirectResidentProbe({
         ironBaseHeightM: DEFAULT_IRON_BASE_HEIGHT_M,
         boxDimsM: DEFAULT_BOX_DIMS_M,
         dropParticleEdge: DEFAULT_DROP_PARTICLE_EDGE,
-        baseParticleEdge: DEFAULT_BASE_PARTICLE_EDGE
+        baseParticleEdge: DEFAULT_BASE_PARTICLE_EDGE,
+        directResidentProgressLog: process.env.ULG_PROBE_DIRECT_RESIDENT_PROGRESS === '1'
       }
     });
     return attachBrowserConsoleTelemetry(timeline, consoleCapture);

@@ -13809,3 +13809,29 @@ One-submit thermal sidecar fusion, 2026-06-30 18:57 AKDT:
     `852.2 ms`.
   - Caveat: sidecar fusion is functionally promoted, but queue-fenced
     active-grid fused sequence performance is still slideshow-class.
+
+Direct-resident queue-fence split, 2026-06-30 19:25 AKDT:
+
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `13/13`.
+- Focused resident MLS-MPM:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `72/72`.
+- Live HTTPS direct-resident no-fence throughput benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fused-sequence-throughput-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Blocked: the run timed out without producing JSON, and Chromium headless
+    entered uninterruptible sleep before reliable teardown evidence was
+    available.
+- Live HTTPS direct-resident fenced control with progress streaming:
+  `ULG_PROBE_MODE=direct-resident ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=plan-only ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_PROBE_MEASURE_GPU_QUEUE_FENCE=1 ULG_PROBE_DIRECT_RESIDENT_PROGRESS=1 ULG_PROBE_STREAM_BROWSER_CONSOLE=1 ULG_PROBE_OUTPUT=/tmp/ulg-direct-resident-fenced-progress.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  - Blocked: the progress log only recorded the Node TLS warning. No browser
+    progress event was emitted, and Chromium entered uninterruptible sleep
+    before page-evaluate code ran. Reset the headless-browser/GPU state before
+    trusting live WebGPU benchmark results from this host.

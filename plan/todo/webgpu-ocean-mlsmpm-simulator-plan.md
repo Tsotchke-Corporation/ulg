@@ -1423,6 +1423,15 @@ Interim status, 2026-06-18 AKDT:
   smoke reports `probeStatus=good` and `probeIssues=[]` without compact motion
   readback. Keep this scoped to route/probe classification; physics validation
   still needs compact diagnostics or visual sampling.
+- 2026-06-30 direct-resident queue-fence split: benchmark throughput mode no
+  longer silently enables `residentQueueFence=1`; explicit queue-completion
+  evidence remains available through `ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1`.
+  The direct-resident probe now fences once before GPU resource teardown for
+  unfenced throughput runs and reports cleanup-fence telemetry. Live validation
+  is currently blocked because Chromium headless WebGPU processes entered
+  uninterruptible sleep before page-evaluate code ran; reset the
+  headless-browser/GPU state, then rerun default throughput mode and explicit
+  fenced mode before treating the hot-loop performance numbers as current.
 
 ## ULG-Specific Constraints
 

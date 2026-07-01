@@ -125,6 +125,32 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
   );
 });
 
+test('direct resident throughput benchmark does not default to per-batch queue fences', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+
+  assert.match(
+    benchmarkSource,
+    /const measureGpuQueueFence = booleanEnv\(\s*'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',\s*false\s*\)/,
+    'direct-resident throughput benchmarks should not default to residentQueueFence=1'
+  );
+  assert.match(
+    benchmarkSource,
+    /const requireQueueFenceGate = booleanEnv\(\s*'ULG_BENCH_REQUIRE_QUEUE_FENCE',\s*measureGpuQueueFence\s*\)/,
+    'queue-fence gate should follow the explicit queue-fence measurement request'
+  );
+  assert.match(
+    probeSource,
+    /queue\.onSubmittedWorkDone-before-direct-resident-cleanup/,
+    'unfenced direct-resident probes should still drain the queue before GPU resource teardown'
+  );
+  assert.match(
+    probeSource,
+    /directResidentCleanupGpuResourceDestroySkipped/,
+    'probe telemetry should report when cleanup skips explicit resource destruction after a failed cleanup fence'
+  );
+});
+
 test('resident material interface seeds surface table before full render-row readback fallback', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 

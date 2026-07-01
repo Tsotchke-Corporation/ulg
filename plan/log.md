@@ -34289,3 +34289,46 @@ Next:
   fused active-grid hot loop: measure whether the long fence is shader compile,
   active-grid dispatch, summary planner work, or command submission pacing, then
   reduce that path before widening sidecar fusion to reaction or pressure.
+
+## 2026-06-30 AKDT - Direct-Resident Queue-Fence Split
+
+Status:
+
+- Split direct-resident throughput benchmarking from queue-completion evidence.
+  `ULG_BENCH_MEASURE_GPU_QUEUE_FENCE` now defaults to false, and the queue-fence
+  gate follows that explicit request instead of silently enabling
+  `residentQueueFence=1` for every direct-resident benchmark.
+- Added a direct-resident cleanup queue fence in the long-horizon probe. An
+  unfenced throughput run can enqueue the resident batch without per-batch
+  blocking, but the probe still awaits one `queue.onSubmittedWorkDone()` before
+  destroying retained GPU resources at teardown. If that cleanup fence times
+  out or errors, explicit resource destruction is skipped and telemetry records
+  the skip rather than destroying live submitted-work buffers.
+- Added env-gated direct-resident browser progress streaming via
+  `ULG_PROBE_DIRECT_RESIDENT_PROGRESS=1` and
+  `ULG_PROBE_STREAM_BROWSER_CONSOLE=1` so future hangs can identify whether the
+  probe reached setup, fused execution, summary sampling, cleanup fencing, or
+  return.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `13/13`
+  passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `72/72`
+  passing.
+- BLOCKED: live HTTPS direct-resident WebGPU validation. After an unfenced
+  benchmark attempt, Chromium headless GPU processes entered uninterruptible
+  sleep (`D` state). A later fenced control run with progress streaming did not
+  emit browser progress at all; the Chromium process entered `D` state before
+  page-evaluate code ran. The current host/browser state needs reset before
+  another live headless WebGPU benchmark can be trusted.
+
+Next:
+
+- After resetting the headless browser/GPU state, rerun both explicit modes:
+  default throughput mode should omit `residentQueueFence=1` and report
+  `measureGpuQueueFence=false`, while completion-evidence mode with
+  `ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1` should still report
+  `queueFenceStatus.fusedMechanicsSequence=complete`.

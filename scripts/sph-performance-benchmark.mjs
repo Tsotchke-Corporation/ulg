@@ -118,7 +118,7 @@ const fusedActiveGridSafetyCells = Number.isFinite(Number(process.env.ULG_BENCH_
   : null;
 const measureGpuQueueFence = booleanEnv(
   'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',
-  probeMode === 'direct-resident'
+  false
 );
 const materialInterfaceDiagnosticRequested =
   booleanEnv('ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC', false)
@@ -141,7 +141,7 @@ const requireActiveGridGate = booleanEnv(
 );
 const requireQueueFenceGate = booleanEnv(
   'ULG_BENCH_REQUIRE_QUEUE_FENCE',
-  probeMode === 'direct-resident' && measureGpuQueueFence
+  measureGpuQueueFence
 );
 const minResidentStageStepsPerSecond = Number.isFinite(Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND))
   && Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND) > 0

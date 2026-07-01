@@ -7439,3 +7439,102 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   active_nodes[node_offset + 15u] = chart_id;
 }
 `;
+
+export const schroederCrossLevelCouplingWgsl = `
+struct SchroederCrossLevelParams {
+  particle_count: u32,
+  max_level: i32,
+  parent_level_delta: i32,
+  flags: u32,
+  base_grid_spacing_m: f32,
+  coupling_halo_cells: f32,
+  min_coupling_radius_m: f32,
+  max_coupling_radius_m: f32,
+  tile_cell_count: u32,
+  pad0: u32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
+@group(0) @binding(1) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(2) var<storage, read_write> cross_level_couplings: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederCrossLevelParams;
+
+const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
+const SCHROEDER_ACTIVE_NODE_STRIDE: u32 = 16u;
+const SCHROEDER_CROSS_LEVEL_STRIDE: u32 = 16u;
+
+fn ss_cross_positive(value: f32) -> bool {
+  return value == value && value > 0.0;
+}
+
+fn ss_cross_clamp_radius(radius: f32) -> f32 {
+  var clamped = max(radius, 0.0);
+  if (ss_cross_positive(params.min_coupling_radius_m)) {
+    clamped = max(clamped, params.min_coupling_radius_m);
+  }
+  if (ss_cross_positive(params.max_coupling_radius_m)) {
+    clamped = min(clamped, params.max_coupling_radius_m);
+  }
+  return clamped;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let assignment_offset = particle_index * SCHROEDER_ASSIGNMENT_STRIDE;
+  let node_offset = particle_index * SCHROEDER_ACTIVE_NODE_STRIDE;
+  let coupling_offset = particle_index * SCHROEDER_CROSS_LEVEL_STRIDE;
+
+  let child_level = i32(round(level_assignments[assignment_offset + 0u]));
+  let child_dx = max(level_assignments[assignment_offset + 1u], 0.000001);
+  let support_radius = max(level_assignments[assignment_offset + 2u], 0.0);
+  let represented_volume_m3 = max(level_assignments[assignment_offset + 3u], 0.0);
+  let mass_kg = max(level_assignments[assignment_offset + 6u], 0.0);
+  let assignment_status = level_assignments[assignment_offset + 10u];
+  let position = vec3<f32>(
+    level_assignments[assignment_offset + 12u],
+    level_assignments[assignment_offset + 13u],
+    level_assignments[assignment_offset + 14u]
+  );
+  let chart_id = level_assignments[assignment_offset + 15u];
+  let active_status = active_nodes[node_offset + 11u];
+
+  let requested_delta = max(params.parent_level_delta, 1);
+  let unclamped_parent_level = child_level + requested_delta;
+  let parent_level = min(unclamped_parent_level, params.max_level);
+  let level_delta = parent_level - child_level;
+  let base_dx = max(params.base_grid_spacing_m, 0.000001);
+  let parent_dx = base_dx * exp2(f32(parent_level));
+  let parent_tile_spacing = max(parent_dx, 0.000001) * f32(max(params.tile_cell_count, 1u));
+  let halo_radius = max(params.coupling_halo_cells, 0.0) * max(child_dx, parent_dx);
+  let coupling_radius = ss_cross_clamp_radius(support_radius + halo_radius);
+  let parent_cell = floor(position / max(parent_dx, 0.000001));
+  var status = select(32.0, 1.0, assignment_status > 0.0 && active_status > 0.0 && child_dx > 0.0 && parent_dx > 0.0);
+  if (parent_level == child_level) {
+    status = status + 64.0;
+  }
+
+  cross_level_couplings[coupling_offset + 0u] = f32(particle_index);
+  cross_level_couplings[coupling_offset + 1u] = f32(child_level);
+  cross_level_couplings[coupling_offset + 2u] = f32(parent_level);
+  cross_level_couplings[coupling_offset + 3u] = f32(level_delta);
+  cross_level_couplings[coupling_offset + 4u] = child_dx;
+  cross_level_couplings[coupling_offset + 5u] = parent_dx;
+  cross_level_couplings[coupling_offset + 6u] = support_radius;
+  cross_level_couplings[coupling_offset + 7u] = coupling_radius;
+  cross_level_couplings[coupling_offset + 8u] = parent_cell.x;
+  cross_level_couplings[coupling_offset + 9u] = parent_cell.y;
+  cross_level_couplings[coupling_offset + 10u] = parent_cell.z;
+  cross_level_couplings[coupling_offset + 11u] = parent_tile_spacing;
+  cross_level_couplings[coupling_offset + 12u] = mass_kg;
+  cross_level_couplings[coupling_offset + 13u] = represented_volume_m3;
+  cross_level_couplings[coupling_offset + 14u] = status;
+  cross_level_couplings[coupling_offset + 15u] = chart_id;
+}
+`;

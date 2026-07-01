@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -14,16 +17,20 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   SCHROEDER_ACTIVE_NODE_FLOATS,
+  SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_NO_FULL_READBACK_MODE,
   createSchroederActiveNodeListPlan,
   createSchroederActiveNodeParamsArray,
+  createSchroederCrossLevelCouplingParamsArray,
+  createSchroederCrossLevelCouplingPlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
   createSchroederSameLevelMechanicsPlan,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
   runSchroederActiveNodeListWebGpu,
+  runSchroederCrossLevelCouplingWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederGridSpacingForLevel
@@ -167,6 +174,14 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS, 16);
   assert.equal(SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length, SCHROEDER_ACTIVE_NODE_FLOATS);
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA, 'peercompute.ulg.schroeder-cross-level-coupling.v0');
+  assert.equal(
+    ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-cross-level-coupling-execution.v0'
+  );
+  assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS, 16);
+  assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length, SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS);
+  assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA, 'peercompute.ulg.schroeder-same-level-mechanics.v0');
   assert.equal(
     ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -246,6 +261,55 @@ test('Schroeder active-node plan uses retained level assignments as unsorted til
   assert.equal(view.getUint32(0, true), 5);
   assert.equal(view.getUint32(4, true), 4);
   assert.equal(view.getFloat32(16, true), 2);
+});
+
+test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
+  const levelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-level-assignment-submitted',
+    particleCount: 4,
+    maxLevel: 6,
+    baseGridSpacingM: 0.25,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    assignmentBuffer: { label: 'fake-assignment-buffer' }
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 4,
+    tileCellCount: 4,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const plan = createSchroederCrossLevelCouplingPlan({
+    levelAssignment,
+    activeNodeList,
+    parentLevelDelta: 1,
+    couplingHaloCells: 2,
+    minCouplingRadiusM: 0.125
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA);
+  assert.equal(plan.status, 'schroeder-cross-level-coupling-plan-ready');
+  assert.equal(plan.sourceAssignmentSchema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
+  assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(plan.crossLevelCandidateCount, 4);
+  assert.equal(plan.outputCompaction, 'one-child-parent-candidate-row-per-particle');
+  assert.equal(plan.hierarchyRole, 'cross-level-parent-candidate-generation');
+  assert.equal(plan.couplingConsumerStatus, 'planned-not-yet-applied-to-mls-mpm-grid-transfer');
+  assert.equal(plan.crossLevelByteLength, 4 * 16 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederCrossLevelCouplingParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 4);
+  assert.equal(view.getInt32(4, true), 6);
+  assert.equal(view.getInt32(8, true), 1);
+  assert.equal(view.getFloat32(16, true), 0.25);
+  assert.equal(view.getFloat32(20, true), 2);
+  assert.equal(view.getFloat32(24, true), 0.125);
+  assert.equal(view.getUint32(32, true), 4);
 });
 
 test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
@@ -333,6 +397,53 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
   assert.equal(activeNodes.activeNodes.length, 0);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder WebGPU cross-level coupling consumes retained hierarchy buffers without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.25,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1
+  });
+  const crossLevel = await runSchroederCrossLevelCouplingWebGpu({
+    device,
+    levelAssignment,
+    activeNodeList: activeNodes,
+    parentLevelDelta: 1,
+    couplingHaloCells: 2
+  });
+
+  assert.equal(crossLevel.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
+  assert.equal(crossLevel.crossLevelCouplingSchema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA);
+  assert.equal(crossLevel.status, 'schroeder-cross-level-coupling-submitted');
+  assert.equal(crossLevel.sourceAssignmentSchema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
+  assert.equal(crossLevel.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(crossLevel.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(crossLevel.fullReadbackPerformed, false);
+  assert.equal(crossLevel.fullParticleReadbackPerformed, false);
+  assert.equal(crossLevel.normalHotLoopReadbackFree, true);
+  assert.equal(crossLevel.retainedCrossLevelBuffer, true);
+  assert.ok(crossLevel.crossLevelBuffer);
+  assert.equal(crossLevel.crossLevelBuffer.destroyed, false);
+  assert.equal(crossLevel.crossLevelBufferByteLength, 3 * 16 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(crossLevel.crossLevelCouplings.length, 0);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederCrossLevelParams')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false

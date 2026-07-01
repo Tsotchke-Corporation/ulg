@@ -1,9 +1,12 @@
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -12,6 +15,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   schroederActiveNodeListWgsl,
+  schroederCrossLevelCouplingWgsl,
   schroederLevelAssignmentWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
@@ -25,6 +29,8 @@ import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
 export {
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -32,15 +38,19 @@ export {
 };
 
 export const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
+export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
+export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
+export const SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE = 'schroeder-gpu-cross-level-coupling';
 export const SCHROEDER_LEVEL_ASSIGNMENT_SCOPE = 'schroeder-gpu-level-assignment';
 export const SCHROEDER_SAME_LEVEL_MECHANICS_SCOPE = 'schroeder-same-level-mls-mpm-ocean-mechanics';
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
+export const SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE = 'full-cross-level-readback';
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -244,6 +254,34 @@ export function createSchroederActiveNodeParamsArray({
   return buffer;
 }
 
+export function createSchroederCrossLevelCouplingParamsArray({
+  particleCount = 0,
+  maxLevel = DEFAULT_MAX_LEVEL,
+  parentLevelDelta = 1,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  couplingHaloCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  minCouplingRadiusM = 0,
+  maxCouplingRadiusM = 0,
+  tileCellCount = DEFAULT_TILE_CELL_COUNT,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(48);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setInt32(4, Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)), true);
+  view.setInt32(8, Math.max(1, Math.round(finiteNumber(parentLevelDelta, 1))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(16, finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M), true);
+  view.setFloat32(20, Math.max(0, finiteNumber(couplingHaloCells, DEFAULT_SUPPORT_INFLATE_CELLS)), true);
+  view.setFloat32(24, Math.max(0, finiteNumber(minCouplingRadiusM, 0)), true);
+  view.setFloat32(28, Math.max(0, finiteNumber(maxCouplingRadiusM, 0)), true);
+  view.setUint32(32, Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))), true);
+  view.setUint32(36, 0, true);
+  view.setFloat32(40, 0, true);
+  view.setFloat32(44, 0, true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -261,6 +299,26 @@ function assertLevelAssignmentInput(levelAssignment) {
   )));
   if (stride !== SCHROEDER_LEVEL_ASSIGNMENT_FLOATS) {
     throw new RangeError('Schroeder active node list requires the current level-assignment row layout');
+  }
+}
+
+function assertActiveNodeListInput(activeNodeList, particleCount) {
+  if (
+    activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA
+    && activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA
+  ) {
+    throw new TypeError('Schroeder cross-level coupling requires a Schroeder active-node input');
+  }
+  const activeCandidateCount = Math.max(0, Math.round(finiteNumber(activeNodeList.activeCandidateCount, 0)));
+  if (activeCandidateCount !== particleCount) {
+    throw new RangeError('Schroeder cross-level coupling requires active-node rows for every level-assigned particle');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  )));
+  if (stride !== SCHROEDER_ACTIVE_NODE_FLOATS) {
+    throw new RangeError('Schroeder cross-level coupling requires the current active-node row layout');
   }
 }
 
@@ -298,6 +356,61 @@ export function createSchroederActiveNodeListPlan({
     activeNodeStrideBytes: SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     activeNodeByteLength,
     outputCompaction: 'unsorted-one-row-per-particle-tile-range',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederCrossLevelCouplingPlan({
+  levelAssignment,
+  activeNodeList,
+  parentLevelDelta = 1,
+  baseGridSpacingM = levelAssignment?.baseGridSpacingM ?? DEFAULT_BASE_GRID_SPACING_M,
+  maxLevel = levelAssignment?.maxLevel ?? DEFAULT_MAX_LEVEL,
+  couplingHaloCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  minCouplingRadiusM = 0,
+  maxCouplingRadiusM = 0,
+  tileCellCount = activeNodeList?.tileCellCount ?? DEFAULT_TILE_CELL_COUNT
+} = {}) {
+  assertLevelAssignmentInput(levelAssignment);
+  const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  assertActiveNodeListInput(activeNodeList, particleCount);
+  const crossLevelByteLength = Math.max(
+    4,
+    particleCount * SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+    status: 'schroeder-cross-level-coupling-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE,
+    sourceAssignmentSchema: levelAssignment.schema,
+    sourceAssignmentStatus: levelAssignment.status ?? null,
+    sourceActiveNodeSchema: activeNodeList.schema,
+    sourceActiveNodeStatus: activeNodeList.status ?? null,
+    particleCount,
+    crossLevelCandidateCount: particleCount,
+    parentLevelDelta: Math.max(1, Math.round(finiteNumber(parentLevelDelta, 1))),
+    maxLevel: Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)),
+    baseGridSpacingM: finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M),
+    couplingHaloCells: Math.max(0, finiteNumber(couplingHaloCells, DEFAULT_SUPPORT_INFLATE_CELLS)),
+    minCouplingRadiusM: Math.max(0, finiteNumber(minCouplingRadiusM, 0)),
+    maxCouplingRadiusM: Math.max(0, finiteNumber(maxCouplingRadiusM, 0)),
+    tileCellCount: Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))),
+    assignmentRowLayout: [...SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT],
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    activeNodeRowLayout: [...SCHROEDER_ACTIVE_NODE_ROW_LAYOUT],
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    crossLevelRowLayout: [...SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT],
+    crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+    crossLevelStrideBytes: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    crossLevelByteLength,
+    outputCompaction: 'one-child-parent-candidate-row-per-particle',
+    hierarchyRole: 'cross-level-parent-candidate-generation',
+    couplingConsumerStatus: 'planned-not-yet-applied-to-mls-mpm-grid-transfer',
+    conservationRole: 'candidate-rows-carry-mass-and-volume-for-later-conservative-transfer',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -634,6 +747,161 @@ export async function runSchroederActiveNodeListWebGpu({
     const cleanup = () => {
       if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
       if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
+export async function runSchroederCrossLevelCouplingWebGpu({
+  device,
+  levelAssignment,
+  activeNodeList,
+  parentLevelDelta = 1,
+  baseGridSpacingM = levelAssignment?.baseGridSpacingM ?? DEFAULT_BASE_GRID_SPACING_M,
+  maxLevel = levelAssignment?.maxLevel ?? DEFAULT_MAX_LEVEL,
+  couplingHaloCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  minCouplingRadiusM = 0,
+  maxCouplingRadiusM = 0,
+  tileCellCount = activeNodeList?.tileCellCount ?? DEFAULT_TILE_CELL_COUNT,
+  retainCrossLevelBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederCrossLevelCouplingWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederCrossLevelCouplingPlan({
+    levelAssignment,
+    activeNodeList,
+    parentLevelDelta,
+    baseGridSpacingM,
+    maxLevel,
+    couplingHaloCells,
+    minCouplingRadiusM,
+    maxCouplingRadiusM,
+    tileCellCount
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
+  const assignmentRows = levelAssignment?.assignments instanceof Float32Array
+    ? levelAssignment.assignments
+    : null;
+  if (!borrowedAssignmentBuffer && !(assignmentRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder cross-level coupling requires a retained assignment buffer or explicit assignment rows');
+  }
+  const borrowedActiveNodeBuffer = activeNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
+    ? activeNodeList.activeNodes
+    : null;
+  if (!borrowedActiveNodeBuffer && !(activeNodeRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder cross-level coupling requires a retained active-node buffer or explicit active-node rows');
+  }
+  const assignmentBuffer = borrowedAssignmentBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-cross-level-assignment-in', assignmentRows);
+  const activeNodeBuffer = borrowedActiveNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-cross-level-active-node-in', activeNodeRows);
+  const crossLevelBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-couplings-out',
+    size: plan.crossLevelByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-params',
+    size: 48,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-cross-level-couplings-readback',
+      size: plan.crossLevelByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedCrossLevelBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelCouplingParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-cross-level-coupling.v0',
+      label: 'ulg-schroeder-cross-level-coupling',
+      code: schroederCrossLevelCouplingWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: assignmentBuffer } },
+        { binding: 1, resource: { buffer: activeNodeBuffer } },
+        { binding: 2, resource: { buffer: crossLevelBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.particleCount / SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(crossLevelBuffer, 0, readBuffer, 0, plan.crossLevelByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let crossLevelCouplings = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      crossLevelCouplings = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.crossLevelCandidateCount * SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+      crossLevelCouplingSchema: plan.schema,
+      status: 'schroeder-cross-level-coupling-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback ? SCHROEDER_NO_FULL_READBACK_MODE : SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedCrossLevelBuffer: Boolean(retainCrossLevelBuffer),
+      crossLevelBufferByteLength: plan.crossLevelByteLength,
+      crossLevelCouplings,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainCrossLevelBuffer) {
+      result.crossLevelBuffer = crossLevelBuffer;
+      result.destroyCrossLevelBuffer = () => crossLevelBuffer.destroy?.();
+      returnedRetainedCrossLevelBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
+      if (!borrowedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      if (!retainCrossLevelBuffer || !returnedRetainedCrossLevelBuffer) crossLevelBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };

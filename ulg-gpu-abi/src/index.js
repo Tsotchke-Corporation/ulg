@@ -76,6 +76,7 @@ export const ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA = 'peercompute.ulg.
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary-execution.v0';
@@ -716,6 +717,24 @@ export const SCHROEDER_ACTIVE_NODE_ROW_LAYOUT = Object.freeze([
   'positionXM:f32',
   'positionYM:f32',
   'positionZM:f32',
+  'chartId:f32'
+]);
+export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'childLevelId:f32',
+  'parentLevelId:f32',
+  'levelDelta:f32',
+  'childNativeGridSpacingM:f32',
+  'parentNativeGridSpacingM:f32',
+  'supportRadiusM:f32',
+  'couplingRadiusM:f32',
+  'parentCellX:f32',
+  'parentCellY:f32',
+  'parentCellZ:f32',
+  'parentTileSpacingM:f32',
+  'massKg:f32',
+  'representedVolumeM3:f32',
+  'status:f32',
   'chartId:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([

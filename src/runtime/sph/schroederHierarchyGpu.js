@@ -1,10 +1,13 @@
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -15,6 +18,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   schroederActiveNodeListWgsl,
+  schroederConservationSummaryWgsl,
   schroederCrossLevelCouplingWgsl,
   schroederLevelAssignmentWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -29,6 +33,8 @@ import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
 export {
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -38,9 +44,11 @@ export {
 };
 
 export const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
+export const SCHROEDER_CONSERVATION_SUMMARY_FLOATS = SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
+export const SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
@@ -51,6 +59,7 @@ export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE = 'full-cross-level-readback';
+export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservation-summary-readback';
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -282,6 +291,27 @@ export function createSchroederCrossLevelCouplingParamsArray({
   return buffer;
 }
 
+export function createSchroederConservationSummaryParamsArray({
+  crossLevelCandidateCount = 0,
+  crossLevelStrideFloats = SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+  summaryStrideFloats = SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    crossLevelStrideFloats,
+    SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    summaryStrideFloats,
+    SCHROEDER_CONSERVATION_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -319,6 +349,26 @@ function assertActiveNodeListInput(activeNodeList, particleCount) {
   )));
   if (stride !== SCHROEDER_ACTIVE_NODE_FLOATS) {
     throw new RangeError('Schroeder cross-level coupling requires the current active-node row layout');
+  }
+}
+
+function assertCrossLevelCouplingInput(crossLevelCoupling) {
+  if (
+    crossLevelCoupling?.schema !== ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA
+    && crossLevelCoupling?.schema !== ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA
+  ) {
+    throw new TypeError('Schroeder conservation summary requires a Schroeder cross-level coupling input');
+  }
+  const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelCoupling.crossLevelCandidateCount, 0)));
+  if (candidateCount <= 0) {
+    throw new RangeError('Schroeder conservation summary requires at least one cross-level candidate');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    crossLevelCoupling.crossLevelStrideFloats,
+    SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
+  )));
+  if (stride !== SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS) {
+    throw new RangeError('Schroeder conservation summary requires the current cross-level row layout');
   }
 }
 
@@ -411,6 +461,47 @@ export function createSchroederCrossLevelCouplingPlan({
     hierarchyRole: 'cross-level-parent-candidate-generation',
     couplingConsumerStatus: 'planned-not-yet-applied-to-mls-mpm-grid-transfer',
     conservationRole: 'candidate-rows-carry-mass-and-volume-for-later-conservative-transfer',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederConservationSummaryPlan({
+  crossLevelCoupling,
+  summaryWorkgroupSize = SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE
+} = {}) {
+  assertCrossLevelCouplingInput(crossLevelCoupling);
+  const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelCoupling.crossLevelCandidateCount, 0)));
+  const workgroupSize = Math.max(1, Math.round(finiteNumber(
+    summaryWorkgroupSize,
+    SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE
+  )));
+  const summaryRowCount = Math.max(1, Math.ceil(candidateCount / workgroupSize));
+  const summaryByteLength = Math.max(
+    4,
+    summaryRowCount * SCHROEDER_CONSERVATION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
+    status: 'schroeder-conservation-summary-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-cross-level-conservation-summary',
+    sourceCrossLevelSchema: crossLevelCoupling.schema,
+    sourceCrossLevelStatus: crossLevelCoupling.status ?? null,
+    crossLevelCandidateCount: candidateCount,
+    crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+    summaryRowLayout: [...SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT],
+    summaryStrideFloats: SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
+    summaryStrideBytes: SCHROEDER_CONSERVATION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    summaryWorkgroupSize: workgroupSize,
+    summaryRowCount,
+    summaryByteLength,
+    outputCompaction: 'one-conservation-summary-row-per-workgroup',
+    conservativeTransferStatus: 'summary-only-no-state-mutation',
+    residualCounterStatus: 'planned-gpu-resident-workgroup-partials',
+    conservedQuantities: ['mass', 'represented-volume'],
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -913,6 +1004,132 @@ export async function runSchroederCrossLevelCouplingWebGpu({
   }
 }
 
+export async function runSchroederConservationSummaryWebGpu({
+  device,
+  crossLevelCoupling,
+  retainSummaryBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederConservationSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederConservationSummaryPlan({ crossLevelCoupling });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedCrossLevelBuffer = crossLevelCoupling?.crossLevelBuffer || null;
+  const crossLevelRows = crossLevelCoupling?.crossLevelCouplings instanceof Float32Array
+    ? crossLevelCoupling.crossLevelCouplings
+    : null;
+  if (!borrowedCrossLevelBuffer && !(crossLevelRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder conservation summary requires a retained cross-level buffer or explicit rows');
+  }
+  const crossLevelBuffer = borrowedCrossLevelBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-conservation-cross-level-in', crossLevelRows);
+  const summaryBuffer = device.createBuffer({
+    label: 'ulg-schroeder-conservation-summary-out',
+    size: plan.summaryByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-conservation-summary-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-conservation-summary-readback',
+      size: plan.summaryByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedSummaryBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederConservationSummaryParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-conservation-summary.v0',
+      label: 'ulg-schroeder-conservation-summary',
+      code: schroederConservationSummaryWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: crossLevelBuffer } },
+        { binding: 1, resource: { buffer: summaryBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(plan.summaryRowCount);
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, plan.summaryByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let summaryRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      summaryRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.summaryRowCount * SCHROEDER_CONSERVATION_SUMMARY_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
+      conservationSummarySchema: plan.schema,
+      status: 'schroeder-conservation-summary-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedSummaryBuffer: Boolean(retainSummaryBuffer),
+      summaryBufferByteLength: plan.summaryByteLength,
+      summaryRows,
+      residualCounterStatus: 'workgroup-partial-summary-gpu-resident',
+      conservativeTransferStatus: 'summary-only-no-state-mutation',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainSummaryBuffer) {
+      result.summaryBuffer = summaryBuffer;
+      result.destroySummaryBuffer = () => summaryBuffer.destroy?.();
+      returnedRetainedSummaryBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedCrossLevelBuffer) crossLevelBuffer.destroy?.();
+      if (!retainSummaryBuffer || !returnedRetainedSummaryBuffer) summaryBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -922,6 +1139,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   levelAssignment = null,
   activeNodeList = null,
   crossLevelCoupling = null,
+  conservationSummary = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = DEFAULT_MIN_LEVEL,
@@ -931,6 +1149,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
   enableCrossLevelCoupling = true,
+  enableConservationSummary = enableCrossLevelCoupling,
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -941,6 +1160,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   cflFactor = mlsMpmParticleState?.gridCflFactor,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
   crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
+  conservationSummaryRunner = runSchroederConservationSummaryWebGpu,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
 } = {}) {
@@ -952,6 +1172,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (enableCrossLevelCoupling && typeof crossLevelCouplingRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelCouplingRunner function');
+  }
+  if (enableCrossLevelCoupling && enableConservationSummary && typeof conservationSummaryRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a conservationSummaryRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -1001,6 +1224,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainCrossLevelBuffer: true,
       readbackMode
     });
+  const resolvedConservationSummary = !resolvedCrossLevelCoupling || !enableConservationSummary
+    ? null
+    : conservationSummary || await conservationSummaryRunner({
+      device,
+      crossLevelCoupling: resolvedCrossLevelCoupling,
+      retainSummaryBuffer: true,
+      readbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -1018,6 +1249,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederLevelAssignment: resolvedLevelAssignment,
     schroederSelectedLevel: plan.selectedLevel,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
+    schroederConservationSummary: resolvedConservationSummary,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -1057,6 +1289,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedCrossLevelCoupling.crossLevelByteLength
         ?? 0
     } : null,
+    conservationSummary: resolvedConservationSummary ? {
+      schema: resolvedConservationSummary.schema,
+      status: resolvedConservationSummary.status,
+      summaryRowCount: resolvedConservationSummary.summaryRowCount,
+      outputCompaction: resolvedConservationSummary.outputCompaction,
+      residualCounterStatus: resolvedConservationSummary.residualCounterStatus,
+      conservativeTransferStatus: resolvedConservationSummary.conservativeTransferStatus,
+      retainedSummaryBuffer: Boolean(resolvedConservationSummary.summaryBuffer),
+      summaryBufferByteLength: resolvedConservationSummary.summaryBufferByteLength
+        ?? resolvedConservationSummary.summaryByteLength
+        ?? 0
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -1066,6 +1310,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     crossLevelCouplingStatus: resolvedCrossLevelCoupling
       ? 'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
       : 'disabled-same-level-only-mechanics',
+    conservationSummaryStatus: resolvedConservationSummary?.status ?? (
+      resolvedCrossLevelCoupling ? 'disabled-cross-level-summary' : 'disabled-same-level-only-mechanics'
+    ),
+    conservativeTransferStatus: resolvedConservationSummary?.conservativeTransferStatus ?? 'not-run',
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

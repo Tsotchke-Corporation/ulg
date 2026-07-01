@@ -78,6 +78,7 @@ export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
+export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0';
@@ -736,6 +737,24 @@ export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'representedVolumeM3:f32',
   'status:f32',
   'chartId:f32'
+]);
+export const SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'candidateCount:f32',
+  'activeCandidateCount:f32',
+  'blockedCandidateCount:f32',
+  'sameLevelCandidateCount:f32',
+  'sourceMassKg:f32',
+  'restrictedMassKg:f32',
+  'massResidualKg:f32',
+  'sourceVolumeM3:f32',
+  'restrictedVolumeM3:f32',
+  'volumeResidualM3:f32',
+  'maxAbsMassResidualKg:f32',
+  'maxAbsVolumeResidualM3:f32',
+  'badWeightCount:f32',
+  'missingParentChildCount:f32',
+  'status:f32',
+  'pad0:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

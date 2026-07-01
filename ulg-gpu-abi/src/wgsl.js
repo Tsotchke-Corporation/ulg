@@ -7556,3 +7556,143 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   cross_level_couplings[coupling_offset + 15u] = chart_id;
 }
 `;
+
+export const schroederConservationSummaryWgsl = `
+struct SchroederConservationSummaryParams {
+  candidate_count: u32,
+  cross_level_stride: u32,
+  summary_stride: u32,
+  flags: u32,
+};
+
+@group(0) @binding(0) var<storage, read> cross_level_couplings: array<f32>;
+@group(0) @binding(1) var<storage, read_write> summary_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederConservationSummaryParams;
+
+const SCHROEDER_SUMMARY_WORKGROUP_SIZE: u32 = 64u;
+const SCHROEDER_DEFAULT_CROSS_LEVEL_STRIDE: u32 = 16u;
+const SCHROEDER_DEFAULT_SUMMARY_STRIDE: u32 = 16u;
+
+var<workgroup> wg_candidate_count: array<f32, 64>;
+var<workgroup> wg_active_count: array<f32, 64>;
+var<workgroup> wg_blocked_count: array<f32, 64>;
+var<workgroup> wg_same_level_count: array<f32, 64>;
+var<workgroup> wg_source_mass: array<f32, 64>;
+var<workgroup> wg_restricted_mass: array<f32, 64>;
+var<workgroup> wg_source_volume: array<f32, 64>;
+var<workgroup> wg_restricted_volume: array<f32, 64>;
+var<workgroup> wg_max_mass_residual: array<f32, 64>;
+var<workgroup> wg_max_volume_residual: array<f32, 64>;
+var<workgroup> wg_bad_weight_count: array<f32, 64>;
+var<workgroup> wg_missing_parent_child_count: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn main(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let particle_index = global_id.x;
+  let local_index = local_id.x;
+  let cross_stride = max(params.cross_level_stride, SCHROEDER_DEFAULT_CROSS_LEVEL_STRIDE);
+
+  var candidate_count = 0.0;
+  var active_count = 0.0;
+  var blocked_count = 0.0;
+  var same_level_count = 0.0;
+  var source_mass = 0.0;
+  var restricted_mass = 0.0;
+  var source_volume = 0.0;
+  var restricted_volume = 0.0;
+  var max_mass_residual = 0.0;
+  var max_volume_residual = 0.0;
+  var bad_weight_count = 0.0;
+  var missing_parent_child_count = 0.0;
+
+  if (particle_index < params.candidate_count) {
+    let offset = particle_index * cross_stride;
+    let level_delta = cross_level_couplings[offset + 3u];
+    let mass_kg = max(cross_level_couplings[offset + 12u], 0.0);
+    let represented_volume_m3 = max(cross_level_couplings[offset + 13u], 0.0);
+    let status = cross_level_couplings[offset + 14u];
+    let active_candidate = select(0.0, 1.0, status > 0.0 && status < 32.0 && level_delta > 0.0);
+    let blocked = select(0.0, 1.0, status >= 32.0 && status < 64.0);
+    let same_level = select(0.0, 1.0, status >= 64.0 || level_delta <= 0.0);
+
+    candidate_count = 1.0;
+    active_count = active_candidate;
+    blocked_count = blocked;
+    same_level_count = same_level;
+    source_mass = mass_kg;
+    restricted_mass = mass_kg * active_candidate;
+    source_volume = represented_volume_m3;
+    restricted_volume = represented_volume_m3 * active_candidate;
+    max_mass_residual = abs(source_mass - restricted_mass);
+    max_volume_residual = abs(source_volume - restricted_volume);
+    missing_parent_child_count = blocked;
+  }
+
+  wg_candidate_count[local_index] = candidate_count;
+  wg_active_count[local_index] = active_count;
+  wg_blocked_count[local_index] = blocked_count;
+  wg_same_level_count[local_index] = same_level_count;
+  wg_source_mass[local_index] = source_mass;
+  wg_restricted_mass[local_index] = restricted_mass;
+  wg_source_volume[local_index] = source_volume;
+  wg_restricted_volume[local_index] = restricted_volume;
+  wg_max_mass_residual[local_index] = max_mass_residual;
+  wg_max_volume_residual[local_index] = max_volume_residual;
+  wg_bad_weight_count[local_index] = bad_weight_count;
+  wg_missing_parent_child_count[local_index] = missing_parent_child_count;
+  workgroupBarrier();
+
+  if (local_index == 0u) {
+    var sum_candidate_count = 0.0;
+    var sum_active_count = 0.0;
+    var sum_blocked_count = 0.0;
+    var sum_same_level_count = 0.0;
+    var sum_source_mass = 0.0;
+    var sum_restricted_mass = 0.0;
+    var sum_source_volume = 0.0;
+    var sum_restricted_volume = 0.0;
+    var max_abs_mass_residual = 0.0;
+    var max_abs_volume_residual = 0.0;
+    var sum_bad_weight_count = 0.0;
+    var sum_missing_parent_child_count = 0.0;
+    for (var index = 0u; index < SCHROEDER_SUMMARY_WORKGROUP_SIZE; index = index + 1u) {
+      sum_candidate_count = sum_candidate_count + wg_candidate_count[index];
+      sum_active_count = sum_active_count + wg_active_count[index];
+      sum_blocked_count = sum_blocked_count + wg_blocked_count[index];
+      sum_same_level_count = sum_same_level_count + wg_same_level_count[index];
+      sum_source_mass = sum_source_mass + wg_source_mass[index];
+      sum_restricted_mass = sum_restricted_mass + wg_restricted_mass[index];
+      sum_source_volume = sum_source_volume + wg_source_volume[index];
+      sum_restricted_volume = sum_restricted_volume + wg_restricted_volume[index];
+      max_abs_mass_residual = max(max_abs_mass_residual, wg_max_mass_residual[index]);
+      max_abs_volume_residual = max(max_abs_volume_residual, wg_max_volume_residual[index]);
+      sum_bad_weight_count = sum_bad_weight_count + wg_bad_weight_count[index];
+      sum_missing_parent_child_count = sum_missing_parent_child_count + wg_missing_parent_child_count[index];
+    }
+    let summary_stride = max(params.summary_stride, SCHROEDER_DEFAULT_SUMMARY_STRIDE);
+    let summary_offset = workgroup_id.x * summary_stride;
+    let mass_residual = sum_source_mass - sum_restricted_mass;
+    let volume_residual = sum_source_volume - sum_restricted_volume;
+    summary_rows[summary_offset + 0u] = sum_candidate_count;
+    summary_rows[summary_offset + 1u] = sum_active_count;
+    summary_rows[summary_offset + 2u] = sum_blocked_count;
+    summary_rows[summary_offset + 3u] = sum_same_level_count;
+    summary_rows[summary_offset + 4u] = sum_source_mass;
+    summary_rows[summary_offset + 5u] = sum_restricted_mass;
+    summary_rows[summary_offset + 6u] = mass_residual;
+    summary_rows[summary_offset + 7u] = sum_source_volume;
+    summary_rows[summary_offset + 8u] = sum_restricted_volume;
+    summary_rows[summary_offset + 9u] = volume_residual;
+    summary_rows[summary_offset + 10u] = max_abs_mass_residual;
+    summary_rows[summary_offset + 11u] = max_abs_volume_residual;
+    summary_rows[summary_offset + 12u] = sum_bad_weight_count;
+    summary_rows[summary_offset + 13u] = sum_missing_parent_child_count;
+    summary_rows[summary_offset + 14u] = select(0.0, 1.0, sum_candidate_count > 0.0);
+    summary_rows[summary_offset + 15u] = 0.0;
+  }
+}
+`;

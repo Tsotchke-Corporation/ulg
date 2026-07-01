@@ -92,6 +92,7 @@ import {
 } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 import { ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA } from '../src/runtime/sph/sphReactionGpuSummary.js';
 import { tagResidentProductMassDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   RESIDENT_STATE_FAMILIES,
@@ -4171,6 +4172,51 @@ test('MLS-MPM resident steps compute task blocks fused sequence when sidecars re
   assert.equal(task.data.residentSequenceLaneContract.fallbackMode, 'per-step-fused-mechanics-active-grid');
 });
 
+test('MLS-MPM resident steps compute task can opt into thermal sidecar fused sequence', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const materialProperties = {
+    h2o: {
+      molarMassKgPerMol: 0.018,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 1000, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    }
+  };
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-thermal-sidecar-fused-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'final-only',
+    activeGridDispatchPlanRefreshMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    fuseThermalSidecarResidentSequence: true,
+    thermalMaterialTable: buildSphThermalMaterialTable(materialProperties),
+    mechanicsMaterialTable: buildMlsMpmMechanicsMaterialTable(materialProperties)
+  });
+
+  const contract = task.gpuResidentLane.residentSequenceLaneContract;
+  assert.equal(contract.sequenceRequested, true);
+  assert.equal(contract.sequenceRunnable, true);
+  assert.equal(contract.status, 'lane-owned-fused-sequence-contract-ready');
+  assert.deepEqual(contract.blockers, []);
+  assert.deepEqual(contract.sidecarBlockers, ['thermal-sidecar']);
+  assert.equal(contract.sidecarFusionRequired, true);
+  assert.equal(contract.sidecarFusionRunnable, true);
+  assert.equal(contract.sequenceRunnableWithSidecars, true);
+  assert.equal(contract.sidecarFusionPromotesFusedSequence, true);
+  assert.equal(contract.sidecarFusionPlan.status, 'sidecar-fusion-plan-runnable');
+  assert.deepEqual(
+    contract.sidecarFusionPlan.stages.map((stage) => stage.implementedInCurrentFusedSequence),
+    [true, true]
+  );
+  assert.equal(task.webgpu.residentSequenceLaneContract.sequenceRunnable, true);
+  assert.equal(task.data.residentSequenceLaneContract.sidecarFusionPlan.status, 'sidecar-fusion-plan-runnable');
+});
+
 test('MLS-MPM resident steps compute task sidecar fusion plan orders pressure and product blockers', async () => {
   const { options } = noFullReadbackResidentStepFixture();
   const task = createMlsMpmResidentStepsComputeTask({
@@ -6967,6 +7013,106 @@ test('MLS-MPM resident steps summarize thermal sidecar-aware sequence evidence a
   assert.equal(mechanicsRefreshInputs[1].sourceStateBuffer, 'aware-thermal-state-2');
   assert.equal(mechanicsRefreshInputs[0].mechanicsMaterialTable, mechanicsMaterialTable);
   assert.equal(mechanicsRefreshInputs[1].readbackMode, 'no-full-readback');
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM fused resident sequence encodes thermal sidecar fusion in one submission', async () => {
+  const buffers = manualBuffers({
+    position: [1.25, 1.25, 1.25],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const materialProperties = {
+    h2o: {
+      molarMassKgPerMol: 0.018,
+      phases: [
+        {
+          name: 'liquid',
+          densityKgPerM3: 1000,
+          bulkModulusPa: 2.2e9,
+          shearModulusPa: 0,
+          cpJPerKgK: 4184,
+          temperatureRange: [273.15, 373.15],
+          dynamicViscosityPaS: 1e-3,
+          surfaceTensionNPerM: 0.072
+        }
+      ]
+    }
+  };
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable(materialProperties, {
+    viscosityEnabled: true,
+    viscosityLengthM: buffers.sphParticleState.smoothingLengthM,
+    surfaceTensionEnabled: true
+  });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    thermalMaterialTable,
+    mechanicsMaterialTable
+  });
+
+  assert.equal(execution.fusedResidentSequencePreflight.status, 'fused-resident-sequence-preflight-ready');
+  assert.equal(execution.fusedResidentSequencePreflight.sequenceRunnable, true);
+  assert.deepEqual(execution.fusedResidentSequencePreflight.blockers, []);
+  assert.deepEqual(execution.fusedResidentSequencePreflight.sidecarBlockers, ['thermal-sidecar']);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionRequired, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionRunnable, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sequenceRunnableWithSidecars, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionPromotesFusedSequence, true);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarAwareSequenceCandidate, false);
+  assert.equal(execution.fusedResidentSequencePreflight.sidecarFusionPlan.status, 'sidecar-fusion-plan-runnable');
+  assert.deepEqual(
+    execution.fusedResidentSequencePreflight.sidecarFusionPlan.stages.map((stage) => stage.id),
+    ['thermal-phase', 'mechanics-refresh']
+  );
+  assert.deepEqual(
+    execution.fusedResidentSequencePreflight.sidecarFusionPlan.stages.map((stage) => stage.implementedInCurrentFusedSequence),
+    [true, true]
+  );
+
+  assert.equal(execution.fusedResidentSequence.status, 'fused-resident-sequence-executed');
+  assert.equal(execution.fusedResidentSequence.commandSubmissionCount, 1);
+  assert.equal(execution.fusedResidentSequence.sidecarFusionPromotesFusedSequence, true);
+  assert.equal(execution.fusedResidentSequence.thermalSidecarFused, true);
+  assert.equal(execution.fusedResidentSequence.sidecarFusionDispatchCount, 4);
+  assert.deepEqual(execution.fusedResidentSequence.sidecarFusionStageOrder, ['thermal-phase', 'mechanics-refresh']);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.status, 'sidecar-fusion-step-evidence-ready');
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.executedStageCount, 2);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.passedStageCount, 2);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.promotesFusedSequence, true);
+  assert.equal(execution.finalStep.sidecarFusionStepEvidence.fallbackEvidence, false);
+  assert.equal(execution.finalStep.stageTiming.thermalRequested, true);
+  assert.equal(execution.finalStep.stageTiming.mechanicsRefreshRequested, true);
+  assert.equal(execution.finalStep.stageTiming.sidecarFusionSequence, true);
+  assert.equal(execution.finalStep.stageTiming.sidecarFusionPromotesFusedSequence, true);
+  assert.equal(execution.finalStep.g2pStateBufferReplacedByThermalStep, true);
+  assert.equal(execution.finalStep.g2pMechanicsBufferReplacedByMechanicsRefresh, true);
+  assert.equal(execution.nextParticleBufferMode, 'retained-thermal-output-and-refreshed-mechanics-buffers');
+  assert.equal(execution.sidecarAwareResidentSequenceActive, false);
+  assert.equal(execution.sidecarAwareDirectRunnerContractStatus, 'thermal-sidecar-direct-runner-not-candidate');
+  assert.equal(device.submissions.length, 1);
+  assert.equal(device.dispatches.length, 12);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

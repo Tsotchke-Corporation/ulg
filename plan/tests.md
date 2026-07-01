@@ -13760,3 +13760,52 @@ Direct-resident plan-only active-grid motion evidence, 2026-06-30 17:51 AKDT:
   - Caveat: this is no-readback route evidence only. It does not replace
     compact-summary or visual motion validation when those diagnostics are
     present.
+
+One-submit thermal sidecar fusion, 2026-06-30 18:57 AKDT:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- Syntax:
+  `node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js`
+  - Passed.
+- Syntax:
+  `node --check src/runtime/sph/sphThermalGpuKernel.js`
+  - Passed.
+- Syntax:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- Focused resident MLS-MPM:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `72/72`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `18/18`.
+- Benchmark/probe source harness:
+  `node --test tests/nativeSurfaceHarness.test.mjs`
+  - Passed: `12/12`.
+- VPN server availability:
+  `curl -k -I https://100.86.83.35:5173/`,
+  `curl -I http://100.86.83.35:5174/`, and
+  `ss -ltnp 'sport = :5173 or sport = :5174'`
+  - Passed: HTTPS returned HTTP/2 200, HTTP returned HTTP/1.1 200, and both
+    listeners were bound to `0.0.0.0`.
+- Live HTTPS sidecar-fused sequence benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fused-sequence-bench-warm.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, scenario `good`,
+    `probeStatus=good`, `probeIssues=[]`, preflight
+    `fused-resident-sequence-preflight-ready`, `sequenceRunnable=true`,
+    `sidecarFusionRunnable=true`, `sidecarFusionPromotesFusedSequence=true`,
+    sidecar evidence `sidecar-fusion-step-evidence-ready`, sidecar
+    executed/passed stages `2/2`, compact readback bytes `0`,
+    `residentStageMs=1327.8`, `residentStageStepsPerSecond=0.753`, and fused
+    sequence queue fence `1313 ms`.
+- Baseline fused active-grid benchmark without thermal sidecar:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-fused-sequence-no-thermal-bench.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed the performance gate with suite status `complete`, scenario `good`,
+    `probeStatus=good`, preflight `fused-resident-sequence-preflight-ready`,
+    `sequenceRunnable=true`, `sidecarRequired=false`, `residentStageMs=860.3`,
+    `residentStageStepsPerSecond=1.16`, and fused sequence queue fence
+    `852.2 ms`.
+  - Caveat: sidecar fusion is functionally promoted, but queue-fenced
+    active-grid fused sequence performance is still slideshow-class.

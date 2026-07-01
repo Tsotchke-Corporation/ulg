@@ -61,6 +61,7 @@ import {
   runMlsMpmResidentSummaryWebGpu
 } from './sphMlsMpmGpuSummary.js';
 import {
+  createSphThermalStepWebGpuEncoderStage,
   runSphThermalStepWithOptionalWebGpu,
   runSphThermalStepWebGpu
 } from './sphThermalGpuKernel.js';
@@ -69,6 +70,7 @@ import {
   runSphReactionStepWithOptionalWebGpu
 } from './sphReactionGpuKernel.js';
 import {
+  createMlsMpmMechanicsRefreshWebGpuEncoderStage,
   runMlsMpmMechanicsRefreshWithOptionalWebGpu
 } from './sphMechanicsRefreshGpuKernel.js';
 import {
@@ -2537,7 +2539,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   fuseActiveGrid = false,
   activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
-  measureQueueFence = false
+  measureQueueFence = false,
+  sidecarFusionPlan = null,
+  thermalMaterialTable = null,
+  thermalStepOptions = {},
+  mechanicsMaterialTable = null,
+  mechanicsRefreshOptions = {}
 }) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -2551,6 +2558,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const stateByteLength = sphParticleState.state.byteLength;
   const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  const useThermalSidecarFusion = Boolean(
+    sidecarFusionPlan?.sequenceRunnableWithSidecars === true
+    && sidecarFusionPlan?.sidecarBlockers?.length === 1
+    && sidecarFusionPlan.sidecarBlockers[0] === 'thermal-sidecar'
+    && thermalMaterialTable
+    && mechanicsMaterialTable
+  );
+  const sidecarFusionDispatchCount = useThermalSidecarFusion ? count * 2 : 0;
   const activeGridDispatch = resolveFusedActiveGridDispatch({
     requested: fuseActiveGrid,
     sphParticleState,
@@ -2706,9 +2721,15 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
   let finalStateBuffer = null;
+  let finalThermoBuffer = sphParticleUpload.thermoBuffer;
   let finalMechanicsBuffer = null;
   let finalSourceStateBuffer = sphParticleUpload.stateBuffer;
+  let finalSourceThermoBuffer = sphParticleUpload.thermoBuffer;
   let finalSourceMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
+  let finalThermalStep = null;
+  let finalMechanicsRefreshStep = null;
+  const sidecarEncoderStages = [];
+  const sidecarOutputBuffers = [];
   let returned = false;
   try {
     const p2gBindings = [
@@ -2793,10 +2814,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
     let currentStateBuffer = sphParticleUpload.stateBuffer;
+    let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
+        finalSourceThermoBuffer = currentThermoBuffer;
         finalSourceMechanicsBuffer = currentMechanicsBuffer;
       }
       const pingIndex = index % 2;
@@ -2806,7 +2829,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         layout: p2gBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
-          { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+          { binding: 1, resource: { buffer: currentThermoBuffer } },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
           { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
           { binding: 4, resource: { buffer: p2gParamsBuffer } },
@@ -2818,7 +2841,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         layout: p2gFinalizeBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
-          { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+          { binding: 1, resource: { buffer: currentThermoBuffer } },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
           { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
           { binding: 4, resource: { buffer: p2gParamsBuffer } },
@@ -2831,7 +2854,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: currentStateBuffer } },
-            { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+            { binding: 1, resource: { buffer: currentThermoBuffer } },
             { binding: 2, resource: { buffer: currentMechanicsBuffer } },
             { binding: 3, resource: { buffer: p2gAccumulatorBuffer } },
             { binding: 4, resource: { buffer: p2gParamsBuffer } },
@@ -2891,7 +2914,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         layout: g2pBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: currentStateBuffer } },
-          { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+          { binding: 1, resource: { buffer: currentThermoBuffer } },
           { binding: 2, resource: { buffer: currentMechanicsBuffer } },
           { binding: 3, resource: { buffer: updatedGridBuffer } },
           { binding: 4, resource: { buffer: outStateBuffer } },
@@ -2908,6 +2931,52 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       currentMechanicsBuffer = outMechanicsBuffer;
       finalStateBuffer = outStateBuffer;
       finalMechanicsBuffer = outMechanicsBuffer;
+      if (useThermalSidecarFusion) {
+        const thermalStartMs = nowMs();
+        const thermalStage = createSphThermalStepWebGpuEncoderStage({
+          device,
+          sphParticleState,
+          thermalMaterialTable,
+          sphParticleUpload,
+          sourceStateBuffer: outStateBuffer,
+          sourceThermoBuffer: currentThermoBuffer,
+          boxDimsM: dims,
+          dtS: dtSeconds,
+          retainOutputParticleBuffers: true,
+          readbackMode: NO_FULL_READBACK_MODE,
+          ...thermalStepOptions
+        });
+        thermalStage.encode(encoder);
+        stageMs.thermalStep += Math.max(0, nowMs() - thermalStartMs);
+        sidecarEncoderStages.push(thermalStage);
+        sidecarOutputBuffers.push(thermalStage.stateBuffer, thermalStage.thermoBuffer);
+        finalThermalStep = thermalStage.result;
+        currentStateBuffer = thermalStage.stateBuffer;
+        currentThermoBuffer = thermalStage.thermoBuffer;
+        finalThermoBuffer = thermalStage.thermoBuffer;
+
+        const mechanicsRefreshStartMs = nowMs();
+        const mechanicsRefreshStage = createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+          device,
+          sphParticleState,
+          mlsMpmParticleState,
+          mechanicsMaterialTable,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          sourceStateBuffer: currentStateBuffer,
+          sourceThermoBuffer: currentThermoBuffer,
+          sourceMechanicsBuffer: outMechanicsBuffer,
+          retainOutputParticleBuffers: true,
+          readbackMode: NO_FULL_READBACK_MODE,
+          ...mechanicsRefreshOptions
+        });
+        mechanicsRefreshStage.encode(encoder);
+        stageMs.mechanicsRefresh += Math.max(0, nowMs() - mechanicsRefreshStartMs);
+        sidecarEncoderStages.push(mechanicsRefreshStage);
+        sidecarOutputBuffers.push(mechanicsRefreshStage.mechanicsBuffer);
+        finalMechanicsRefreshStep = mechanicsRefreshStage.result;
+        currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
+      }
     }
     device.queue.submit([encoder.finish()]);
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
@@ -3095,7 +3164,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     const finalSourceSphParticleUpload = {
       ...sphParticleUpload,
       stateBuffer: finalSourceStateBuffer,
+      thermoBuffer: finalSourceThermoBuffer,
       ownsStateBuffer: false,
+      ownsThermoBuffer: false,
       slot: finalSourceSlot,
       sourceSlot: finalSourceSlot,
       nextSlot: finalSourceSlot,
@@ -3124,9 +3195,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
           gridUpdate,
           g2pReconstruction,
-          thermalStep: null,
+          thermalStep: finalThermalStep,
           reactionStep: null,
-          mechanicsRefreshStep: null,
+          mechanicsRefreshStep: finalMechanicsRefreshStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
           activeGridDispatchPlan: activeGridDispatch.useActiveGrid
@@ -3164,9 +3235,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
           gridUpdate,
           g2pReconstruction,
-          thermalStep: null,
+          thermalStep: finalThermalStep,
           reactionStep: null,
-          mechanicsRefreshStep: null,
+          mechanicsRefreshStep: finalMechanicsRefreshStep,
           cohortRanges,
           summaryScope: compactSummaryScope,
           readCompactSummary: false,
@@ -3218,9 +3289,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       compactSummaryRequested: typeof summaryRunner === 'function',
       activeGridDispatchPlanOnlyRequested: typeof summaryRunner !== 'function' && activeGridDispatch.useActiveGrid,
       compactSummaryScope,
-      thermalRequested: false,
-      mechanicsRefreshRequested: false,
+      mechanicsRefreshRequested: useThermalSidecarFusion,
+      thermalRequested: useThermalSidecarFusion,
       reactionRequested: false,
+      sidecarFusionSequence: useThermalSidecarFusion,
+      sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
+      sidecarFusionStepCount: useThermalSidecarFusion ? count : 0,
+      sidecarFusionDispatchCount,
+      sidecarFusionPlan: sidecarFusionPlan || null,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -3232,9 +3308,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       p2gGridProjection,
       gridUpdate,
       g2pReconstruction,
-      thermalStep: null,
+      thermalStep: finalThermalStep,
       reactionStep: null,
-      mechanicsRefreshStep: null,
+      mechanicsRefreshStep: finalMechanicsRefreshStep,
       inputResidentProductMass: null,
       compactGpuSummary,
       dt: dtSeconds,
@@ -3248,6 +3324,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sourceSlot: finalSourceSlot,
       pressureInterfaceForceSolver: null,
       internalPressureScale,
+      sidecarFusionPlan,
       stageTiming
     });
     finalStep.sequenceIndex = count - 1;
@@ -3265,7 +3342,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       status: 'fused-resident-sequence-executed',
       stepCount: count,
       commandSubmissionCount: 1,
-      dispatchCount: dispatchTopology.totalDispatches,
+      dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount,
+      mechanicsDispatchCount: dispatchTopology.totalDispatches,
+      sidecarFusionDispatchCount,
+      sidecarFusionSequence: useThermalSidecarFusion,
+      sidecarFusionRequired: sidecarFusionPlan?.required === true,
+      sidecarFusionRunnable: sidecarFusionPlan?.sidecarFusionRunnable === true,
+      sidecarFusionPromotesFusedSequence: useThermalSidecarFusion,
+      sidecarFusionPlanStatus: sidecarFusionPlan?.status ?? null,
+      sidecarFusionStageCount: useThermalSidecarFusion ? 2 : 0,
+      sidecarFusionStageOrder: useThermalSidecarFusion ? ['thermal-phase', 'mechanics-refresh'] : [],
+      thermalSidecarFused: useThermalSidecarFusion,
       queueFenceRequested: measureQueueFence,
       queueFenceMs: fusedMechanicsSequenceQueueFenceMs,
       queueFenceStatus: fusedMechanicsSequenceQueueFenceStatus,
@@ -3287,13 +3374,27 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       ...statePingBuffers.filter((buffer) => buffer !== finalStateBuffer),
       ...mechanicsPingBuffers.filter((buffer) => buffer !== finalMechanicsBuffer)
     ];
+    const retainedSidecarBuffers = new Set([
+      finalThermalStep?.stateBuffer,
+      finalThermalStep?.thermoBuffer,
+      finalMechanicsRefreshStep?.mechanicsBuffer,
+      finalThermoBuffer
+    ].filter(Boolean));
+    temporaryBuffers.push(...sidecarOutputBuffers.filter((buffer) => buffer && !retainedSidecarBuffers.has(buffer)));
     deferSubmittedWorkCleanup(device, () => {
+      for (const stage of sidecarEncoderStages) stage.cleanupSubmittedWork?.();
       for (const buffer of temporaryBuffers) buffer.destroy?.();
     });
     returned = true;
     return finalStep;
   } finally {
     if (!returned) {
+      for (const stage of sidecarEncoderStages) {
+        stage.cleanupSubmittedWork?.();
+      }
+      for (const buffer of sidecarOutputBuffers) {
+        buffer?.destroy?.();
+      }
       for (const buffer of allCreatedBuffers) buffer.destroy?.();
     }
   }
@@ -4534,10 +4635,17 @@ function createFusedResidentSidecarFusionPlan({
   readbackMode = FULL_READBACK_MODE,
   compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
   activeGridRequested = false,
-  sidecarBlockers = []
+  sidecarBlockers = [],
+  thermalSidecarFusionAvailable = false
 } = {}) {
   const normalizedSidecarBlockers = uniqueStringList(sidecarBlockers);
   const sidecarFusionRequired = requested === true && normalizedSidecarBlockers.length > 0;
+  const thermalSidecarFusionRunnable = Boolean(
+    sidecarFusionRequired
+    && thermalSidecarFusionAvailable === true
+    && normalizedSidecarBlockers.length === 1
+    && normalizedSidecarBlockers[0] === 'thermal-sidecar'
+  );
   const stages = [];
   const addStage = (stage) => {
     if (!stage || stages.some((entry) => entry.id === stage.id)) return;
@@ -4586,6 +4694,7 @@ function createFusedResidentSidecarFusionPlan({
     addStage({
       id: 'thermal-phase',
       blocker: 'thermal-sidecar',
+      implementedInCurrentFusedSequence: thermalSidecarFusionRunnable,
       lawNodeId: 'ulg-sph-thermal-phase-law',
       orderConstraint: 'after-mechanics-g2p-before-reaction',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'thermal-material-table'],
@@ -4619,6 +4728,7 @@ function createFusedResidentSidecarFusionPlan({
     addStage({
       id: 'mechanics-refresh',
       blocker: normalizedSidecarBlockers.includes('reaction-sidecar') ? 'reaction-sidecar' : 'thermal-sidecar',
+      implementedInCurrentFusedSequence: thermalSidecarFusionRunnable,
       lawNodeId: 'ulg-mls-mpm-mechanics-refresh-law',
       orderConstraint: 'after-thermal-or-reaction-before-next-step-p2g',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mechanics-material-table'],
@@ -4644,17 +4754,21 @@ function createFusedResidentSidecarFusionPlan({
     'resident-compact-summary-or-active-grid-plan'
   ];
   const blockers = sidecarFusionRequired
-    ? ['sidecar-fusion-execution-not-implemented']
+    ? (thermalSidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
     : [];
   return {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA,
     status: sidecarFusionRequired
-      ? 'sidecar-fusion-plan-ready-execution-blocked'
+      ? (thermalSidecarFusionRunnable
+          ? 'sidecar-fusion-plan-runnable'
+          : 'sidecar-fusion-plan-ready-execution-blocked')
       : 'sidecar-fusion-not-required',
     requested: requested === true,
     required: sidecarFusionRequired,
-    sequenceRunnableWithSidecars: false,
-    sidecarFusionRunnable: !sidecarFusionRequired,
+    sequenceRunnableWithSidecars: thermalSidecarFusionRunnable,
+    sidecarFusionRunnable: !sidecarFusionRequired || thermalSidecarFusionRunnable,
+    thermalSidecarFusionAvailable: thermalSidecarFusionAvailable === true,
+    thermalSidecarFusionRunnable,
     stepCount: Math.max(1, Math.round(finiteNumber(stepCount, 1))),
     readbackMode,
     compactSummaryMode: normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
@@ -4666,8 +4780,8 @@ function createFusedResidentSidecarFusionPlan({
     stages,
     requiredStageOrder,
     requiredMechanicsStages: ['mechanics-p2g', 'mechanics-grid-update', 'mechanics-g2p'],
-    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired,
-    fallbackModeUntilImplemented: sidecarFusionRequired
+    perStepFallbackMaintainsLawOrdering: sidecarFusionRequired && !thermalSidecarFusionRunnable,
+    fallbackModeUntilImplemented: sidecarFusionRequired && !thermalSidecarFusionRunnable
       ? 'per-step-resident-pass-dag-or-per-step-fused-mechanics-active-grid'
       : null,
     ownershipRules: [
@@ -4677,7 +4791,9 @@ function createFusedResidentSidecarFusionPlan({
       'scene-local-execution-must-not-bypass-law-graph-ordering'
     ],
     promotionStatus: sidecarFusionRequired
-      ? 'contract-ready-execution-not-promoted'
+      ? (thermalSidecarFusionRunnable
+          ? 'contract-ready-execution-promoted'
+          : 'contract-ready-execution-not-promoted')
       : 'not-required',
     scientificValidation: false,
     fullPhysicsValidation: false
@@ -4770,6 +4886,10 @@ function createFusedResidentSidecarStepEvidence({
   const executedStageCount = stageEvidence.filter((stage) => stage.executed).length;
   const passedStageCount = stageEvidence.filter((stage) => stage.passed).length;
   const allRequiredStagesPassed = stageEvidence.length > 0 && passedStageCount === stageEvidence.length;
+  const promotesFusedSequence = Boolean(
+    allRequiredStagesPassed
+    && sidecarFusionPlan.sequenceRunnableWithSidecars === true
+  );
   return {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_STEP_EVIDENCE_SCHEMA,
     status: allRequiredStagesPassed
@@ -4787,8 +4907,8 @@ function createFusedResidentSidecarStepEvidence({
     executedStageCount,
     passedStageCount,
     allRequiredStagesPassed,
-    promotesFusedSequence: false,
-    fallbackEvidence: true,
+    promotesFusedSequence,
+    fallbackEvidence: !promotesFusedSequence,
     stages: stageEvidence,
     scientificValidation: false,
     fullPhysicsValidation: false
@@ -5016,7 +5136,8 @@ function createFusedResidentSequencePreflight({
   requestPerStepFusedNoFullMechanics = false,
   requestActiveGridFusedNoFullMechanics = false,
   customRunnerBlockers = [],
-  sidecarBlockers = []
+  sidecarBlockers = [],
+  thermalSidecarFusionAvailable = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -5028,7 +5149,8 @@ function createFusedResidentSequencePreflight({
     readbackMode,
     compactSummaryMode: normalizedCompactSummaryMode,
     activeGridRequested: requestActiveGridFusedNoFullMechanics,
-    sidecarBlockers: normalizedSidecarBlockers
+    sidecarBlockers: normalizedSidecarBlockers,
+    thermalSidecarFusionAvailable
   });
   const blockers = [];
   if (sequenceRequested) {
@@ -5042,7 +5164,9 @@ function createFusedResidentSequencePreflight({
     if (sphParticleUpload?.status !== 'webgpu-uploaded') blockers.push('sph-particle-upload-not-resident');
     if (mlsMpmParticleUpload?.status !== 'webgpu-uploaded') blockers.push('mls-mpm-upload-not-resident');
     blockers.push(...uniqueStringList(customRunnerBlockers));
-    blockers.push(...normalizedSidecarBlockers);
+    if (sidecarFusionPlan.sequenceRunnableWithSidecars !== true) {
+      blockers.push(...normalizedSidecarBlockers);
+    }
   }
   const uniqueBlockers = uniqueStringList(blockers);
   const sequenceRunnable = sequenceRequested && uniqueBlockers.length === 0;
@@ -5096,6 +5220,8 @@ function createFusedResidentSequencePreflight({
     sidecarFusionPlanStatus: sidecarFusionPlan.status,
     sidecarFusionStageCount: sidecarFusionPlan.stageCount,
     sidecarFusionPlan,
+    sidecarFusionPromotesFusedSequence: sidecarFusionPlan.sequenceRunnableWithSidecars === true,
+    sequenceRunnableWithSidecars: sidecarFusionPlan.sequenceRunnableWithSidecars === true,
     fallbackMode,
     perStepFusedMechanicsFallbackEligible,
     sidecarOnlySequenceBlocked,
@@ -5113,12 +5239,12 @@ function createFusedResidentSequencePreflight({
     sidecarAwareSequencePromotesFusedSequence: false,
     sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
     activeGridFallbackRequested: requestActiveGridFusedNoFullMechanics === true,
-    thermalAwareFusionRequired: uniqueBlockers.includes('thermal-sidecar'),
-    reactionAwareFusionRequired: uniqueBlockers.includes('reaction-sidecar'),
+    thermalAwareFusionRequired: normalizedSidecarBlockers.includes('thermal-sidecar'),
+    reactionAwareFusionRequired: normalizedSidecarBlockers.includes('reaction-sidecar'),
     pressureInterfaceAwareFusionRequired:
-      uniqueBlockers.includes('pressure-interface-force-rows')
-      || uniqueBlockers.includes('pressure-interface-force-solver'),
-    residentProductMassAwareFusionRequired: uniqueBlockers.includes('resident-product-mass-sidecar')
+      normalizedSidecarBlockers.includes('pressure-interface-force-rows')
+      || normalizedSidecarBlockers.includes('pressure-interface-force-solver'),
+    residentProductMassAwareFusionRequired: normalizedSidecarBlockers.includes('resident-product-mass-sidecar')
   };
 }
 
@@ -5135,7 +5261,8 @@ function createResidentSequenceLaneContract({
   retainedBufferRefs = [],
   activeGridDispatchPolicy = null,
   fusedResidentSequence = false,
-  sidecarBlockers = []
+  sidecarBlockers = [],
+  thermalSidecarFusionAvailable = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -5147,7 +5274,8 @@ function createResidentSequenceLaneContract({
     readbackMode,
     compactSummaryMode: normalizedCompactSummaryMode,
     activeGridRequested: activeGridDispatchPolicy?.enabled === true,
-    sidecarBlockers: normalizedSidecarBlockers
+    sidecarBlockers: normalizedSidecarBlockers,
+    thermalSidecarFusionAvailable
   });
   const requirementBlockers = [];
   if (sequenceRequested) {
@@ -5156,7 +5284,9 @@ function createResidentSequenceLaneContract({
     if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
       requirementBlockers.push('compact-summary-every-step');
     }
-    requirementBlockers.push(...normalizedSidecarBlockers);
+    if (sidecarFusionPlan.sequenceRunnableWithSidecars !== true) {
+      requirementBlockers.push(...normalizedSidecarBlockers);
+    }
   }
   const blockers = uniqueStringList(requirementBlockers);
   const sequenceRunnable = sequenceRequested
@@ -5207,6 +5337,8 @@ function createResidentSequenceLaneContract({
     sidecarFusionPlanStatus: sidecarFusionPlan.status,
     sidecarFusionStageCount: sidecarFusionPlan.stageCount,
     sidecarFusionPlan,
+    sidecarFusionPromotesFusedSequence: sidecarFusionPlan.sequenceRunnableWithSidecars === true,
+    sequenceRunnableWithSidecars: sidecarFusionPlan.sequenceRunnableWithSidecars === true,
     sequenceMode,
     fallbackMode,
     sidecarOnlySequenceBlocked,
@@ -5223,12 +5355,12 @@ function createResidentSequenceLaneContract({
       : null,
     sidecarAwareSequencePromotesFusedSequence: false,
     sidecarAwareSequenceSupportedBlockers: ['thermal-sidecar'],
-    thermalAwareFusionRequired: blockers.includes('thermal-sidecar'),
-    reactionAwareFusionRequired: blockers.includes('reaction-sidecar'),
+    thermalAwareFusionRequired: normalizedSidecarBlockers.includes('thermal-sidecar'),
+    reactionAwareFusionRequired: normalizedSidecarBlockers.includes('reaction-sidecar'),
     pressureInterfaceAwareFusionRequired:
-      blockers.includes('pressure-interface-force-rows')
-      || blockers.includes('pressure-interface-force-solver'),
-    residentProductMassAwareFusionRequired: blockers.includes('resident-product-mass-sidecar'),
+      normalizedSidecarBlockers.includes('pressure-interface-force-rows')
+      || normalizedSidecarBlockers.includes('pressure-interface-force-solver'),
+    residentProductMassAwareFusionRequired: normalizedSidecarBlockers.includes('resident-product-mass-sidecar'),
     activeGridDispatchPolicy,
     defaultEnabled: false,
     laneMustRetainBuffers: [...retainedBufferRefs],
@@ -5508,6 +5640,16 @@ export function createMlsMpmResidentStepsComputeTask({
     pressureInterfaceForceSolver: taskStepOptions.pressureInterfaceForceSolver,
     residentProductMass: taskStepOptions.residentProductMass ?? taskStepOptions.nextParticleUploads?.residentProductMass ?? null
   });
+  const thermalSidecarFusionAvailable = Boolean(
+    taskStepOptions.fuseThermalSidecarResidentSequence === true
+    && taskStepOptions.thermalMaterialTable
+    && taskStepOptions.mechanicsMaterialTable
+    && (taskStepOptions.thermalStepRunner == null || taskStepOptions.thermalStepRunner === runSphThermalStepWebGpu)
+    && (
+      taskStepOptions.mechanicsRefreshRunner == null
+      || taskStepOptions.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
+    )
+  );
   const residentSequenceLaneContract = createResidentSequenceLaneContract({
     laneId,
     stateKey,
@@ -5521,7 +5663,8 @@ export function createMlsMpmResidentStepsComputeTask({
     retainedBufferRefs,
     activeGridDispatchPolicy,
     fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence),
-    sidecarBlockers: residentSequenceSidecarBlockers
+    sidecarBlockers: residentSequenceSidecarBlockers,
+    thermalSidecarFusionAvailable
   });
   const hotLoopBudget = summarizeMlsMpmResidentHotLoopBudget({
     ...taskStepOptions,
@@ -14711,7 +14854,17 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       pressureInterfaceForceRowsBuffer: args.pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver: args.pressureInterfaceForceSolver,
       residentProductMass
-    })
+    }),
+    thermalSidecarFusionAvailable: Boolean(
+      args.fuseThermalSidecarResidentSequence !== false
+      && args.thermalMaterialTable
+      && args.mechanicsMaterialTable
+      && (args.thermalStepRunner == null || args.thermalStepRunner === runSphThermalStepWebGpu)
+      && (
+        args.mechanicsRefreshRunner == null
+        || args.mechanicsRefreshRunner === runMlsMpmMechanicsRefreshWithOptionalWebGpu
+      )
+    )
   });
   const sidecarAwareDirectRunnerContract = createThermalSidecarDirectRunnerContract({
     preflight: fusedResidentSequencePreflight,
@@ -14765,7 +14918,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.measureFusedSequenceQueueFence
         || args.measureGpuQueueFence
         || args.benchmarkQueueFence
-      )
+      ),
+      sidecarFusionPlan: fusedResidentSequencePreflight.sidecarFusionPlan,
+      thermalMaterialTable: args.thermalMaterialTable,
+      thermalStepOptions: args.thermalStepOptions ?? {},
+      mechanicsMaterialTable: args.mechanicsMaterialTable,
+      mechanicsRefreshOptions: args.mechanicsRefreshOptions ?? {}
     });
     const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
     const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);

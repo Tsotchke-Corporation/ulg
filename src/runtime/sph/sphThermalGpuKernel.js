@@ -1454,7 +1454,7 @@ async function readBuffer(device, sourceBuffer, byteLength) {
   return copy;
 }
 
-export async function runSphThermalStepWebGpu({
+export function createSphThermalStepWebGpuEncoderStage({
   device,
   sphParticleState,
   thermalMaterialTable,
@@ -1574,24 +1574,8 @@ export async function runSphThermalStepWebGpu({
       { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } }
     ]
   });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
-  pass.end();
-  device.queue.submit([encoder.finish()]);
-
-  let state = new Float32Array();
-  let thermo = new Float32Array();
-  if (!noFullReadback) {
-    const [stateBytes, thermoBytes] = await Promise.all([
-      readBuffer(device, outStateBuffer, sphParticleState.state.byteLength),
-      readBuffer(device, outThermoBuffer, sphParticleState.thermo.byteLength)
-    ]);
-    state = new Float32Array(stateBytes);
-    thermo = new Float32Array(thermoBytes);
-  }
+  const state = new Float32Array();
+  const thermo = new Float32Array();
   const cleanup = () => {
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
@@ -1603,11 +1587,6 @@ export async function runSphThermalStepWebGpu({
       outThermoBuffer.destroy?.();
     }
   };
-  if (noFullReadback) {
-    deferSubmittedWorkCleanup(device, cleanup);
-  } else {
-    cleanup();
-  }
   let outputParticleBuffersDestroyed = false;
   const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
     ? () => {
@@ -1619,7 +1598,7 @@ export async function runSphThermalStepWebGpu({
       });
     }
     : null;
-  return outputEnvelope({
+  const result = outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     thermalMaterialTable,
@@ -1650,6 +1629,52 @@ export async function runSphThermalStepWebGpu({
     },
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
   });
+  return {
+    schema: 'peercompute.ulg.sph-thermal-encoder-stage.v0',
+    status: 'thermal-encoder-stage-ready',
+    backend: 'webgpu',
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    result,
+    stateBuffer: outStateBuffer,
+    thermoBuffer: outThermoBuffer,
+    stateBufferByteLength: sphParticleState.state.byteLength,
+    thermoBufferByteLength: sphParticleState.thermo.byteLength,
+    encode(encoder) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+      pass.end();
+    },
+    cleanupSubmittedWork: cleanup
+  };
+}
+
+export async function runSphThermalStepWebGpu(args = {}) {
+  const stage = createSphThermalStepWebGpuEncoderStage(args);
+  const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
+  const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
+  const encoder = device.createCommandEncoder();
+  stage.encode(encoder);
+  device.queue.submit([encoder.finish()]);
+  if (!noFullReadback) {
+    const [stateBytes, thermoBytes] = await Promise.all([
+      readBuffer(device, stage.stateBuffer, sphParticleState.state.byteLength),
+      readBuffer(device, stage.thermoBuffer, sphParticleState.thermo.byteLength)
+    ]);
+    stage.result.state = new Float32Array(stateBytes);
+    stage.result.thermo = new Float32Array(thermoBytes);
+  }
+  if (noFullReadback) {
+    deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+  } else {
+    stage.cleanupSubmittedWork();
+  }
+  if (!retainOutputParticleBuffers) {
+    stage.result.stateBuffer = null;
+    stage.result.thermoBuffer = null;
+  }
+  return stage.result;
 }
 
 export function compareSphThermalStepParity(cpuResult, gpuResult, { tolerance = 2e-3 } = {}) {

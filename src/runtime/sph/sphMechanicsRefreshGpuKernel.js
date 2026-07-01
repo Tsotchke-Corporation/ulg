@@ -416,7 +416,7 @@ export function refreshMlsMpmMechanicsCpu({
   });
 }
 
-export async function runMlsMpmMechanicsRefreshWebGpu({
+export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -502,17 +502,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
       { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } }
     ]
   });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
-  pass.end();
-  device.queue.submit([encoder.finish()]);
-  let mechanics = new Float32Array();
-  if (!noFullReadback) {
-    mechanics = new Float32Array(await readBuffer(device, outMechanicsBuffer, mlsMpmParticleState.mechanics.byteLength));
-  }
+  const mechanics = new Float32Array();
   const cleanup = () => {
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
@@ -522,12 +512,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
     paramsBuffer.destroy?.();
     if (!retainOutputParticleBuffers) outMechanicsBuffer.destroy?.();
   };
-  if (noFullReadback) {
-    deferSubmittedWorkCleanup(device, cleanup);
-  } else {
-    cleanup();
-  }
-  return outputEnvelope({
+  const result = outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     mlsMpmParticleState,
@@ -550,6 +535,46 @@ export async function runMlsMpmMechanicsRefreshWebGpu({
       outMechanicsBuffer.destroy?.();
     }
   });
+  return {
+    schema: 'peercompute.ulg.mls-mpm-mechanics-refresh-encoder-stage.v0',
+    status: 'mechanics-refresh-encoder-stage-ready',
+    backend: 'webgpu',
+    readbackMode,
+    result,
+    mechanicsBuffer: outMechanicsBuffer,
+    mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
+    encode(encoder) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+      pass.end();
+    },
+    cleanupSubmittedWork: cleanup
+  };
+}
+
+export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
+  const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage(args);
+  const { device, mlsMpmParticleState, retainOutputParticleBuffers = false } = args;
+  const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
+  const encoder = device.createCommandEncoder();
+  stage.encode(encoder);
+  device.queue.submit([encoder.finish()]);
+  if (!noFullReadback) {
+    stage.result.mechanics = new Float32Array(
+      await readBuffer(device, stage.mechanicsBuffer, mlsMpmParticleState.mechanics.byteLength)
+    );
+  }
+  if (noFullReadback) {
+    deferSubmittedWorkCleanup(device, stage.cleanupSubmittedWork);
+  } else {
+    stage.cleanupSubmittedWork();
+  }
+  if (!retainOutputParticleBuffers) {
+    stage.result.mechanicsBuffer = null;
+  }
+  return stage.result;
 }
 
 export async function runMlsMpmMechanicsRefreshWithOptionalWebGpu({

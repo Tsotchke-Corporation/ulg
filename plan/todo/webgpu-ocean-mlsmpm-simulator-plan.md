@@ -466,6 +466,28 @@ Tactical status, 2026-06-19 AKDT:
   `6.1 ms`. The next implementation should select this contract and replace
   the generic per-step resident call with a dedicated thermal/mechanics-refresh
   runner for this route only.
+- The true one-submit thermal sidecar fusion path is now implemented for the
+  thermal-only sidecar case. Thermal and mechanics-refresh WebGPU kernels expose
+  encoder-stage helpers, the fused resident sequence carries current state,
+  thermo, and mechanics buffers across substeps, and thermal plus
+  mechanics-refresh are encoded inside the same command submission after G2P.
+  The preflight now reports
+  `fused-resident-sequence-preflight-ready`,
+  `sidecarFusionPlanStatus=sidecar-fusion-plan-runnable`,
+  `sequenceRunnableWithSidecars=true`, and sidecar evidence
+  `promotesFusedSequence=true`. Reaction, pressure-interface, and
+  resident-product sidecars remain blocked by the sidecar fusion plan. Runtime
+  calls can disable this path with `fuseThermalSidecarResidentSequence=false`;
+  ComputeManager resident-step tasks must explicitly opt in with
+  `fuseThermalSidecarResidentSequence=true` before the lane contract advertises
+  thermal sidecar fusion as runnable. Fresh focused coverage proves one command
+  submission with mechanics, thermal, and mechanics-refresh dispatches. Browser
+  smoke evidence is functionally good, but performance is not solved:
+  sidecar-fused active-grid plan-only runs showed `residentStageMs` around
+  `1327.8 ms` (`0.75` steps/s) with queue fence `1313 ms`; the same active-grid
+  fused sequence with thermal disabled still showed `860.3 ms` (`1.16`
+  steps/s). The next hot-loop target is therefore queue-fenced fused active-grid
+  execution cost, not more sidecar route plumbing.
 - Native WebGPU surface validation now has a cadence gate before validation
   command-encoder creation. The render loop inspects readback-smoke and
   offscreen validation pending/pass/retry-exhausted state and only starts GPU

@@ -34224,3 +34224,68 @@ Next:
 - Keep this as probe evidence only. Do not use active-grid prediction as a
   substitute for physics validation when compact diagnostics or visual output
   are available.
+
+## 2026-06-30 AKDT - One-Submit Thermal Sidecar Fusion
+
+Status:
+
+- Implemented the first true sidecar-fusion path inside the fused resident
+  MLS-MPM sequence. The thermal and mechanics-refresh WebGPU runners now expose
+  encoder-stage helpers, so the fused sequence can encode mechanics P2G,
+  grid-update, G2P, thermal phase, and mechanics refresh into one command
+  submission for the supported thermal-only sidecar case.
+- The fused sequence now carries current state, thermo, and mechanics buffers
+  across substeps. Thermal output becomes the authoritative next state/thermo,
+  mechanics-refresh output becomes the authoritative next mechanics buffer, and
+  the G2P output remains visible as the G2P stage artifact.
+- Preflight and sidecar evidence now promote the supported case:
+  `fused-resident-sequence-preflight-ready`,
+  `sidecarFusionPlanStatus=sidecar-fusion-plan-runnable`,
+  `sequenceRunnableWithSidecars=true`, `sidecarFusionRunnable=true`, and
+  `promotesFusedSequence=true`.
+- Kept the scope narrow. Reaction/product, pressure-interface, and resident
+  product-mass sidecars still fail closed with
+  `sidecar-fusion-execution-not-implemented`.
+- Added a peercompute configuration hook. Normal runtime calls can disable this
+  path with `fuseThermalSidecarResidentSequence=false`; ComputeManager resident
+  step tasks only advertise the fused thermal sidecar lane when
+  `fuseThermalSidecarResidentSequence=true` and both thermal/mechanics material
+  tables are present.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js`
+- PASS: `node --check src/runtime/sph/sphThermalGpuKernel.js`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `72/72`
+  passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `12/12`
+  passing.
+- PASS: VPN server availability check: `https://100.86.83.35:5173/` returned
+  HTTP/2 200, `http://100.86.83.35:5174/` returned HTTP/1.1 200, and both
+  listeners were bound to `0.0.0.0`.
+- PASS: live HTTPS sidecar-fused sequence benchmark
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_OUTPUT=/tmp/ulg-sidecar-fused-sequence-bench-warm.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  with suite status `complete`, gate `pass`, scenario `good`,
+  `probeStatus=good`, `probeIssues=[]`, preflight
+  `fused-resident-sequence-preflight-ready`, `sequenceRunnable=true`,
+  `sidecarFusionRunnable=true`, `sidecarFusionPromotesFusedSequence=true`,
+  sidecar evidence `sidecar-fusion-step-evidence-ready`, executed/passed
+  stages `2/2`, compact readback bytes `0`, `residentStageMs=1327.8`,
+  `residentStageStepsPerSecond=0.753`, and fused sequence queue fence
+  `1313 ms`.
+- Baseline caveat: the same active-grid fused sequence with thermal disabled
+  passed but still reported `residentStageMs=860.3`,
+  `residentStageStepsPerSecond=1.16`, and queue fence `852.2 ms`. Sidecar
+  fusion is now functionally real, but the slideshow-class performance problem
+  remains in queue-fenced fused active-grid execution.
+
+Next:
+
+- Move the performance focus from sidecar route plumbing to the queue-fenced
+  fused active-grid hot loop: measure whether the long fence is shader compile,
+  active-grid dispatch, summary planner work, or command submission pacing, then
+  reduce that path before widening sidecar fusion to reaction or pressure.

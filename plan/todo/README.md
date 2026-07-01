@@ -39,16 +39,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
-Current routing note, 2026-07-01 AKDT: the new architecture branch
-`arch/generalized-law-tree` routes the next broad performance/adaptivity work
-through `plan/todo/generalized-spatial-law-tree-plan.md`. Treat the generalized
-spatial law tree as the shared acceleration substrate for adaptive support,
-reaction/contact broad phase, material-interface extraction, render LOD, and
-future gravity/radiation/plasma laws. It does not replace PeerCompute authority
-or StateManager admission, and it does not make Ocean-style mechanics moot:
-Ocean-style atomic/tiled P2G becomes the dense local mechanics backend fed by
-the tree. Do not add new one-off neighbor grids or dense source fields before
-checking whether they belong as a tree law adapter.
+Current routing note, 2026-07-01 AKDT SS branch: new architecture work now
+routes through `plan/todo/SS/`. SS means Schroeder Simulation: the Schroeder
+Tree plus Schroeder Algorithm. This supersedes the external-only generalized
+spatial tree framing. The hierarchy is both a multilevel MLS-MPM/Ocean grid and
+the shared law accelerator from atomic to supergalactic scale. Start GPU-first:
+no CPU reference tree, no full-particle readback gate, and no new one-off
+neighbor grid or dense source field before checking whether it belongs as an SS
+law adapter. Keep PeerCompute authority, StateManager admission, GPU resident
+lane ownership, and Ocean-style dense local kernels inside the SS hierarchy.
 
 Current routing note, 2026-06-29 AKDT follow-up: render ownership is now
 selectable through `peercompute.ulg.render-ownership-policy.v0`, not hardwired

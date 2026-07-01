@@ -52,7 +52,7 @@ const renderOwnershipMode = String(process.env.ULG_BENCH_RENDER_OWNERSHIP || '')
 const renderOwnershipUseCase = String(
   process.env.ULG_BENCH_RENDER_USE_CASE
     || process.env.ULG_BENCH_PEERCOMPUTE_RENDER_USE_CASE
-    || ''
+    || (probeMode === 'scene' ? 'same-device-interactive' : '')
 ).trim();
 const residentInterfaceRefreshWarmupFrames = Number.isFinite(Number(
   process.env.ULG_BENCH_RESIDENT_INTERFACE_WARMUP_FRAMES

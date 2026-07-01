@@ -146,6 +146,7 @@ const RESIDENT_STAGE_ORDER_TRACE_EVENT_LIMIT = 64;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_FRACTION = 1e-3;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_MIN_M = 1e-6;
 const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
+const DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE = 'same-device-interactive';
 export const SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA =
   'peercompute.ulg.sph-demo-remote-resident-task-graph-refresh.v0';
 export const SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA =
@@ -2108,12 +2109,18 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('peercomputeRenderOwnership')
     ?? initialHash.get('rendererOwnership')
     ?? initialQuery.get('rendererOwnership');
-  const renderOwnershipUseCase =
+  const rawRenderOwnershipModeExplicitNonAuto = Boolean(
+    rawRenderOwnershipMode != null
+    && String(rawRenderOwnershipMode).trim().toLowerCase() !== 'auto'
+  );
+  const rawRenderOwnershipUseCase =
     initialHash.get('renderUseCase')
     ?? initialQuery.get('renderUseCase')
     ?? initialHash.get('peercomputeRenderUseCase')
     ?? initialQuery.get('peercomputeRenderUseCase')
     ?? null;
+  const renderOwnershipUseCase = rawRenderOwnershipUseCase
+    ?? (rawRenderOwnershipModeExplicitNonAuto ? null : DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE);
   const directWorkerOffscreenPresentationEnabled = booleanUrlParam(
     initialHash.get('workerOffscreenPresentation')
       ?? initialQuery.get('workerOffscreenPresentation')

@@ -416,6 +416,9 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /ULG_BENCH_PRESENTATION_WORKER_RESIDENT_STAGES/);
   assert.match(benchmarkSource, /ULG_BENCH_RENDER_USE_CASE/);
   assert.match(benchmarkSource, /renderUseCase/);
+  assert.match(mountSource, /DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE = 'same-device-interactive'/);
+  assert.match(mountSource, /rawRenderOwnershipModeExplicitNonAuto/);
+  assert.match(benchmarkSource, /probeMode === 'scene' \? 'same-device-interactive' : ''/);
   assert.match(benchmarkSource, /workerOffscreenResidentStageSameWorkerGpuHandoff/);
   assert.match(benchmarkSource, /renderRowsReadbackWorkerOwnedResidentParticleStateProducerReadbackFree/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipResidentInterfaceRefreshMode/);

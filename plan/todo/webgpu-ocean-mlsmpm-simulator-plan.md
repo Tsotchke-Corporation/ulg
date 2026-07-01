@@ -54,6 +54,19 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-28 AKDT:
 
+- Follow-up, 2026-06-30 AKDT: the slideshow symptom was narrowed to the
+  visible render path, not the fused MLS-MPM compute path. Direct-resident
+  throughput after the sidecar-fused sequence reset was about `52` resident
+  stage steps/s without queue fences, while the old scene path spent about
+  `2993 ms` in `renderRowsMs` because the Three render-row bridge forced a
+  full readback. The demo now defaults unclaimed/`auto` interactive render
+  ownership to `renderUseCase=same-device-interactive`, which resolves to
+  presentation-worker retained output on same-device browser runs. The default
+  scene benchmark now reports `renderRefreshAwaitMs=1.0`,
+  `probeWallStepsPerSecond=55.40`, `estimatedReadbackBytesPerStep=0`, and
+  `resident-render-presentation-worker-retained-output-preserved`. Completed
+  artifact:
+  `plan/done/same-device-retained-presentation-default-2026-06-30.md`.
 - Presentation-worker mechanics execution is now browser-proven. The
   worker-owned offscreen presentation worker can run the mechanics resident
   stage runner on its own WebGPU device, and a same-lane

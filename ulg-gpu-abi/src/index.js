@@ -68,6 +68,12 @@ export const ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.m
 export const ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-summary.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0';
+export const ULG_SCHROEDER_TREE_SCHEMA = 'peercompute.ulg.schroeder-tree.v0';
+export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA = 'peercompute.ulg.schroeder-level-assignment.v0';
+export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-level-assignment-execution.v0';
+export const ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA = 'peercompute.ulg.schroeder-active-node-list.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
+export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0';
@@ -672,6 +678,24 @@ export const MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT = Object.freeze([
   'dropCohortNextMaxZM:f32',
   'dropCohortMaxSpeedMPerS:f32',
   'cohortSummaryPad0:f32'
+]);
+export const SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT = Object.freeze([
+  'levelId:f32',
+  'nativeGridSpacingM:f32',
+  'supportRadiusM:f32',
+  'representedVolumeM3:f32',
+  'restVolumeM3:f32',
+  'currentVolumeM3:f32',
+  'massKg:f32',
+  'restDensityKgPerM3:f32',
+  'phaseId:f32',
+  'materialId:f32',
+  'status:f32',
+  'hysteresisBand:f32',
+  'positionXM:f32',
+  'positionYM:f32',
+  'positionZM:f32',
+  'chartId:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

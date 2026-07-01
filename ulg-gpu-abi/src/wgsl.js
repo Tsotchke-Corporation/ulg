@@ -7243,3 +7243,120 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   dispatch_metadata[15u] = select(0u, 1u, bounds_ready);
 }
 `;
+
+export const schroederLevelAssignmentWgsl = `
+struct SchroederLevelParams {
+  particle_count: u32,
+  min_level: i32,
+  max_level: i32,
+  flags: u32,
+  base_grid_spacing_m: f32,
+  target_support_cells: f32,
+  support_radius_scale: f32,
+  chart_id: f32,
+  min_support_radius_m: f32,
+  max_support_radius_m: f32,
+  fallback_support_radius_m: f32,
+  hysteresis_band: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<f32>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<f32>;
+@group(0) @binding(2) var<storage, read> mls_mpm_mechanics: array<f32>;
+@group(0) @binding(3) var<storage, read_write> level_assignments: array<f32>;
+@group(0) @binding(4) var<uniform> params: SchroederLevelParams;
+
+const SCHROEDER_STATE_STRIDE: u32 = 8u;
+const SCHROEDER_THERMO_STRIDE: u32 = 12u;
+const SCHROEDER_MECHANICS_STRIDE: u32 = 32u;
+const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
+const SCHROEDER_PI: f32 = 3.141592653589793;
+
+fn ss_positive(value: f32) -> bool {
+  return value == value && value > 0.0;
+}
+
+fn ss_volume_radius(volume_m3: f32) -> f32 {
+  if (!ss_positive(volume_m3)) {
+    return 0.0;
+  }
+  return pow((3.0 * volume_m3) / (4.0 * SCHROEDER_PI), 0.3333333333333333);
+}
+
+fn ss_clamp_i32(value: i32, lo: i32, hi: i32) -> i32 {
+  return min(max(value, lo), hi);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let state_offset = particle_index * SCHROEDER_STATE_STRIDE;
+  let thermo_offset = particle_index * SCHROEDER_THERMO_STRIDE;
+  let mechanics_offset = particle_index * SCHROEDER_MECHANICS_STRIDE;
+  let assignment_offset = particle_index * SCHROEDER_ASSIGNMENT_STRIDE;
+
+  let px = sph_state[state_offset + 0u];
+  let py = sph_state[state_offset + 1u];
+  let pz = sph_state[state_offset + 2u];
+  let mass_kg = max(sph_state[state_offset + 3u], 0.0);
+  let material_id = sph_thermo[thermo_offset + 0u];
+  let phase_id = sph_thermo[thermo_offset + 1u];
+  let rest_density_kg_per_m3 = max(sph_thermo[thermo_offset + 3u], 0.0);
+  let smoothing_length_m = max(sph_thermo[thermo_offset + 8u], 0.0);
+  let visual_radius_m = max(sph_thermo[thermo_offset + 11u], 0.0);
+  let volume_ratio_j = max(mls_mpm_mechanics[mechanics_offset + 18u], 0.0);
+  let rest_volume_m3 = max(mls_mpm_mechanics[mechanics_offset + 19u], 0.0);
+  let mechanics_volume_m3 = rest_volume_m3 * max(volume_ratio_j, 0.000001);
+  var represented_volume_m3 = mechanics_volume_m3;
+  if (!ss_positive(represented_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
+    represented_volume_m3 = mass_kg / rest_density_kg_per_m3;
+  }
+
+  let physical_radius_m = ss_volume_radius(represented_volume_m3);
+  var support_radius_m = physical_radius_m * max(params.support_radius_scale, 0.0);
+  var status = 1.0;
+  if (!ss_positive(support_radius_m)) {
+    support_radius_m = max(max(smoothing_length_m, visual_radius_m), params.fallback_support_radius_m);
+    status = status + 2.0;
+  }
+  if (ss_positive(params.min_support_radius_m) && support_radius_m < params.min_support_radius_m) {
+    support_radius_m = params.min_support_radius_m;
+    status = status + 4.0;
+  }
+  if (ss_positive(params.max_support_radius_m) && support_radius_m > params.max_support_radius_m) {
+    support_radius_m = params.max_support_radius_m;
+    status = status + 8.0;
+  }
+
+  let base_dx = max(params.base_grid_spacing_m, 0.000001);
+  let target_cells = max(params.target_support_cells, 1.0);
+  let native_dx_unclamped = max(support_radius_m / target_cells, 0.000001);
+  let raw_level = i32(round(log2(native_dx_unclamped / base_dx)));
+  let level = ss_clamp_i32(raw_level, params.min_level, params.max_level);
+  let native_dx = base_dx * exp2(f32(level));
+  if (level != raw_level) {
+    status = status + 16.0;
+  }
+
+  level_assignments[assignment_offset + 0u] = f32(level);
+  level_assignments[assignment_offset + 1u] = native_dx;
+  level_assignments[assignment_offset + 2u] = support_radius_m;
+  level_assignments[assignment_offset + 3u] = represented_volume_m3;
+  level_assignments[assignment_offset + 4u] = rest_volume_m3;
+  level_assignments[assignment_offset + 5u] = mechanics_volume_m3;
+  level_assignments[assignment_offset + 6u] = mass_kg;
+  level_assignments[assignment_offset + 7u] = rest_density_kg_per_m3;
+  level_assignments[assignment_offset + 8u] = phase_id;
+  level_assignments[assignment_offset + 9u] = material_id;
+  level_assignments[assignment_offset + 10u] = status;
+  level_assignments[assignment_offset + 11u] = max(params.hysteresis_band, 0.0);
+  level_assignments[assignment_offset + 12u] = px;
+  level_assignments[assignment_offset + 13u] = py;
+  level_assignments[assignment_offset + 14u] = pz;
+  level_assignments[assignment_offset + 15u] = params.chart_id;
+}
+`;

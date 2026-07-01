@@ -2,6 +2,7 @@ import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
@@ -10,6 +11,8 @@ import {
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -20,6 +23,7 @@ import {
   schroederActiveNodeListWgsl,
   schroederConservationSummaryWgsl,
   schroederCrossLevelCouplingWgsl,
+  schroederCrossLevelTransferWgsl,
   schroederLevelAssignmentWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
@@ -37,6 +41,8 @@ export {
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -46,10 +52,12 @@ export {
 export const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_CONSERVATION_SUMMARY_FLOATS = SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length;
+export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
+export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
 export const SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE = 'schroeder-gpu-cross-level-coupling';
@@ -60,6 +68,7 @@ export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE = 'full-cross-level-readback';
 export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservation-summary-readback';
+export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -312,6 +321,35 @@ export function createSchroederConservationSummaryParamsArray({
   return buffer;
 }
 
+export function createSchroederCrossLevelTransferParamsArray({
+  crossLevelCandidateCount = 0,
+  crossLevelStrideFloats = SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+  stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
+  transferStrideFloats = SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    crossLevelStrideFloats,
+    SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    stateStrideFloats,
+    SPH_GPU_PARTICLE_STATE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    transferStrideFloats,
+    SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS
+  ))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -369,6 +407,15 @@ function assertCrossLevelCouplingInput(crossLevelCoupling) {
   )));
   if (stride !== SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS) {
     throw new RangeError('Schroeder conservation summary requires the current cross-level row layout');
+  }
+}
+
+function assertSphParticleStateInput(sphParticleState) {
+  if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('Schroeder cross-level transfer requires a packed SPH GPU particle buffer');
+  }
+  if (!(sphParticleState.state instanceof Float32Array)) {
+    throw new TypeError('Schroeder cross-level transfer requires packed Float32Array SPH state rows');
   }
 }
 
@@ -461,6 +508,42 @@ export function createSchroederCrossLevelCouplingPlan({
     hierarchyRole: 'cross-level-parent-candidate-generation',
     couplingConsumerStatus: 'planned-not-yet-applied-to-mls-mpm-grid-transfer',
     conservationRole: 'candidate-rows-carry-mass-and-volume-for-later-conservative-transfer',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederCrossLevelTransferPlan({
+  crossLevelCoupling,
+  sphParticleState
+} = {}) {
+  assertCrossLevelCouplingInput(crossLevelCoupling);
+  assertSphParticleStateInput(sphParticleState);
+  const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelCoupling.crossLevelCandidateCount, 0)));
+  const transferByteLength = Math.max(
+    4,
+    candidateCount * SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
+    status: 'schroeder-cross-level-transfer-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-cross-level-transfer-rows',
+    sourceCrossLevelSchema: crossLevelCoupling.schema,
+    sourceCrossLevelStatus: crossLevelCoupling.status ?? null,
+    sourceParticleSchema: sphParticleState.schema,
+    crossLevelCandidateCount: candidateCount,
+    crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+    stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+    transferRowLayout: [...SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT],
+    transferStrideFloats: SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
+    transferStrideBytes: SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    transferByteLength,
+    outputCompaction: 'one-conservative-transfer-row-per-cross-level-candidate',
+    conservativeTransferStatus: 'transfer-rows-ready-no-state-mutation',
+    conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -1130,6 +1213,143 @@ export async function runSchroederConservationSummaryWebGpu({
   }
 }
 
+export async function runSchroederCrossLevelTransferWebGpu({
+  device,
+  sphParticleState,
+  sphParticleUpload = null,
+  crossLevelCoupling,
+  retainTransferBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederCrossLevelTransferWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederCrossLevelTransferPlan({ crossLevelCoupling, sphParticleState });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedCrossLevelBuffer = crossLevelCoupling?.crossLevelBuffer || null;
+  const crossLevelRows = crossLevelCoupling?.crossLevelCouplings instanceof Float32Array
+    ? crossLevelCoupling.crossLevelCouplings
+    : null;
+  if (!borrowedCrossLevelBuffer && !(crossLevelRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder cross-level transfer requires a retained cross-level buffer or explicit rows');
+  }
+  const borrowedStateBuffer = optionalSourceStateBuffer(sphParticleUpload);
+  const crossLevelBuffer = borrowedCrossLevelBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-transfer-cross-level-in', crossLevelRows);
+  const stateBuffer = borrowedStateBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-transfer-sph-state-in', sphParticleState.state);
+  const transferBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-transfer-out',
+    size: plan.transferByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-transfer-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-cross-level-transfer-readback',
+      size: plan.transferByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedTransferBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelTransferParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-cross-level-transfer.v0',
+      label: 'ulg-schroeder-cross-level-transfer',
+      code: schroederCrossLevelTransferWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: crossLevelBuffer } },
+        { binding: 1, resource: { buffer: stateBuffer } },
+        { binding: 2, resource: { buffer: transferBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.crossLevelCandidateCount / SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(transferBuffer, 0, readBuffer, 0, plan.transferByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let transferRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      transferRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.crossLevelCandidateCount * SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
+      crossLevelTransferSchema: plan.schema,
+      status: 'schroeder-cross-level-transfer-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedTransferBuffer: Boolean(retainTransferBuffer),
+      transferBufferByteLength: plan.transferByteLength,
+      transferRows,
+      conservativeTransferStatus: 'transfer-rows-ready-no-state-mutation',
+      stateMutationStatus: 'not-applied-transfer-rows-only',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainTransferBuffer) {
+      result.transferBuffer = transferBuffer;
+      result.destroyTransferBuffer = () => transferBuffer.destroy?.();
+      returnedRetainedTransferBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedCrossLevelBuffer) crossLevelBuffer.destroy?.();
+      if (!borrowedStateBuffer) stateBuffer.destroy?.();
+      if (!retainTransferBuffer || !returnedRetainedTransferBuffer) transferBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -1140,6 +1360,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   activeNodeList = null,
   crossLevelCoupling = null,
   conservationSummary = null,
+  crossLevelTransfer = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = DEFAULT_MIN_LEVEL,
@@ -1150,6 +1371,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
   enableCrossLevelCoupling = true,
   enableConservationSummary = enableCrossLevelCoupling,
+  enableCrossLevelTransfer = enableConservationSummary,
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -1161,6 +1383,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
   crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
   conservationSummaryRunner = runSchroederConservationSummaryWebGpu,
+  crossLevelTransferRunner = runSchroederCrossLevelTransferWebGpu,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
 } = {}) {
@@ -1175,6 +1398,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (enableCrossLevelCoupling && enableConservationSummary && typeof conservationSummaryRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a conservationSummaryRunner function');
+  }
+  if (enableCrossLevelCoupling && enableCrossLevelTransfer && typeof crossLevelTransferRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelTransferRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -1232,6 +1458,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainSummaryBuffer: true,
       readbackMode
     });
+  const resolvedCrossLevelTransfer = !resolvedCrossLevelCoupling || !enableCrossLevelTransfer
+    ? null
+    : crossLevelTransfer || await crossLevelTransferRunner({
+      device,
+      sphParticleState,
+      sphParticleUpload,
+      crossLevelCoupling: resolvedCrossLevelCoupling,
+      retainTransferBuffer: true,
+      readbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -1250,6 +1486,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederSelectedLevel: plan.selectedLevel,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
+    schroederCrossLevelTransfer: resolvedCrossLevelTransfer,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -1301,6 +1538,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedConservationSummary.summaryByteLength
         ?? 0
     } : null,
+    crossLevelTransfer: resolvedCrossLevelTransfer ? {
+      schema: resolvedCrossLevelTransfer.schema,
+      status: resolvedCrossLevelTransfer.status,
+      crossLevelCandidateCount: resolvedCrossLevelTransfer.crossLevelCandidateCount,
+      outputCompaction: resolvedCrossLevelTransfer.outputCompaction,
+      conservativeTransferStatus: resolvedCrossLevelTransfer.conservativeTransferStatus,
+      stateMutationStatus: resolvedCrossLevelTransfer.stateMutationStatus,
+      retainedTransferBuffer: Boolean(resolvedCrossLevelTransfer.transferBuffer),
+      transferBufferByteLength: resolvedCrossLevelTransfer.transferBufferByteLength
+        ?? resolvedCrossLevelTransfer.transferByteLength
+        ?? 0
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -1313,7 +1562,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     conservationSummaryStatus: resolvedConservationSummary?.status ?? (
       resolvedCrossLevelCoupling ? 'disabled-cross-level-summary' : 'disabled-same-level-only-mechanics'
     ),
-    conservativeTransferStatus: resolvedConservationSummary?.conservativeTransferStatus ?? 'not-run',
+    crossLevelTransferStatus: resolvedCrossLevelTransfer?.status ?? (
+      resolvedCrossLevelCoupling ? 'disabled-cross-level-transfer' : 'disabled-same-level-only-mechanics'
+    ),
+    conservativeTransferStatus: resolvedCrossLevelTransfer?.conservativeTransferStatus
+      ?? resolvedConservationSummary?.conservativeTransferStatus
+      ?? 'not-run',
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

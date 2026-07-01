@@ -77,6 +77,8 @@ export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroe
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling-execution.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA = 'peercompute.ulg.schroeder-cross-level-transfer.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-transfer-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -755,6 +757,32 @@ export const SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'missingParentChildCount:f32',
   'status:f32',
   'pad0:f32'
+]);
+export const SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'childLevelId:f32',
+  'parentLevelId:f32',
+  'levelDelta:f32',
+  'parentCellX:f32',
+  'parentCellY:f32',
+  'parentCellZ:f32',
+  'chartId:f32',
+  'sourceMassKg:f32',
+  'transferMassKg:f32',
+  'massResidualKg:f32',
+  'sourceVolumeM3:f32',
+  'transferVolumeM3:f32',
+  'volumeResidualM3:f32',
+  'momentumXKgMPerS:f32',
+  'momentumYKgMPerS:f32',
+  'momentumZKgMPerS:f32',
+  'internalEnergyJ:f32',
+  'velocityXMPerS:f32',
+  'velocityYMPerS:f32',
+  'velocityZMPerS:f32',
+  'specificInternalEnergyJPerKg:f32',
+  'transferWeight:f32',
+  'status:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

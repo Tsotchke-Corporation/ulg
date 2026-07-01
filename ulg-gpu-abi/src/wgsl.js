@@ -7696,3 +7696,91 @@ fn main(
   }
 }
 `;
+
+export const schroederCrossLevelTransferWgsl = `
+struct SchroederCrossLevelTransferParams {
+  candidate_count: u32,
+  cross_level_stride: u32,
+  state_stride: u32,
+  transfer_stride: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> cross_level_couplings: array<f32>;
+@group(0) @binding(1) var<storage, read> sph_state: array<f32>;
+@group(0) @binding(2) var<storage, read_write> transfer_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederCrossLevelTransferParams;
+
+const SCHROEDER_DEFAULT_CROSS_LEVEL_TRANSFER_STRIDE: u32 = 24u;
+const SCHROEDER_DEFAULT_CROSS_LEVEL_STRIDE_FOR_TRANSFER: u32 = 16u;
+const SCHROEDER_DEFAULT_SPH_STATE_STRIDE_FOR_TRANSFER: u32 = 8u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  if (candidate_index >= params.candidate_count) {
+    return;
+  }
+
+  let cross_stride = max(params.cross_level_stride, SCHROEDER_DEFAULT_CROSS_LEVEL_STRIDE_FOR_TRANSFER);
+  let state_stride = max(params.state_stride, SCHROEDER_DEFAULT_SPH_STATE_STRIDE_FOR_TRANSFER);
+  let transfer_stride = max(params.transfer_stride, SCHROEDER_DEFAULT_CROSS_LEVEL_TRANSFER_STRIDE);
+  let cross_offset = candidate_index * cross_stride;
+  let transfer_offset = candidate_index * transfer_stride;
+
+  let source_particle_index = u32(max(cross_level_couplings[cross_offset + 0u], 0.0));
+  let state_offset = source_particle_index * state_stride;
+  let child_level = cross_level_couplings[cross_offset + 1u];
+  let parent_level = cross_level_couplings[cross_offset + 2u];
+  let level_delta = cross_level_couplings[cross_offset + 3u];
+  let parent_cell = vec3<f32>(
+    cross_level_couplings[cross_offset + 8u],
+    cross_level_couplings[cross_offset + 9u],
+    cross_level_couplings[cross_offset + 10u]
+  );
+  let source_mass_kg = max(cross_level_couplings[cross_offset + 12u], 0.0);
+  let source_volume_m3 = max(cross_level_couplings[cross_offset + 13u], 0.0);
+  let candidate_status = cross_level_couplings[cross_offset + 14u];
+  let chart_id = cross_level_couplings[cross_offset + 15u];
+  let velocity = vec3<f32>(
+    sph_state[state_offset + 4u],
+    sph_state[state_offset + 5u],
+    sph_state[state_offset + 6u]
+  );
+  let specific_internal_energy = sph_state[state_offset + 7u];
+  let transfer_weight = select(0.0, 1.0, candidate_status > 0.0 && candidate_status < 32.0 && level_delta > 0.0);
+  let transfer_mass_kg = source_mass_kg * transfer_weight;
+  let transfer_volume_m3 = source_volume_m3 * transfer_weight;
+  let momentum = velocity * transfer_mass_kg;
+  let internal_energy_j = specific_internal_energy * transfer_mass_kg;
+  let transfer_status = select(32.0, 1.0, transfer_weight > 0.0);
+
+  transfer_rows[transfer_offset + 0u] = f32(source_particle_index);
+  transfer_rows[transfer_offset + 1u] = child_level;
+  transfer_rows[transfer_offset + 2u] = parent_level;
+  transfer_rows[transfer_offset + 3u] = level_delta;
+  transfer_rows[transfer_offset + 4u] = parent_cell.x;
+  transfer_rows[transfer_offset + 5u] = parent_cell.y;
+  transfer_rows[transfer_offset + 6u] = parent_cell.z;
+  transfer_rows[transfer_offset + 7u] = chart_id;
+  transfer_rows[transfer_offset + 8u] = source_mass_kg;
+  transfer_rows[transfer_offset + 9u] = transfer_mass_kg;
+  transfer_rows[transfer_offset + 10u] = source_mass_kg - transfer_mass_kg;
+  transfer_rows[transfer_offset + 11u] = source_volume_m3;
+  transfer_rows[transfer_offset + 12u] = transfer_volume_m3;
+  transfer_rows[transfer_offset + 13u] = source_volume_m3 - transfer_volume_m3;
+  transfer_rows[transfer_offset + 14u] = momentum.x;
+  transfer_rows[transfer_offset + 15u] = momentum.y;
+  transfer_rows[transfer_offset + 16u] = momentum.z;
+  transfer_rows[transfer_offset + 17u] = internal_energy_j;
+  transfer_rows[transfer_offset + 18u] = velocity.x;
+  transfer_rows[transfer_offset + 19u] = velocity.y;
+  transfer_rows[transfer_offset + 20u] = velocity.z;
+  transfer_rows[transfer_offset + 21u] = specific_internal_energy;
+  transfer_rows[transfer_offset + 22u] = transfer_weight;
+  transfer_rows[transfer_offset + 23u] = transfer_status;
+}
+`;

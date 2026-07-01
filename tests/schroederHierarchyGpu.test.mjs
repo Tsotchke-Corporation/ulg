@@ -4,6 +4,7 @@ import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
@@ -12,6 +13,8 @@ import {
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -22,6 +25,7 @@ import {
   SCHROEDER_ACTIVE_NODE_FLOATS,
   SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
   SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+  SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_NO_FULL_READBACK_MODE,
   createSchroederActiveNodeListPlan,
@@ -30,6 +34,8 @@ import {
   createSchroederCrossLevelCouplingPlan,
   createSchroederConservationSummaryParamsArray,
   createSchroederConservationSummaryPlan,
+  createSchroederCrossLevelTransferParamsArray,
+  createSchroederCrossLevelTransferPlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
   createSchroederSameLevelMechanicsPlan,
@@ -38,6 +44,7 @@ import {
   runSchroederActiveNodeListWebGpu,
   runSchroederConservationSummaryWebGpu,
   runSchroederCrossLevelCouplingWebGpu,
+  runSchroederCrossLevelTransferWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederGridSpacingForLevel
@@ -189,6 +196,14 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS, 16);
   assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length, SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS);
   assert.equal(SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA, 'peercompute.ulg.schroeder-cross-level-transfer.v0');
+  assert.equal(
+    ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-cross-level-transfer-execution.v0'
+  );
+  assert.equal(SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS, 24);
+  assert.equal(SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length, SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS);
+  assert.equal(SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
     ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -355,6 +370,40 @@ test('Schroeder conservation summary plan keeps cross-level residuals GPU-reside
   assert.equal(view.getUint32(0, true), 130);
   assert.equal(view.getUint32(4, true), SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_CONSERVATION_SUMMARY_FLOATS);
+});
+
+test('Schroeder cross-level transfer plan carries conserved motion and energy rows', () => {
+  const buffers = manualBuffers({ particleCount: 130 });
+  const crossLevelCoupling = {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
+    status: 'schroeder-cross-level-coupling-submitted',
+    crossLevelCandidateCount: 130,
+    crossLevelStrideFloats: SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
+    crossLevelBuffer: { label: 'fake-cross-level-buffer' }
+  };
+  const plan = createSchroederCrossLevelTransferPlan({
+    crossLevelCoupling,
+    sphParticleState: buffers.sphParticleState
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA);
+  assert.equal(plan.status, 'schroeder-cross-level-transfer-plan-ready');
+  assert.equal(plan.sourceCrossLevelSchema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
+  assert.equal(plan.sourceParticleSchema, ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA);
+  assert.equal(plan.crossLevelCandidateCount, 130);
+  assert.equal(plan.outputCompaction, 'one-conservative-transfer-row-per-cross-level-candidate');
+  assert.equal(plan.conservativeTransferStatus, 'transfer-rows-ready-no-state-mutation');
+  assert.deepEqual(plan.conservedQuantities, ['mass', 'represented-volume', 'momentum', 'internal-energy']);
+  assert.equal(plan.transferByteLength, 130 * 24 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederCrossLevelTransferParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS);
+  assert.equal(view.getUint32(8, true), 8);
+  assert.equal(view.getUint32(12, true), SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS);
 });
 
 test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
@@ -548,6 +597,63 @@ test('Schroeder conservation summary consumes retained cross-level buffers witho
   );
 });
 
+test('Schroeder cross-level transfer consumes retained candidates and particle state without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 130, smoothingLengthM: 0.25 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.25,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1
+  });
+  const crossLevel = await runSchroederCrossLevelCouplingWebGpu({
+    device,
+    levelAssignment,
+    activeNodeList: activeNodes,
+    parentLevelDelta: 1,
+    couplingHaloCells: 2
+  });
+  const transfer = await runSchroederCrossLevelTransferWebGpu({
+    device,
+    ...buffers,
+    crossLevelCoupling: crossLevel
+  });
+
+  assert.equal(transfer.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA);
+  assert.equal(transfer.crossLevelTransferSchema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA);
+  assert.equal(transfer.status, 'schroeder-cross-level-transfer-submitted');
+  assert.equal(transfer.sourceCrossLevelSchema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
+  assert.equal(transfer.sourceParticleSchema, ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA);
+  assert.equal(transfer.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(transfer.fullReadbackPerformed, false);
+  assert.equal(transfer.fullParticleReadbackPerformed, false);
+  assert.equal(transfer.normalHotLoopReadbackFree, true);
+  assert.equal(transfer.retainedTransferBuffer, true);
+  assert.ok(transfer.transferBuffer);
+  assert.equal(transfer.transferBuffer.destroyed, false);
+  assert.equal(transfer.transferBufferByteLength, 130 * 24 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(transfer.transferRows.length, 0);
+  assert.equal(transfer.conservativeTransferStatus, 'transfer-rows-ready-no-state-mutation');
+  assert.equal(transfer.stateMutationStatus, 'not-applied-transfer-rows-only');
+  assert.deepEqual(
+    device.dispatches,
+    [[3, 1, 1], [3, 1, 1], [3, 1, 1], [3, 1, 1]]
+  );
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederCrossLevelTransferParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
 test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -562,6 +668,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       schroederSelectedLevel: options.schroederSelectedLevel,
       hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
       hasConservationSummary: Boolean(options.schroederConservationSummary),
+      hasCrossLevelTransfer: Boolean(options.schroederCrossLevelTransfer),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
   };
@@ -589,15 +696,20 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.conservationSummary.retainedSummaryBuffer, true);
   assert.equal(result.conservationSummary.summaryRowCount, 1);
   assert.equal(result.conservationSummary.conservativeTransferStatus, 'summary-only-no-state-mutation');
+  assert.equal(result.crossLevelTransfer.retainedTransferBuffer, true);
+  assert.equal(result.crossLevelTransfer.crossLevelCandidateCount, 3);
+  assert.equal(result.crossLevelTransfer.conservativeTransferStatus, 'transfer-rows-ready-no-state-mutation');
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.residentStep.hasConservationSummary, true);
+  assert.equal(result.residentStep.hasCrossLevelTransfer, true);
   assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
   assert.equal(
     result.crossLevelCouplingStatus,
     'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
   );
   assert.equal(result.conservationSummaryStatus, 'schroeder-conservation-summary-submitted');
-  assert.equal(result.conservativeTransferStatus, 'summary-only-no-state-mutation');
+  assert.equal(result.crossLevelTransferStatus, 'schroeder-cross-level-transfer-submitted');
+  assert.equal(result.conservativeTransferStatus, 'transfer-rows-ready-no-state-mutation');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].gridSpacingM, 1);
   assert.equal(calls[0].schroederSelectedLevel, 2);
@@ -606,9 +718,10 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].preferWebGpu, true);
   assert.equal(calls[0].schroederCrossLevelCoupling.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederConservationSummary.schema, ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA);
+  assert.equal(calls[0].schroederCrossLevelTransfer.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA);
   assert.equal(calls[0].fuseNoFullResidentMechanics, true);
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
-  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
 });
 
 test('Schroeder same-level mechanics can disable cross-level candidate generation per use case', async () => {
@@ -633,12 +746,15 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
 
   assert.equal(result.crossLevelCoupling, null);
   assert.equal(result.conservationSummary, null);
+  assert.equal(result.crossLevelTransfer, null);
   assert.equal(result.crossLevelCouplingStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservationSummaryStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.crossLevelTransferStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservativeTransferStatus, 'not-run');
   assert.equal(result.residentStep.hasCrossLevelCoupling, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].schroederCrossLevelCoupling, null);
   assert.equal(calls[0].schroederConservationSummary, null);
+  assert.equal(calls[0].schroederCrossLevelTransfer, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
 });

@@ -39,6 +39,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-07-01 AKDT: the new architecture branch
+`arch/generalized-law-tree` routes the next broad performance/adaptivity work
+through `plan/todo/generalized-spatial-law-tree-plan.md`. Treat the generalized
+spatial law tree as the shared acceleration substrate for adaptive support,
+reaction/contact broad phase, material-interface extraction, render LOD, and
+future gravity/radiation/plasma laws. It does not replace PeerCompute authority
+or StateManager admission, and it does not make Ocean-style mechanics moot:
+Ocean-style atomic/tiled P2G becomes the dense local mechanics backend fed by
+the tree. Do not add new one-off neighbor grids or dense source fields before
+checking whether they belong as a tree law adapter.
+
 Current routing note, 2026-06-29 AKDT follow-up: render ownership is now
 selectable through `peercompute.ulg.render-ownership-policy.v0`, not hardwired
 to one demo flag. PeerCompute/runtime options or local `renderOwnership=...`

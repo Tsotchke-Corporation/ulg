@@ -34,8 +34,23 @@ Supporting routing:
 - Do not let presentation own physics cadence or state authority.
 - Keep Ocean-style kernels as dense local backends inside the SS hierarchy.
 
-## Current First Slice
+## Current Status
 
-Start with a retained GPU level-assignment pass. It should classify particles by
-physical support/volume into SS hierarchy levels and emit retained GPU rows plus
-tiny optional summary counters.
+Landed checkpoints:
+
+1. `f662640` routes todo ownership and branch identity through `SS`.
+2. `f4c8e88` adds retained GPU level assignment rows and execution contracts.
+3. `b41c179` adds retained per-level active-node planning.
+4. `55b3a59` adds same-level MLS-MPM mechanics orchestration.
+5. `82044fd` adds retained cross-level coupling candidate rows.
+6. `9d3ea80` wires cross-level prepass orchestration into SS mechanics.
+7. `d752434` filters MLS-MPM P2G by selected Schroeder level assignment.
+
+Next implementation queue:
+
+1. Add fused no-full selected-level filtering so SS mechanics can recover the
+   high-throughput resident path instead of falling back to split P2G.
+2. Add adjacent-level conservative restriction/prolongation execution rows and
+   residual counters.
+3. Promote water-to-steam phase-volume migration into a visible SS stress case.
+4. Route reaction/contact/interface work queues through SS active nodes.

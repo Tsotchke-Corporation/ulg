@@ -176,6 +176,7 @@ Suggested schemas:
 
 ### Slice 0: Todo Reorg And Branch Identity
 
+- Status: landed in `f662640`.
 - Switch work to branch `SS`.
 - Route `plan/todo` through this SS folder.
 - Preserve older todo files as source material, but make this plan the active
@@ -184,6 +185,7 @@ Suggested schemas:
 
 ### Slice 1: GPU Level Assignment
 
+- Status: landed in `f4c8e88`.
 - Add ABI constants and row layouts for SS level assignment.
 - Add a GPU-facing module that classifies each particle into an SS level from
   physical support radius, rest volume, represented volume, density, phase, and
@@ -195,6 +197,7 @@ Suggested schemas:
 
 ### Slice 2: Per-Level Active Nodes
 
+- Status: landed in `b41c179`.
 - Convert level assignments into per-level active node/tile keys.
 - Start with one chart and a bounded level range.
 - Use GPU-friendly key rows and active-node lists; add sort/radix only when the
@@ -202,14 +205,21 @@ Suggested schemas:
 
 ### Slice 3: Same-Level Mechanics
 
+- Status: partially landed in `55b3a59`, `9d3ea80`, and `d752434`.
 - Run existing MLS-MPM/Ocean-style `P2G -> grid update -> G2P` against a single
   selected SS level.
 - Preserve no-full-readback resident operation.
 - Report active level, native `dx`, tile count, particle count, and fallback
   status.
+- Current caveat: selected-level filtering is implemented for split P2G. The
+  fused no-full mechanics path is intentionally disabled when a live SS level
+  assignment is present until the fused P2G shader accepts the same assignment
+  binding and selected-level uniform fields.
 
 ### Slice 4: Adjacent-Level Conservative Coupling
 
+- Status: candidate row planning and orchestration landed in `82044fd` and
+  `9d3ea80`; conservative transfer execution is next.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -242,6 +252,22 @@ Suggested schemas:
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
+
+## Current Implementation Queue
+
+1. Fused no-full selected-level filtering:
+   - pass retained SS level assignments into the fused resident P2G path;
+   - enable the existing P2G filter fields in fused params;
+   - keep dummy assignment rows only for non-SS fused calls;
+   - preserve no-full readback and active-grid dispatch behavior.
+2. Conservative cross-level execution:
+   - add compact restriction/prolongation rows for adjacent-level candidates;
+   - emit residual counters for mass, volume, momentum, and energy drift;
+   - fail closed when parent/child level metadata is missing.
+3. Phase-volume migration:
+   - drive level changes from closure-derived density/pressure/temperature;
+   - make water-to-steam expansion migrate levels without particle explosion;
+   - preserve fine representation near surfaces, reactions, and walls.
 
 ## Acceptance Gates
 

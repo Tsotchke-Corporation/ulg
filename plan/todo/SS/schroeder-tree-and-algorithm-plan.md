@@ -219,7 +219,8 @@ Suggested schemas:
 ### Slice 4: Adjacent-Level Conservative Coupling
 
 - Status: candidate row planning and orchestration landed in `82044fd` and
-  `9d3ea80`; conservative transfer execution is next.
+  `9d3ea80`; GPU-resident conservation summary rows landed in `b9d35de`;
+  conservative state mutation is next.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -255,9 +256,10 @@ Suggested schemas:
 
 ## Current Implementation Queue
 
-1. Conservative cross-level execution:
-   - add compact restriction/prolongation rows for adjacent-level candidates;
-   - emit residual counters for mass, volume, momentum, and energy drift;
+1. Conservative cross-level state mutation:
+   - consume adjacent-level candidate rows and conservation summary rows;
+   - write restriction/prolongation effects into retained mechanics/grid state;
+   - extend residual counters from mass/volume into momentum and energy drift;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
    - drive level changes from closure-derived density/pressure/temperature;

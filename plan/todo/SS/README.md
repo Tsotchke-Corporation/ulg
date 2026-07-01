@@ -47,10 +47,12 @@ Landed checkpoints:
 7. `d752434` filters MLS-MPM P2G by selected Schroeder level assignment.
 8. `e9997a3` enables fused no-full MLS-MPM P2G filtering by retained
    Schroeder level assignment.
+9. `b9d35de` adds GPU-resident cross-level conservation summary rows for mass
+   and represented volume residuals.
 
 Next implementation queue:
 
-1. Add adjacent-level conservative restriction/prolongation execution rows and
-   residual counters.
+1. Add adjacent-level conservative restriction/prolongation state mutation that
+   consumes the cross-level summary/candidate rows.
 2. Promote water-to-steam phase-volume migration into a visible SS stress case.
 3. Route reaction/contact/interface work queues through SS active nodes.

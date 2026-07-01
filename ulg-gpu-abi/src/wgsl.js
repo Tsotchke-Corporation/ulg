@@ -7360,3 +7360,82 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   level_assignments[assignment_offset + 15u] = params.chart_id;
 }
 `;
+
+export const schroederActiveNodeListWgsl = `
+struct SchroederActiveNodeParams {
+  particle_count: u32,
+  tile_cell_count: u32,
+  flags: u32,
+  pad0: u32,
+  support_inflate_cells: f32,
+  min_tile_spacing_m: f32,
+  max_tile_spacing_m: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
+@group(0) @binding(1) var<storage, read_write> active_nodes: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederActiveNodeParams;
+
+const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
+const SCHROEDER_ACTIVE_NODE_STRIDE: u32 = 16u;
+
+fn ss_active_positive(value: f32) -> bool {
+  return value == value && value > 0.0;
+}
+
+fn ss_active_tile_spacing(native_dx: f32) -> f32 {
+  var tile_spacing = max(native_dx, 0.000001) * f32(max(params.tile_cell_count, 1u));
+  if (ss_active_positive(params.min_tile_spacing_m)) {
+    tile_spacing = max(tile_spacing, params.min_tile_spacing_m);
+  }
+  if (ss_active_positive(params.max_tile_spacing_m)) {
+    tile_spacing = min(tile_spacing, params.max_tile_spacing_m);
+  }
+  return max(tile_spacing, 0.000001);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let assignment_offset = particle_index * SCHROEDER_ASSIGNMENT_STRIDE;
+  let node_offset = particle_index * SCHROEDER_ACTIVE_NODE_STRIDE;
+  let level = level_assignments[assignment_offset + 0u];
+  let native_dx = max(level_assignments[assignment_offset + 1u], 0.000001);
+  let support_radius = max(level_assignments[assignment_offset + 2u], 0.0);
+  let assignment_status = level_assignments[assignment_offset + 10u];
+  let position = vec3<f32>(
+    level_assignments[assignment_offset + 12u],
+    level_assignments[assignment_offset + 13u],
+    level_assignments[assignment_offset + 14u]
+  );
+  let chart_id = level_assignments[assignment_offset + 15u];
+  let tile_spacing = ss_active_tile_spacing(native_dx);
+  let support_inflation = max(params.support_inflate_cells, 0.0) * native_dx;
+  let expanded_support = support_radius + support_inflation;
+  let min_tile = floor((position - vec3<f32>(expanded_support)) / tile_spacing);
+  let max_tile = floor((position + vec3<f32>(expanded_support)) / tile_spacing);
+  let status = select(32.0, 1.0, assignment_status > 0.0 && support_radius >= 0.0);
+
+  active_nodes[node_offset + 0u] = level;
+  active_nodes[node_offset + 1u] = min_tile.x;
+  active_nodes[node_offset + 2u] = min_tile.y;
+  active_nodes[node_offset + 3u] = min_tile.z;
+  active_nodes[node_offset + 4u] = max_tile.x;
+  active_nodes[node_offset + 5u] = max_tile.y;
+  active_nodes[node_offset + 6u] = max_tile.z;
+  active_nodes[node_offset + 7u] = tile_spacing;
+  active_nodes[node_offset + 8u] = native_dx;
+  active_nodes[node_offset + 9u] = support_radius;
+  active_nodes[node_offset + 10u] = f32(particle_index);
+  active_nodes[node_offset + 11u] = status;
+  active_nodes[node_offset + 12u] = position.x;
+  active_nodes[node_offset + 13u] = position.y;
+  active_nodes[node_offset + 14u] = position.z;
+  active_nodes[node_offset + 15u] = chart_id;
+}
+`;

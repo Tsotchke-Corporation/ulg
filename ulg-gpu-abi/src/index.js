@@ -72,6 +72,7 @@ export const ULG_SCHROEDER_TREE_SCHEMA = 'peercompute.ulg.schroeder-tree.v0';
 export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA = 'peercompute.ulg.schroeder-level-assignment.v0';
 export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-level-assignment-execution.v0';
 export const ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA = 'peercompute.ulg.schroeder-active-node-list.v0';
+export const ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-list-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -692,6 +693,24 @@ export const SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
   'status:f32',
   'hysteresisBand:f32',
+  'positionXM:f32',
+  'positionYM:f32',
+  'positionZM:f32',
+  'chartId:f32'
+]);
+export const SCHROEDER_ACTIVE_NODE_ROW_LAYOUT = Object.freeze([
+  'levelId:f32',
+  'tileMinX:f32',
+  'tileMinY:f32',
+  'tileMinZ:f32',
+  'tileMaxX:f32',
+  'tileMaxY:f32',
+  'tileMaxZ:f32',
+  'tileSpacingM:f32',
+  'nativeGridSpacingM:f32',
+  'supportRadiusM:f32',
+  'sourceParticleIndex:f32',
+  'status:f32',
   'positionXM:f32',
   'positionYM:f32',
   'positionZM:f32',

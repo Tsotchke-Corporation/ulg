@@ -8,6 +8,8 @@ import {
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -18,10 +20,13 @@ import {
   createSchroederActiveNodeParamsArray,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
+  createSchroederSameLevelMechanicsPlan,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
   runSchroederActiveNodeListWebGpu,
-  runSchroederLevelAssignmentWebGpu
+  runSchroederLevelAssignmentWebGpu,
+  runSchroederSameLevelMechanicsWebGpu,
+  schroederGridSpacingForLevel
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
 
@@ -162,10 +167,21 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS, 16);
   assert.equal(SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length, SCHROEDER_ACTIVE_NODE_FLOATS);
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA, 'peercompute.ulg.schroeder-same-level-mechanics.v0');
+  assert.equal(
+    ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-same-level-mechanics-execution.v0'
+  );
 });
 
 test('Schroeder level estimates model water-to-steam scale migration without 700x particles', () => {
   assert.equal(estimateSchroederLevelDeltaForVolumeRatio(700), 3);
+  assert.equal(schroederGridSpacingForLevel({
+    selectedLevel: 3,
+    baseGridSpacingM: 0.125,
+    minLevel: -8,
+    maxLevel: 8
+  }), 1);
   assert.equal(
     estimateSchroederLevelFromSupportRadius({
       supportRadiusM: Math.cbrt(700),
@@ -230,6 +246,25 @@ test('Schroeder active-node plan uses retained level assignments as unsorted til
   assert.equal(view.getUint32(0, true), 5);
   assert.equal(view.getUint32(4, true), 4);
   assert.equal(view.getFloat32(16, true), 2);
+});
+
+test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
+  const buffers = manualBuffers({ particleCount: 2, smoothingLengthM: 0.125 });
+  const plan = createSchroederSameLevelMechanicsPlan({
+    ...buffers,
+    selectedLevel: 3,
+    baseGridSpacingM: 0.125,
+    minLevel: -4,
+    maxLevel: 6
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA);
+  assert.equal(plan.status, 'schroeder-same-level-mechanics-plan-ready');
+  assert.equal(plan.nativeGridSpacingM, 1);
+  assert.equal(plan.selectedLevel, 3);
+  assert.equal(plan.mechanicsBackend, 'mls-mpm-resident-step-selected-schroeder-level');
+  assert.equal(plan.crossLevelCouplingStatus, 'not-started-schroeder-cross-level-coupling-slice-pending');
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.fullParticleReadbackRequired, false);
 });
 
 test('Schroeder WebGPU level assignment submits without default readback buffer', async () => {
@@ -302,4 +337,48 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
   );
+});
+
+test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const residentStepRunner = async (options) => {
+    calls.push(options);
+    return {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      gridSpacingM: options.gridSpacingM,
+      readbackMode: options.readbackMode,
+      fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
+    };
+  };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    residentStepRunner
+  });
+
+  assert.equal(result.schema, ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA);
+  assert.equal(result.sameLevelMechanicsSchema, ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA);
+  assert.equal(result.status, 'schroeder-same-level-mechanics-submitted');
+  assert.equal(result.selectedLevel, 2);
+  assert.equal(result.mechanicsGridSpacingM, 1);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.levelAssignment.retainedAssignmentBuffer, true);
+  assert.equal(result.activeNodeList.retainedActiveNodeBuffer, true);
+  assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
+  assert.equal(result.crossLevelCouplingStatus, 'not-started-schroeder-cross-level-coupling-slice-pending');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].gridSpacingM, 1);
+  assert.equal(calls[0].readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(calls[0].preferWebGpu, true);
+  assert.equal(calls[0].fuseNoFullResidentMechanics, true);
+  assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
 });

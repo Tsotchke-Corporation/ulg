@@ -6,6 +6,8 @@ import {
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
@@ -18,12 +20,15 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
 
 export {
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
-  ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA
+  ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA
 };
 
 export const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
@@ -32,6 +37,7 @@ export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
 export const SCHROEDER_LEVEL_ASSIGNMENT_SCOPE = 'schroeder-gpu-level-assignment';
+export const SCHROEDER_SAME_LEVEL_MECHANICS_SCOPE = 'schroeder-same-level-mls-mpm-ocean-mechanics';
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
@@ -292,6 +298,59 @@ export function createSchroederActiveNodeListPlan({
     activeNodeStrideBytes: SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     activeNodeByteLength,
     outputCompaction: 'unsorted-one-row-per-particle-tile-range',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function schroederGridSpacingForLevel({
+  selectedLevel = 0,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  minLevel = DEFAULT_MIN_LEVEL,
+  maxLevel = DEFAULT_MAX_LEVEL
+} = {}) {
+  const level = clampInteger(selectedLevel, minLevel, maxLevel);
+  const baseDx = finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M);
+  return baseDx * (2 ** level);
+}
+
+export function createSchroederSameLevelMechanicsPlan({
+  sphParticleState,
+  mlsMpmParticleState,
+  selectedLevel = 0,
+  baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
+  minLevel = DEFAULT_MIN_LEVEL,
+  maxLevel = DEFAULT_MAX_LEVEL,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  tileCellCount = DEFAULT_TILE_CELL_COUNT
+} = {}) {
+  assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  const level = clampInteger(selectedLevel, minLevel, maxLevel);
+  const nativeGridSpacingM = schroederGridSpacingForLevel({
+    selectedLevel: level,
+    baseGridSpacingM,
+    minLevel,
+    maxLevel
+  });
+  return {
+    schema: ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
+    status: 'schroeder-same-level-mechanics-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: SCHROEDER_SAME_LEVEL_MECHANICS_SCOPE,
+    particleCount: sphParticleState.particleCount,
+    selectedLevel: level,
+    minLevel: Math.round(finiteNumber(minLevel, DEFAULT_MIN_LEVEL)),
+    maxLevel: Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)),
+    baseGridSpacingM: finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M),
+    nativeGridSpacingM,
+    tileCellCount: Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))),
+    readbackMode,
+    mechanicsBackend: 'mls-mpm-resident-step-selected-schroeder-level',
+    denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
+    hierarchyRole: 'same-level-dense-local-mechanics',
+    crossLevelCouplingStatus: 'not-started-schroeder-cross-level-coupling-slice-pending',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -584,4 +643,123 @@ export async function runSchroederActiveNodeListWebGpu({
       cleanup();
     }
   }
+}
+
+export async function runSchroederSameLevelMechanicsWebGpu({
+  device,
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  levelAssignment = null,
+  activeNodeList = null,
+  selectedLevel = 0,
+  baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
+  minLevel = DEFAULT_MIN_LEVEL,
+  maxLevel = DEFAULT_MAX_LEVEL,
+  targetSupportCells = DEFAULT_TARGET_SUPPORT_CELLS,
+  supportRadiusScale = DEFAULT_SUPPORT_RADIUS_SCALE,
+  tileCellCount = DEFAULT_TILE_CELL_COUNT,
+  supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  boxDimsM = [5, 5, 5],
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
+  cflFactor = mlsMpmParticleState?.gridCflFactor,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
+  residentStepOptions = {}
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (typeof residentStepRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  const plan = createSchroederSameLevelMechanicsPlan({
+    sphParticleState,
+    mlsMpmParticleState,
+    selectedLevel,
+    baseGridSpacingM,
+    minLevel,
+    maxLevel,
+    readbackMode,
+    tileCellCount
+  });
+  const resolvedLevelAssignment = levelAssignment || await runSchroederLevelAssignmentWebGpu({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    baseGridSpacingM: plan.baseGridSpacingM,
+    minLevel: plan.minLevel,
+    maxLevel: plan.maxLevel,
+    targetSupportCells,
+    supportRadiusScale,
+    retainAssignmentBuffer: true,
+    readbackMode
+  });
+  const resolvedActiveNodeList = activeNodeList || await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment: resolvedLevelAssignment,
+    tileCellCount,
+    supportInflateCells,
+    retainActiveNodeBuffer: true,
+    readbackMode
+  });
+  const residentStep = await residentStepRunner({
+    ...residentStepOptions,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    gridSpacingM: plan.nativeGridSpacingM,
+    boxDimsM,
+    dt,
+    gravityMPerS2,
+    cflFactor,
+    preferWebGpu: true,
+    device,
+    readbackMode,
+    fuseNoFullResidentMechanics: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    fuseNoFullResidentActiveGrid: true
+  });
+
+  return {
+    ...plan,
+    schema: ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+    sameLevelMechanicsSchema: plan.schema,
+    status: 'schroeder-same-level-mechanics-submitted',
+    backend: 'webgpu',
+    readbackMode,
+    fullParticleReadbackPerformed: false,
+    normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
+    levelAssignment: {
+      schema: resolvedLevelAssignment.schema,
+      status: resolvedLevelAssignment.status,
+      particleCount: resolvedLevelAssignment.particleCount,
+      retainedAssignmentBuffer: Boolean(resolvedLevelAssignment.assignmentBuffer),
+      assignmentBufferByteLength: resolvedLevelAssignment.assignmentBufferByteLength ?? resolvedLevelAssignment.assignmentByteLength ?? 0
+    },
+    activeNodeList: {
+      schema: resolvedActiveNodeList.schema,
+      status: resolvedActiveNodeList.status,
+      activeCandidateCount: resolvedActiveNodeList.activeCandidateCount,
+      outputCompaction: resolvedActiveNodeList.outputCompaction,
+      retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
+      activeNodeBufferByteLength: resolvedActiveNodeList.activeNodeBufferByteLength ?? resolvedActiveNodeList.activeNodeByteLength ?? 0
+    },
+    residentStep,
+    residentStepStatus: residentStep?.status ?? null,
+    residentStepSchema: residentStep?.schema ?? null,
+    mechanicsGridSpacingM: plan.nativeGridSpacingM,
+    denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
+    activeNodeConsumerStatus: 'planned-not-yet-consumed-by-mls-mpm-kernels',
+    crossLevelCouplingStatus: 'not-started-schroeder-cross-level-coupling-slice-pending',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
 }

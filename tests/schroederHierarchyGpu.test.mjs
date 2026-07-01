@@ -326,7 +326,7 @@ test('Schroeder same-level mechanics plan selects a native hierarchy grid spacin
   assert.equal(plan.nativeGridSpacingM, 1);
   assert.equal(plan.selectedLevel, 3);
   assert.equal(plan.mechanicsBackend, 'mls-mpm-resident-step-selected-schroeder-level');
-  assert.equal(plan.crossLevelCouplingStatus, 'not-started-schroeder-cross-level-coupling-slice-pending');
+  assert.equal(plan.crossLevelCouplingStatus, 'optional-candidate-generation-available-not-yet-consumed');
   assert.equal(plan.gpuFirst, true);
   assert.equal(plan.fullParticleReadbackRequired, false);
 });
@@ -461,6 +461,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       status: 'resident-step-stubbed',
       gridSpacingM: options.gridSpacingM,
       readbackMode: options.readbackMode,
+      hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
   };
@@ -483,13 +484,48 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.normalHotLoopReadbackFree, true);
   assert.equal(result.levelAssignment.retainedAssignmentBuffer, true);
   assert.equal(result.activeNodeList.retainedActiveNodeBuffer, true);
+  assert.equal(result.crossLevelCoupling.retainedCrossLevelBuffer, true);
+  assert.equal(result.crossLevelCoupling.crossLevelCandidateCount, 3);
+  assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
-  assert.equal(result.crossLevelCouplingStatus, 'not-started-schroeder-cross-level-coupling-slice-pending');
+  assert.equal(
+    result.crossLevelCouplingStatus,
+    'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
+  );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].gridSpacingM, 1);
   assert.equal(calls[0].readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(calls[0].preferWebGpu, true);
+  assert.equal(calls[0].schroederCrossLevelCoupling.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
   assert.equal(calls[0].fuseNoFullResidentMechanics, true);
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+});
+
+test('Schroeder same-level mechanics can disable cross-level candidate generation per use case', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableCrossLevelCoupling: false,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling)
+      };
+    }
+  });
+
+  assert.equal(result.crossLevelCoupling, null);
+  assert.equal(result.crossLevelCouplingStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.residentStep.hasCrossLevelCoupling, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].schroederCrossLevelCoupling, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
 });

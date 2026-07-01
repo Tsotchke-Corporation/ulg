@@ -463,7 +463,7 @@ export function createSchroederSameLevelMechanicsPlan({
     mechanicsBackend: 'mls-mpm-resident-step-selected-schroeder-level',
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
     hierarchyRole: 'same-level-dense-local-mechanics',
-    crossLevelCouplingStatus: 'not-started-schroeder-cross-level-coupling-slice-pending',
+    crossLevelCouplingStatus: 'optional-candidate-generation-available-not-yet-consumed',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -921,6 +921,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   mlsMpmParticleUpload = null,
   levelAssignment = null,
   activeNodeList = null,
+  crossLevelCoupling = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = DEFAULT_MIN_LEVEL,
@@ -929,11 +930,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   supportRadiusScale = DEFAULT_SUPPORT_RADIUS_SCALE,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  enableCrossLevelCoupling = true,
+  parentLevelDelta = 1,
+  couplingHaloCells = supportInflateCells,
+  minCouplingRadiusM = 0,
+  maxCouplingRadiusM = 0,
   boxDimsM = [5, 5, 5],
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
   cflFactor = mlsMpmParticleState?.gridCflFactor,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
 } = {}) {
@@ -942,6 +949,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (typeof residentStepRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  if (enableCrossLevelCoupling && typeof crossLevelCouplingRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelCouplingRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -975,6 +985,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
+  const resolvedCrossLevelCoupling = !enableCrossLevelCoupling
+    ? null
+    : crossLevelCoupling || await crossLevelCouplingRunner({
+      device,
+      levelAssignment: resolvedLevelAssignment,
+      activeNodeList: resolvedActiveNodeList,
+      parentLevelDelta,
+      baseGridSpacingM: plan.baseGridSpacingM,
+      maxLevel: plan.maxLevel,
+      couplingHaloCells,
+      minCouplingRadiusM,
+      maxCouplingRadiusM,
+      tileCellCount,
+      retainCrossLevelBuffer: true,
+      readbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -989,6 +1015,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     preferWebGpu: true,
     device,
     readbackMode,
+    schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -1018,13 +1045,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
       activeNodeBufferByteLength: resolvedActiveNodeList.activeNodeBufferByteLength ?? resolvedActiveNodeList.activeNodeByteLength ?? 0
     },
+    crossLevelCoupling: resolvedCrossLevelCoupling ? {
+      schema: resolvedCrossLevelCoupling.schema,
+      status: resolvedCrossLevelCoupling.status,
+      crossLevelCandidateCount: resolvedCrossLevelCoupling.crossLevelCandidateCount,
+      outputCompaction: resolvedCrossLevelCoupling.outputCompaction,
+      retainedCrossLevelBuffer: Boolean(resolvedCrossLevelCoupling.crossLevelBuffer),
+      crossLevelBufferByteLength: resolvedCrossLevelCoupling.crossLevelBufferByteLength
+        ?? resolvedCrossLevelCoupling.crossLevelByteLength
+        ?? 0
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
     mechanicsGridSpacingM: plan.nativeGridSpacingM,
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
     activeNodeConsumerStatus: 'planned-not-yet-consumed-by-mls-mpm-kernels',
-    crossLevelCouplingStatus: 'not-started-schroeder-cross-level-coupling-slice-pending',
+    crossLevelCouplingStatus: resolvedCrossLevelCoupling
+      ? 'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
+      : 'disabled-same-level-only-mechanics',
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

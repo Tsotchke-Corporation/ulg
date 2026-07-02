@@ -207,6 +207,8 @@ import {
   createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
   createSchroederPhaseVolumeMigrationPlan,
+  createSchroederPhaseVolumeTargetAggregateParamsArray,
+  createSchroederPhaseVolumeTargetAggregatePlan,
   createSchroederPortableSummaryPlan,
   createSchroederSameLevelMechanicsPlan,
   decodeSchroederLawNeighborTraversalDiagnostics,
@@ -237,6 +239,7 @@ import {
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   runSchroederPhaseVolumeLevelUpdateWebGpu,
   runSchroederPhaseVolumeMigrationWebGpu,
+  runSchroederPhaseVolumeTargetAggregateWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederFarAggregateGasStateDeltaAdmissionAllowsApplication,
   schroederFarAggregateLawConsumerAdmissionAllowsConsumption,
@@ -1831,6 +1834,49 @@ test('Schroeder hierarchy aggregate plan materializes admitted merge rows as uns
   assert.equal(view.getUint32(0, true), 130);
   assert.equal(view.getUint32(4, true), SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_HIERARCHY_AGGREGATE_FLOATS);
+});
+
+test('Schroeder phase-volume target aggregate plan emits assignment-derived target-cell contributions', () => {
+  const levelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-level-assignment-submitted',
+    particleCount: 8,
+    minLevel: -2,
+    maxLevel: 8,
+    baseGridSpacingM: 0.25,
+    targetSupportCells: 1.5,
+    supportRadiusScale: 1,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    assignmentBuffer: { label: 'retained-level-assignment-buffer' }
+  };
+  const plan = createSchroederPhaseVolumeTargetAggregatePlan({
+    levelAssignment,
+    phaseVolumeExpandThreshold: 64,
+    gasPhaseId: 3,
+    aggregateEpoch: 12
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA);
+  assert.equal(plan.status, 'schroeder-phase-volume-target-aggregate-plan-ready');
+  assert.equal(plan.sourceAssignmentSchema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
+  assert.equal(plan.aggregateSourceMode, 'phase-volume-target-level-assignment');
+  assert.equal(plan.aggregateRowCount, 8);
+  assert.equal(plan.outputCompaction, 'one-phase-volume-target-aggregate-contribution-row-per-assignment-row');
+  assert.equal(plan.aggregateReductionStatus, 'pending-keyed-reduction');
+  assert.equal(plan.stateAuthorityStatus, 'derived-from-current-level-assignment-no-authoritative-state-mutation');
+  assert.equal(plan.aggregateByteLength, 8 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederPhaseVolumeTargetAggregateParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 8);
+  assert.equal(view.getUint32(4, true), SCHROEDER_LEVEL_ASSIGNMENT_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_HIERARCHY_AGGREGATE_FLOATS);
+  assert.equal(view.getInt32(16, true), -2);
+  assert.equal(view.getInt32(20, true), 8);
+  assert.equal(view.getFloat32(44, true), 64);
+  assert.equal(view.getFloat32(48, true), 3);
+  assert.equal(view.getFloat32(52, true), 12);
 });
 
 test('Schroeder hierarchy aggregate-node plan reduces duplicate parent keys on GPU', () => {
@@ -3827,6 +3873,55 @@ test('Schroeder hierarchy aggregate materializes retained admitted merge rows wi
   assert.equal(aggregate.stateAuthorityStatus, 'state-manager-admitted-merge-buffer-materialized');
   assert.deepEqual(device.dispatches, [[3, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederHierarchyAggregateParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder phase-volume target aggregate materializes retained assignment target rows without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const levelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-level-assignment-submitted',
+    particleCount: 130,
+    minLevel: -4,
+    maxLevel: 8,
+    baseGridSpacingM: 0.25,
+    targetSupportCells: 1.5,
+    supportRadiusScale: 1,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    assignmentBuffer: { label: 'retained-level-assignment-buffer' }
+  };
+  const aggregate = await runSchroederPhaseVolumeTargetAggregateWebGpu({
+    device,
+    levelAssignment,
+    phaseVolumeExpandThreshold: 64,
+    gasPhaseId: 3,
+    aggregateEpoch: 11
+  });
+
+  assert.equal(aggregate.schema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA);
+  assert.equal(aggregate.hierarchyAggregateSchema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA);
+  assert.equal(aggregate.status, 'schroeder-phase-volume-target-aggregate-submitted');
+  assert.equal(aggregate.sourceAssignmentSchema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
+  assert.equal(aggregate.aggregateSourceMode, 'phase-volume-target-level-assignment');
+  assert.equal(aggregate.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(aggregate.fullReadbackPerformed, false);
+  assert.equal(aggregate.fullParticleReadbackPerformed, false);
+  assert.equal(aggregate.normalHotLoopReadbackFree, true);
+  assert.equal(aggregate.retainedAggregateBuffer, true);
+  assert.ok(aggregate.aggregateBuffer);
+  assert.equal(aggregate.aggregateBuffer.destroyed, false);
+  assert.equal(aggregate.aggregateBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(aggregate.aggregateRows.length, 0);
+  assert.equal(aggregate.outputCompaction, 'one-phase-volume-target-aggregate-contribution-row-per-assignment-row');
+  assert.equal(aggregate.aggregateReductionStatus, 'pending-keyed-reduction');
+  assert.equal(aggregate.conservativeTransferStatus, 'phase-volume-target-aggregate-contributions-submitted');
+  assert.equal(aggregate.stateMutationStatus, 'phase-volume-target-aggregate-contribution-buffer-submitted');
+  assert.equal(aggregate.stateAuthorityStatus, 'derived-from-current-level-assignment-no-authoritative-state-mutation');
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeTargetAggregateParams')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
@@ -6055,6 +6150,16 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.hierarchyAggregateNode.conservativeTransferStatus, 'hierarchy-aggregate-nodes-submitted');
   assert.equal(result.hierarchyAggregateNode.stateMutationStatus, 'aggregate-node-buffer-submitted');
   assert.equal(result.hierarchyAggregateNode.stateAuthorityStatus, 'state-manager-admitted-aggregate-nodes-materialized');
+  assert.equal(result.phaseVolumeTargetAggregate.retainedAggregateBuffer, true);
+  assert.equal(result.phaseVolumeTargetAggregate.aggregateRowCount, 3);
+  assert.equal(result.phaseVolumeTargetAggregate.aggregateSourceMode, 'phase-volume-target-level-assignment');
+  assert.equal(
+    result.phaseVolumeTargetAggregate.conservativeTransferStatus,
+    'phase-volume-target-aggregate-contributions-submitted'
+  );
+  assert.equal(result.phaseVolumeTargetAggregateNode.retainedAggregateNodeBuffer, true);
+  assert.equal(result.phaseVolumeTargetAggregateNode.aggregateRowCount, 3);
+  assert.equal(result.phaseVolumeTargetAggregateNode.aggregateReductionStatus, 'exact-first-occurrence-global-scan');
   assert.equal(result.farAggregateCandidates.retainedFarAggregateCandidateBuffer, true);
   assert.equal(result.farAggregateCandidates.farAggregateCandidateCount, 96);
   assert.equal(result.farAggregateCandidates.traversalMode, 'barnes-hut-style-aggregate-opening-over-schroeder-nodes');
@@ -6079,6 +6184,11 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.phaseVolumeMigration.retainedMigrationBuffer, true);
   assert.equal(result.phaseVolumeMigration.particleCount, 3);
   assert.equal(result.phaseVolumeMigration.aggregateNodeCount, 3);
+  assert.equal(result.phaseVolumeMigration.aggregateNodeSourceMode, 'phase-volume-target-aggregate-node');
+  assert.equal(
+    result.phaseVolumeMigration.aggregateNodeSourceStatus,
+    'schroeder-hierarchy-aggregate-node-reduction-submitted'
+  );
   assert.equal(result.phaseVolumeMigration.phaseVolumeStatus, 'phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeMigration.migrationMode, 'physical-volume-level-target-with-aggregate-coherence');
   assert.equal(result.phaseVolumeMigration.aggregateCoherenceRequirement, 'retained-aggregate-node-buffer-consumed');
@@ -6093,6 +6203,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'schroeder-cross-level-state-delta-merge-submitted');
   assert.equal(result.hierarchyAggregateStatus, 'schroeder-hierarchy-aggregate-submitted');
   assert.equal(result.hierarchyAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
+  assert.equal(result.phaseVolumeTargetAggregateStatus, 'schroeder-phase-volume-target-aggregate-submitted');
+  assert.equal(result.phaseVolumeTargetAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
   assert.equal(result.farAggregateCandidateStatus, 'schroeder-far-aggregate-candidates-submitted');
   assert.equal(result.farAggregateCandidateConsumerStatus, 'far-aggregate-candidates-forwarded-to-resident-backend');
   assert.equal(result.farAggregateForceSummaryStatus, 'schroeder-far-aggregate-force-summary-submitted');
@@ -6150,7 +6262,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -6544,6 +6656,10 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   });
 
   assert.equal(result.phaseVolumeMigration.retainedMigrationBuffer, true);
+  assert.equal(result.phaseVolumeMigration.aggregateNodeSourceMode, 'phase-volume-target-aggregate-node');
+  assert.equal(result.phaseVolumeTargetAggregate.retainedAggregateBuffer, true);
+  assert.equal(result.phaseVolumeTargetAggregate.aggregateSourceMode, 'phase-volume-target-level-assignment');
+  assert.equal(result.phaseVolumeTargetAggregateNode.retainedAggregateNodeBuffer, true);
   assert.equal(result.farAggregateCandidates.retainedFarAggregateCandidateBuffer, true);
   assert.equal(result.farAggregateCandidates.farAggregateCandidateCount, 96);
   assert.equal(result.farAggregateCandidateStatus, 'schroeder-far-aggregate-candidates-submitted');
@@ -6574,6 +6690,8 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   );
   assert.equal(result.phaseVolumeDiagnosticSummary.summaryRows.length, 32);
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
+  assert.equal(result.phaseVolumeTargetAggregateStatus, 'schroeder-phase-volume-target-aggregate-submitted');
+  assert.equal(result.phaseVolumeTargetAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
   assert.equal(result.phaseVolumeLevelUpdateConsumerStatus, 'phase-volume-level-update-forwarded-to-resident-backend');
   assert.equal(result.phaseVolumeNativeLevelSource, 'state-manager-admitted-phase-volume-level-update');
@@ -6614,7 +6732,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 

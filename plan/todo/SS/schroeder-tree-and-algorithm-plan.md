@@ -275,7 +275,14 @@ Suggested schemas:
   makes the StateManager-admitted phase-volume overlay the source of the
   positive level update; the mounted H2O steam proof now reports source level
   `0`, target level up to `2`, `phase-migration=changed`, and no full
-  readback.
+  readback. The aggregate-coherence checkpoint adds a dedicated GPU
+  phase-volume target aggregate producer over retained level-assignment rows,
+  reuses the hierarchy aggregate-node reducer to materialize target-cell nodes,
+  and feeds those nodes into phase-volume migration without changing the main
+  far-field hierarchy aggregate source. The URL H2O steam proof now requires
+  positive coarsen-eligible and aggregate-coherent counts, zero refine-required
+  rows, zero conservation residual issues, particle-count growth `1x`, and no
+  full readback.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -474,6 +481,9 @@ Suggested schemas:
    - keep future phase-volume level changes StateManager-admitted: source
      assignment levels come from current mechanics volume, while represented
      phase volume drives the retained migration target level;
+   - materialize phase-volume target aggregate nodes from retained assignment
+     rows before migration so coherent bulk phase expansion can coarsen without
+     requiring a prior cross-level merge aggregate;
    - preserve fine representation near surfaces, reactions, and walls.
 
 ## Acceptance Gates
@@ -515,15 +525,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS aggregate-coherent phase-volume coarsening**:
+The next code slice on `SS` is **SS phase-volume refine/split policy**:
 
-1. Improve aggregate-node matching/coherence for water-to-steam target cells so
-   coherent bulk steam can produce coarsen rows instead of refine-required rows
-   when conservation residuals allow it.
-2. Preserve the authority split: current/rest mechanics volume defines source
-   level assignment, represented phase volume defines migration target level,
-   and admitted overlay rows own following-tick level changes.
+1. Use compact target-aggregate and migration diagnostics to keep coherent bulk
+   phase expansion coarsened while preserving or refining particles near
+   surfaces, reactions, walls, shocks, and high-gradient regions.
+2. Add explicit surface/interface/refine pressure counters before any
+   split/merge mutation path, keeping mutation StateManager-admitted and
+   conservation-safe.
 3. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
-   observed admitted update delta > 0, represented/rest volume > 100, particle
-   growth <= 1, no full readback, and status telemetry separating expansion
-   detection from level-update deltas.
+   observed admitted update delta > 0, represented/rest volume > 100,
+   coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent
+   bulk, particle growth <= 1, no full readback, and status telemetry
+   separating expansion detection from level-update deltas.

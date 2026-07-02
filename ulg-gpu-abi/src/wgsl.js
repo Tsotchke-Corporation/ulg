@@ -9572,6 +9572,158 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederPhaseVolumeTargetAggregateWgsl = `
+struct SchroederPhaseVolumeTargetAggregateParams {
+  particle_count: u32,
+  assignment_stride: u32,
+  aggregate_stride: u32,
+  flags: u32,
+  min_level: i32,
+  max_level: i32,
+  pad0: u32,
+  pad1: u32,
+  base_grid_spacing_m: f32,
+  target_support_cells: f32,
+  support_radius_scale: f32,
+  volume_expand_threshold: f32,
+  gas_phase_id: f32,
+  aggregate_epoch: f32,
+  state_family_id: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
+@group(0) @binding(1) var<storage, read_write> aggregate_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeTargetAggregateParams;
+
+const SCHROEDER_PVTA_ASSIGNMENT_STRIDE: u32 = 16u;
+const SCHROEDER_PVTA_AGGREGATE_STRIDE: u32 = 32u;
+const SCHROEDER_PVTA_PI: f32 = 3.141592653589793;
+
+fn ss_pvta_positive(value: f32) -> bool {
+  return value == value && value > 0.0;
+}
+
+fn ss_pvta_clamp_i32(value: i32, lo: i32, hi: i32) -> i32 {
+  return min(max(value, lo), hi);
+}
+
+fn ss_pvta_volume_radius(volume_m3: f32) -> f32 {
+  if (!ss_pvta_positive(volume_m3)) {
+    return 0.0;
+  }
+  return pow((3.0 * volume_m3) / (4.0 * SCHROEDER_PVTA_PI), 0.3333333333333333);
+}
+
+fn ss_pvta_level_from_support(support_radius_m: f32) -> i32 {
+  let base_dx = max(params.base_grid_spacing_m, 0.000001);
+  let target_cells = max(params.target_support_cells, 1.0);
+  let native_dx_unclamped = max(support_radius_m / target_cells, 0.000001);
+  let raw_level = i32(round(log2(native_dx_unclamped / base_dx)));
+  return ss_pvta_clamp_i32(raw_level, params.min_level, params.max_level);
+}
+
+fn ss_pvta_write_empty(aggregate_offset: u32, assignment_offset: u32, particle_index: u32, status: f32) {
+  aggregate_rows[aggregate_offset + 0u] = 0.0;
+  aggregate_rows[aggregate_offset + 1u] = level_assignments[assignment_offset + 0u];
+  aggregate_rows[aggregate_offset + 2u] = level_assignments[assignment_offset + 15u];
+  aggregate_rows[aggregate_offset + 3u] = status;
+  aggregate_rows[aggregate_offset + 4u] = 0.0;
+  aggregate_rows[aggregate_offset + 5u] = 0.0;
+  aggregate_rows[aggregate_offset + 6u] = 0.0;
+  aggregate_rows[aggregate_offset + 7u] = params.state_family_id;
+  for (var column = 8u; column < SCHROEDER_PVTA_AGGREGATE_STRIDE; column = column + 1u) {
+    aggregate_rows[aggregate_offset + column] = 0.0;
+  }
+  aggregate_rows[aggregate_offset + 14u] = f32(particle_index);
+  aggregate_rows[aggregate_offset + 26u] = params.aggregate_epoch;
+  aggregate_rows[aggregate_offset + 27u] = level_assignments[assignment_offset + 0u];
+  aggregate_rows[aggregate_offset + 29u] = 2.0;
+  aggregate_rows[aggregate_offset + 30u] = 1.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let assignment_stride = max(params.assignment_stride, SCHROEDER_PVTA_ASSIGNMENT_STRIDE);
+  let aggregate_stride = max(params.aggregate_stride, SCHROEDER_PVTA_AGGREGATE_STRIDE);
+  let assignment_offset = particle_index * assignment_stride;
+  let aggregate_offset = particle_index * aggregate_stride;
+
+  let source_level = level_assignments[assignment_offset + 0u];
+  let source_support = level_assignments[assignment_offset + 2u];
+  let represented_volume = level_assignments[assignment_offset + 3u];
+  let rest_volume = level_assignments[assignment_offset + 4u];
+  let source_volume = level_assignments[assignment_offset + 5u];
+  let mass_kg = level_assignments[assignment_offset + 6u];
+  let phase_id = level_assignments[assignment_offset + 8u];
+  let position = vec3<f32>(
+    level_assignments[assignment_offset + 12u],
+    level_assignments[assignment_offset + 13u],
+    level_assignments[assignment_offset + 14u]
+  );
+  let chart_id = level_assignments[assignment_offset + 15u];
+
+  if (!ss_pvta_positive(represented_volume) || !ss_pvta_positive(rest_volume) || !ss_pvta_positive(mass_kg)) {
+    ss_pvta_write_empty(aggregate_offset, assignment_offset, particle_index, 32.0);
+    return;
+  }
+
+  let volume_ratio = represented_volume / max(rest_volume, 0.000001);
+  let gas_phase = abs(phase_id - params.gas_phase_id) < 0.5;
+  let phase_expanded = gas_phase && volume_ratio >= max(params.volume_expand_threshold, 1.0);
+  if (!phase_expanded) {
+    ss_pvta_write_empty(aggregate_offset, assignment_offset, particle_index, 32.0);
+    return;
+  }
+
+  let physical_support = ss_pvta_volume_radius(represented_volume) * max(params.support_radius_scale, 0.0);
+  let target_support = max(physical_support, source_support);
+  let target_level_i32 = ss_pvta_level_from_support(target_support);
+  let target_level = f32(target_level_i32);
+  let target_grid_spacing = max(params.base_grid_spacing_m, 0.000001) * exp2(target_level);
+  let target_cell = floor(position / target_grid_spacing);
+  let level_delta = target_level - source_level;
+
+  aggregate_rows[aggregate_offset + 0u] = 0.0;
+  aggregate_rows[aggregate_offset + 1u] = target_level;
+  aggregate_rows[aggregate_offset + 2u] = chart_id;
+  aggregate_rows[aggregate_offset + 3u] = 1.0;
+  aggregate_rows[aggregate_offset + 4u] = target_cell.x;
+  aggregate_rows[aggregate_offset + 5u] = target_cell.y;
+  aggregate_rows[aggregate_offset + 6u] = target_cell.z;
+  aggregate_rows[aggregate_offset + 7u] = params.state_family_id;
+  aggregate_rows[aggregate_offset + 8u] = mass_kg;
+  aggregate_rows[aggregate_offset + 9u] = represented_volume;
+  aggregate_rows[aggregate_offset + 10u] = 0.0;
+  aggregate_rows[aggregate_offset + 11u] = 0.0;
+  aggregate_rows[aggregate_offset + 12u] = 0.0;
+  aggregate_rows[aggregate_offset + 13u] = 0.0;
+  aggregate_rows[aggregate_offset + 14u] = f32(particle_index);
+  aggregate_rows[aggregate_offset + 15u] = 1.0;
+  aggregate_rows[aggregate_offset + 16u] = mass_kg;
+  aggregate_rows[aggregate_offset + 17u] = mass_kg;
+  aggregate_rows[aggregate_offset + 18u] = 0.0;
+  aggregate_rows[aggregate_offset + 19u] = max(source_volume, rest_volume);
+  aggregate_rows[aggregate_offset + 20u] = represented_volume;
+  aggregate_rows[aggregate_offset + 21u] = 0.0;
+  aggregate_rows[aggregate_offset + 22u] = 0.0;
+  aggregate_rows[aggregate_offset + 23u] = 0.0;
+  aggregate_rows[aggregate_offset + 24u] = 0.0;
+  aggregate_rows[aggregate_offset + 25u] = 0.0;
+  aggregate_rows[aggregate_offset + 26u] = params.aggregate_epoch;
+  aggregate_rows[aggregate_offset + 27u] = source_level;
+  aggregate_rows[aggregate_offset + 28u] = level_delta;
+  aggregate_rows[aggregate_offset + 29u] = 2.0;
+  aggregate_rows[aggregate_offset + 30u] = 1.0;
+  aggregate_rows[aggregate_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederHierarchyAggregateNodeReduceWgsl = `
 struct SchroederHierarchyAggregateNodeReduceParams {
   row_count: u32,

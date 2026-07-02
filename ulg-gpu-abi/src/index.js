@@ -93,6 +93,8 @@ export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA = 'peercomput
 export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-migration-admission.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-diagnostic-summary.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-diagnostic-summary-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -1001,6 +1003,40 @@ export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT = Object.freeze([
   'capacityStatus:f32',
   'stateAdmissionRequired:f32',
   'pad0:f32'
+]);
+export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'migrationRowCount:f32',
+  'activeUpdateCount:f32',
+  'coarsenEligibleCount:f32',
+  'refineRequiredCount:f32',
+  'aggregateCoherentCount:f32',
+  'conservationResidualIssueCount:f32',
+  'minSourceLevelId:f32',
+  'maxSourceLevelId:f32',
+  'minTargetLevelId:f32',
+  'maxTargetLevelId:f32',
+  'maxPositiveLevelDelta:f32',
+  'maxNegativeLevelDelta:f32',
+  'totalRestVolumeM3:f32',
+  'totalRepresentedVolumeM3:f32',
+  'totalAggregateMassKg:f32',
+  'totalAggregateRepresentedVolumeM3:f32',
+  'totalAbsAggregateMassResidualKg:f32',
+  'totalAbsAggregateVolumeResidualM3:f32',
+  'steamExpansionCandidateCount:f32',
+  'admittedUpdateCount:f32',
+  'stateAdmissionRequiredCount:f32',
+  'visibleMigrationCount:f32',
+  'aggregateMissingCount:f32',
+  'levelChangedCount:f32',
+  'summaryModeId:f32',
+  'migrationEpoch:f32',
+  'status:f32',
+  'phaseVolumeExpandThreshold:f32',
+  'stateFamilyId:f32',
+  'capacityStatus:f32',
+  'pad0:f32',
+  'pad1:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

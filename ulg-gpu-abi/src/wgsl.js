@@ -8623,3 +8623,149 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   level_update_rows[update_offset + 31u] = 0.0;
 }
 `;
+
+export const schroederPhaseVolumeDiagnosticSummaryWgsl = `
+struct SchroederPhaseVolumeDiagnosticSummaryParams {
+  level_update_row_count: u32,
+  level_update_stride: u32,
+  summary_stride: u32,
+  flags: u32,
+  phase_volume_expand_threshold: f32,
+  migration_epoch: f32,
+  state_family_id: f32,
+  pad0: f32,
+};
+
+@group(0) @binding(0) var<storage, read> level_update_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> summary_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeDiagnosticSummaryParams;
+
+const SCHROEDER_PVDS_LEVEL_UPDATE_STRIDE: u32 = 32u;
+const SCHROEDER_PVDS_SUMMARY_STRIDE: u32 = 32u;
+
+fn ss_pvds_active_update(offset: u32) -> bool {
+  let status = level_update_rows[offset + 3u];
+  let admission = level_update_rows[offset + 17u];
+  return status > 0.0 && status < 32.0 && admission > 0.0;
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  let level_update_stride = max(params.level_update_stride, SCHROEDER_PVDS_LEVEL_UPDATE_STRIDE);
+  let summary_stride = max(params.summary_stride, SCHROEDER_PVDS_SUMMARY_STRIDE);
+  let summary_offset = 0u * summary_stride;
+
+  var active_count = 0.0;
+  var coarsen_count = 0.0;
+  var refine_count = 0.0;
+  var coherent_count = 0.0;
+  var residual_issue_count = 0.0;
+  var min_source_level = 1000000.0;
+  var max_source_level = -1000000.0;
+  var min_target_level = 1000000.0;
+  var max_target_level = -1000000.0;
+  var max_positive_delta = 0.0;
+  var max_negative_delta = 0.0;
+  var total_rest_volume = 0.0;
+  var total_represented_volume = 0.0;
+  var total_aggregate_mass = 0.0;
+  var total_aggregate_volume = 0.0;
+  var total_abs_mass_residual = 0.0;
+  var total_abs_volume_residual = 0.0;
+  var steam_expansion_count = 0.0;
+  var admitted_update_count = 0.0;
+  var state_admission_required_count = 0.0;
+  var visible_migration_count = 0.0;
+  var aggregate_missing_count = 0.0;
+  var level_changed_count = 0.0;
+
+  for (var row_index = 0u; row_index < params.level_update_row_count; row_index = row_index + 1u) {
+    let offset = row_index * level_update_stride;
+    if (ss_pvds_active_update(offset)) {
+      let source_level = level_update_rows[offset + 1u];
+      let target_level = level_update_rows[offset + 2u];
+      let level_delta = level_update_rows[offset + 9u];
+      let coarsen = level_update_rows[offset + 13u] > 0.0;
+      let refine = level_update_rows[offset + 14u] > 0.0;
+      let coherent = level_update_rows[offset + 15u] > 0.0;
+      let residual_issue = level_update_rows[offset + 16u] > 1.0;
+      let phase_volume_ratio = level_update_rows[offset + 8u];
+      active_count = active_count + 1.0;
+      coarsen_count = coarsen_count + select(0.0, 1.0, coarsen);
+      refine_count = refine_count + select(0.0, 1.0, refine);
+      coherent_count = coherent_count + select(0.0, 1.0, coherent);
+      residual_issue_count = residual_issue_count + select(0.0, 1.0, residual_issue);
+      min_source_level = min(min_source_level, source_level);
+      max_source_level = max(max_source_level, source_level);
+      min_target_level = min(min_target_level, target_level);
+      max_target_level = max(max_target_level, target_level);
+      max_positive_delta = max(max_positive_delta, max(level_delta, 0.0));
+      max_negative_delta = min(max_negative_delta, min(level_delta, 0.0));
+      total_rest_volume = total_rest_volume + level_update_rows[offset + 6u];
+      total_represented_volume = total_represented_volume + level_update_rows[offset + 7u];
+      total_aggregate_mass = total_aggregate_mass + level_update_rows[offset + 22u];
+      total_aggregate_volume = total_aggregate_volume + level_update_rows[offset + 23u];
+      total_abs_mass_residual = total_abs_mass_residual + abs(level_update_rows[offset + 24u]);
+      total_abs_volume_residual = total_abs_volume_residual + abs(level_update_rows[offset + 25u]);
+      steam_expansion_count = steam_expansion_count + select(
+        0.0,
+        1.0,
+        phase_volume_ratio >= max(params.phase_volume_expand_threshold, 1.0)
+      );
+      admitted_update_count = admitted_update_count + select(0.0, 1.0, level_update_rows[offset + 17u] > 0.0);
+      state_admission_required_count = state_admission_required_count + select(
+        0.0,
+        1.0,
+        level_update_rows[offset + 30u] > 0.0
+      );
+      visible_migration_count = visible_migration_count + select(0.0, 1.0, coarsen || refine);
+      aggregate_missing_count = aggregate_missing_count + select(0.0, 1.0, !coherent);
+      level_changed_count = level_changed_count + select(0.0, 1.0, abs(target_level - source_level) > 0.5);
+    }
+  }
+
+  if (active_count == 0.0) {
+    min_source_level = 0.0;
+    max_source_level = 0.0;
+    min_target_level = 0.0;
+    max_target_level = 0.0;
+  }
+
+  summary_rows[summary_offset + 0u] = f32(params.level_update_row_count);
+  summary_rows[summary_offset + 1u] = active_count;
+  summary_rows[summary_offset + 2u] = coarsen_count;
+  summary_rows[summary_offset + 3u] = refine_count;
+  summary_rows[summary_offset + 4u] = coherent_count;
+  summary_rows[summary_offset + 5u] = residual_issue_count;
+  summary_rows[summary_offset + 6u] = min_source_level;
+  summary_rows[summary_offset + 7u] = max_source_level;
+  summary_rows[summary_offset + 8u] = min_target_level;
+  summary_rows[summary_offset + 9u] = max_target_level;
+  summary_rows[summary_offset + 10u] = max_positive_delta;
+  summary_rows[summary_offset + 11u] = max_negative_delta;
+  summary_rows[summary_offset + 12u] = total_rest_volume;
+  summary_rows[summary_offset + 13u] = total_represented_volume;
+  summary_rows[summary_offset + 14u] = total_aggregate_mass;
+  summary_rows[summary_offset + 15u] = total_aggregate_volume;
+  summary_rows[summary_offset + 16u] = total_abs_mass_residual;
+  summary_rows[summary_offset + 17u] = total_abs_volume_residual;
+  summary_rows[summary_offset + 18u] = steam_expansion_count;
+  summary_rows[summary_offset + 19u] = admitted_update_count;
+  summary_rows[summary_offset + 20u] = state_admission_required_count;
+  summary_rows[summary_offset + 21u] = visible_migration_count;
+  summary_rows[summary_offset + 22u] = aggregate_missing_count;
+  summary_rows[summary_offset + 23u] = level_changed_count;
+  summary_rows[summary_offset + 24u] = 1.0;
+  summary_rows[summary_offset + 25u] = params.migration_epoch;
+  summary_rows[summary_offset + 26u] = select(32.0, 1.0, active_count > 0.0);
+  summary_rows[summary_offset + 27u] = max(params.phase_volume_expand_threshold, 1.0);
+  summary_rows[summary_offset + 28u] = params.state_family_id;
+  summary_rows[summary_offset + 29u] = 1.0;
+  summary_rows[summary_offset + 30u] = 0.0;
+  summary_rows[summary_offset + 31u] = 0.0;
+}
+`;

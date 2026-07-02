@@ -10,6 +10,7 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -32,6 +33,8 @@ import {
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
@@ -51,7 +54,9 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
   SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+  SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_NO_FULL_READBACK_MODE,
+  SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
   createSchroederActiveNodeListPlan,
@@ -72,6 +77,8 @@ import {
   createSchroederHierarchyAggregatePlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
+  createSchroederPhaseVolumeDiagnosticSummaryParamsArray,
+  createSchroederPhaseVolumeDiagnosticSummaryPlan,
   createSchroederPhaseVolumeLevelUpdateParamsArray,
   createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
@@ -88,6 +95,7 @@ import {
   runSchroederHierarchyAggregateNodeReductionWebGpu,
   runSchroederHierarchyAggregateWebGpu,
   runSchroederLevelAssignmentWebGpu,
+  runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   runSchroederPhaseVolumeLevelUpdateWebGpu,
   runSchroederPhaseVolumeMigrationWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
@@ -143,7 +151,7 @@ function manualBuffers({
   };
 }
 
-function createFakeWebGpuDevice() {
+function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
   const createdBuffers = [];
   const writes = [];
   const shaderModules = [];
@@ -163,6 +171,15 @@ function createFakeWebGpuDevice() {
         destroyed: false,
         destroy() {
           this.destroyed = true;
+        },
+        async mapAsync() {
+          return undefined;
+        },
+        getMappedRange() {
+          return new ArrayBuffer(size);
+        },
+        unmap() {
+          this.unmapped = true;
         }
       };
       createdBuffers.push(buffer);
@@ -196,7 +213,9 @@ function createFakeWebGpuDevice() {
           };
         },
         copyBufferToBuffer() {
-          throw new Error('Schroeder no-full-readback test should not copy to a readback buffer');
+          if (!allowReadbackCopies) {
+            throw new Error('Schroeder no-full-readback test should not copy to a readback buffer');
+          }
         },
         finish() {
           return { label: 'fake-schroeder-command-buffer' };
@@ -365,6 +384,20 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
   );
   assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-diagnostic-summary.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-diagnostic-summary-execution.v0'
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length,
+    SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
     ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -881,6 +914,42 @@ test('Schroeder phase-volume level update plan requires StateManager admission',
   assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS);
   assert.equal(view.getUint32(12, true), 1);
+  assert.equal(view.getFloat32(20, true), 7);
+});
+
+test('Schroeder phase-volume diagnostic summary plan reads compact admitted level updates only', () => {
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 130,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    migrationEpoch: 7,
+    levelUpdateBuffer: { label: 'fake-phase-volume-level-update-buffer' }
+  };
+  const plan = createSchroederPhaseVolumeDiagnosticSummaryPlan({
+    phaseVolumeLevelUpdate,
+    phaseVolumeExpandThreshold: 64
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA);
+  assert.equal(plan.status, 'schroeder-phase-volume-diagnostic-summary-plan-ready');
+  assert.equal(plan.sourcePhaseVolumeLevelUpdateSchema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA);
+  assert.equal(plan.levelUpdateRowCount, 130);
+  assert.equal(plan.summaryRowCount, 1);
+  assert.equal(plan.outputCompaction, 'one-compact-phase-volume-diagnostic-summary-row');
+  assert.equal(plan.diagnosticStatus, 'phase-volume-diagnostics-ready');
+  assert.equal(plan.visibleStressCaseStatus, 'water-to-steam-level-migration-diagnostics-ready');
+  assert.equal(plan.readbackPolicy, 'compact-summary-only-no-particle-readback');
+  assert.equal(plan.summaryByteLength, 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederPhaseVolumeDiagnosticSummaryParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS);
+  assert.equal(view.getFloat32(16, true), 64);
   assert.equal(view.getFloat32(20, true), 7);
 });
 
@@ -1469,6 +1538,43 @@ test('Schroeder phase-volume level update consumes retained migration rows after
   );
 });
 
+test('Schroeder phase-volume diagnostic summary consumes admitted level updates with compact readback', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 130,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    migrationEpoch: 11,
+    levelUpdateBuffer: { label: 'retained-phase-volume-level-update-buffer' }
+  };
+  const summary = await runSchroederPhaseVolumeDiagnosticSummaryWebGpu({
+    device,
+    phaseVolumeLevelUpdate,
+    phaseVolumeExpandThreshold: 64
+  });
+
+  assert.equal(summary.schema, ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA);
+  assert.equal(summary.phaseVolumeDiagnosticSummarySchema, ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA);
+  assert.equal(summary.status, 'schroeder-phase-volume-diagnostic-summary-submitted');
+  assert.equal(summary.sourcePhaseVolumeLevelUpdateSchema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA);
+  assert.equal(summary.readbackMode, SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE);
+  assert.equal(summary.compactSummaryReadbackPerformed, true);
+  assert.equal(summary.fullReadbackPerformed, false);
+  assert.equal(summary.fullParticleReadbackPerformed, false);
+  assert.equal(summary.retainedSummaryBuffer, true);
+  assert.ok(summary.summaryBuffer);
+  assert.equal(summary.summaryBuffer.destroyed, false);
+  assert.equal(summary.summaryBufferByteLength, 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(summary.summaryRows.length, 32);
+  assert.equal(summary.diagnosticStatus, 'phase-volume-diagnostics-submitted');
+  assert.equal(summary.visibleStressCaseStatus, 'water-to-steam-level-migration-diagnostics-submitted');
+  assert.equal(summary.conservativeTransferStatus, 'diagnostic-summary-only-no-conservative-transfer');
+  assert.equal(summary.stateMutationStatus, 'diagnostic-summary-only-no-state-mutation');
+  assert.deepEqual(device.dispatches, [[1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeDiagnosticSummaryParams')));
+});
+
 test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -1490,6 +1596,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
       hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
       hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
+      hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
   };
@@ -1530,6 +1637,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregateNode, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
+  assert.equal(result.phaseVolumeDiagnosticSummary, null);
+  assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
@@ -1541,6 +1650,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.residentStep.hasHierarchyAggregateNode, false);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
+  assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
   assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
   assert.equal(
     result.crossLevelCouplingStatus,
@@ -1554,6 +1664,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregateNodeStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeMigrationStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservativeTransferStatus, 'state-delta-ready-pending-admission');
   assert.equal(result.stateMutationStatus, 'pending-state-delta-submitted-awaiting-admission');
@@ -1573,6 +1685,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].schroederHierarchyAggregateNode, null);
   assert.equal(calls[0].schroederPhaseVolumeMigration, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
+  assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(calls[0].fuseNoFullResidentMechanics, true);
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
@@ -1605,7 +1719,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
         hasHierarchyAggregate: Boolean(options.schroederHierarchyAggregate),
         hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
-        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
+        hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
       };
     }
   });
@@ -1641,11 +1756,13 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     'requires-state-manager-admission-for-authoritative-level-migration'
   );
   assert.equal(result.phaseVolumeLevelUpdate, null);
+  assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'schroeder-cross-level-state-delta-merge-submitted');
   assert.equal(result.hierarchyAggregateStatus, 'schroeder-hierarchy-aggregate-submitted');
   assert.equal(result.hierarchyAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
+  assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-migration-submitted');
   assert.equal(result.stateMutationStatus, 'phase-volume-migration-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'requires-state-manager-admission-for-authoritative-level-migration');
@@ -1654,6 +1771,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.residentStep.hasHierarchyAggregateNode, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
+  assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederCrossLevelStateDeltaMerge.schema,
@@ -1672,6 +1790,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA
   );
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
     device.dispatches,
     [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
@@ -1679,7 +1798,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
 });
 
 test('Schroeder same-level mechanics can apply admitted phase-volume level updates before resident backend', async () => {
-  const device = createFakeWebGpuDevice();
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const calls = [];
   const result = await runSchroederSameLevelMechanicsWebGpu({
@@ -1699,7 +1818,8 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
         schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
         status: 'resident-step-stubbed',
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
-        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
+        hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
       };
     }
   });
@@ -1715,21 +1835,36 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     result.phaseVolumeLevelUpdate.stateAuthorityStatus,
     'state-manager-admitted-phase-volume-level-update-materialized'
   );
+  assert.equal(result.phaseVolumeDiagnosticSummary.retainedSummaryBuffer, true);
+  assert.equal(result.phaseVolumeDiagnosticSummary.summaryRowCount, 1);
+  assert.equal(result.phaseVolumeDiagnosticSummary.compactSummaryReadbackPerformed, true);
+  assert.equal(result.phaseVolumeDiagnosticSummary.diagnosticStatus, 'phase-volume-diagnostics-submitted');
+  assert.equal(
+    result.phaseVolumeDiagnosticSummary.visibleStressCaseStatus,
+    'water-to-steam-level-migration-diagnostics-submitted'
+  );
+  assert.equal(result.phaseVolumeDiagnosticSummary.summaryRows.length, 32);
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'schroeder-phase-volume-diagnostic-summary-submitted');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-level-update-submitted');
   assert.equal(result.stateMutationStatus, 'phase-volume-level-update-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, true);
+  assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, true);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederPhaseVolumeLevelUpdate.schema,
     ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA
   );
+  assert.equal(
+    calls[0].schroederPhaseVolumeDiagnosticSummary.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+  );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 

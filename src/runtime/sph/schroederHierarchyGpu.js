@@ -8,6 +8,7 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -28,6 +29,8 @@ import {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
@@ -49,6 +52,7 @@ import {
   schroederCrossLevelStateDeltaWgsl,
   schroederCrossLevelTransferWgsl,
   schroederLevelAssignmentWgsl,
+  schroederPhaseVolumeDiagnosticSummaryWgsl,
   schroederPhaseVolumeLevelUpdateWgsl,
   schroederPhaseVolumeMigrationWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -78,6 +82,8 @@ export {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
@@ -98,6 +104,7 @@ export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANS
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
+export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS = SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
@@ -109,6 +116,7 @@ export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
+export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
@@ -125,6 +133,7 @@ export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
+export const SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-phase-volume-diagnostic-summary-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schroeder-phase-volume-level-update-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
 
@@ -611,6 +620,37 @@ export function createSchroederPhaseVolumeLevelUpdateParamsArray({
   return buffer;
 }
 
+export function createSchroederPhaseVolumeDiagnosticSummaryParamsArray({
+  levelUpdateRowCount = 0,
+  levelUpdateStrideFloats = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+  summaryStrideFloats = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
+  flags = 0,
+  phaseVolumeExpandThreshold = DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD,
+  migrationEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(levelUpdateRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    levelUpdateStrideFloats,
+    SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    summaryStrideFloats,
+    SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(16, Math.max(1, finiteNumber(
+    phaseVolumeExpandThreshold,
+    DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD
+  )), true);
+  view.setFloat32(20, finiteNumber(migrationEpoch, 0), true);
+  view.setFloat32(24, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(28, 0, true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -936,6 +976,26 @@ function assertPhaseVolumeMigrationInput(phaseVolumeMigration) {
   )));
   if (stride !== SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS) {
     throw new RangeError('Schroeder phase-volume level update requires the current migration row layout');
+  }
+}
+
+function assertPhaseVolumeLevelUpdateInput(phaseVolumeLevelUpdate) {
+  if (
+    phaseVolumeLevelUpdate?.schema !== ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA
+    && phaseVolumeLevelUpdate?.schema !== ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA
+  ) {
+    throw new TypeError('Schroeder phase-volume diagnostic summary requires a Schroeder phase-volume level-update input');
+  }
+  const migrationRowCount = Math.max(0, Math.round(finiteNumber(phaseVolumeLevelUpdate.migrationRowCount, 0)));
+  if (migrationRowCount <= 0) {
+    throw new RangeError('Schroeder phase-volume diagnostic summary requires at least one level-update row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeLevelUpdate.levelUpdateStrideFloats,
+    SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
+  )));
+  if (stride !== SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS) {
+    throw new RangeError('Schroeder phase-volume diagnostic summary requires the current level-update row layout');
   }
 }
 
@@ -1385,6 +1445,53 @@ export function createSchroederPhaseVolumeLevelUpdatePlan({
       ? 'state-manager-admission-present'
       : 'requires-state-manager-admission-for-authoritative-level-migration',
     conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederPhaseVolumeDiagnosticSummaryPlan({
+  phaseVolumeLevelUpdate,
+  phaseVolumeExpandThreshold = DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD,
+  migrationEpoch = phaseVolumeLevelUpdate?.migrationEpoch ?? 0,
+  stateFamilyId = phaseVolumeLevelUpdate?.stateFamilyId ?? 1
+} = {}) {
+  assertPhaseVolumeLevelUpdateInput(phaseVolumeLevelUpdate);
+  const levelUpdateRowCount = Math.max(0, Math.round(finiteNumber(phaseVolumeLevelUpdate.migrationRowCount, 0)));
+  const summaryByteLength = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
+    status: 'schroeder-phase-volume-diagnostic-summary-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-phase-volume-diagnostic-summary',
+    sourcePhaseVolumeLevelUpdateSchema: phaseVolumeLevelUpdate.schema,
+    sourcePhaseVolumeLevelUpdateStatus: phaseVolumeLevelUpdate.status ?? null,
+    levelUpdateRowCount,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    summaryRowLayout: [...SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT],
+    summaryStrideFloats: SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
+    summaryStrideBytes: summaryByteLength,
+    summaryByteLength,
+    summaryRowCount: 1,
+    outputCompaction: 'one-compact-phase-volume-diagnostic-summary-row',
+    phaseVolumeExpandThreshold: Math.max(1, finiteNumber(
+      phaseVolumeExpandThreshold,
+      DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD
+    )),
+    migrationEpoch: finiteNumber(migrationEpoch, 0),
+    stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    diagnosticStatus: 'phase-volume-diagnostics-ready',
+    visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-ready',
+    readbackPolicy: 'compact-summary-only-no-particle-readback',
+    outputFamilies: [
+      'schroeder-phase-volume-diagnostics',
+      'schroeder-phase-volume-level-update'
+    ],
+    stateMutationStatus: 'diagnostic-summary-only-no-state-mutation',
+    stateAuthorityStatus: 'state-manager-admitted-level-update-source',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -3078,6 +3185,144 @@ export async function runSchroederPhaseVolumeLevelUpdateWebGpu({
   }
 }
 
+export async function runSchroederPhaseVolumeDiagnosticSummaryWebGpu({
+  device,
+  phaseVolumeLevelUpdate,
+  phaseVolumeExpandThreshold = DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD,
+  migrationEpoch = phaseVolumeLevelUpdate?.migrationEpoch ?? 0,
+  stateFamilyId = phaseVolumeLevelUpdate?.stateFamilyId ?? 1,
+  retainSummaryBuffer = true,
+  readbackMode = SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederPhaseVolumeDiagnosticSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederPhaseVolumeDiagnosticSummaryPlan({
+    phaseVolumeLevelUpdate,
+    phaseVolumeExpandThreshold,
+    migrationEpoch,
+    stateFamilyId
+  });
+  const compactSummaryReadback = readbackMode === SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE;
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedLevelUpdateBuffer = phaseVolumeLevelUpdate?.levelUpdateBuffer || null;
+  const levelUpdateRows = phaseVolumeLevelUpdate?.levelUpdateRows instanceof Float32Array
+    ? phaseVolumeLevelUpdate.levelUpdateRows
+    : null;
+  if (!borrowedLevelUpdateBuffer && !(levelUpdateRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder phase-volume diagnostic summary requires a retained level-update buffer or explicit rows');
+  }
+
+  const levelUpdateBuffer = borrowedLevelUpdateBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-diagnostic-summary-in', levelUpdateRows);
+  const summaryBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-diagnostic-summary-out',
+    size: plan.summaryByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-diagnostic-summary-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = compactSummaryReadback
+    ? device.createBuffer({
+      label: 'ulg-schroeder-phase-volume-diagnostic-summary-readback',
+      size: plan.summaryByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    })
+    : null;
+  let returnedRetainedSummaryBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederPhaseVolumeDiagnosticSummaryParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-phase-volume-diagnostic-summary.v0',
+      label: 'ulg-schroeder-phase-volume-diagnostic-summary',
+      code: schroederPhaseVolumeDiagnosticSummaryWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: levelUpdateBuffer } },
+        { binding: 1, resource: { buffer: summaryBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    if (compactSummaryReadback) {
+      encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, plan.summaryByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let summaryRows = new Float32Array();
+    if (compactSummaryReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      summaryRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+      phaseVolumeDiagnosticSummarySchema: plan.schema,
+      status: 'schroeder-phase-volume-diagnostic-summary-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode,
+      compactSummaryReadbackPerformed: compactSummaryReadback,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedSummaryBuffer: Boolean(retainSummaryBuffer),
+      summaryBufferByteLength: plan.summaryByteLength,
+      summaryRows,
+      diagnosticStatus: 'phase-volume-diagnostics-submitted',
+      visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-submitted',
+      conservativeTransferStatus: 'diagnostic-summary-only-no-conservative-transfer',
+      stateMutationStatus: 'diagnostic-summary-only-no-state-mutation',
+      stateAuthorityStatus: 'state-manager-admitted-level-update-source',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainSummaryBuffer) {
+      result.summaryBuffer = summaryBuffer;
+      result.destroySummaryBuffer = () => summaryBuffer.destroy?.();
+      returnedRetainedSummaryBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedLevelUpdateBuffer) levelUpdateBuffer.destroy?.();
+      if (!retainSummaryBuffer || !returnedRetainedSummaryBuffer) summaryBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback || compactSummaryReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -3095,6 +3340,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   hierarchyAggregateNode = null,
   phaseVolumeMigration = null,
   phaseVolumeLevelUpdate = null,
+  phaseVolumeDiagnosticSummary = null,
   stateDeltaMergeAdmission = null,
   phaseVolumeMigrationAdmission = null,
   selectedLevel = 0,
@@ -3114,6 +3360,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableHierarchyAggregateNodeReduction = enableHierarchyAggregate,
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
+  enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -3136,6 +3383,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   hierarchyAggregateNodeReductionRunner = runSchroederHierarchyAggregateNodeReductionWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
+  phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
+  phaseVolumeDiagnosticReadbackMode = SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   mergeEpoch = 0,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
@@ -3212,6 +3461,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof phaseVolumeLevelUpdateRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeLevelUpdateRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && enablePhaseVolumeMigration
+    && enablePhaseVolumeLevelUpdate
+    && enablePhaseVolumeDiagnosticSummary
+    && typeof phaseVolumeDiagnosticSummaryRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeDiagnosticSummaryRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -3342,6 +3605,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainLevelUpdateBuffer: true,
       readbackMode
     });
+  const resolvedPhaseVolumeDiagnosticSummary = !resolvedPhaseVolumeLevelUpdate || !enablePhaseVolumeDiagnosticSummary
+    ? null
+    : phaseVolumeDiagnosticSummary || await phaseVolumeDiagnosticSummaryRunner({
+      device,
+      phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
+      phaseVolumeExpandThreshold,
+      migrationEpoch: mergeEpoch,
+      retainSummaryBuffer: true,
+      readbackMode: phaseVolumeDiagnosticReadbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -3367,6 +3640,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederHierarchyAggregateNode: resolvedHierarchyAggregateNode,
     schroederPhaseVolumeMigration: resolvedPhaseVolumeMigration,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
+    schroederPhaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -3518,6 +3792,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedPhaseVolumeLevelUpdate.levelUpdateByteLength
         ?? 0
     } : null,
+    phaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary ? {
+      schema: resolvedPhaseVolumeDiagnosticSummary.schema,
+      status: resolvedPhaseVolumeDiagnosticSummary.status,
+      summaryRowCount: resolvedPhaseVolumeDiagnosticSummary.summaryRowCount,
+      diagnosticStatus: resolvedPhaseVolumeDiagnosticSummary.diagnosticStatus,
+      visibleStressCaseStatus: resolvedPhaseVolumeDiagnosticSummary.visibleStressCaseStatus,
+      readbackPolicy: resolvedPhaseVolumeDiagnosticSummary.readbackPolicy,
+      compactSummaryReadbackPerformed: resolvedPhaseVolumeDiagnosticSummary.compactSummaryReadbackPerformed,
+      retainedSummaryBuffer: Boolean(resolvedPhaseVolumeDiagnosticSummary.summaryBuffer),
+      summaryBufferByteLength: resolvedPhaseVolumeDiagnosticSummary.summaryBufferByteLength
+        ?? resolvedPhaseVolumeDiagnosticSummary.summaryByteLength
+        ?? 0,
+      summaryRows: resolvedPhaseVolumeDiagnosticSummary.summaryRows instanceof Float32Array
+        ? Array.from(resolvedPhaseVolumeDiagnosticSummary.summaryRows)
+        : []
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -3564,6 +3854,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       resolvedPhaseVolumeMigration
         ? 'disabled-phase-volume-level-update-admission-not-provided'
         : (resolvedHierarchyAggregateNode ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')
+    ),
+    phaseVolumeDiagnosticSummaryStatus: resolvedPhaseVolumeDiagnosticSummary?.status ?? (
+      resolvedPhaseVolumeLevelUpdate
+        ? 'disabled-phase-volume-diagnostic-summary'
+        : (resolvedPhaseVolumeMigration ? 'disabled-phase-volume-level-update-admission-not-provided' : 'disabled-same-level-only-mechanics')
     ),
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
       ?? resolvedPhaseVolumeMigration?.conservativeTransferStatus

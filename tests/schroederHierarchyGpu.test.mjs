@@ -5459,6 +5459,16 @@ test('Schroeder same-level mechanics auto-indexes sparse phase-volume overlays f
   );
   assert.equal(result.phaseVolumeNextTickAssignmentOverlay?.schema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA);
   assert.equal(
+    result.schroederPhaseVolumeNextTickAssignmentOverlay?.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA
+  );
+  assert.equal(
+    result.schroederPhaseVolumeNextTickAssignmentOverlay?.levelUpdateBuffer,
+    phaseVolumeLevelUpdate.levelUpdateBuffer
+  );
+  assert.equal(result.schroederPhaseVolumeNextTickAssignmentOverlay?.sameDeviceOnly, true);
+  assert.equal(result.schroederPhaseVolumeNextTickAssignmentOverlay?.rawGpuBufferTransferAllowed, false);
+  assert.equal(
     result.phaseVolumeNextTickAssignmentOverlayConsumerStatus,
     'phase-volume-level-update-overlay-ready-for-next-resident-tick'
   );

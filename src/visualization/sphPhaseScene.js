@@ -15,6 +15,7 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
@@ -164,6 +165,8 @@ export const ULG_PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 export const ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-phase-volume-diagnostic-status.v0';
+export const ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_FEEDBACK_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-phase-volume-assignment-overlay-feedback.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-source.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA =
@@ -233,6 +236,127 @@ function normalizeSchroederPhaseVolumeDiagnosticSummaryRow(summary = null) {
   return [...rows];
 }
 
+function schroederPhaseVolumeNextTickAssignmentOverlayFromExecution(residentExecution = null) {
+  const sourceStep = residentExecution?.finalStep
+    || residentExecution?.residentStep
+    || residentExecution
+    || null;
+  return residentExecution?.schroederPhaseVolumeNextTickAssignmentOverlay
+    || sourceStep?.schroederPhaseVolumeNextTickAssignmentOverlay
+    || residentExecution?.phaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay
+    || sourceStep?.phaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay
+    || null;
+}
+
+export function createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry({
+  residentExecution = null,
+  residentExecutionGeneration = null,
+  currentResidentExecutionGeneration = null,
+  source = 'resident-step-publication'
+} = {}) {
+  const sourceStep = residentExecution?.finalStep
+    || residentExecution?.residentStep
+    || residentExecution
+    || null;
+  const overlay = schroederPhaseVolumeNextTickAssignmentOverlayFromExecution(residentExecution);
+  const inferredGeneration = finiteNumberOrNull(
+    residentExecutionGeneration
+      ?? residentExecution?.residentExecutionGeneration
+      ?? sourceStep?.residentExecutionGeneration
+  );
+  const currentGeneration = finiteNumberOrNull(
+    currentResidentExecutionGeneration
+      ?? residentExecution?.currentResidentExecutionGeneration
+      ?? sourceStep?.currentResidentExecutionGeneration
+      ?? inferredGeneration
+  );
+  const rowCount = Math.max(0, Math.round(Number(
+    overlay?.phaseVolumeAssignmentOverlayRowCount
+      ?? overlay?.levelUpdateRowCount
+      ?? 0
+  ) || 0));
+  const retainedLevelUpdateBuffer = Boolean(overlay?.levelUpdateBuffer);
+  const schemaReady =
+    overlay?.schema === ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA;
+  const overlayEnabled = overlay?.phaseVolumeAssignmentOverlayEnabled === true;
+  const noRawGpuBufferTransfer = overlay?.rawGpuBufferTransferAllowed !== true;
+  const noFullParticleReadback = overlay?.fullParticleReadbackRequired !== true;
+  const ready = Boolean(
+    schemaReady
+      && overlayEnabled
+      && rowCount > 0
+      && retainedLevelUpdateBuffer
+      && noRawGpuBufferTransfer
+      && noFullParticleReadback
+  );
+  const status = ready
+    ? 'schroeder-phase-volume-assignment-overlay-feedback-ready'
+    : (!overlay
+        ? 'schroeder-phase-volume-assignment-overlay-feedback-empty'
+        : (!schemaReady
+            ? 'schroeder-phase-volume-assignment-overlay-feedback-blocked-schema-mismatch'
+            : (!overlayEnabled
+                ? 'schroeder-phase-volume-assignment-overlay-feedback-disabled'
+                : (!retainedLevelUpdateBuffer
+                    ? 'schroeder-phase-volume-assignment-overlay-feedback-blocked-retained-buffer-required'
+                    : (!noRawGpuBufferTransfer || !noFullParticleReadback
+                        ? 'schroeder-phase-volume-assignment-overlay-feedback-blocked-nonportable-transfer-required'
+                        : 'schroeder-phase-volume-assignment-overlay-feedback-blocked-empty-overlay')))));
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_FEEDBACK_SCHEMA,
+    status,
+    ready,
+    source,
+    sourceSchema: residentExecution?.schema ?? null,
+    sourceStatus: residentExecution?.status ?? null,
+    sourceStepSchema: sourceStep?.schema ?? null,
+    sourceStepStatus: sourceStep?.status ?? null,
+    residentExecutionGeneration: inferredGeneration,
+    currentResidentExecutionGeneration: currentGeneration,
+    overlaySchema: overlay?.schema ?? null,
+    overlayStatus: overlay?.status ?? null,
+    overlayConsumerStatus: overlay?.consumerStatus ?? null,
+    levelUpdateRowCount: rowCount,
+    rowAlignedWithParticles: overlay?.rowAlignedWithParticles === true,
+    sparseOverlayIndexRequired: overlay?.sparseOverlayIndexRequired === true,
+    overlayIndexMode: overlay?.overlayIndexMode ?? null,
+    sparseOverlayIndexStatus: overlay?.sparseOverlayIndexStatus ?? null,
+    retainedLevelUpdateBuffer,
+    levelUpdateBufferByteLength: overlay?.levelUpdateBufferByteLength ?? 0,
+    transferMode: overlay?.transferMode ?? null,
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    fullParticleReadbackRequired: overlay?.fullParticleReadbackRequired === true,
+    nativeLevelSource: ready
+      ? 'phase-volume-level-update-target-level'
+      : 'level-assignment-native-support-radius',
+    selectedLevelSource: ready
+      ? 'state-manager-admitted-phase-volume-level-update'
+      : 'configured-selected-schroeder-level',
+    phaseVolumeAssignmentOverlay: ready ? overlay : null
+  };
+}
+
+export function summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(feedback = null) {
+  if (!feedback) {
+    return {
+      schema: ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_FEEDBACK_SCHEMA,
+      status: 'schroeder-phase-volume-assignment-overlay-feedback-empty',
+      ready: false,
+      rawGpuBufferTransferAllowed: false,
+      fullParticleReadbackRequired: false
+    };
+  }
+  const { phaseVolumeAssignmentOverlay: _phaseVolumeAssignmentOverlay, ...summary } = feedback;
+  return {
+    ...summary,
+    rawGpuBufferTransferAllowed: false,
+    descriptorOnlyPeerComputeHandoff: true
+  };
+}
+
 export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution = null) {
   const sourceStep = residentExecution?.finalStep || residentExecution || null;
   const sourceSummary = sourceStep?.phaseVolumeDiagnosticSummary
@@ -292,6 +416,13 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
       ?? residentExecution?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
       ?? residentExecution?.phaseVolumeLevelUpdate?.levelUpdateBuffer
   );
+  const phaseVolumeAssignmentOverlayFeedback = summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+    sourceStep?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || residentExecution?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || sourceStep?.phaseVolumeAssignmentOverlayFeedback
+      || residentExecution?.phaseVolumeAssignmentOverlayFeedback
+      || null
+  );
   const noFullParticleReadback = sourceSummary
     ? sourceSummary.fullParticleReadbackPerformed !== true && sourceSummary.fullReadbackPerformed !== true
     : null;
@@ -310,6 +441,22 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     phaseVolumeDiagnosticSummaryStatus: sourceStatus,
     phaseVolumeMigrationStatus: sourceStep?.phaseVolumeMigrationStatus ?? null,
     phaseVolumeLevelUpdateStatus: sourceStep?.phaseVolumeLevelUpdateStatus ?? null,
+    phaseVolumeAssignmentOverlayFeedbackStatus: phaseVolumeAssignmentOverlayFeedback.status,
+    phaseVolumeAssignmentOverlayFeedbackReady: phaseVolumeAssignmentOverlayFeedback.ready === true,
+    phaseVolumeAssignmentOverlayFeedbackRowCount:
+      phaseVolumeAssignmentOverlayFeedback.levelUpdateRowCount ?? 0,
+    phaseVolumeAssignmentOverlayFeedbackIndexRequired:
+      phaseVolumeAssignmentOverlayFeedback.sparseOverlayIndexRequired === true,
+    phaseVolumeAssignmentOverlayFeedbackRawGpuBufferTransferAllowed:
+      phaseVolumeAssignmentOverlayFeedback.rawGpuBufferTransferAllowed === true,
+    phaseVolumeNextTickAssignmentOverlayStatus:
+      sourceStep?.phaseVolumeNextTickAssignmentOverlayStatus
+      ?? residentExecution?.phaseVolumeNextTickAssignmentOverlayStatus
+      ?? null,
+    phaseVolumeNextTickAssignmentOverlayConsumerStatus:
+      sourceStep?.phaseVolumeNextTickAssignmentOverlayConsumerStatus
+      ?? residentExecution?.phaseVolumeNextTickAssignmentOverlayConsumerStatus
+      ?? null,
     visibleStressCaseStatus: sourceSummary?.visibleStressCaseStatus ?? null,
     readbackPolicy: sourceSummary?.readbackPolicy ?? 'compact-summary-only-no-particle-readback',
     compactSummaryReadbackPerformed: sourceSummary?.compactSummaryReadbackPerformed ?? null,
@@ -10535,6 +10682,7 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentSteps = null;
   let mlsMpmResidentExecutionGeneration = 0;
+  let schroederPhaseVolumeAssignmentOverlayFeedback = null;
   let sphThermalMaterialTable = null;
   let sphThermalClosureGraphBuffers = null;
   let sphThermalPhaseResponseTable = null;
@@ -10577,12 +10725,14 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentStep = null;
   scene.userData.mlsMpmResidentSteps = null;
   scene.userData.schroederPhaseVolumeDiagnostics = null;
+  scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
   scene.userData.schroederRenderSource = null;
   scene.userData.schroederRenderProxyDescriptorPlan = null;
   scene.userData.schroederRenderProxyVisibleConsumer = null;
   scene.userData.schroederRenderProxyDrawSource = null;
   scene.userData.schroederRenderProxyBackendSelection = null;
   renderer.userData.schroederPhaseVolumeDiagnostics = null;
+  renderer.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
   renderer.userData.schroederRenderSource = null;
   renderer.userData.schroederRenderProxyDescriptorPlan = null;
   renderer.userData.schroederRenderProxyVisibleConsumer = null;
@@ -12689,6 +12839,9 @@ export function createSphPhaseScene(container, {
     schroederEnableActiveNodeIndex = false,
     schroederEnableActiveNodeSortedIndex = false,
     schroederLawNeighborTraversalPolicyMode = null,
+    schroederPhaseVolumeAssignmentOverlayFeedbackStatus = null,
+    schroederPhaseVolumeAssignmentOverlayFeedbackRowCount = 0,
+    schroederPhaseVolumeAssignmentOverlayFeedbackGeneration = null,
     ...args
   } = {}) {
     const stepSignature = mlsMpmResidentStepSignatureFor(args);
@@ -12708,7 +12861,12 @@ export function createSphPhaseScene(container, {
       `ssPortable=${Boolean(schroederEnablePortableSummary) ? 1 : 0}`,
       `ssIndex=${Boolean(schroederEnableActiveNodeIndex) ? 1 : 0}`,
       `ssSorted=${Boolean(schroederEnableActiveNodeSortedIndex) ? 1 : 0}`,
-      `ssTraversal=${schroederLawNeighborTraversalPolicyMode || 'default'}`
+      `ssTraversal=${schroederLawNeighborTraversalPolicyMode || 'default'}`,
+      `ssPvFeedback=${schroederPhaseVolumeAssignmentOverlayFeedbackStatus || 'none'}`,
+      `ssPvFeedbackRows=${Math.max(0, Math.round(Number(
+        schroederPhaseVolumeAssignmentOverlayFeedbackRowCount
+      ) || 0))}`,
+      `ssPvFeedbackGeneration=${schroederPhaseVolumeAssignmentOverlayFeedbackGeneration ?? 'none'}`
     ].join('|');
   }
 
@@ -12756,6 +12914,16 @@ export function createSphPhaseScene(container, {
       ...(execution?.retainedSteps || []).flatMap((step) => residentProductMassBuffersFromStep(step)),
       ...schroederGasCellImportBuffersFromStep(execution?.finalStep),
       ...(execution?.retainedSteps || []).flatMap((step) => schroederGasCellImportBuffersFromStep(step)),
+      schroederPhaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay?.levelUpdateBuffer,
+      execution?.schroederPhaseVolumeNextTickAssignmentOverlay?.levelUpdateBuffer,
+      execution?.finalStep?.schroederPhaseVolumeNextTickAssignmentOverlay?.levelUpdateBuffer,
+      execution?.schroederPhaseVolumeAssignmentOverlayFeedback
+        ?.phaseVolumeAssignmentOverlay
+        ?.levelUpdateBuffer,
+      execution?.finalStep
+        ?.schroederPhaseVolumeAssignmentOverlayFeedback
+        ?.phaseVolumeAssignmentOverlay
+        ?.levelUpdateBuffer,
       ...activeGridPlanBuffers(execution?.finalStep?.nextParticleUploads?.activeGridDispatchPlanHint),
       ...activeGridPlanBuffers(execution?.finalStep?.residentActiveGridDispatchPlanHint)
     ].filter(Boolean);
@@ -12812,12 +12980,14 @@ export function createSphPhaseScene(container, {
     mlsMpmResidentStepsSignature = null;
     scene.userData.mlsMpmResidentSteps = null;
     scene.userData.schroederPhaseVolumeDiagnostics = null;
+    scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
     scene.userData.schroederRenderSource = null;
     scene.userData.schroederRenderProxyDescriptorPlan = null;
     scene.userData.schroederRenderProxyVisibleConsumer = null;
     scene.userData.schroederRenderProxyDrawSource = null;
     scene.userData.schroederRenderProxyBackendSelection = null;
     renderer.userData.schroederPhaseVolumeDiagnostics = null;
+    renderer.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
     renderer.userData.schroederRenderSource = null;
     renderer.userData.schroederRenderProxyDescriptorPlan = null;
     renderer.userData.schroederRenderProxyVisibleConsumer = null;
@@ -12838,6 +13008,9 @@ export function createSphPhaseScene(container, {
     mlsMpmResidentExecutionGeneration += 1;
     pendingMlsMpmResidentStep = null;
     pendingMlsMpmResidentSteps = null;
+    schroederPhaseVolumeAssignmentOverlayFeedback = null;
+    scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
+    renderer.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
     scene.userData.mlsMpmResidentExecutionGeneration = mlsMpmResidentExecutionGeneration;
     scene.userData.mlsMpmResidentExecutionInvalidation = {
       schema: 'peercompute.ulg.sph-scene-resident-execution-invalidation.v0',
@@ -17744,6 +17917,39 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
     scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
     scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
+    const nextSchroederPhaseVolumeAssignmentOverlayFeedback =
+      createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry({
+        residentExecution: stepsExecution || step || null,
+        residentExecutionGeneration,
+        currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+        source: 'resident-step-publication'
+      });
+    if (nextSchroederPhaseVolumeAssignmentOverlayFeedback.ready) {
+      schroederPhaseVolumeAssignmentOverlayFeedback =
+        nextSchroederPhaseVolumeAssignmentOverlayFeedback;
+    } else if (
+      schroederPhaseVolumeAssignmentOverlayFeedback?.residentExecutionGeneration
+      !== residentExecutionGeneration
+    ) {
+      schroederPhaseVolumeAssignmentOverlayFeedback = null;
+    }
+    const schroederPhaseVolumeAssignmentOverlayFeedbackSummary =
+      summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+        schroederPhaseVolumeAssignmentOverlayFeedback
+          || nextSchroederPhaseVolumeAssignmentOverlayFeedback
+      );
+    if (stepsExecution) {
+      stepsExecution.schroederPhaseVolumeAssignmentOverlayFeedback =
+        schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
+    }
+    if (step) {
+      step.schroederPhaseVolumeAssignmentOverlayFeedback =
+        schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
+    }
+    scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback =
+      schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
+    renderer.userData.schroederPhaseVolumeAssignmentOverlayFeedback =
+      schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
     const schroederPhaseVolumeDiagnostics =
       summarizeSchroederPhaseVolumeDiagnosticStatus(stepsExecution || step || null);
     scene.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
@@ -18985,6 +19191,18 @@ export function createSphPhaseScene(container, {
     const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
+    const cachedSchroederPhaseVolumeAssignmentOverlayFeedback =
+      requestedSchroederSimulation
+      && schroederPhaseVolumeAssignmentOverlayFeedback?.ready === true
+      && schroederPhaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay
+      && schroederPhaseVolumeAssignmentOverlayFeedback.currentResidentExecutionGeneration
+        === mlsMpmResidentExecutionGeneration
+        ? schroederPhaseVolumeAssignmentOverlayFeedback
+        : null;
+    const cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary =
+      summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedback
+      );
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
@@ -19051,7 +19269,13 @@ export function createSphPhaseScene(container, {
       schroederSelectedLevel: requestedSchroederSelectedLevel,
       schroederPortableSummaryEnabled: requestedSchroederEnablePortableSummary,
       schroederActiveNodeIndexEnabled: requestedSchroederEnableActiveNodeIndex,
-      schroederActiveNodeSortedIndexEnabled: requestedSchroederEnableActiveNodeSortedIndex
+      schroederActiveNodeSortedIndexEnabled: requestedSchroederEnableActiveNodeSortedIndex,
+      schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status,
+      schroederPhaseVolumeAssignmentOverlayFeedbackReady:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true,
+      schroederPhaseVolumeAssignmentOverlayFeedbackRows:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount ?? 0
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
@@ -19114,7 +19338,19 @@ export function createSphPhaseScene(container, {
       schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
       schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
       schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
-      schroederLawNeighborTraversalPolicyMode
+      schroederLawNeighborTraversalPolicyMode,
+      schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+          ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status
+          : null,
+      schroederPhaseVolumeAssignmentOverlayFeedbackRowCount:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+          ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount
+          : 0,
+      schroederPhaseVolumeAssignmentOverlayFeedbackGeneration:
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+          ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.residentExecutionGeneration
+          : null
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
     const residentStepsStartedAtMs = nowMs();
@@ -19365,6 +19601,19 @@ export function createSphPhaseScene(container, {
             activeNodeConsumerStatus: result.activeNodeConsumerStatus ?? null,
             activeNodeIndexStatus: result.activeNodeIndexStatus ?? null,
             activeNodeSortedIndexStatus: result.activeNodeSortedIndexStatus ?? null,
+            phaseVolumeAssignmentOverlayStatus: result.phaseVolumeAssignmentOverlayStatus ?? null,
+            phaseVolumeAssignmentOverlayConsumerStatus:
+              result.phaseVolumeAssignmentOverlayConsumerStatus ?? null,
+            phaseVolumeAssignmentOverlayFeedbackStatus:
+              result.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
+            phaseVolumeAssignmentOverlayFeedbackReady:
+              result.phaseVolumeAssignmentOverlayFeedbackReady === true,
+            phaseVolumeAssignmentOverlayFeedbackRows:
+              result.phaseVolumeAssignmentOverlayFeedback?.levelUpdateRowCount ?? 0,
+            phaseVolumeNextTickAssignmentOverlayStatus:
+              result.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
+            phaseVolumeNextTickAssignmentOverlayConsumerStatus:
+              result.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
             lawQueueStatus: result.lawQueueStatus ?? null,
             lawNeighborCandidateStatus: result.lawNeighborCandidateStatus ?? null,
             crossLevelCouplingStatus: result.crossLevelCouplingStatus ?? null,
@@ -19395,6 +19644,10 @@ export function createSphPhaseScene(container, {
           step.schroederActiveNodeList = schroederResult.activeNodeList ?? null;
           step.schroederLawQueue = schroederResult.lawQueue ?? null;
           step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
+          step.schroederPhaseVolumeAssignmentOverlayFeedback =
+            schroederResult.phaseVolumeAssignmentOverlayFeedback ?? null;
+          step.schroederPhaseVolumeNextTickAssignmentOverlay =
+            schroederResult.schroederPhaseVolumeNextTickAssignmentOverlay ?? null;
           step.schroederPortableSummary = schroederResult.portableSummary ?? null;
           step.portableSummary = schroederResult.portableSummary ?? null;
           step.renderLod = schroederResult.portableSummary?.renderLod ?? null;
@@ -19421,10 +19674,17 @@ export function createSphPhaseScene(container, {
           const retainedSteps = [];
           const stepSummaries = [];
           const schroederStepSummaries = [];
+          let currentPhaseVolumeAssignmentOverlayFeedback =
+            cachedSchroederPhaseVolumeAssignmentOverlayFeedback;
+          let finalPhaseVolumeAssignmentOverlayFeedback = null;
           markResidentStepsProgress('resident-steps-schroeder-sequence-started', {
             stepCount: count,
             selectedLevel: requestedSchroederSelectedLevel,
-            baseGridSpacingM: requestedSchroederBaseGridSpacingM
+            baseGridSpacingM: requestedSchroederBaseGridSpacingM,
+            phaseVolumeAssignmentOverlayFeedbackStatus:
+              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status,
+            phaseVolumeAssignmentOverlayFeedbackReady:
+              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
           });
           for (let index = 0; index < count; index += 1) {
             const summarizeStep = requestedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
@@ -19435,8 +19695,18 @@ export function createSphPhaseScene(container, {
             markResidentStepsProgress('resident-steps-schroeder-step-started', {
               stepIndex: index,
               selectedLevel: requestedSchroederSelectedLevel,
-              summarizeStep
+              summarizeStep,
+              phaseVolumeAssignmentOverlayFeedbackStatus:
+                currentPhaseVolumeAssignmentOverlayFeedback?.status ?? null,
+              phaseVolumeAssignmentOverlayFeedbackReady:
+                currentPhaseVolumeAssignmentOverlayFeedback?.ready === true,
+              phaseVolumeAssignmentOverlayFeedbackRows:
+                currentPhaseVolumeAssignmentOverlayFeedback?.levelUpdateRowCount ?? 0
             });
+            const stepPhaseVolumeAssignmentOverlay =
+              currentPhaseVolumeAssignmentOverlayFeedback?.ready === true
+                ? currentPhaseVolumeAssignmentOverlayFeedback.phaseVolumeAssignmentOverlay
+                : null;
             const residentStepOptions = {
               ...baseOptions,
               sphParticleState: currentSphParticleState,
@@ -19469,6 +19739,9 @@ export function createSphPhaseScene(container, {
               ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
               ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
               ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
+              ...(stepPhaseVolumeAssignmentOverlay
+                ? { phaseVolumeAssignmentOverlay: stepPhaseVolumeAssignmentOverlay }
+                : {}),
               enablePortableSummary: requestedSchroederEnablePortableSummary,
               portableSummaryPeerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
               enableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
@@ -19491,6 +19764,27 @@ export function createSphPhaseScene(container, {
               residentStepRunner: runMlsMpmResidentStepWithOptionalWebGpu,
               residentStepOptions
             });
+            const nextPhaseVolumeAssignmentOverlayFeedback =
+              createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry({
+                residentExecution: schroederResult,
+                residentExecutionGeneration: executionGeneration,
+                currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
+                source: 'schroeder-same-level-resident-step'
+              });
+            const nextPhaseVolumeAssignmentOverlayFeedbackSummary =
+              summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+                nextPhaseVolumeAssignmentOverlayFeedback
+              );
+            schroederResult.phaseVolumeAssignmentOverlayFeedback =
+              nextPhaseVolumeAssignmentOverlayFeedbackSummary;
+            schroederResult.phaseVolumeAssignmentOverlayFeedbackStatus =
+              nextPhaseVolumeAssignmentOverlayFeedbackSummary.status;
+            schroederResult.phaseVolumeAssignmentOverlayFeedbackReady =
+              nextPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true;
+            schroederResult.phaseVolumeAssignmentOverlayFeedbackConsumerStatus =
+              stepPhaseVolumeAssignmentOverlay
+                ? 'cached-phase-volume-assignment-overlay-consumed-by-schroeder-same-level-step'
+                : 'no-cached-phase-volume-assignment-overlay-for-schroeder-same-level-step';
             const step = attachSchroederSceneStepArtifacts(schroederResult.residentStep, schroederResult);
             if (!step) {
               throw new Error('Schroeder same-level scene runner did not return a resident step');
@@ -19511,7 +19805,11 @@ export function createSphPhaseScene(container, {
               schroederSelectedLevel: compactSchroederStep?.selectedLevel ?? null,
               schroederRenderLodStatus: compactSchroederStep?.renderLodStatus ?? null,
               schroederLocalRetainedRenderBufferStatus:
-                compactSchroederStep?.localRetainedRenderBufferStatus ?? null
+                compactSchroederStep?.localRetainedRenderBufferStatus ?? null,
+              phaseVolumeAssignmentOverlayFeedbackStatus:
+                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
+              phaseVolumeAssignmentOverlayFeedbackReady:
+                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackReady === true
             });
             schroederStepSummaries.push(compactSchroederStep);
             markResidentStepsProgress('resident-steps-schroeder-step-complete', {
@@ -19519,7 +19817,11 @@ export function createSphPhaseScene(container, {
               backend: step.backend,
               stageTiming: step.stageTiming || null,
               schroederStatus: compactSchroederStep?.status ?? null,
-              renderLodStatus: compactSchroederStep?.renderLodStatus ?? null
+              renderLodStatus: compactSchroederStep?.renderLodStatus ?? null,
+              phaseVolumeAssignmentOverlayFeedbackStatus:
+                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
+              phaseVolumeAssignmentOverlayFeedbackReady:
+                compactSchroederStep?.phaseVolumeAssignmentOverlayFeedbackReady === true
             });
             const carriedResidentProductMass =
               step.nextParticleUploads?.residentProductMass
@@ -19547,13 +19849,26 @@ export function createSphPhaseScene(container, {
             currentMlsMpmParticleUpload = step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
             currentResidentProductMass = carriedResidentProductMass;
             currentSourceSlot = step.particlePingPong?.nextSlot ?? (currentSourceSlot === 0 ? 1 : 0);
+            currentPhaseVolumeAssignmentOverlayFeedback =
+              nextPhaseVolumeAssignmentOverlayFeedback.ready
+                ? nextPhaseVolumeAssignmentOverlayFeedback
+                : null;
+            finalPhaseVolumeAssignmentOverlayFeedback = currentPhaseVolumeAssignmentOverlayFeedback;
           }
           const compactFinalSchroeder = compactSchroederSameLevelMechanicsForScene(finalSchroederResult);
+          const finalPhaseVolumeAssignmentOverlayFeedbackSummary =
+            summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+              finalPhaseVolumeAssignmentOverlayFeedback
+            );
           markResidentStepsProgress('resident-steps-schroeder-sequence-complete', {
             completedStepCount: stepSummaries.length,
             backend: finalStep?.backend || 'webgpu',
             schroederStatus: compactFinalSchroeder?.status ?? null,
-            renderLodStatus: compactFinalSchroeder?.renderLodStatus ?? null
+            renderLodStatus: compactFinalSchroeder?.renderLodStatus ?? null,
+            phaseVolumeAssignmentOverlayFeedbackStatus:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary.status,
+            phaseVolumeAssignmentOverlayFeedbackReady:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
           });
           return {
             schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
@@ -19563,6 +19878,16 @@ export function createSphPhaseScene(container, {
             schroederSameLevelSequenceStatus: 'schroeder-same-level-resident-steps-executed',
             schroederSameLevelMechanics: compactFinalSchroeder,
             schroederSameLevelMechanicsSummaries: schroederStepSummaries,
+            schroederPhaseVolumeNextTickAssignmentOverlay:
+              finalPhaseVolumeAssignmentOverlayFeedback?.phaseVolumeAssignmentOverlay ?? null,
+            schroederPhaseVolumeAssignmentOverlayFeedback:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary,
+            phaseVolumeAssignmentOverlayFeedback:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary,
+            phaseVolumeAssignmentOverlayFeedbackStatus:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary.status,
+            phaseVolumeAssignmentOverlayFeedbackReady:
+              finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true,
             stepCount: count,
             completedStepCount: stepSummaries.length,
             compactSummaryMode: requestedCompactSummaryMode,
@@ -19813,7 +20138,19 @@ export function createSphPhaseScene(container, {
             schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
             schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
             schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
-            schroederLawNeighborTraversalPolicyMode
+            schroederLawNeighborTraversalPolicyMode,
+            schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
+              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.status
+                : null,
+            schroederPhaseVolumeAssignmentOverlayFeedbackRowCount:
+              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount
+                : 0,
+            schroederPhaseVolumeAssignmentOverlayFeedbackGeneration:
+              cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
+                ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.residentExecutionGeneration
+                : null
           }) !== signature
         ) {
           destroyMlsMpmResidentStepsBuffers(execution);

@@ -105,6 +105,8 @@ import {
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial,
   summarizeRenderRowSphereBridgeMaterial,
+  createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry,
+  summarizeSchroederPhaseVolumeAssignmentOverlayFeedback,
   summarizeSchroederPhaseVolumeDiagnosticStatus,
   stabilizeSurfaceMeshMaterialForRenderer,
   createThreeWebGpuResidentBridgeMaterialProxy,
@@ -128,6 +130,7 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 
@@ -403,6 +406,68 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
   );
   assert.equal(status.particleCountGrowthStatus, 'particle-count-stable-or-reduced');
   assert.equal(status.fullPhysicsValidation, false);
+});
+
+test('SPH scene phase-volume overlay feedback keeps GPU buffer local and publishes summary only', () => {
+  const levelUpdateBuffer = { label: 'retained-phase-volume-overlay-buffer' };
+  const overlay = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-assignment-overlay-ready',
+    phaseVolumeAssignmentOverlayEnabled: true,
+    levelUpdateRowCount: 2,
+    phaseVolumeAssignmentOverlayRowCount: 2,
+    levelUpdateBuffer,
+    retainedLevelUpdateBuffer: true,
+    levelUpdateBufferByteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    rowAlignedWithParticles: false,
+    sparseOverlayIndexRequired: true,
+    overlayIndexMode: 'sparse-source-particle-index-required',
+    sparseOverlayIndexStatus: 'required-for-sparse-phase-volume-level-update-rows',
+    transferMode: 'descriptor-only-same-device-retained-buffer-ref',
+    rawGpuBufferTransferAllowed: false,
+    fullParticleReadbackRequired: false
+  };
+
+  const feedback = createSchroederPhaseVolumeAssignmentOverlayFeedbackCacheEntry({
+    residentExecution: {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      status: 'resident-steps-executed',
+      residentExecutionGeneration: 4,
+      currentResidentExecutionGeneration: 4,
+      schroederPhaseVolumeNextTickAssignmentOverlay: overlay
+    },
+    source: 'unit-test'
+  });
+  const summary = summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(feedback);
+  const diagnostic = summarizeSchroederPhaseVolumeDiagnosticStatus({
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    schroederPhaseVolumeAssignmentOverlayFeedback: summary,
+    phaseVolumeDiagnosticSummaryStatus: 'schroeder-phase-volume-diagnostic-summary-submitted',
+    phaseVolumeDiagnosticSummary: {
+      schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+      status: 'schroeder-phase-volume-diagnostic-summary-submitted',
+      summaryRows: new Float32Array(32),
+      fullParticleReadbackPerformed: false
+    }
+  });
+
+  assert.equal(feedback.status, 'schroeder-phase-volume-assignment-overlay-feedback-ready');
+  assert.equal(feedback.ready, true);
+  assert.equal(feedback.phaseVolumeAssignmentOverlay.levelUpdateBuffer, levelUpdateBuffer);
+  assert.equal(feedback.sameDeviceOnly, true);
+  assert.equal(feedback.rawGpuBufferTransferAllowed, false);
+  assert.equal(summary.status, feedback.status);
+  assert.equal(summary.ready, true);
+  assert.equal(summary.levelUpdateRowCount, 2);
+  assert.equal(summary.sparseOverlayIndexRequired, true);
+  assert.equal(summary.phaseVolumeAssignmentOverlay, undefined);
+  assert.equal(summary.rawGpuBufferTransferAllowed, false);
+  assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackStatus, feedback.status);
+  assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackReady, true);
+  assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackRowCount, 2);
+  assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackIndexRequired, true);
+  assert.equal(diagnostic.phaseVolumeAssignmentOverlayFeedbackRawGpuBufferTransferAllowed, false);
 });
 
 test('worker resident particle-state source cache keys avoid full hashes for versioned CPU-visible state', () => {

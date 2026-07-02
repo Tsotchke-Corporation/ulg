@@ -11048,6 +11048,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
     localRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     schroederLocalRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
+    schroederPhaseVolumeNextTickAssignmentOverlay: resolvedPhaseVolumeNextTickAssignmentOverlay,
     levelAssignment: {
       schema: resolvedLevelAssignment.schema,
       status: resolvedLevelAssignment.status,

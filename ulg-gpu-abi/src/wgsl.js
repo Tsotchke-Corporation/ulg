@@ -9977,6 +9977,205 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateForceSummaryWgsl = `
+struct SchroederFarAggregateForceSummaryParams {
+  active_node_count: u32,
+  far_candidate_count: u32,
+  candidate_stride: u32,
+  summary_stride: u32,
+  candidate_budget: u32,
+  enabled_far_law_mask: u32,
+  flags: u32,
+  pad0: u32,
+  gravitational_constant: f32,
+  softening_length_m: f32,
+  force_scale: f32,
+  far_field_error_bound: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> far_candidate_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> force_summary_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederFarAggregateForceSummaryParams;
+
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_CANDIDATE_STRIDE_FOR_FORCE: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE: u32 = 32u;
+
+fn ss_far_force_write_empty(summary_offset: u32, source_index: u32, candidate_offset: u32, status: f32) {
+  var source_particle = f32(source_index);
+  var source_level = 0.0;
+  var source_chart = 0.0;
+  var source_position = vec3<f32>(0.0);
+  if (candidate_offset < params.far_candidate_count * max(params.candidate_stride, SCHROEDER_DEFAULT_FAR_AGGREGATE_CANDIDATE_STRIDE_FOR_FORCE)) {
+    source_particle = far_candidate_rows[candidate_offset + 0u];
+    source_level = far_candidate_rows[candidate_offset + 1u];
+    source_chart = far_candidate_rows[candidate_offset + 4u];
+    source_position = vec3<f32>(
+      far_candidate_rows[candidate_offset + 21u],
+      far_candidate_rows[candidate_offset + 22u],
+      far_candidate_rows[candidate_offset + 23u]
+    );
+  }
+  force_summary_rows[summary_offset + 0u] = source_particle;
+  force_summary_rows[summary_offset + 1u] = source_level;
+  force_summary_rows[summary_offset + 2u] = source_chart;
+  force_summary_rows[summary_offset + 3u] = f32(params.enabled_far_law_mask);
+  force_summary_rows[summary_offset + 4u] = f32(source_index * max(params.candidate_budget, 1u));
+  force_summary_rows[summary_offset + 5u] = f32(max(params.candidate_budget, 1u));
+  force_summary_rows[summary_offset + 6u] = 0.0;
+  force_summary_rows[summary_offset + 7u] = 0.0;
+  force_summary_rows[summary_offset + 8u] = 0.0;
+  force_summary_rows[summary_offset + 9u] = 0.0;
+  force_summary_rows[summary_offset + 10u] = 0.0;
+  force_summary_rows[summary_offset + 11u] = 0.0;
+  force_summary_rows[summary_offset + 12u] = 0.0;
+  force_summary_rows[summary_offset + 13u] = 0.0;
+  force_summary_rows[summary_offset + 14u] = 0.0;
+  force_summary_rows[summary_offset + 15u] = params.far_field_error_bound;
+  force_summary_rows[summary_offset + 16u] = 0.0;
+  force_summary_rows[summary_offset + 17u] = 0.0;
+  force_summary_rows[summary_offset + 18u] = status;
+  force_summary_rows[summary_offset + 19u] = params.queue_epoch;
+  force_summary_rows[summary_offset + 20u] = params.state_family_id;
+  force_summary_rows[summary_offset + 21u] = params.gravitational_constant;
+  force_summary_rows[summary_offset + 22u] = params.softening_length_m;
+  force_summary_rows[summary_offset + 23u] = 1.0;
+  force_summary_rows[summary_offset + 24u] = source_position.x;
+  force_summary_rows[summary_offset + 25u] = source_position.y;
+  force_summary_rows[summary_offset + 26u] = source_position.z;
+  force_summary_rows[summary_offset + 27u] = 0.0;
+  force_summary_rows[summary_offset + 28u] = 0.0;
+  force_summary_rows[summary_offset + 29u] = 0.0;
+  force_summary_rows[summary_offset + 30u] = 0.0;
+  force_summary_rows[summary_offset + 31u] = 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let source_index = global_id.x;
+  if (source_index >= params.active_node_count) {
+    return;
+  }
+
+  let candidate_stride = max(params.candidate_stride, SCHROEDER_DEFAULT_FAR_AGGREGATE_CANDIDATE_STRIDE_FOR_FORCE);
+  let summary_stride = max(params.summary_stride, SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE);
+  let candidate_budget = max(params.candidate_budget, 1u);
+  let candidate_offset_base = source_index * candidate_budget * candidate_stride;
+  let summary_offset = source_index * summary_stride;
+
+  if (params.enabled_far_law_mask == 0u) {
+    ss_far_force_write_empty(summary_offset, source_index, candidate_offset_base, 32.0);
+    return;
+  }
+
+  var source_particle = f32(source_index);
+  var source_level = 0.0;
+  var source_chart = 0.0;
+  var source_position = vec3<f32>(0.0);
+  var acceleration = vec3<f32>(0.0);
+  var potential = 0.0;
+  var total_mass = 0.0;
+  var active_count = 0.0;
+  var accepted_count = 0.0;
+  var blocked_count = 0.0;
+  var overflow_count = 0.0;
+  var min_distance = 3.402823e38;
+  var max_opening_ratio = 0.0;
+  var max_error_bound = params.far_field_error_bound;
+  var admissibility_flags = 0.0;
+
+  for (var slot = 0u; slot < candidate_budget; slot = slot + 1u) {
+    let candidate_index = source_index * candidate_budget + slot;
+    if (candidate_index >= params.far_candidate_count) {
+      continue;
+    }
+    let candidate_offset = candidate_index * candidate_stride;
+    let status = far_candidate_rows[candidate_offset + 7u];
+    if (slot == 0u) {
+      source_particle = far_candidate_rows[candidate_offset + 0u];
+      source_level = far_candidate_rows[candidate_offset + 1u];
+      source_chart = far_candidate_rows[candidate_offset + 4u];
+      source_position = vec3<f32>(
+        far_candidate_rows[candidate_offset + 21u],
+        far_candidate_rows[candidate_offset + 22u],
+        far_candidate_rows[candidate_offset + 23u]
+      );
+      accepted_count = far_candidate_rows[candidate_offset + 30u];
+    }
+    if (far_candidate_rows[candidate_offset + 31u] > 0.0) {
+      overflow_count = overflow_count + 1.0;
+      accepted_count = max(accepted_count, far_candidate_rows[candidate_offset + 30u]);
+    }
+    if (status > 0.0 && status < 32.0) {
+      let aggregate_mass = far_candidate_rows[candidate_offset + 12u];
+      let distance_m = max(far_candidate_rows[candidate_offset + 8u], 0.000001);
+      let center_m = vec3<f32>(
+        far_candidate_rows[candidate_offset + 18u],
+        far_candidate_rows[candidate_offset + 19u],
+        far_candidate_rows[candidate_offset + 20u]
+      );
+      let direction_vector = center_m - source_position;
+      let softened_distance = sqrt(distance_m * distance_m + params.softening_length_m * params.softening_length_m);
+      let inv_distance = 1.0 / max(softened_distance, 0.000001);
+      let direction = direction_vector * inv_distance;
+      let acceleration_magnitude = params.gravitational_constant * aggregate_mass * inv_distance * inv_distance * params.force_scale;
+      acceleration = acceleration + direction * acceleration_magnitude;
+      potential = potential - params.gravitational_constant * aggregate_mass * inv_distance * params.force_scale;
+      total_mass = total_mass + aggregate_mass;
+      active_count = active_count + 1.0;
+      min_distance = min(min_distance, distance_m);
+      max_opening_ratio = max(max_opening_ratio, far_candidate_rows[candidate_offset + 11u]);
+      max_error_bound = max(max_error_bound, far_candidate_rows[candidate_offset + 25u]);
+      admissibility_flags = max(admissibility_flags, far_candidate_rows[candidate_offset + 26u]);
+    } else if (status >= 32.0) {
+      blocked_count = blocked_count + 1.0;
+    }
+  }
+
+  let final_min_distance = select(0.0, min_distance, active_count > 0.0);
+  var summary_status = select(32.0, 1.0, active_count > 0.0);
+  if (overflow_count > 0.0) {
+    summary_status = 128.0;
+  }
+
+  force_summary_rows[summary_offset + 0u] = source_particle;
+  force_summary_rows[summary_offset + 1u] = source_level;
+  force_summary_rows[summary_offset + 2u] = source_chart;
+  force_summary_rows[summary_offset + 3u] = f32(params.enabled_far_law_mask);
+  force_summary_rows[summary_offset + 4u] = f32(source_index * candidate_budget);
+  force_summary_rows[summary_offset + 5u] = f32(candidate_budget);
+  force_summary_rows[summary_offset + 6u] = accepted_count;
+  force_summary_rows[summary_offset + 7u] = active_count;
+  force_summary_rows[summary_offset + 8u] = acceleration.x;
+  force_summary_rows[summary_offset + 9u] = acceleration.y;
+  force_summary_rows[summary_offset + 10u] = acceleration.z;
+  force_summary_rows[summary_offset + 11u] = potential;
+  force_summary_rows[summary_offset + 12u] = total_mass;
+  force_summary_rows[summary_offset + 13u] = final_min_distance;
+  force_summary_rows[summary_offset + 14u] = max_opening_ratio;
+  force_summary_rows[summary_offset + 15u] = max_error_bound;
+  force_summary_rows[summary_offset + 16u] = overflow_count;
+  force_summary_rows[summary_offset + 17u] = blocked_count;
+  force_summary_rows[summary_offset + 18u] = summary_status;
+  force_summary_rows[summary_offset + 19u] = params.queue_epoch;
+  force_summary_rows[summary_offset + 20u] = params.state_family_id;
+  force_summary_rows[summary_offset + 21u] = params.gravitational_constant;
+  force_summary_rows[summary_offset + 22u] = params.softening_length_m;
+  force_summary_rows[summary_offset + 23u] = 1.0;
+  force_summary_rows[summary_offset + 24u] = source_position.x;
+  force_summary_rows[summary_offset + 25u] = source_position.y;
+  force_summary_rows[summary_offset + 26u] = source_position.z;
+  force_summary_rows[summary_offset + 27u] = admissibility_flags;
+  force_summary_rows[summary_offset + 28u] = 0.0;
+  force_summary_rows[summary_offset + 29u] = 0.0;
+  force_summary_rows[summary_offset + 30u] = 0.0;
+  force_summary_rows[summary_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederPhaseVolumeMigrationWgsl = `
 struct SchroederPhaseVolumeMigrationParams {
   particle_count: u32,

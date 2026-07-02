@@ -34898,3 +34898,46 @@ Next:
   without moving presentation into physics ownership.
 - Add PeerCompute/StateManager admission metadata for compact SS summaries,
   using descriptors, seeds, or explicit snapshots rather than raw GPU handles.
+
+## 2026-07-01 AKDT - SS Portable Summary Consumption And Admission
+
+Status:
+
+- Added a stable `schroeder-render-lod-summary` ABI schema constant and used it
+  in portable SS summary payloads.
+- Render ownership policy now recognizes descriptor-only SS portable summaries,
+  rejects raw browser `GPUBuffer` transfer, and exposes render LOD presentation
+  readiness/status without requiring full particle readback.
+- The browser resident authority host can admit descriptor-only SS portable
+  summaries into StateManager warm deltas and hot-buffer records for
+  PeerCompute-safe replay.
+- Resident host summaries now report SS portable-summary admission capability
+  alongside the render ownership fields.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeRenderOwnershipPolicy.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/peercomputeRenderOwnershipPolicy.test.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs` with
+  `16/16` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs` with
+  `18/18` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `66/66`
+  passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `86/86` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `860` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Materialize admitted SS render LOD summaries as scene/render source metadata
+  that references active leaves, coherent aggregates, and law queue proxy
+  counts without giving presentation physics ownership.
+- Keep the render-source path descriptor-first and no-full-readback by default,
+  then wire it into the existing SPH/Three render-source selection points.

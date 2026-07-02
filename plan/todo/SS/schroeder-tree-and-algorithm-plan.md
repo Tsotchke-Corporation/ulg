@@ -179,6 +179,8 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-phase-volume-level-update.v0`
 - `peercompute.ulg.schroeder-phase-volume-diagnostic-summary.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
+- `peercompute.ulg.schroeder-render-lod-summary.v0`
+- `peercompute.ulg.schroeder-portable-summary-admission.v0`
 
 ## Implementation Slices
 
@@ -305,7 +307,8 @@ Suggested schemas:
 ### Slice 8: Render And Distribution
 
 - Status: descriptor-only portable SS summary planning and same-level mechanics
-  forwarding landed in `ba87e41`.
+  forwarding landed in `ba87e41`; render ownership consumption and
+  StateManager/resident-authority admission landed in `10d1f5c`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -370,13 +373,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS portable summary consumption and admission**:
+The next code slice on `SS` is **SS render-source materialization**:
 
-1. Thread `schroederPortableSummary`/`renderLod` into the scene/render ownership
-   path as the presentation-facing SS source contract.
-2. Keep the handoff descriptor-only by default; do not move raw browser
-   `GPUBuffer` handles across PeerCompute or worker ownership boundaries.
-3. Add StateManager/PeerCompute admission metadata for compact SS summaries so
-   remote peers can replay from descriptors, seeds, or explicit snapshots.
-4. Preserve the default no-full-readback hot path and use compact summaries only
-   where an observing or admission boundary actually needs them.
+1. Convert admitted `schroeder-render-lod-summary` descriptors into
+   scene/render source metadata that references active leaves, coherent
+   aggregate proxies, and law queue proxy counts.
+2. Keep presentation as a consumer of SS render sources, not as the owner of
+   physics cadence or state authority.
+3. Preserve descriptor-only PeerCompute handoff by default; raw browser
+   `GPUBuffer` handles stay same-device/same-worker unless a later explicit
+   use case admits a different transport contract.
+4. Keep optical and PBR material choices closure-derived while avoiding full
+   particle readback for SS render-source planning.

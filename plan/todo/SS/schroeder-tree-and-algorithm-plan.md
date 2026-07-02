@@ -320,7 +320,9 @@ Suggested schemas:
   presentation-worker preemption bypass for explicit native same-device
   consumer refreshes landed in `efe73dc`; opt-in scene resident execution
   through `runSchroederSameLevelMechanicsWebGpu` plus native SS proxy draw
-  validation landed in `b573ccd`.
+  validation landed in `b573ccd`; URL/PeerCompute-style app configuration,
+  resident auto-scheduler wiring, visible SS telemetry, and no-full native
+  auto-refresh for URL-configured SS retained proxy draws landed in `9699d58`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -328,11 +330,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - expose the SS scene path through app/use-case configuration instead of
-     only direct scene API calls;
-   - feed compact SS telemetry into visible status/performance harness output:
-     selected level, native spacing, active leaves, retained proxy draw batches,
-     and native submit counts;
+   - feed compact SS telemetry into performance harness output, beyond the
+     visible status line now wired through the demo: selected level, native
+     spacing, active leaves, retained proxy draw batches, native submit counts,
+     and render-field readback status;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep diagnostic CPU proxy geometry explicit, capped, and outside the
      PeerCompute hot path;
@@ -389,14 +390,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS native retained-proxy live validation and
-telemetry hardening**:
+The next code slice on `SS` is **SS performance/admission hardening for
+configured live runs**:
 
-1. Exercise the live native surface path through the browser/performance harness
-   and confirm SS proxy draw commands submit without overlay or frame-copy
-   fallback.
-2. Surface any missing resolver/executor/camera/submit status in the existing
-   render-state telemetry.
-3. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
+1. Add the URL/use-case SS telemetry fields to the performance harness so
+   regressions can be tracked outside the visible status pane.
+2. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
+3. Start compact PeerCompute replay/admission of SS summaries as descriptors,
+   seeds, or snapshots rather than raw browser `GPUBuffer` handles.
 4. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.

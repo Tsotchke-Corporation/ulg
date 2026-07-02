@@ -35280,3 +35280,49 @@ Next:
 - Expose the SS scene path through app/use-case configuration so live runs can
   select plain MLS-MPM or Schroeder same-level orchestration without relying on
   direct test-only scene API calls.
+
+## 2026-07-01 AKDT - URL-Configured Schroeder Resident Auto Path
+
+Status:
+
+- Exposed the scene-local SS resident execution path through demo URL and
+  PeerCompute-style policy configuration:
+  `ss=1`, `schroeder=1`, `schroederSimulation=1`, or
+  `schroederSimulationPolicy`.
+- Threaded the normalized SS options through resident auto-scheduler telemetry,
+  resident batch signatures, and `scene.refreshMlsMpmResidentSteps`, so plain
+  MLS-MPM and Schroeder same-level runs no longer coalesce under the same
+  pending resident signature.
+- Added visible SS status telemetry for request/source, sequence status,
+  selected level, native grid spacing, active leaves, retained proxy draw
+  batches, retained refs, native submit draw counts, and backend selection.
+- Fixed native surface auto-refresh for configured SS runs by treating
+  `native-webgpu-surface-consumer` as a retained no-full-readback render path.
+  The URL-configured path now keeps render-field readback off and submits SS
+  active-leaf proxy draws in the native surface pass instead of falling back to
+  CPU render-field geometry.
+- Added Chromium coverage proving the URL-configured resident auto path reaches
+  `direct-schroeder-scene`, publishes local SS render LOD, resolves same-device
+  retained refs, and submits native retained-proxy draw commands without a
+  frame-copy or overlay-owned physics path.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `171/171` passing.
+- PASS: short Playwright probe confirmed `renderFieldReadback=false`,
+  `resident-extension-surface-draw-buffers-retained`,
+  `native-webgpu-surface-consumer-ready`, and
+  `schroeder-render-proxy-native-executor-submitted-to-pass` for
+  `ss=1&surfaceDraw=native-webgpu-surface-consumer`.
+- PASS: `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase native (same-device surface consumer|surface consumer draws scene-local Schroeder render LOD)|SPH phase URL Schroeder config drives native resident schedule"`.
+
+Next:
+
+- Add the SS telemetry fields to performance harness output, not only the
+  visible status pane.
+- Keep diagnostic CPU proxy geometry explicit, capped, and outside the
+  PeerCompute hot path.

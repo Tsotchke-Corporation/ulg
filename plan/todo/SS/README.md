@@ -183,16 +183,22 @@ Landed checkpoints:
     buffer resolver artifacts through resident publication, and proves in
     Chromium that the native surface pass submits SS active-leaf proxy draws
     without a frame-copy or overlay path.
+50. `9699d58` exposes the scene-local SS execution path through URL and
+    PeerCompute-style use-case configuration (`ss=1` / `schroeder=1` /
+    `schroederSimulationPolicy`), threads that selection through the resident
+    auto scheduler and batch signature, adds visible SS status telemetry, and
+    fixes native surface auto-refresh so URL-configured SS runs submit retained
+    native proxy draws without CPU render-field readback.
 
 Next implementation queue:
 
-1. Expose the SS scene path through app/use-case configuration so live runs can
-   select plain MLS-MPM or Schroeder same-level orchestration without test-only
-   `page.evaluate` calls.
-2. Feed compact SS telemetry into the visible status/performance harness:
-   selected level, native spacing, active leaves, retained proxy draw batches,
-   and native submit counts.
-3. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
+1. Feed compact SS telemetry into the performance harness output, not only the
+   visible status pane: selected level, native spacing, active leaves, retained
+   proxy draw batches, native submit counts, and render-field readback status.
+2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
+3. Publish/replay compact SS summaries across PeerCompute/StateManager
+   boundaries as descriptors, seeds, or snapshots rather than raw browser
+   `GPUBuffer` handles.
 4. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

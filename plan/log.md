@@ -34941,3 +34941,36 @@ Next:
   counts without giving presentation physics ownership.
 - Keep the render-source path descriptor-first and no-full-readback by default,
   then wire it into the existing SPH/Three render-source selection points.
+
+## 2026-07-01 AKDT - SS Scene Render Source Materialization
+
+Status:
+
+- Added `sph-scene-schroeder-render-source` metadata for admitted/ready
+  `schroeder-render-lod-summary` descriptors.
+- The scene helper now records active leaf proxy counts, coherent aggregate
+  proxy counts, law queue proxy counts, native hierarchy spacing,
+  closure-derived PBR/optics policy, StateManager admission metadata, and
+  no-full-readback status.
+- The resident render-source metadata/apply path now carries SS render-source
+  fields to render artifacts without giving presentation physics ownership.
+- Scene and renderer `userData` now expose `schroederRenderSource`, with a
+  public scene getter for diagnostics.
+- Raw browser `GPUBuffer` refs remain fail-closed in the scene metadata path.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `84/84` passing.
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/peercomputeComputeManagerIntegration.test.mjs tests/schroederHierarchyGpu.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `184/184` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `862` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Convert `schroederRenderSource` metadata into renderer-visible SS proxy
+  descriptors for active leaves and coherent aggregates.
+- Keep those descriptors closure/PBR-derived and no-full-readback, then decide
+  which existing render bridge should consume them first.

@@ -135,13 +135,16 @@ Landed checkpoints:
     render ownership policy and the resident authority host, storing compact
     StateManager warm deltas and hot-buffer descriptors without raw `GPUBuffer`
     transfer or full particle readback.
+40. `df261c7` materializes admitted SS render LOD summaries as scene/render
+    source metadata, including active leaf, coherent aggregate, law queue proxy,
+    closure-PBR, admission, and no-full-readback fields on the existing resident
+    render-source path.
 
 Next implementation queue:
 
-1. Materialize admitted SS render LOD summaries as scene/render source metadata
-   so presentation can consume SS leaves and coherent aggregates without owning
-   physics cadence.
-2. Map active-node leaves and coherent aggregate nodes into closure-derived PBR
+1. Map active-node leaves and coherent aggregate nodes into closure-derived PBR
    render sources without full particle readback.
+2. Add renderer-visible SS proxy/draw descriptors that consume the scene
+   `schroederRenderSource` contract without creating overlay-owned physics.
 3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

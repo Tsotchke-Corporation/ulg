@@ -308,7 +308,8 @@ Suggested schemas:
 
 - Status: descriptor-only portable SS summary planning and same-level mechanics
   forwarding landed in `ba87e41`; render ownership consumption and
-  StateManager/resident-authority admission landed in `10d1f5c`.
+  StateManager/resident-authority admission landed in `10d1f5c`; scene/render
+  source metadata materialization landed in `df261c7`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -316,10 +317,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - consume portable `schroeder-render-lod-summary` descriptors in the scene
-     and render ownership paths without making presentation the physics owner;
-   - map active-node leaves and coherent aggregate nodes into render sources
-     while keeping optical/PBR data closure-derived;
+   - map active-node leaves and coherent aggregate nodes into renderer-visible
+     proxy/draw descriptors while keeping optical/PBR data closure-derived;
+   - consume scene `schroederRenderSource` metadata without making presentation
+     the physics owner;
    - publish compact SS summaries across PeerCompute/StateManager boundaries as
      descriptors, seeds, or snapshots rather than raw browser `GPUBuffer`
      handles.
@@ -373,15 +374,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS render-source materialization**:
+The next code slice on `SS` is **SS render proxy descriptors**:
 
-1. Convert admitted `schroeder-render-lod-summary` descriptors into
-   scene/render source metadata that references active leaves, coherent
-   aggregate proxies, and law queue proxy counts.
-2. Keep presentation as a consumer of SS render sources, not as the owner of
-   physics cadence or state authority.
-3. Preserve descriptor-only PeerCompute handoff by default; raw browser
-   `GPUBuffer` handles stay same-device/same-worker unless a later explicit
-   use case admits a different transport contract.
-4. Keep optical and PBR material choices closure-derived while avoiding full
-   particle readback for SS render-source planning.
+1. Convert scene `schroederRenderSource` metadata into renderer-visible proxy
+   descriptors for active leaves and coherent aggregate nodes.
+2. Keep proxy descriptors closure/PBR-derived and no-full-readback by default.
+3. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
+   owner of physics cadence or state authority.
+4. Defer raw same-device `GPUBuffer` drawing until an explicit renderer
+   capability/admission contract proves it can be consumed without frame-copy
+   readback or overlay-only integration.

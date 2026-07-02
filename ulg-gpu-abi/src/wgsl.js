@@ -8208,3 +8208,310 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   aggregate_node_rows[node_offset + 31u] = 0.0;
 }
 `;
+
+export const schroederPhaseVolumeMigrationWgsl = `
+struct SchroederPhaseVolumeMigrationParams {
+  particle_count: u32,
+  aggregate_node_count: u32,
+  assignment_stride: u32,
+  aggregate_node_stride: u32,
+  migration_stride: u32,
+  min_level: i32,
+  max_level: i32,
+  flags: u32,
+  base_grid_spacing_m: f32,
+  target_support_cells: f32,
+  support_radius_scale: f32,
+  volume_expand_threshold: f32,
+  coarsen_level_delta_threshold: f32,
+  gas_phase_id: f32,
+  migration_epoch: f32,
+  aggregate_residual_tolerance: f32,
+};
+
+@group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
+@group(0) @binding(1) var<storage, read> aggregate_node_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> migration_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederPhaseVolumeMigrationParams;
+
+const SCHROEDER_PVM_ASSIGNMENT_STRIDE: u32 = 16u;
+const SCHROEDER_PVM_AGGREGATE_NODE_STRIDE: u32 = 32u;
+const SCHROEDER_PVM_MIGRATION_STRIDE: u32 = 32u;
+const SCHROEDER_PVM_PI: f32 = 3.141592653589793;
+
+fn ss_pvm_positive(value: f32) -> bool {
+  return value == value && value > 0.0;
+}
+
+fn ss_pvm_clamp_i32(value: i32, lo: i32, hi: i32) -> i32 {
+  return min(max(value, lo), hi);
+}
+
+fn ss_pvm_volume_radius(volume_m3: f32) -> f32 {
+  if (!ss_pvm_positive(volume_m3)) {
+    return 0.0;
+  }
+  return pow((3.0 * volume_m3) / (4.0 * SCHROEDER_PVM_PI), 0.3333333333333333);
+}
+
+fn ss_pvm_level_from_support(support_radius_m: f32) -> i32 {
+  let base_dx = max(params.base_grid_spacing_m, 0.000001);
+  let target_cells = max(params.target_support_cells, 1.0);
+  let native_dx_unclamped = max(support_radius_m / target_cells, 0.000001);
+  let raw_level = i32(round(log2(native_dx_unclamped / base_dx)));
+  return ss_pvm_clamp_i32(raw_level, params.min_level, params.max_level);
+}
+
+fn ss_pvm_grid_spacing_for_level(level: i32) -> f32 {
+  return max(params.base_grid_spacing_m, 0.000001) * exp2(f32(level));
+}
+
+fn ss_pvm_active_aggregate_node(node_offset: u32) -> bool {
+  let status = aggregate_node_rows[node_offset + 3u];
+  let admission = aggregate_node_rows[node_offset + 30u];
+  return status > 0.0 && status < 32.0 && admission > 0.0;
+}
+
+fn ss_pvm_same_cell(
+  node_offset: u32,
+  target_level: i32,
+  chart_id: f32,
+  target_cell: vec3<f32>
+) -> bool {
+  let node_level = aggregate_node_rows[node_offset + 1u];
+  let node_chart = aggregate_node_rows[node_offset + 2u];
+  let node_cell = vec3<f32>(
+    aggregate_node_rows[node_offset + 4u],
+    aggregate_node_rows[node_offset + 5u],
+    aggregate_node_rows[node_offset + 6u]
+  );
+  return abs(node_level - f32(target_level)) < 0.5
+    && abs(node_chart - chart_id) < 0.5
+    && all(abs(node_cell - target_cell) < vec3<f32>(0.5));
+}
+
+fn ss_pvm_write_row(
+  migration_offset: u32,
+  particle_index: u32,
+  source_level: f32,
+  target_level: f32,
+  status: f32,
+  source_support: f32,
+  target_support: f32,
+  rest_volume: f32,
+  represented_volume: f32,
+  volume_ratio: f32,
+  level_delta: f32,
+  phase_id: f32,
+  material_id: f32,
+  aggregate_node_index: f32,
+  aggregate_match_count: f32,
+  aggregate_suppressed_duplicate_count: f32,
+  aggregate_mass: f32,
+  aggregate_volume: f32,
+  aggregate_mass_residual: f32,
+  aggregate_volume_residual: f32,
+  source_grid_spacing: f32,
+  target_grid_spacing: f32,
+  aggregate_volume_ratio: f32,
+  coarsen_eligible: f32,
+  refine_required: f32,
+  phase_volume_mode_id: f32,
+  aggregate_coherence_status: f32,
+  conservation_residual_status: f32,
+  chart_id: f32,
+  migration_mode_id: f32,
+  state_admission_required: f32
+) {
+  migration_rows[migration_offset + 0u] = f32(particle_index);
+  migration_rows[migration_offset + 1u] = source_level;
+  migration_rows[migration_offset + 2u] = target_level;
+  migration_rows[migration_offset + 3u] = status;
+  migration_rows[migration_offset + 4u] = source_support;
+  migration_rows[migration_offset + 5u] = target_support;
+  migration_rows[migration_offset + 6u] = rest_volume;
+  migration_rows[migration_offset + 7u] = represented_volume;
+  migration_rows[migration_offset + 8u] = volume_ratio;
+  migration_rows[migration_offset + 9u] = level_delta;
+  migration_rows[migration_offset + 10u] = phase_id;
+  migration_rows[migration_offset + 11u] = material_id;
+  migration_rows[migration_offset + 12u] = aggregate_node_index;
+  migration_rows[migration_offset + 13u] = aggregate_match_count;
+  migration_rows[migration_offset + 14u] = aggregate_suppressed_duplicate_count;
+  migration_rows[migration_offset + 15u] = aggregate_mass;
+  migration_rows[migration_offset + 16u] = aggregate_volume;
+  migration_rows[migration_offset + 17u] = aggregate_mass_residual;
+  migration_rows[migration_offset + 18u] = aggregate_volume_residual;
+  migration_rows[migration_offset + 19u] = source_grid_spacing;
+  migration_rows[migration_offset + 20u] = target_grid_spacing;
+  migration_rows[migration_offset + 21u] = aggregate_volume_ratio;
+  migration_rows[migration_offset + 22u] = coarsen_eligible;
+  migration_rows[migration_offset + 23u] = refine_required;
+  migration_rows[migration_offset + 24u] = phase_volume_mode_id;
+  migration_rows[migration_offset + 25u] = aggregate_coherence_status;
+  migration_rows[migration_offset + 26u] = conservation_residual_status;
+  migration_rows[migration_offset + 27u] = params.migration_epoch;
+  migration_rows[migration_offset + 28u] = chart_id;
+  migration_rows[migration_offset + 29u] = migration_mode_id;
+  migration_rows[migration_offset + 30u] = state_admission_required;
+  migration_rows[migration_offset + 31u] = 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let assignment_stride = max(params.assignment_stride, SCHROEDER_PVM_ASSIGNMENT_STRIDE);
+  let aggregate_node_stride = max(params.aggregate_node_stride, SCHROEDER_PVM_AGGREGATE_NODE_STRIDE);
+  let migration_stride = max(params.migration_stride, SCHROEDER_PVM_MIGRATION_STRIDE);
+  let assignment_offset = particle_index * assignment_stride;
+  let migration_offset = particle_index * migration_stride;
+
+  let source_level = level_assignments[assignment_offset + 0u];
+  let source_grid_spacing = level_assignments[assignment_offset + 1u];
+  let source_support = level_assignments[assignment_offset + 2u];
+  let represented_volume = level_assignments[assignment_offset + 3u];
+  let rest_volume = level_assignments[assignment_offset + 4u];
+  let phase_id = level_assignments[assignment_offset + 8u];
+  let material_id = level_assignments[assignment_offset + 9u];
+  let position = vec3<f32>(
+    level_assignments[assignment_offset + 12u],
+    level_assignments[assignment_offset + 13u],
+    level_assignments[assignment_offset + 14u]
+  );
+  let chart_id = level_assignments[assignment_offset + 15u];
+
+  if (!ss_pvm_positive(represented_volume) || !ss_pvm_positive(rest_volume)) {
+    ss_pvm_write_row(
+      migration_offset,
+      particle_index,
+      source_level,
+      source_level,
+      32.0,
+      source_support,
+      source_support,
+      rest_volume,
+      represented_volume,
+      0.0,
+      0.0,
+      phase_id,
+      material_id,
+      -1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      source_grid_spacing,
+      source_grid_spacing,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      chart_id,
+      1.0,
+      1.0
+    );
+    return;
+  }
+
+  let volume_ratio = max(represented_volume / max(rest_volume, 0.000001), 0.0);
+  let physical_support = ss_pvm_volume_radius(represented_volume) * max(params.support_radius_scale, 0.0);
+  let target_support = max(physical_support, source_support);
+  let target_level_i32 = ss_pvm_level_from_support(target_support);
+  let target_level = f32(target_level_i32);
+  let target_grid_spacing = ss_pvm_grid_spacing_for_level(target_level_i32);
+  let level_delta = target_level - source_level;
+  let target_cell = floor(position / max(target_grid_spacing, 0.000001));
+
+  var aggregate_node_index = -1.0;
+  var aggregate_match_count = 0.0;
+  var aggregate_suppressed_duplicate_count = 0.0;
+  var aggregate_mass = 0.0;
+  var aggregate_volume = 0.0;
+  var aggregate_mass_residual = 0.0;
+  var aggregate_volume_residual = 0.0;
+  for (var node_index = 0u; node_index < params.aggregate_node_count; node_index = node_index + 1u) {
+    let node_offset = node_index * aggregate_node_stride;
+    if (ss_pvm_active_aggregate_node(node_offset)
+      && ss_pvm_same_cell(node_offset, target_level_i32, chart_id, target_cell)
+      && aggregate_node_index < 0.0) {
+      aggregate_node_index = f32(node_index);
+      aggregate_match_count = aggregate_node_rows[node_offset + 15u];
+      aggregate_suppressed_duplicate_count = aggregate_node_rows[node_offset + 16u];
+      aggregate_mass = aggregate_node_rows[node_offset + 8u];
+      aggregate_volume = aggregate_node_rows[node_offset + 9u];
+      aggregate_mass_residual = aggregate_node_rows[node_offset + 17u];
+      aggregate_volume_residual = aggregate_node_rows[node_offset + 18u];
+    }
+  }
+
+  let gas_phase = abs(phase_id - params.gas_phase_id) < 0.5;
+  let phase_expanded = gas_phase && volume_ratio >= max(params.volume_expand_threshold, 1.0);
+  let aggregate_matched = aggregate_node_index >= 0.0;
+  let aggregate_volume_ratio = select(0.0, aggregate_volume / max(rest_volume, 0.000001), aggregate_volume > 0.0);
+  let residual_tolerance = max(params.aggregate_residual_tolerance, 0.0);
+  let mass_residual_ok = abs(aggregate_mass_residual) <= residual_tolerance * max(abs(aggregate_mass), 1.0);
+  let volume_residual_ok = abs(aggregate_volume_residual) <= residual_tolerance * max(abs(aggregate_volume), 1.0);
+  let residual_ok = !aggregate_matched || (mass_residual_ok && volume_residual_ok);
+  let aggregate_coherence_status = select(0.0, 1.0, aggregate_matched);
+  let conservation_residual_status = select(2.0, 1.0, residual_ok);
+  let delta_threshold = max(params.coarsen_level_delta_threshold, 0.0);
+  let coarsen = phase_expanded && level_delta >= delta_threshold && aggregate_matched && residual_ok;
+  let refine = phase_expanded && (!aggregate_matched || !residual_ok);
+
+  var status = 1.0;
+  if (phase_expanded) {
+    status = status + 2.0;
+  }
+  if (coarsen) {
+    status = status + 4.0;
+  }
+  if (aggregate_matched) {
+    status = status + 8.0;
+  }
+  if (!residual_ok) {
+    status = status + 16.0;
+  }
+
+  ss_pvm_write_row(
+    migration_offset,
+    particle_index,
+    source_level,
+    target_level,
+    status,
+    source_support,
+    target_support,
+    rest_volume,
+    represented_volume,
+    volume_ratio,
+    level_delta,
+    phase_id,
+    material_id,
+    aggregate_node_index,
+    aggregate_match_count,
+    aggregate_suppressed_duplicate_count,
+    aggregate_mass,
+    aggregate_volume,
+    aggregate_mass_residual,
+    aggregate_volume_residual,
+    source_grid_spacing,
+    target_grid_spacing,
+    aggregate_volume_ratio,
+    select(0.0, 1.0, coarsen),
+    select(0.0, 1.0, refine),
+    1.0,
+    aggregate_coherence_status,
+    conservation_residual_status,
+    chart_id,
+    1.0,
+    1.0
+  );
+}
+`;

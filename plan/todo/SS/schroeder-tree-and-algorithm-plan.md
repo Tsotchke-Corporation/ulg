@@ -311,7 +311,8 @@ Suggested schemas:
   StateManager/resident-authority admission landed in `10d1f5c`; scene/render
   source metadata materialization landed in `df261c7`; compact render proxy
   descriptor plans landed in `24ecd87`; renderer-visible proxy consumer binding
-  landed in `9b31697`.
+  landed in `9b31697`; descriptor-batched proxy draw-source contracts landed
+  in `5b54457`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -319,8 +320,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - add the first concrete active-node leaf / coherent aggregate proxy draw
-     source under the new renderer-visible consumer contract;
+   - turn descriptor-batched active-node leaf / coherent aggregate proxy draw
+     sources into an actual renderer backend path;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - publish compact SS summaries across PeerCompute/StateManager boundaries as
      descriptors, seeds, or snapshots rather than raw browser `GPUBuffer`
@@ -375,13 +376,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS concrete proxy draw source**:
+The next code slice on `SS` is **SS proxy draw backend selection**:
 
-1. Create the first concrete proxy draw source from
-   `schroederRenderProxyDescriptorPlan`.
-2. Keep it descriptor/metadata-driven unless we explicitly admit a same-device
-   raw-buffer draw route.
-3. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
+1. Choose the first backend to consume `schroederRenderProxyDrawSource`.
+2. Native WebGPU descriptor consumption is the preferred SS-aligned target, but
+   it needs a renderer capability/admission contract before binding raw buffers.
+3. A diagnostic CPU-materialized proxy can be used only if it is clearly marked
+   diagnostic and does not become the hot path.
+4. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.
-4. Keep closure/PBR material selection deferred to SS node material/phase
-   histograms rather than inventing per-element renderer patches.

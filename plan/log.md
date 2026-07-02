@@ -35035,3 +35035,37 @@ Next:
 - Choose the initial draw-source strategy conservatively: metadata/descriptor
   geometry first, unless a same-device raw-buffer capability/admission gate is
   explicit and testable.
+
+## 2026-07-01 AKDT - SS Proxy Draw Source Contract
+
+Status:
+
+- Preserved descriptor-only retained refs in the compact same-level SS portable
+  summary result.
+- Scene `schroederRenderSource` metadata now selects retained active-leaf,
+  coherent-aggregate, and law-queue source refs without exposing raw browser
+  `GPUBuffer` handles.
+- Proxy descriptor batches now carry source refs and retained-source status.
+- Added `sph-scene-schroeder-render-proxy-draw-source`, which creates drawable
+  active-leaf/coherent-aggregate batches from retained SS source descriptors.
+- The draw-source contract remains descriptor-batched: raw `GPUBuffer` binding,
+  CPU geometry materialization, frame-copy readback, and overlay integration are
+  all false by default.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `150/150` passing.
+- PASS: `npm test` with `862/865` passing and `3` skipped.
+- PASS: `git diff --check`.
+
+Next:
+
+- Select the first backend for `schroederRenderProxyDrawSource`.
+- Native WebGPU retained-buffer consumption is architecturally cleaner, but it
+  needs an explicit renderer capability/admission gate before raw buffer
+  drawing is enabled.

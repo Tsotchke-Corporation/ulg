@@ -147,13 +147,18 @@ Landed checkpoints:
     consumer contract that defaults to descriptor import, leaves raw
     `GPUBuffer` drawing deferred until renderer capability/admission exists,
     and explicitly requires no frame-copy readback or overlay-owned physics.
+43. `5b54457` adds the SS proxy draw-source contract: compact same-level
+    portable summaries preserve descriptor-only retained refs, scene metadata
+    selects active-leaf/coherent-aggregate retained sources, and draw batches
+    stay descriptor-batched with no raw `GPUBuffer` binding, frame-copy
+    readback, CPU geometry materialization, or overlay requirement.
 
 Next implementation queue:
 
-1. Add the first concrete active-leaf/coherent-aggregate proxy draw source while
-   preserving closure-derived PBR and no-full-readback defaults.
-2. Decide whether that first draw source should start as CPU-materialized
-   descriptor geometry, native WebGPU descriptor consumption, or an explicit
+1. Turn the descriptor-batched SS proxy draw source into an actual renderer
+   backend path.
+2. Decide whether the first backend should be native WebGPU descriptor
+   consumption, a strictly diagnostic CPU-materialized proxy, or an explicit
    same-device raw-buffer capability gate.
 3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

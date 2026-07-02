@@ -1775,6 +1775,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       gridSpacingM: options.gridSpacingM,
       readbackMode: options.readbackMode,
       schroederSelectedLevel: options.schroederSelectedLevel,
+      hasLawQueue: Boolean(options.schroederLawQueue),
       hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
       hasConservationSummary: Boolean(options.schroederConservationSummary),
       hasCrossLevelTransfer: Boolean(options.schroederCrossLevelTransfer),
@@ -1807,6 +1808,11 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.normalHotLoopReadbackFree, true);
   assert.equal(result.levelAssignment.retainedAssignmentBuffer, true);
   assert.equal(result.activeNodeList.retainedActiveNodeBuffer, true);
+  assert.equal(result.lawQueue.retainedLawQueueBuffer, true);
+  assert.equal(result.lawQueue.activeNodeCount, 3);
+  assert.equal(result.lawQueue.lawQueueStatus, 'local-law-queues-submitted');
+  assert.equal(result.lawQueue.reactionScopeStatus, 'sedenion-scope-preserved-for-reaction-queue');
+  assert.equal(result.lawQueue.stateMutationStatus, 'law-queue-buffer-submitted-no-state-mutation');
   assert.equal(result.crossLevelCoupling.retainedCrossLevelBuffer, true);
   assert.equal(result.crossLevelCoupling.crossLevelCandidateCount, 3);
   assert.equal(result.conservationSummary.retainedSummaryBuffer, true);
@@ -1829,6 +1835,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeMigration, null);
+  assert.equal(result.residentStep.hasLawQueue, true);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.residentStep.hasConservationSummary, true);
   assert.equal(result.residentStep.hasCrossLevelTransfer, true);
@@ -1858,12 +1865,18 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.conservativeTransferStatus, 'state-delta-ready-pending-admission');
   assert.equal(result.stateMutationStatus, 'pending-state-delta-submitted-awaiting-admission');
   assert.equal(result.stateAuthorityStatus, 'requires-state-manager-admission-before-authoritative-merge');
+  assert.equal(result.lawQueueStatus, 'schroeder-law-queue-submitted');
+  assert.equal(
+    result.lawQueueConsumerStatus,
+    'law-queue-submitted-not-yet-consumed-by-reaction-contact-interface'
+  );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].gridSpacingM, 1);
   assert.equal(calls[0].schroederSelectedLevel, 2);
   assert.equal(calls[0].schroederLevelAssignment.schema, ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA);
   assert.equal(calls[0].readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(calls[0].preferWebGpu, true);
+  assert.equal(calls[0].schroederLawQueue.schema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelCoupling.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederConservationSummary.schema, ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelTransfer.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA);
@@ -1880,7 +1893,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -1981,7 +1994,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -2052,7 +2065,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -2069,14 +2082,17 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
     residentStepRunner: async (options) => {
       calls.push(options);
       return {
-        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
-        status: 'resident-step-stubbed',
-        hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling)
-      };
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      hasLawQueue: Boolean(options.schroederLawQueue),
+      hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling)
+    };
     }
   });
 
   assert.equal(result.crossLevelCoupling, null);
+  assert.equal(result.lawQueue.retainedLawQueueBuffer, true);
+  assert.equal(result.lawQueueStatus, 'schroeder-law-queue-submitted');
   assert.equal(result.conservationSummary, null);
   assert.equal(result.crossLevelTransfer, null);
   assert.equal(result.crossLevelStateDelta, null);
@@ -2094,8 +2110,10 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
   assert.equal(result.conservativeTransferStatus, 'not-run');
   assert.equal(result.stateMutationStatus, 'not-run');
   assert.equal(result.stateAuthorityStatus, 'not-run');
+  assert.equal(result.residentStep.hasLawQueue, true);
   assert.equal(result.residentStep.hasCrossLevelCoupling, false);
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].schroederLawQueue.schema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelCoupling, null);
   assert.equal(calls[0].schroederConservationSummary, null);
   assert.equal(calls[0].schroederCrossLevelTransfer, null);
@@ -2104,5 +2122,35 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
   assert.equal(calls[0].schroederHierarchyAggregate, null);
   assert.equal(calls[0].schroederHierarchyAggregateNode, null);
   assert.equal(calls[0].schroederPhaseVolumeMigration, null);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+});
+
+test('Schroeder same-level mechanics can disable local law queue per use case', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasLawQueue: Boolean(options.schroederLawQueue)
+      };
+    }
+  });
+
+  assert.equal(result.lawQueue, null);
+  assert.equal(result.lawQueueStatus, 'disabled-local-law-queue');
+  assert.equal(result.lawQueueConsumerStatus, 'disabled-local-law-queue');
+  assert.equal(result.residentStep.hasLawQueue, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].schroederLawQueue, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
 });

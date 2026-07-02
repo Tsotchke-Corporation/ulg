@@ -3798,6 +3798,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   mlsMpmParticleUpload = null,
   levelAssignment = null,
   activeNodeList = null,
+  lawQueue = null,
   crossLevelCoupling = null,
   conservationSummary = null,
   crossLevelTransfer = null,
@@ -3818,6 +3819,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   supportRadiusScale = DEFAULT_SUPPORT_RADIUS_SCALE,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  enableLawQueue = true,
+  enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+  lawQueueCandidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   enableCrossLevelCoupling = true,
   enableConservationSummary = enableCrossLevelCoupling,
   enableCrossLevelTransfer = enableConservationSummary,
@@ -3841,6 +3845,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
   cflFactor = mlsMpmParticleState?.gridCflFactor,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  lawQueueRunner = runSchroederLawQueueWebGpu,
   crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
   conservationSummaryRunner = runSchroederConservationSummaryWebGpu,
   crossLevelTransferRunner = runSchroederCrossLevelTransferWebGpu,
@@ -3861,6 +3866,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (typeof residentStepRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  if (enableLawQueue && typeof lawQueueRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a lawQueueRunner function');
   }
   if (enableCrossLevelCoupling && typeof crossLevelCouplingRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelCouplingRunner function');
@@ -3975,6 +3983,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
+  const resolvedLawQueue = !enableLawQueue
+    ? null
+    : lawQueue || await lawQueueRunner({
+      device,
+      activeNodeList: resolvedActiveNodeList,
+      enabledLawMask,
+      candidateBudget: lawQueueCandidateBudget,
+      queueEpoch: mergeEpoch,
+      retainLawQueueBuffer: true,
+      readbackMode
+    });
   const resolvedCrossLevelCoupling = !enableCrossLevelCoupling
     ? null
     : crossLevelCoupling || await crossLevelCouplingRunner({
@@ -4098,6 +4117,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     readbackMode,
     schroederLevelAssignment: resolvedLevelAssignment,
     schroederSelectedLevel: plan.selectedLevel,
+    schroederLawQueue: resolvedLawQueue,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
     schroederCrossLevelTransfer: resolvedCrossLevelTransfer,
@@ -4137,6 +4157,21 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
       activeNodeBufferByteLength: resolvedActiveNodeList.activeNodeBufferByteLength ?? resolvedActiveNodeList.activeNodeByteLength ?? 0
     },
+    lawQueue: resolvedLawQueue ? {
+      schema: resolvedLawQueue.schema,
+      status: resolvedLawQueue.status,
+      activeNodeCount: resolvedLawQueue.activeNodeCount,
+      outputCompaction: resolvedLawQueue.outputCompaction,
+      lawQueueStatus: resolvedLawQueue.lawQueueStatus,
+      exactNearFieldRequirement: resolvedLawQueue.exactNearFieldRequirement,
+      reactionScopeStatus: resolvedLawQueue.reactionScopeStatus,
+      stateMutationStatus: resolvedLawQueue.stateMutationStatus,
+      stateAuthorityStatus: resolvedLawQueue.stateAuthorityStatus,
+      retainedLawQueueBuffer: Boolean(resolvedLawQueue.lawQueueBuffer),
+      lawQueueBufferByteLength: resolvedLawQueue.lawQueueBufferByteLength
+        ?? resolvedLawQueue.lawQueueByteLength
+        ?? 0
+    } : null,
     crossLevelCoupling: resolvedCrossLevelCoupling ? {
       schema: resolvedCrossLevelCoupling.schema,
       status: resolvedCrossLevelCoupling.status,
@@ -4281,6 +4316,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     mechanicsGridSpacingM: plan.nativeGridSpacingM,
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
     activeNodeConsumerStatus: 'planned-not-yet-consumed-by-mls-mpm-kernels',
+    lawQueueStatus: resolvedLawQueue?.status ?? 'disabled-local-law-queue',
+    lawQueueConsumerStatus: resolvedLawQueue
+      ? 'law-queue-submitted-not-yet-consumed-by-reaction-contact-interface'
+      : 'disabled-local-law-queue',
     crossLevelCouplingStatus: resolvedCrossLevelCoupling
       ? 'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
       : 'disabled-same-level-only-mechanics',

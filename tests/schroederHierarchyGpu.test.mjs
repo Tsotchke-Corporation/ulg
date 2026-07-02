@@ -66,7 +66,9 @@ import {
   SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
   SCHROEDER_LAW_QUEUE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+  SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
+  SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT,
   SCHROEDER_NO_FULL_READBACK_MODE,
   SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE,
@@ -690,6 +692,21 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(plan.sourceCandidateSpanCount, 3);
   assert.equal(plan.sourceCandidateSpanStrideFloats, SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS);
   assert.equal(plan.sourceCandidateSpanByteLength, 3 * 4 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.diagnosticCounterCount, SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT);
+  assert.equal(
+    plan.diagnosticCounterByteLength,
+    SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT * Uint32Array.BYTES_PER_ELEMENT
+  );
+  assert.deepEqual(plan.diagnosticCounterLayout, [
+    'candidateInvocationCount:u32',
+    'bucketIndexAttemptCount:u32',
+    'bucketSelectedCount:u32',
+    'exactFallbackScanCount:u32',
+    'exactFallbackSelectedCount:u32',
+    'inactiveCandidateCount:u32',
+    'bucketPressureCount:u32',
+    'sourceSpanWriteCount:u32'
+  ]);
   assert.equal(plan.enumerationMode, 'schroeder-active-node-tile-traversal-neighbor-enumeration');
   assert.equal(plan.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
   assert.equal(plan.candidateIndexingMode, 'particle-source-candidate-span-table');
@@ -1526,6 +1543,7 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
   assert.equal(candidates.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(candidates.fullReadbackPerformed, false);
+  assert.equal(candidates.compactDiagnosticReadbackPerformed, false);
   assert.equal(candidates.fullParticleReadbackPerformed, false);
   assert.equal(candidates.normalHotLoopReadbackFree, true);
   assert.equal(candidates.particleCount, 3);
@@ -1538,14 +1556,23 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.activeNodeIndexConsumerStatus, 'active-node-index-disabled-full-active-node-scan');
   assert.equal(candidates.retainedNeighborCandidateBuffer, true);
   assert.equal(candidates.retainedSourceCandidateSpanBuffer, true);
+  assert.equal(candidates.retainedDiagnosticCounterBuffer, true);
   assert.ok(candidates.neighborCandidateBuffer);
   assert.ok(candidates.sourceCandidateSpanBuffer);
+  assert.ok(candidates.diagnosticCounterBuffer);
   assert.equal(candidates.neighborCandidateBuffer.destroyed, false);
   assert.equal(candidates.sourceCandidateSpanBuffer.destroyed, false);
+  assert.equal(candidates.diagnosticCounterBuffer.destroyed, false);
   assert.equal(candidates.neighborCandidateBufferByteLength, 12 * 16 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(candidates.sourceCandidateSpanBufferByteLength, 3 * 4 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(
+    candidates.diagnosticCounterBufferByteLength,
+    SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT * Uint32Array.BYTES_PER_ELEMENT
+  );
   assert.equal(candidates.neighborCandidateRows.length, 0);
   assert.equal(candidates.sourceCandidateSpanRows.length, 0);
+  assert.equal(candidates.diagnosticCounters.length, 0);
+  assert.equal(candidates.traversalDiagnosticStatus, 'law-neighbor-traversal-diagnostic-counters-submitted');
   assert.equal(candidates.neighborCandidateStatus, 'local-law-neighbor-candidates-submitted');
   assert.equal(candidates.sourceCandidateSpanStatus, 'local-law-neighbor-source-spans-submitted');
   assert.equal(candidates.stateMutationStatus, 'law-neighbor-candidates-buffer-submitted-no-state-mutation');
@@ -1561,17 +1588,26 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.ok(device.shaderModules.some((module) => module.code.includes('active_nodes')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('active_node_index_bucket_slots')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('source_candidate_span_rows')));
-  assert.equal(device.bindGroups.at(-1).entries.length, 7);
+  assert.equal(device.bindGroups.at(-1).entries.length, 8);
   assert.equal(device.bindGroups.at(-1).entries[1].resource.buffer, activeNodeBuffer);
   assert.equal(device.bindGroups.at(-1).entries[4].resource.buffer, candidates.sourceCandidateSpanBuffer);
   assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer.label, 'ulg-schroeder-law-neighbor-active-node-index-slots-dummy');
+  assert.equal(device.bindGroups.at(-1).entries[7].resource.buffer, candidates.diagnosticCounterBuffer);
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
     && write.byteLength === 64
   )));
+  assert.ok(device.writes.some((write) => (
+    write.label === 'ulg-schroeder-law-neighbor-diagnostic-counters'
+    && write.byteLength === SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT * Uint32Array.BYTES_PER_ELEMENT
+  )));
   assert.ok(device.createdBuffers.some((buffer) => (
     buffer.label === 'ulg-schroeder-law-neighbor-candidates-params'
     && buffer.size === 64
+  )));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-law-neighbor-diagnostic-counters'
+    && buffer.size === SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT * Uint32Array.BYTES_PER_ELEMENT
   )));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
@@ -1652,13 +1688,81 @@ test('Schroeder law-neighbor candidates consume retained active-node bucket inde
     candidates.activeNodeIndexConsumerStatus,
     'active-node-bucket-index-consumed-with-exact-scan-fallback'
   );
-  assert.equal(device.bindGroups.at(-1).entries.length, 7);
+  assert.equal(candidates.retainedDiagnosticCounterBuffer, true);
+  assert.equal(device.bindGroups.at(-1).entries.length, 8);
   assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer, activeNodeIndexBucketSlotBuffer);
+  assert.equal(device.bindGroups.at(-1).entries[7].resource.buffer, candidates.diagnosticCounterBuffer);
   assert.equal(activeNodeIndexBucketSlotBuffer.destroyed, false);
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
     && write.byteLength === 64
   )));
+});
+
+test('Schroeder law-neighbor candidates can read compact traversal diagnostics only', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const lawQueueBuffer = device.createBuffer({
+    label: 'retained-law-queue-buffer',
+    size: 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const activeNodeBuffer = device.createBuffer({
+    label: 'retained-active-node-buffer',
+    size: 3 * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const stateBuffer = device.createBuffer({
+    label: 'retained-state-buffer',
+    size: 3 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer,
+    enabledLawMask: SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+    candidateBudget: 4,
+    queueEpoch: 7
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer
+  };
+  const candidates = await runSchroederLawNeighborCandidateWebGpu({
+    device,
+    lawQueue,
+    activeNodeList,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 3,
+      stateBuffer
+    },
+    candidateBudget: 4,
+    readbackMode: SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE
+  });
+
+  assert.equal(candidates.readbackMode, SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE);
+  assert.equal(candidates.fullReadbackPerformed, false);
+  assert.equal(candidates.compactDiagnosticReadbackPerformed, true);
+  assert.equal(candidates.fullParticleReadbackPerformed, false);
+  assert.equal(candidates.normalHotLoopReadbackFree, false);
+  assert.equal(candidates.neighborCandidateRows.length, 0);
+  assert.equal(candidates.sourceCandidateSpanRows.length, 0);
+  assert.equal(candidates.diagnosticCounters.length, SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT);
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-law-neighbor-diagnostic-counters-readback'));
+  assert.equal(
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-law-neighbor-candidates-readback'),
+    false
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-law-neighbor-source-spans-readback'),
+    false
+  );
 });
 
 test('Schroeder WebGPU cross-level coupling consumes retained hierarchy buffers without default readback', async () => {

@@ -8081,6 +8081,7 @@ struct SchroederLawNeighborParams {
 @group(0) @binding(4) var<storage, read_write> source_candidate_span_rows: array<f32>;
 @group(0) @binding(5) var<uniform> params: SchroederLawNeighborParams;
 @group(0) @binding(6) var<storage, read> active_node_index_bucket_slots: array<u32>;
+@group(0) @binding(7) var<storage, read_write> traversal_diagnostic_counters: array<atomic<u32>>;
 
 const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE: u32 = 16u;
@@ -8093,6 +8094,21 @@ const SCHROEDER_LAW_NEIGHBOR_REACTION_MASK: u32 = 1u;
 const SCHROEDER_LAW_NEIGHBOR_CONTACT_MASK: u32 = 2u;
 const SCHROEDER_LAW_NEIGHBOR_INTERFACE_MASK: u32 = 4u;
 const SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL: u32 = 0xffffffffu;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT: u32 = 8u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_CANDIDATE_INVOCATIONS: u32 = 0u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_ATTEMPTS: u32 = 1u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_SELECTED: u32 = 2u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SCANS: u32 = 3u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SELECTED: u32 = 4u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_INACTIVE_CANDIDATES: u32 = 5u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_PRESSURE: u32 = 6u;
+const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_SOURCE_SPANS: u32 = 7u;
+
+fn ss_neighbor_diagnostic_add(counter_index: u32, value: u32) {
+  if (counter_index < SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT && value > 0u) {
+    atomicAdd(&traversal_diagnostic_counters[counter_index], value);
+  }
+}
 
 fn ss_neighbor_state_pos_mass(particle_index: u32, state_stride: u32) -> vec4<f32> {
   let offset = particle_index * state_stride;
@@ -8198,6 +8214,26 @@ fn ss_neighbor_active_index_contains(queue_offset: u32, active_index: u32) -> bo
   return false;
 }
 
+fn ss_neighbor_active_index_bucket_full(queue_offset: u32) -> bool {
+  if (!ss_neighbor_active_index_enabled()) {
+    return false;
+  }
+  var occupied_count = 0u;
+  var bucket_slot_index = 0u;
+  loop {
+    if (bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
+      break;
+    }
+    let active_index = ss_neighbor_active_index_slot(queue_offset, bucket_slot_index);
+    if (active_index == SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL) {
+      return false;
+    }
+    occupied_count = occupied_count + 1u;
+    bucket_slot_index = bucket_slot_index + 1u;
+  }
+  return occupied_count >= params.active_node_index_bucket_slot_capacity;
+}
+
 fn ss_neighbor_active_index_match_count(queue_offset: u32, source_active_index: u32, active_stride: u32) -> u32 {
   if (!ss_neighbor_active_index_enabled()) {
     return 0u;
@@ -8251,6 +8287,7 @@ fn ss_neighbor_select_active_index_match(
 }
 
 fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_index: u32, queue_epoch: f32) {
+  ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_INACTIVE_CANDIDATES, 1u);
   neighbor_candidate_rows[row_offset + 0u] = source_index;
   neighbor_candidate_rows[row_offset + 1u] = -1.0;
   neighbor_candidate_rows[row_offset + 2u] = 0.0;
@@ -8279,6 +8316,7 @@ fn ss_neighbor_write_source_span(source_index: u32, candidate_start: u32, candid
   source_candidate_span_rows[span_offset + 1u] = f32(candidate_start);
   source_candidate_span_rows[span_offset + 2u] = f32(candidate_count);
   source_candidate_span_rows[span_offset + 3u] = status;
+  ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_SOURCE_SPANS, 1u);
 }
 
 @compute @workgroup_size(64)
@@ -8289,6 +8327,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (candidate_index >= candidate_count) {
     return;
   }
+  ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_CANDIDATE_INVOCATIONS, 1u);
   let queue_row_index = candidate_index / candidate_budget;
   let candidate_slot = candidate_index - queue_row_index * candidate_budget;
   let queue_stride = max(params.law_queue_stride, SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE);
@@ -8343,12 +8382,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var selected_active_index = params.active_node_count;
   var indexed_match_count = 0u;
   if (ss_neighbor_active_index_enabled()) {
+    ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_ATTEMPTS, 1u);
+    if (candidate_slot == 0u && ss_neighbor_active_index_bucket_full(queue_offset)) {
+      ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_PRESSURE, 1u);
+    }
     selected_active_index = ss_neighbor_select_active_index_match(
       queue_offset,
       source_active_index,
       active_stride,
       candidate_slot
     );
+    if (selected_active_index < params.active_node_count) {
+      ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_SELECTED, 1u);
+    }
     if (selected_active_index >= params.active_node_count) {
       indexed_match_count = ss_neighbor_active_index_match_count(queue_offset, source_active_index, active_stride);
     }
@@ -8360,6 +8406,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var matched_count = 0u;
   var scan_step = 0u;
   if (selected_active_index >= params.active_node_count) {
+    ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SCANS, 1u);
     loop {
       if (scan_step >= params.active_node_count) {
         break;
@@ -8370,6 +8417,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
           if (matched_count == fallback_target_slot) {
             selected_active_index = active_index;
+            ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_EXACT_FALLBACK_SELECTED, 1u);
             break;
           }
           matched_count = matched_count + 1u;

@@ -139,6 +139,7 @@ export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE = 64;
+export const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT = 8;
 export const SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
@@ -164,6 +165,7 @@ export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schro
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
 export const SCHROEDER_FULL_LAW_NEIGHBOR_CANDIDATE_READBACK_MODE = 'full-schroeder-law-neighbor-candidate-readback';
 export const SCHROEDER_FULL_LAW_QUEUE_READBACK_MODE = 'full-schroeder-law-queue-readback';
+export const SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-law-neighbor-diagnostic-readback';
 export const SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-phase-volume-diagnostic-summary-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schroeder-phase-volume-level-update-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
@@ -1547,6 +1549,8 @@ export function createSchroederLawNeighborCandidatePlan({
     4,
     sourceCandidateSpanCount * SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
+  const diagnosticCounterCount = SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT;
+  const diagnosticCounterByteLength = diagnosticCounterCount * Uint32Array.BYTES_PER_ELEMENT;
   return {
     schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
     status: 'schroeder-law-neighbor-candidate-plan-ready',
@@ -1579,6 +1583,18 @@ export function createSchroederLawNeighborCandidatePlan({
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     neighborCandidateByteLength,
     sourceCandidateSpanByteLength,
+    diagnosticCounterCount,
+    diagnosticCounterByteLength,
+    diagnosticCounterLayout: [
+      'candidateInvocationCount:u32',
+      'bucketIndexAttemptCount:u32',
+      'bucketSelectedCount:u32',
+      'exactFallbackScanCount:u32',
+      'exactFallbackSelectedCount:u32',
+      'inactiveCandidateCount:u32',
+      'bucketPressureCount:u32',
+      'sourceSpanWriteCount:u32'
+    ],
     enabledLawMask: resolvedLawMask,
     candidateBudget: resolvedCandidateBudget,
     queueEpoch: finiteNumber(lawQueue.queueEpoch, 0),
@@ -2840,6 +2856,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   candidateBudget = lawQueue?.candidateBudget ?? DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   enabledLawMask = lawQueue?.enabledLawMask ?? SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   retainNeighborCandidateBuffer = true,
+  retainDiagnosticCounterBuffer = true,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -2855,7 +2872,9 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     candidateBudget,
     enabledLawMask
   });
-  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const compactDiagnosticReadback = readbackMode === SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE;
+  const fullCandidateReadback = readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE && !compactDiagnosticReadback;
+  const noFullReadback = !fullCandidateReadback;
   const borrowedLawQueueBuffer = lawQueue?.lawQueueBuffer || null;
   const lawQueueRows = lawQueue?.lawQueueRows instanceof Float32Array
     ? lawQueue.lawQueueRows
@@ -2916,30 +2935,44 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     size: plan.sourceCandidateSpanByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
+  const diagnosticCounterBuffer = device.createBuffer({
+    label: 'ulg-schroeder-law-neighbor-diagnostic-counters',
+    size: plan.diagnosticCounterByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-law-neighbor-candidates-params',
     size: 64,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  const candidateReadBuffer = noFullReadback
+  const candidateReadBuffer = !fullCandidateReadback
     ? null
     : device.createBuffer({
       label: 'ulg-schroeder-law-neighbor-candidates-readback',
       size: plan.neighborCandidateByteLength,
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
-  const sourceSpanReadBuffer = noFullReadback
+  const sourceSpanReadBuffer = !fullCandidateReadback
     ? null
     : device.createBuffer({
       label: 'ulg-schroeder-law-neighbor-source-spans-readback',
       size: plan.sourceCandidateSpanByteLength,
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
+  const diagnosticReadBuffer = !(compactDiagnosticReadback || fullCandidateReadback)
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-law-neighbor-diagnostic-counters-readback',
+      size: plan.diagnosticCounterByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
   let returnedRetainedNeighborCandidateBuffer = false;
   let returnedRetainedSourceCandidateSpanBuffer = false;
+  let returnedRetainedDiagnosticCounterBuffer = false;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederLawNeighborCandidateParamsArray(plan));
+    device.queue.writeBuffer(diagnosticCounterBuffer, 0, new Uint32Array(plan.diagnosticCounterCount));
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
@@ -2947,10 +2980,11 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'uniform'),
-      computeBufferBinding(6, 'read-only-storage')
+      computeBufferBinding(6, 'read-only-storage'),
+      computeBufferBinding(7, 'storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v3',
+      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v4',
       label: 'ulg-schroeder-law-neighbor-candidates',
       code: schroederLawNeighborCandidateWgsl,
       entryPoint: 'main',
@@ -2965,7 +2999,8 @@ export async function runSchroederLawNeighborCandidateWebGpu({
         { binding: 3, resource: { buffer: neighborCandidateBuffer } },
         { binding: 4, resource: { buffer: sourceCandidateSpanBuffer } },
         { binding: 5, resource: { buffer: paramsBuffer } },
-        { binding: 6, resource: { buffer: activeNodeIndexBucketSlotBuffer } }
+        { binding: 6, resource: { buffer: activeNodeIndexBucketSlotBuffer } },
+        { binding: 7, resource: { buffer: diagnosticCounterBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -2977,7 +3012,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       Math.ceil(plan.neighborCandidateCount / SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE)
     ));
     pass.end();
-    if (!noFullReadback) {
+    if (fullCandidateReadback) {
       encoder.copyBufferToBuffer(
         neighborCandidateBuffer,
         0,
@@ -2993,11 +3028,21 @@ export async function runSchroederLawNeighborCandidateWebGpu({
         plan.sourceCandidateSpanByteLength
       );
     }
+    if (compactDiagnosticReadback || fullCandidateReadback) {
+      encoder.copyBufferToBuffer(
+        diagnosticCounterBuffer,
+        0,
+        diagnosticReadBuffer,
+        0,
+        plan.diagnosticCounterByteLength
+      );
+    }
     device.queue.submit([encoder.finish()]);
 
     let neighborCandidateRows = new Float32Array();
     let sourceCandidateSpanRows = new Float32Array();
-    if (!noFullReadback) {
+    let diagnosticCounters = new Uint32Array();
+    if (fullCandidateReadback) {
       await candidateReadBuffer.mapAsync(GPU_MAP_MODE.READ);
       neighborCandidateRows = new Float32Array(candidateReadBuffer.getMappedRange()).slice(
         0,
@@ -3011,6 +3056,14 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       );
       sourceSpanReadBuffer.unmap();
     }
+    if (compactDiagnosticReadback || fullCandidateReadback) {
+      await diagnosticReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      diagnosticCounters = new Uint32Array(diagnosticReadBuffer.getMappedRange()).slice(
+        0,
+        plan.diagnosticCounterCount
+      );
+      diagnosticReadBuffer.unmap();
+    }
 
     const result = {
       ...plan,
@@ -3019,18 +3072,24 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       status: 'schroeder-law-neighbor-candidates-submitted',
       backend: 'webgpu',
       pipelineCacheStatus: cacheStatus,
-      readbackMode: noFullReadback
-        ? SCHROEDER_NO_FULL_READBACK_MODE
-        : SCHROEDER_FULL_LAW_NEIGHBOR_CANDIDATE_READBACK_MODE,
-      fullReadbackPerformed: !noFullReadback,
+      readbackMode: fullCandidateReadback
+        ? SCHROEDER_FULL_LAW_NEIGHBOR_CANDIDATE_READBACK_MODE
+        : (compactDiagnosticReadback
+          ? SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE
+          : SCHROEDER_NO_FULL_READBACK_MODE),
+      fullReadbackPerformed: fullCandidateReadback,
+      compactDiagnosticReadbackPerformed: compactDiagnosticReadback,
       fullParticleReadbackPerformed: false,
-      normalHotLoopReadbackFree: noFullReadback,
+      normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
       retainedNeighborCandidateBuffer: Boolean(retainNeighborCandidateBuffer),
       neighborCandidateBufferByteLength: plan.neighborCandidateByteLength,
       neighborCandidateRows,
       retainedSourceCandidateSpanBuffer: Boolean(retainNeighborCandidateBuffer),
       sourceCandidateSpanBufferByteLength: plan.sourceCandidateSpanByteLength,
       sourceCandidateSpanRows,
+      retainedDiagnosticCounterBuffer: Boolean(retainDiagnosticCounterBuffer),
+      diagnosticCounterBufferByteLength: plan.diagnosticCounterByteLength,
+      diagnosticCounters,
       activeNodeIndexEnabled: plan.activeNodeIndexEnabled,
       sourceActiveNodeIndexSchema: plan.sourceActiveNodeIndexSchema,
       sourceActiveNodeIndexStatus: plan.sourceActiveNodeIndexStatus,
@@ -3038,6 +3097,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       activeNodeIndexBucketSlotCapacity: plan.activeNodeIndexBucketSlotCapacity,
       activeNodeIndexBucketSlotCount: plan.activeNodeIndexBucketSlotCount,
       activeNodeIndexConsumerStatus: plan.activeNodeIndexConsumerStatus,
+      traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
       sourceCandidateSpanStatus: 'local-law-neighbor-source-spans-submitted',
       neighborCandidateStatus: 'local-law-neighbor-candidates-submitted',
       conservativeTransferStatus: 'local-law-neighbor-candidates-submitted-no-transfer',
@@ -3056,6 +3116,11 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       returnedRetainedNeighborCandidateBuffer = true;
       returnedRetainedSourceCandidateSpanBuffer = true;
     }
+    if (retainDiagnosticCounterBuffer) {
+      result.diagnosticCounterBuffer = diagnosticCounterBuffer;
+      result.destroyDiagnosticCounterBuffer = () => diagnosticCounterBuffer.destroy?.();
+      returnedRetainedDiagnosticCounterBuffer = true;
+    }
     return result;
   } finally {
     const cleanup = () => {
@@ -3069,9 +3134,13 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       if (!retainNeighborCandidateBuffer || !returnedRetainedSourceCandidateSpanBuffer) {
         sourceCandidateSpanBuffer.destroy?.();
       }
+      if (!retainDiagnosticCounterBuffer || !returnedRetainedDiagnosticCounterBuffer) {
+        diagnosticCounterBuffer.destroy?.();
+      }
       paramsBuffer.destroy?.();
       candidateReadBuffer?.destroy?.();
       sourceSpanReadBuffer?.destroy?.();
+      diagnosticReadBuffer?.destroy?.();
     };
     if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
@@ -5084,6 +5153,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       treeTraversalStatus: resolvedLawNeighborCandidates.treeTraversalStatus,
       activeNodeIndexEnabled: Boolean(resolvedLawNeighborCandidates.activeNodeIndexEnabled),
       activeNodeIndexConsumerStatus: resolvedLawNeighborCandidates.activeNodeIndexConsumerStatus,
+      traversalDiagnosticStatus: resolvedLawNeighborCandidates.traversalDiagnosticStatus,
+      retainedDiagnosticCounterBuffer: Boolean(resolvedLawNeighborCandidates.diagnosticCounterBuffer),
+      diagnosticCounterBufferByteLength: resolvedLawNeighborCandidates.diagnosticCounterBufferByteLength
+        ?? resolvedLawNeighborCandidates.diagnosticCounterByteLength
+        ?? 0,
       retainedNeighborCandidateBuffer: Boolean(resolvedLawNeighborCandidates.neighborCandidateBuffer),
       neighborCandidateBufferByteLength: resolvedLawNeighborCandidates.neighborCandidateBufferByteLength
         ?? resolvedLawNeighborCandidates.neighborCandidateByteLength

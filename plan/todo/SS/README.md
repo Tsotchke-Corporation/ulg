@@ -243,11 +243,16 @@ Landed checkpoints:
     consumer rows into one pressure/exposure summary row, forwards it through
     same-level/resident and portable descriptor paths, and keeps the state
     mutation boundary closed.
+62. `794e4aa` adds an explicit far-aggregate law-consumer authority policy over
+    compact diagnostics. The default policy keeps pressure/exposure signals
+    read-only, while opt-in use cases can mark a future
+    StateManager-admitted state-delta path as required without mutating state.
 
 Next implementation queue:
 
-1. Continue Slice 7 by using compact law-consumer diagnostics to decide whether
-   any far-field consumer should graduate into a new admitted state-delta path.
+1. Continue Slice 7 by defining the first concrete far-field consumer state
+   delta only after choosing a physically justified target family and admission
+   contract.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

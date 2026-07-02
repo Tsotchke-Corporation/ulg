@@ -35707,3 +35707,38 @@ Next:
   authority boundary: either keep radiation/plasma/gas-summary consumers
   read-only for another slice, or add a StateManager-admitted state-delta path
   for a specific far-field consumer.
+
+## 2026-07-01 AKDT - SS Far-Aggregate Law-Consumer Authority Policy
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-far-aggregate-law-consumer-authority-policy.v0`
+  as an explicit read-only policy artifact over compact law-consumer diagnostics.
+- The default policy keeps radiation/plasma/gas-summary pressure and exposure
+  signals as read-only telemetry. Opt-in use cases can mark that a future
+  StateManager-admitted state-delta path is required, but this checkpoint still
+  performs no authoritative mutation.
+- Same-level mechanics now forwards the authority policy to the resident backend
+  and exposes top-level policy/status telemetry beside the retained diagnostic
+  summary.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test --test-name-pattern "law consumer authority|far-aggregate law consumer|portable summary" tests/schroederHierarchyGpu.test.mjs`
+  with `9/9` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `85/85`
+  passing.
+- PASS: `node --test tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `167/167` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Stop before implementing a mutating far-field consumer until the target
+  state family, conservation law, and StateManager admission contract are
+  chosen. The current code can now report pressure-driven need for such a
+  future path without silently changing state.

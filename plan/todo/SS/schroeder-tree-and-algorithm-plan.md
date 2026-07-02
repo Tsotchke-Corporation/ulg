@@ -308,7 +308,8 @@ Suggested schemas:
   SPH-state fusion of admitted far-force deltas landed in `ed15162`;
   StateManager-admitted read-only radiation/plasma/gas-summary consumer rows
   landed in `4a586fc`; compact diagnostics over those law-consumer rows landed
-  in `35779c2`.
+  in `35779c2`; explicit far-field consumer authority policy landed in
+  `794e4aa`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -325,8 +326,10 @@ Suggested schemas:
   particle readback. `4a586fc` adds the first read-only law-consumer adapter
   rows for radiation, plasma/electromagnetic approximation, and gas-summary
   proxies. `35779c2` compacts those rows into retained pressure/exposure
-  diagnostics for admission/policy decisions. Those rows are not yet
-  authoritative state mutations.
+  diagnostics for admission/policy decisions. `794e4aa` adds the fail-closed
+  authority policy over those diagnostics: read-only remains the default, and
+  opt-in state-delta mutation only reports that a future StateManager-admitted
+  delta path is required. Those rows are not yet authoritative state mutations.
 
 ### Slice 8: Render And Distribution
 
@@ -360,9 +363,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - use compact law-consumer pressure/exposure diagnostics to decide which
-     outputs remain read-only summaries and which require a future admitted
-     state-delta mutation path;
+   - define the first concrete far-field consumer state-delta target only after
+     choosing the physical state family, conservation rule, and admission
+     contract;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -421,12 +424,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **far-field consumer authority policy**:
+The next code slice on `SS` is **far-field consumer state-delta design**:
 
-1. Decide whether any admitted law-consumer diagnostic pressure signal should
-   produce an authoritative state delta, or whether the next step should widen
-   read-only compact summaries first.
-2. Preserve the current fail-closed behavior: summaries and diagnostics may be
+1. Choose one physically justified far-field consumer target family, such as a
+   radiation/plasma/gas-summary aggregate state-delta, and define its conserved
+   quantities before implementation.
+2. Preserve the current fail-closed behavior: summaries, diagnostics, and
+   authority policies may be
    read-only, but state mutation requires explicit admission and retained delta
    rows.
 3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;

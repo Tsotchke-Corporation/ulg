@@ -289,7 +289,8 @@ Suggested schemas:
   recommended sorted/radix mode. A retained sorted/radix active-node index and
   law-neighbor consumer path landed in `f48631f`; it is currently opt-in from
   same-level orchestration or supplied as a retained artifact. Policy-driven
-  automatic construction remains the next step.
+  automatic construction landed in `f29951e`, with disabled, auto, force, and
+  diagnostic-driven selection reported in same-level summaries.
   Pressure/interface contact-kinematics still needs a spatial/interface index
   rather than only a source-particle span.
 
@@ -309,8 +310,6 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - wire traversal policy and PeerCompute use-case config into automatic
-     sorted/radix active-node index construction when diagnostics require it;
    - keep compact traversal diagnostics as the escalation input rather than
      making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;

@@ -121,13 +121,14 @@ Landed checkpoints:
 35. `f48631f` adds a retained sorted/radix active-node index, consumes it in
     law-neighbor traversal ahead of the bucket index, and exposes it as an
     opt-in same-level orchestration artifact without adding particle readback.
+36. `f29951e` wires sorted/radix index construction into traversal policy and
+    PeerCompute-style use-case config: disabled, auto, force, and
+    diagnostic-driven selection are now explicit in same-level summaries.
 
 Next implementation queue:
 
-1. Wire traversal policy and PeerCompute use-case config into automatic
-   sorted/radix index construction, while keeping explicit opt-in available.
-2. Keep the bucket index as the small-scene/default first GPU index and use
+1. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.
-3. Extend active-node mechanics filtering to the fused multi-step sequence when
+2. Extend active-node mechanics filtering to the fused multi-step sequence when
    SS schedules multi-level batches through that path.
-4. Add render LOD and PeerCompute portable SS summaries.
+3. Add render LOD and PeerCompute portable SS summaries.

@@ -34802,3 +34802,36 @@ Next:
   default.
 - Extend retained active-node mechanics filtering into fused multi-step
   sequence batches.
+
+## 2026-07-01 AKDT - SS Policy-Selected Sorted Index
+
+Status:
+
+- Added a separate active-node sorted-index selection policy with explicit
+  `disabled`, `auto`, and `force` modes for PeerCompute use-case configuration.
+- Same-level mechanics now builds the retained sorted/radix active-node index
+  automatically when traversal policy forces sorted/radix or when compact
+  traversal diagnostics exceed the configured fallback/bucket-pressure
+  thresholds.
+- The default auto path still keeps bucket/exact traversal until compact
+  diagnostics justify escalation, avoiding unconditional sort work for small
+  scenes.
+- Same-level summaries now expose the sorted-index selection reason, policy
+  status, PeerCompute config status, and whether full particle readback was
+  avoided.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `64/64` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs` with `118/118` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `855` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Extend retained active-node mechanics filtering into fused multi-step
+  sequence batches.
+- Start shaping SS render LOD and portable PeerCompute summaries once the
+  multi-step mechanics handoff is in place.

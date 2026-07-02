@@ -124,6 +124,10 @@ export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.s
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA =
   'peercompute.ulg.schroeder-phase-volume-level-update-assignment-overlay.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-assignment-overlay-index.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-assignment-overlay-index-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-diagnostic-summary.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-diagnostic-summary-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';

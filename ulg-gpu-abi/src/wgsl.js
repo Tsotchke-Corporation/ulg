@@ -7918,7 +7918,7 @@ struct SchroederActiveNodeParams {
   phase_volume_level_update_row_count: u32,
   phase_volume_level_update_stride: u32,
   phase_volume_level_update_enabled: u32,
-  pad2: u32,
+  phase_volume_level_update_index_enabled: u32,
   pad3: vec4<u32>,
 };
 
@@ -7926,6 +7926,7 @@ struct SchroederActiveNodeParams {
 @group(0) @binding(1) var<storage, read_write> active_nodes: array<f32>;
 @group(0) @binding(2) var<uniform> params: SchroederActiveNodeParams;
 @group(0) @binding(3) var<storage, read> phase_volume_level_updates: array<f32>;
+@group(0) @binding(4) var<storage, read_write> phase_volume_level_update_index: array<atomic<u32>>;
 
 const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_ACTIVE_NODE_STRIDE: u32 = 16u;
@@ -7969,13 +7970,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var overlay_rejected = false;
   if (
     params.phase_volume_level_update_enabled != 0u
-    && particle_index < params.phase_volume_level_update_row_count
+    && params.phase_volume_level_update_row_count > 0u
   ) {
+    var update_row = particle_index;
+    var update_row_available = particle_index < params.phase_volume_level_update_row_count;
+    if (params.phase_volume_level_update_index_enabled != 0u) {
+      let indexed_row = atomicLoad(&phase_volume_level_update_index[particle_index]);
+      update_row = indexed_row;
+      update_row_available = indexed_row < params.phase_volume_level_update_row_count;
+    }
+    if (!update_row_available) {
+      overlay_rejected = true;
+    } else {
     let update_stride = max(
       params.phase_volume_level_update_stride,
       SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_STRIDE
     );
-    let update_offset = particle_index * update_stride;
+    let update_offset = update_row * update_stride;
     let source_particle_index = u32(max(round(phase_volume_level_updates[update_offset + 0u]), 0.0));
     let target_level = phase_volume_level_updates[update_offset + 2u];
     let update_status = phase_volume_level_updates[update_offset + 3u];
@@ -8001,6 +8012,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       overlay_applied = true;
     } else {
       overlay_rejected = true;
+    }
     }
   }
   let tile_spacing = ss_active_tile_spacing(native_dx);
@@ -8032,6 +8044,51 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   active_nodes[node_offset + 13u] = position.y;
   active_nodes[node_offset + 14u] = position.z;
   active_nodes[node_offset + 15u] = chart_id;
+}
+`;
+
+export const schroederPhaseVolumeAssignmentOverlayIndexWgsl = `
+struct SchroederPhaseVolumeAssignmentOverlayIndexParams {
+  particle_count: u32,
+  level_update_row_count: u32,
+  level_update_stride: u32,
+  missing_row: u32,
+};
+
+@group(0) @binding(0) var<storage, read> level_update_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> source_particle_index_rows: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeAssignmentOverlayIndexParams;
+
+const SCHROEDER_PVAI_LEVEL_UPDATE_STRIDE: u32 = 32u;
+
+@compute @workgroup_size(64)
+fn clear_index(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  atomicStore(&source_particle_index_rows[particle_index], params.missing_row);
+}
+
+@compute @workgroup_size(64)
+fn build_index(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.level_update_row_count) {
+    return;
+  }
+  let stride = max(params.level_update_stride, SCHROEDER_PVAI_LEVEL_UPDATE_STRIDE);
+  let offset = row_index * stride;
+  let source_particle_index = u32(max(round(level_update_rows[offset + 0u]), 0.0));
+  let status = level_update_rows[offset + 3u];
+  let admission_approved = level_update_rows[offset + 17u];
+  if (
+    source_particle_index >= params.particle_count
+    || status <= 0.0
+    || admission_approved <= 0.0
+  ) {
+    return;
+  }
+  atomicMin(&source_particle_index_rows[source_particle_index], row_index);
 }
 `;
 

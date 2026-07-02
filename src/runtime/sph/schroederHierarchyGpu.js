@@ -69,6 +69,8 @@ import {
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
@@ -109,6 +111,7 @@ import {
   schroederLevelAssignmentWgsl,
   schroederLawNeighborCandidateWgsl,
   schroederLawQueueWgsl,
+  schroederPhaseVolumeAssignmentOverlayIndexWgsl,
   schroederPhaseVolumeDiagnosticSummaryWgsl,
   schroederPhaseVolumeLevelUpdateWgsl,
   schroederPhaseVolumeMigrationWgsl
@@ -167,6 +170,8 @@ export {
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
@@ -238,8 +243,10 @@ export const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT = 8;
 export const SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
+export const SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE = 64;
+export const SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW = 0xffffffff;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
 export const SCHROEDER_ACTIVE_NODE_INDEX_SCOPE = 'schroeder-gpu-active-node-index';
 export const SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE = 'schroeder-gpu-cross-level-coupling';
@@ -682,6 +689,7 @@ export function createSchroederActiveNodeParamsArray({
   phaseVolumeAssignmentOverlayRowCount = 0,
   phaseVolumeAssignmentOverlayStrideFloats = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   phaseVolumeAssignmentOverlayEnabled = false,
+  phaseVolumeAssignmentOverlayIndexEnabled = false,
   flags = 0
 } = {}) {
   const buffer = new ArrayBuffer(64);
@@ -700,11 +708,32 @@ export function createSchroederActiveNodeParamsArray({
     SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
   ))), true);
   view.setUint32(40, phaseVolumeAssignmentOverlayEnabled ? 1 : 0, true);
-  view.setUint32(44, 0, true);
+  view.setUint32(44, phaseVolumeAssignmentOverlayIndexEnabled ? 1 : 0, true);
   view.setUint32(48, 0, true);
   view.setUint32(52, 0, true);
   view.setUint32(56, 0, true);
   view.setUint32(60, 0, true);
+  return buffer;
+}
+
+export function createSchroederPhaseVolumeAssignmentOverlayIndexParamsArray({
+  particleCount = 0,
+  phaseVolumeAssignmentOverlayRowCount = 0,
+  phaseVolumeAssignmentOverlayStrideFloats = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+  missingRow = SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW
+} = {}) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(phaseVolumeAssignmentOverlayRowCount, 0))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    phaseVolumeAssignmentOverlayStrideFloats,
+    SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(
+    missingRow,
+    SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW
+  ))), true);
   return buffer;
 }
 
@@ -2907,6 +2936,7 @@ function assertPhaseVolumeLevelUpdateInput(phaseVolumeLevelUpdate) {
 export function createSchroederActiveNodeListPlan({
   levelAssignment,
   phaseVolumeAssignmentOverlay = null,
+  phaseVolumeAssignmentOverlayIndex = null,
   phaseVolumeLevelUpdate = null,
   selectedLevel = 0,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
@@ -2923,6 +2953,19 @@ export function createSchroederActiveNodeListPlan({
   });
   const overlaySummary = summarizeSchroederPhaseVolumeAssignmentOverlay(resolvedPhaseVolumeAssignmentOverlay);
   const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  if (phaseVolumeAssignmentOverlayIndex) {
+    assertPhaseVolumeAssignmentOverlayIndexInput(phaseVolumeAssignmentOverlayIndex, particleCount);
+  }
+  const overlayIndexEnabled = Boolean(phaseVolumeAssignmentOverlayIndex?.indexBuffer);
+  const overlayIndexRequired = overlaySummary.phaseVolumeAssignmentOverlayEnabled
+    && overlaySummary.sparseOverlayIndexRequired;
+  const overlayConsumable = overlaySummary.phaseVolumeAssignmentOverlayEnabled
+    && (overlaySummary.rowAlignedWithParticles || overlayIndexEnabled);
+  const overlayConsumerStatus = overlayConsumable
+    ? 'phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection'
+    : (overlayIndexRequired
+        ? 'blocked-phase-volume-level-update-assignment-overlay-index-required'
+        : overlaySummary.consumerStatus);
   const activeNodeByteLength = Math.max(
     4,
     particleCount * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -2937,20 +2980,32 @@ export function createSchroederActiveNodeListPlan({
     sourceAssignmentStatus: levelAssignment.status ?? null,
     phaseVolumeAssignmentOverlaySchema: overlaySummary.schema,
     phaseVolumeAssignmentOverlayStatus: overlaySummary.status,
-    phaseVolumeAssignmentOverlayConsumerStatus: overlaySummary.consumerStatus,
-    phaseVolumeAssignmentOverlayEnabled: overlaySummary.phaseVolumeAssignmentOverlayEnabled,
+    phaseVolumeAssignmentOverlayConsumerStatus: overlayConsumerStatus,
+    phaseVolumeAssignmentOverlayAvailable: overlaySummary.phaseVolumeAssignmentOverlayEnabled,
+    phaseVolumeAssignmentOverlayEnabled: overlayConsumable,
     phaseVolumeAssignmentOverlayRowCount: overlaySummary.rowCount,
     phaseVolumeAssignmentOverlayStrideFloats: overlaySummary.strideFloats,
     phaseVolumeAssignmentOverlayRetainedBuffer: overlaySummary.retainedBuffer,
     phaseVolumeAssignmentOverlayRowAlignedWithParticles: overlaySummary.rowAlignedWithParticles,
+    phaseVolumeAssignmentOverlayIndexRequired: overlayIndexRequired,
+    phaseVolumeAssignmentOverlayIndexEnabled: overlayIndexEnabled,
+    phaseVolumeAssignmentOverlayIndexSchema: phaseVolumeAssignmentOverlayIndex?.schema ?? null,
+    phaseVolumeAssignmentOverlayIndexStatus: phaseVolumeAssignmentOverlayIndex?.status ?? null,
+    phaseVolumeAssignmentOverlayIndexByteLength: phaseVolumeAssignmentOverlayIndex?.indexBufferByteLength
+      ?? phaseVolumeAssignmentOverlayIndex?.indexByteLength
+      ?? 0,
     phaseVolumeAssignmentOverlayIndexMode: overlaySummary.overlayIndexMode,
     phaseVolumeAssignmentOverlaySparseIndexStatus: overlaySummary.sparseOverlayIndexStatus,
     phaseVolumeAssignmentOverlayTransferMode: overlaySummary.transferMode,
     phaseVolumeAssignmentOverlayRetainedBufferRef: overlaySummary.retainedBufferRef,
     phaseVolumeAssignmentOverlayRawGpuBufferTransferAllowed: overlaySummary.rawGpuBufferTransferAllowed,
     phaseVolumeAssignmentOverlayFullParticleReadbackRequired: overlaySummary.fullParticleReadbackRequired,
-    phaseVolumeLevelSelectionSource: overlaySummary.selectedLevelSource,
-    phaseVolumeNativeLevelSource: overlaySummary.nativeLevelSource,
+    phaseVolumeLevelSelectionSource: overlayConsumable
+      ? overlaySummary.selectedLevelSource
+      : 'configured-selected-schroeder-level',
+    phaseVolumeNativeLevelSource: overlayConsumable
+      ? overlaySummary.nativeLevelSource
+      : 'level-assignment-native-support-radius',
     sourcePhaseVolumeLevelUpdateSchema: overlaySummary.sourcePhaseVolumeLevelUpdateSchema ?? null,
     sourcePhaseVolumeLevelUpdateStatus: overlaySummary.sourcePhaseVolumeLevelUpdateStatus ?? null,
     particleCount,
@@ -4681,12 +4736,10 @@ export function createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan({
   const retainedLevelUpdateBuffer = Boolean(phaseVolumeLevelUpdate.levelUpdateBuffer);
   const explicitLevelUpdateRows = phaseVolumeLevelUpdate.levelUpdateRows instanceof Float32Array;
   const rowAlignedWithParticles = particleCount === 0 || levelUpdateRowCount >= particleCount;
-  const overlayAvailable = rowAlignedWithParticles && (retainedLevelUpdateBuffer || explicitLevelUpdateRows);
+  const overlayAvailable = retainedLevelUpdateBuffer || explicitLevelUpdateRows;
   const status = overlayAvailable
     ? 'schroeder-phase-volume-level-update-assignment-overlay-ready'
-    : (!rowAlignedWithParticles
-        ? 'schroeder-phase-volume-level-update-assignment-overlay-blocked-row-alignment-required'
-        : 'schroeder-phase-volume-level-update-assignment-overlay-blocked-retained-buffer-required');
+    : 'schroeder-phase-volume-level-update-assignment-overlay-blocked-retained-buffer-required';
   return {
     schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
     status,
@@ -4706,7 +4759,9 @@ export function createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan({
       : 'level-assignment-native-support-radius',
     phaseVolumeAssignmentOverlayEnabled: overlayAvailable,
     rowAlignedWithParticles,
-    overlayIndexMode: 'row-aligned-source-particle-index',
+    overlayIndexMode: rowAlignedWithParticles
+      ? 'row-aligned-source-particle-index'
+      : 'sparse-source-particle-index-required',
     sparseOverlayIndexRequired: !rowAlignedWithParticles,
     sparseOverlayIndexStatus: rowAlignedWithParticles
       ? 'not-required-row-aligned-level-update-rows'
@@ -4791,6 +4846,7 @@ function summarizeSchroederPhaseVolumeAssignmentOverlay(phaseVolumeAssignmentOve
       strideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
       retainedBuffer: false,
       rowAlignedWithParticles: false,
+      sparseOverlayIndexRequired: false,
       nativeLevelSource: 'level-assignment-native-support-radius',
       selectedLevelSource: 'configured-selected-schroeder-level',
       rawGpuBufferTransferAllowed: false,
@@ -4814,6 +4870,7 @@ function summarizeSchroederPhaseVolumeAssignmentOverlay(phaseVolumeAssignmentOve
       ?? SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
     retainedBuffer: Boolean(phaseVolumeAssignmentOverlay.levelUpdateBuffer),
     rowAlignedWithParticles: phaseVolumeAssignmentOverlay.rowAlignedWithParticles === true,
+    sparseOverlayIndexRequired: phaseVolumeAssignmentOverlay.sparseOverlayIndexRequired === true,
     overlayIndexMode: phaseVolumeAssignmentOverlay.overlayIndexMode ?? null,
     sparseOverlayIndexStatus: phaseVolumeAssignmentOverlay.sparseOverlayIndexStatus ?? null,
     nativeLevelSource: phaseVolumeAssignmentOverlay.nativeLevelSource ?? 'level-assignment-native-support-radius',
@@ -4822,6 +4879,70 @@ function summarizeSchroederPhaseVolumeAssignmentOverlay(phaseVolumeAssignmentOve
     retainedBufferRef: phaseVolumeAssignmentOverlay.retainedBufferRef ?? null,
     rawGpuBufferTransferAllowed: phaseVolumeAssignmentOverlay.rawGpuBufferTransferAllowed === true,
     fullParticleReadbackRequired: phaseVolumeAssignmentOverlay.fullParticleReadbackRequired === true
+  };
+}
+
+function assertPhaseVolumeAssignmentOverlayIndexInput(phaseVolumeAssignmentOverlayIndex, particleCount = 0) {
+  if (
+    phaseVolumeAssignmentOverlayIndex?.schema !== ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA
+    && phaseVolumeAssignmentOverlayIndex?.schema !== ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_SCHEMA
+  ) {
+    throw new TypeError('Schroeder active node list requires a Schroeder phase-volume assignment overlay index input');
+  }
+  const indexParticleCount = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeAssignmentOverlayIndex.particleCount,
+    0
+  )));
+  const requiredParticleCount = Math.max(0, Math.round(finiteNumber(particleCount, 0)));
+  if (requiredParticleCount > 0 && indexParticleCount < requiredParticleCount) {
+    throw new RangeError('Schroeder phase-volume assignment overlay index must cover every active particle');
+  }
+  if (phaseVolumeAssignmentOverlayIndex.indexStrideUints !== 1) {
+    throw new RangeError('Schroeder phase-volume assignment overlay index requires one u32 row per particle');
+  }
+}
+
+export function createSchroederPhaseVolumeAssignmentOverlayIndexPlan({
+  phaseVolumeAssignmentOverlay,
+  levelAssignment
+} = {}) {
+  assertPhaseVolumeAssignmentOverlayInput(phaseVolumeAssignmentOverlay);
+  assertLevelAssignmentInput(levelAssignment);
+  const particleCount = Math.max(0, Math.round(finiteNumber(levelAssignment.particleCount, 0)));
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeAssignmentOverlay.phaseVolumeAssignmentOverlayRowCount
+      ?? phaseVolumeAssignmentOverlay.levelUpdateRowCount,
+    0
+  )));
+  const indexByteLength = Math.max(4, particleCount * Uint32Array.BYTES_PER_ELEMENT);
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_SCHEMA,
+    status: 'schroeder-phase-volume-assignment-overlay-index-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-phase-volume-assignment-overlay-index',
+    sourcePhaseVolumeAssignmentOverlaySchema: phaseVolumeAssignmentOverlay.schema,
+    sourcePhaseVolumeAssignmentOverlayStatus: phaseVolumeAssignmentOverlay.status ?? null,
+    sourcePhaseVolumeLevelUpdateSchema: phaseVolumeAssignmentOverlay.sourcePhaseVolumeLevelUpdateSchema ?? null,
+    sourceLevelAssignmentSchema: levelAssignment.schema,
+    sourceLevelAssignmentStatus: levelAssignment.status ?? null,
+    particleCount,
+    phaseVolumeAssignmentOverlayRowCount: rowCount,
+    phaseVolumeAssignmentOverlayStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    indexStrideUints: 1,
+    indexByteLength,
+    missingRow: SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW,
+    duplicateSourcePolicy: 'atomic-min-first-admitted-row-wins',
+    outputCompaction: 'one-u32-level-update-row-index-per-particle',
+    retainedIndexBufferRef: 'schroeder-phase-volume-assignment-overlay-index:source-particle-row-map',
+    descriptorOnly: true,
+    sameDeviceOnly: true,
+    peerComputePortable: true,
+    transferMode: 'descriptor-only-same-device-retained-buffer-ref',
+    rawGpuBufferTransferAllowed: false,
+    fullReadbackRequired: false,
+    fullParticleReadbackRequired: false,
+    normalHotLoopReadbackFree: true
   };
 }
 
@@ -5601,6 +5722,7 @@ export async function runSchroederActiveNodeListWebGpu({
   device,
   levelAssignment,
   phaseVolumeAssignmentOverlay = null,
+  phaseVolumeAssignmentOverlayIndex = null,
   phaseVolumeLevelUpdate = null,
   selectedLevel = 0,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
@@ -5622,6 +5744,7 @@ export async function runSchroederActiveNodeListWebGpu({
   const plan = createSchroederActiveNodeListPlan({
     levelAssignment,
     phaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
+    phaseVolumeAssignmentOverlayIndex,
     selectedLevel,
     tileCellCount,
     supportInflateCells,
@@ -5657,6 +5780,15 @@ export async function runSchroederActiveNodeListWebGpu({
           'ulg-schroeder-active-node-phase-volume-assignment-overlay-disabled',
           new Float32Array(1)
         ));
+  const borrowedPhaseVolumeAssignmentOverlayIndexBuffer = plan.phaseVolumeAssignmentOverlayIndexEnabled
+    ? (phaseVolumeAssignmentOverlayIndex?.indexBuffer || null)
+    : null;
+  const phaseVolumeAssignmentOverlayIndexBuffer = borrowedPhaseVolumeAssignmentOverlayIndexBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-active-node-phase-volume-assignment-overlay-index-disabled',
+      new Uint32Array([SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW])
+    );
   const activeNodeBuffer = device.createBuffer({
     label: 'ulg-schroeder-active-nodes-out',
     size: plan.activeNodeByteLength,
@@ -5683,10 +5815,11 @@ export async function runSchroederActiveNodeListWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'uniform'),
-      computeBufferBinding(3, 'read-only-storage')
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-active-node-list.v1',
+      cacheKey: 'ulg-schroeder-active-node-list.v2',
       label: 'ulg-schroeder-active-node-list',
       code: schroederActiveNodeListWgsl,
       entryPoint: 'main',
@@ -5698,7 +5831,8 @@ export async function runSchroederActiveNodeListWebGpu({
         { binding: 0, resource: { buffer: assignmentBuffer } },
         { binding: 1, resource: { buffer: activeNodeBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
-        { binding: 3, resource: { buffer: phaseVolumeAssignmentOverlayBuffer } }
+        { binding: 3, resource: { buffer: phaseVolumeAssignmentOverlayBuffer } },
+        { binding: 4, resource: { buffer: phaseVolumeAssignmentOverlayIndexBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -5736,10 +5870,16 @@ export async function runSchroederActiveNodeListWebGpu({
       phaseVolumeAssignmentOverlayStatus: plan.phaseVolumeAssignmentOverlayStatus,
       phaseVolumeAssignmentOverlayConsumerStatus: plan.phaseVolumeAssignmentOverlayConsumerStatus,
       phaseVolumeAssignmentOverlayEnabled: plan.phaseVolumeAssignmentOverlayEnabled,
+      phaseVolumeAssignmentOverlayAvailable: plan.phaseVolumeAssignmentOverlayAvailable,
       phaseVolumeAssignmentOverlayRowCount: plan.phaseVolumeAssignmentOverlayRowCount,
       phaseVolumeAssignmentOverlayStrideFloats: plan.phaseVolumeAssignmentOverlayStrideFloats,
       phaseVolumeAssignmentOverlayRetainedBuffer: plan.phaseVolumeAssignmentOverlayRetainedBuffer,
       phaseVolumeAssignmentOverlayRowAlignedWithParticles: plan.phaseVolumeAssignmentOverlayRowAlignedWithParticles,
+      phaseVolumeAssignmentOverlayIndexRequired: plan.phaseVolumeAssignmentOverlayIndexRequired,
+      phaseVolumeAssignmentOverlayIndexEnabled: plan.phaseVolumeAssignmentOverlayIndexEnabled,
+      phaseVolumeAssignmentOverlayIndexSchema: plan.phaseVolumeAssignmentOverlayIndexSchema,
+      phaseVolumeAssignmentOverlayIndexStatus: plan.phaseVolumeAssignmentOverlayIndexStatus,
+      phaseVolumeAssignmentOverlayIndexByteLength: plan.phaseVolumeAssignmentOverlayIndexByteLength,
       phaseVolumeAssignmentOverlayIndexMode: plan.phaseVolumeAssignmentOverlayIndexMode,
       phaseVolumeAssignmentOverlaySparseIndexStatus: plan.phaseVolumeAssignmentOverlaySparseIndexStatus,
       phaseVolumeAssignmentOverlayTransferMode: plan.phaseVolumeAssignmentOverlayTransferMode,
@@ -5767,7 +5907,166 @@ export async function runSchroederActiveNodeListWebGpu({
     const cleanup = () => {
       if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
       if (!borrowedPhaseVolumeAssignmentOverlayBuffer) phaseVolumeAssignmentOverlayBuffer.destroy?.();
+      if (!borrowedPhaseVolumeAssignmentOverlayIndexBuffer) phaseVolumeAssignmentOverlayIndexBuffer.destroy?.();
       if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
+export async function runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu({
+  device,
+  phaseVolumeAssignmentOverlay,
+  levelAssignment,
+  retainIndexBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError(
+      'runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu requires a WebGPU-like device with queue.writeBuffer'
+    );
+  }
+  const plan = createSchroederPhaseVolumeAssignmentOverlayIndexPlan({
+    phaseVolumeAssignmentOverlay,
+    levelAssignment
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedLevelUpdateBuffer = phaseVolumeAssignmentOverlay?.levelUpdateBuffer || null;
+  const levelUpdateRows = phaseVolumeAssignmentOverlay?.levelUpdateRows instanceof Float32Array
+    ? phaseVolumeAssignmentOverlay.levelUpdateRows
+    : null;
+  if (!borrowedLevelUpdateBuffer && !(levelUpdateRows instanceof Float32Array)) {
+    throw new TypeError(
+      'Schroeder phase-volume assignment overlay index requires retained level-update rows or explicit rows'
+    );
+  }
+  const levelUpdateBuffer = borrowedLevelUpdateBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-assignment-overlay-index-in', levelUpdateRows);
+  const indexBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-assignment-overlay-index-out',
+    size: plan.indexByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsPayload = createSchroederPhaseVolumeAssignmentOverlayIndexParamsArray(plan);
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-assignment-overlay-index-params',
+    size: paramsPayload.byteLength,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-phase-volume-assignment-overlay-index-readback',
+      size: plan.indexByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedIndexBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, paramsPayload);
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const clearPipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-phase-volume-assignment-overlay-index-clear.v0',
+      label: 'ulg-schroeder-phase-volume-assignment-overlay-index-clear',
+      code: schroederPhaseVolumeAssignmentOverlayIndexWgsl,
+      entryPoint: 'clear_index',
+      bindings
+    });
+    const buildPipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-phase-volume-assignment-overlay-index-build.v0',
+      label: 'ulg-schroeder-phase-volume-assignment-overlay-index-build',
+      code: schroederPhaseVolumeAssignmentOverlayIndexWgsl,
+      entryPoint: 'build_index',
+      bindings
+    });
+    const clearBindGroup = device.createBindGroup({
+      layout: clearPipeline.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: levelUpdateBuffer } },
+        { binding: 1, resource: { buffer: indexBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const buildBindGroup = device.createBindGroup({
+      layout: buildPipeline.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: levelUpdateBuffer } },
+        { binding: 1, resource: { buffer: indexBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(clearPipeline.pipeline);
+    pass.setBindGroup(0, clearBindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.particleCount / SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_WORKGROUP_SIZE)
+    ));
+    pass.setPipeline(buildPipeline.pipeline);
+    pass.setBindGroup(0, buildBindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(
+        plan.phaseVolumeAssignmentOverlayRowCount
+          / SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_WORKGROUP_SIZE
+      )
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(indexBuffer, 0, readBuffer, 0, plan.indexByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let indexRows = new Uint32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      indexRows = new Uint32Array(readBuffer.getMappedRange()).slice(0, plan.particleCount);
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA,
+      phaseVolumeAssignmentOverlayIndexSchema: plan.schema,
+      status: 'schroeder-phase-volume-assignment-overlay-index-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: {
+        clear: clearPipeline.cacheStatus,
+        build: buildPipeline.cacheStatus
+      },
+      readbackMode: noFullReadback ? SCHROEDER_NO_FULL_READBACK_MODE : 'full-index-readback',
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedIndexBuffer: Boolean(retainIndexBuffer),
+      indexBufferByteLength: plan.indexByteLength,
+      indexRows,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainIndexBuffer) {
+      result.indexBuffer = indexBuffer;
+      result.destroyIndexBuffer = () => indexBuffer.destroy?.();
+      returnedRetainedIndexBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedLevelUpdateBuffer) levelUpdateBuffer.destroy?.();
+      if (!retainIndexBuffer || !returnedRetainedIndexBuffer) indexBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };
@@ -9893,6 +10192,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   hierarchyAggregateNode = null,
   phaseVolumeMigration = null,
   phaseVolumeAssignmentOverlay = null,
+  phaseVolumeAssignmentOverlayIndex = null,
   phaseVolumeLevelUpdate = null,
   phaseVolumeDiagnosticSummary = null,
   portableSummary = null,
@@ -10035,6 +10335,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateGasStateDeltaRunner = runSchroederFarAggregateGasStateDeltaWebGpu,
   farAggregateGasCellImportRunner = runSchroederFarAggregateGasCellImportWebGpu,
   farAggregateForceApplicationRunner = runSchroederFarAggregateForceApplicationWebGpu,
+  phaseVolumeAssignmentOverlayIndexRunner = runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
@@ -10279,6 +10580,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   if (enablePortableSummary && typeof portableSummaryRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a portableSummaryRunner function');
   }
+  if (
+    phaseVolumeAssignmentOverlayIndex == null
+    && (phaseVolumeAssignmentOverlay || phaseVolumeLevelUpdate)
+    && typeof phaseVolumeAssignmentOverlayIndexRunner !== 'function'
+  ) {
+    throw new TypeError(
+      'runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeAssignmentOverlayIndexRunner function'
+    );
+  }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
     mlsMpmParticleState,
@@ -10309,10 +10619,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     levelAssignment: resolvedLevelAssignment,
     selectedLevel: plan.selectedLevel
   });
+  const shouldBuildPhaseVolumeAssignmentOverlayIndex =
+    Boolean(resolvedPhaseVolumeAssignmentOverlay?.phaseVolumeAssignmentOverlayEnabled)
+    && resolvedPhaseVolumeAssignmentOverlay.rowAlignedWithParticles === false
+    && !phaseVolumeAssignmentOverlayIndex;
+  const resolvedPhaseVolumeAssignmentOverlayIndex = phaseVolumeAssignmentOverlayIndex
+    || (!shouldBuildPhaseVolumeAssignmentOverlayIndex
+        ? null
+        : await phaseVolumeAssignmentOverlayIndexRunner({
+          device,
+          phaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
+          levelAssignment: resolvedLevelAssignment,
+          retainIndexBuffer: true,
+          readbackMode
+        }));
   const resolvedActiveNodeList = activeNodeList || await runSchroederActiveNodeListWebGpu({
     device,
     levelAssignment: resolvedLevelAssignment,
     phaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
+    phaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     selectedLevel: plan.selectedLevel,
     tileCellCount,
     supportInflateCells,
@@ -10619,6 +10944,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       readbackMode
     })
   );
+  const resolvedPhaseVolumeNextTickAssignmentOverlay = resolvedPhaseVolumeLevelUpdate
+    ? createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan({
+      phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
+      levelAssignment: resolvedLevelAssignment,
+      selectedLevel: plan.selectedLevel
+    })
+    : null;
   const resolvedPhaseVolumeDiagnosticSummary = !resolvedPhaseVolumeLevelUpdate || !enablePhaseVolumeDiagnosticSummary
     ? null
     : phaseVolumeDiagnosticSummary || await phaseVolumeDiagnosticSummaryRunner({
@@ -10696,6 +11028,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederHierarchyAggregateNode: resolvedHierarchyAggregateNode,
     schroederPhaseVolumeMigration: resolvedPhaseVolumeMigration,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
+    schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
     schroederPhaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
     schroederPortableSummary: resolvedPortableSummary,
@@ -10729,10 +11062,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       outputCompaction: resolvedActiveNodeList.outputCompaction,
       phaseVolumeAssignmentOverlayStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayStatus,
       phaseVolumeAssignmentOverlayConsumerStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayConsumerStatus,
+      phaseVolumeAssignmentOverlayAvailable: resolvedActiveNodeList.phaseVolumeAssignmentOverlayAvailable === true,
       phaseVolumeAssignmentOverlayEnabled: resolvedActiveNodeList.phaseVolumeAssignmentOverlayEnabled === true,
       phaseVolumeAssignmentOverlayRowCount: resolvedActiveNodeList.phaseVolumeAssignmentOverlayRowCount ?? 0,
       phaseVolumeAssignmentOverlayRetainedBuffer:
         resolvedActiveNodeList.phaseVolumeAssignmentOverlayRetainedBuffer === true,
+      phaseVolumeAssignmentOverlayIndexRequired:
+        resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexRequired === true,
+      phaseVolumeAssignmentOverlayIndexEnabled:
+        resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexEnabled === true,
+      phaseVolumeAssignmentOverlayIndexStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexStatus ?? null,
+      phaseVolumeAssignmentOverlayIndexByteLength:
+        resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexByteLength ?? 0,
       phaseVolumeLevelSelectionSource: resolvedActiveNodeList.phaseVolumeLevelSelectionSource,
       phaseVolumeNativeLevelSource: resolvedActiveNodeList.phaseVolumeNativeLevelSource,
       retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
@@ -11185,6 +11526,29 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedPhaseVolumeLevelUpdate.levelUpdateByteLength
         ?? 0
     } : null,
+    phaseVolumeNextTickAssignmentOverlay: resolvedPhaseVolumeNextTickAssignmentOverlay ? {
+      schema: resolvedPhaseVolumeNextTickAssignmentOverlay.schema,
+      status: resolvedPhaseVolumeNextTickAssignmentOverlay.status,
+      sourcePhaseVolumeLevelUpdateSchema:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.sourcePhaseVolumeLevelUpdateSchema,
+      sourcePhaseVolumeLevelUpdateStatus:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.sourcePhaseVolumeLevelUpdateStatus,
+      phaseVolumeAssignmentOverlayEnabled:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.phaseVolumeAssignmentOverlayEnabled === true,
+      rowAlignedWithParticles: resolvedPhaseVolumeNextTickAssignmentOverlay.rowAlignedWithParticles === true,
+      sparseOverlayIndexRequired:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.sparseOverlayIndexRequired === true,
+      overlayIndexMode: resolvedPhaseVolumeNextTickAssignmentOverlay.overlayIndexMode,
+      sparseOverlayIndexStatus: resolvedPhaseVolumeNextTickAssignmentOverlay.sparseOverlayIndexStatus,
+      levelUpdateRowCount: resolvedPhaseVolumeNextTickAssignmentOverlay.levelUpdateRowCount,
+      retainedLevelUpdateBuffer:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.retainedLevelUpdateBuffer === true,
+      transferMode: resolvedPhaseVolumeNextTickAssignmentOverlay.transferMode,
+      rawGpuBufferTransferAllowed:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.rawGpuBufferTransferAllowed === true,
+      fullParticleReadbackRequired:
+        resolvedPhaseVolumeNextTickAssignmentOverlay.fullParticleReadbackRequired === true
+    } : null,
     phaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary ? {
       schema: resolvedPhaseVolumeDiagnosticSummary.schema,
       status: resolvedPhaseVolumeDiagnosticSummary.status,
@@ -11276,10 +11640,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ?? 'disabled-phase-volume-level-update-overlay-not-provided',
     phaseVolumeAssignmentOverlayConsumerStatus: resolvedActiveNodeList.phaseVolumeAssignmentOverlayConsumerStatus
       ?? 'disabled-phase-volume-level-update-overlay-not-provided',
+    phaseVolumeAssignmentOverlayAvailable: resolvedActiveNodeList.phaseVolumeAssignmentOverlayAvailable === true,
     phaseVolumeAssignmentOverlayEnabled: resolvedActiveNodeList.phaseVolumeAssignmentOverlayEnabled === true,
     phaseVolumeAssignmentOverlayRetainedBuffer:
       resolvedActiveNodeList.phaseVolumeAssignmentOverlayRetainedBuffer === true,
     phaseVolumeAssignmentOverlayRowCount: resolvedActiveNodeList.phaseVolumeAssignmentOverlayRowCount ?? 0,
+    phaseVolumeAssignmentOverlayIndexRequired:
+      resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexRequired === true,
+    phaseVolumeAssignmentOverlayIndexEnabled:
+      resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexEnabled === true,
+    phaseVolumeAssignmentOverlayIndexStatus:
+      resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexStatus ?? null,
+    phaseVolumeAssignmentOverlayIndexByteLength:
+      resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexByteLength ?? 0,
     phaseVolumeAssignmentOverlayIndexMode: resolvedActiveNodeList.phaseVolumeAssignmentOverlayIndexMode ?? null,
     phaseVolumeAssignmentOverlaySparseIndexStatus:
       resolvedActiveNodeList.phaseVolumeAssignmentOverlaySparseIndexStatus ?? null,
@@ -11468,6 +11841,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     phaseVolumeSelectedLevel: plan.selectedLevel,
     phaseVolumeLevelUpdateRetainedBuffer: Boolean(resolvedPhaseVolumeLevelUpdate?.levelUpdateBuffer),
     phaseVolumeLevelUpdateRowCount: resolvedPhaseVolumeLevelUpdate?.migrationRowCount ?? 0,
+    phaseVolumeNextTickAssignmentOverlayStatus: resolvedPhaseVolumeNextTickAssignmentOverlay?.status ?? (
+      resolvedPhaseVolumeLevelUpdate
+        ? 'phase-volume-next-tick-assignment-overlay-unavailable'
+        : 'disabled-phase-volume-level-update'
+    ),
+    phaseVolumeNextTickAssignmentOverlayConsumerStatus: resolvedPhaseVolumeNextTickAssignmentOverlay
+      ? 'phase-volume-level-update-overlay-ready-for-next-resident-tick'
+      : (resolvedPhaseVolumeLevelUpdate
+          ? 'phase-volume-level-update-overlay-unavailable-for-next-resident-tick'
+          : 'disabled-phase-volume-level-update'),
+    phaseVolumeNextTickAssignmentOverlayIndexRequired:
+      resolvedPhaseVolumeNextTickAssignmentOverlay?.sparseOverlayIndexRequired === true,
+    phaseVolumeNextTickAssignmentOverlayRawGpuBufferTransferAllowed:
+      resolvedPhaseVolumeNextTickAssignmentOverlay?.rawGpuBufferTransferAllowed === true,
     phaseVolumeDiagnosticSummaryStatus: resolvedPhaseVolumeDiagnosticSummary?.status ?? (
       resolvedPhaseVolumeLevelUpdate
         ? 'disabled-phase-volume-diagnostic-summary'

@@ -2794,6 +2794,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   fuseActiveGrid = false,
   activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
+  schroederActiveNodeList = null,
   measureQueueFence = false,
   sidecarFusionPlan = null,
   thermalMaterialTable = null,
@@ -2853,6 +2856,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     fusedResidentSequence: true,
     p2gBackend
   });
+  const schroederLevelFilter = createFusedSchroederLevelAssignmentBinding({
+    device,
+    schroederLevelAssignment,
+    schroederSelectedLevel,
+    labelPrefix: 'ulg-mls-mpm-fused-sequence'
+  });
+  const schroederActiveNodeFilter = createFusedSchroederActiveNodeBinding({
+    device,
+    schroederActiveNodeList,
+    labelPrefix: 'ulg-mls-mpm-fused-sequence'
+  });
   const stageTimingStartMs = nowMs();
   const stageMs = {
     deviceAcquire: 0,
@@ -2909,8 +2923,23 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     device,
     'ulg-mls-mpm-fused-sequence-p2g-params',
     activeGridDispatch.useActiveGrid
-      ? createFusedActiveP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale, activeGridDispatch)
-      : createFusedP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale),
+      ? createFusedActiveP2gParamsArray(
+          gridSpec,
+          particleCount,
+          dtSeconds,
+          internalPressureScale,
+          activeGridDispatch,
+          schroederLevelFilter,
+          schroederActiveNodeFilter
+        )
+      : createFusedP2gParamsArray(
+          gridSpec,
+          particleCount,
+          dtSeconds,
+          internalPressureScale,
+          schroederLevelFilter,
+          schroederActiveNodeFilter
+        ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
   const gridUpdateParamsBuffer = writeGpuBuffer(
@@ -2946,7 +2975,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       boxDimsM: dims,
       internalPressureScale,
       liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
-      liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM
+      liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM,
+      schroederLevelFilter,
+      schroederActiveNodeFilter
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -2956,18 +2987,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
-  const schroederAssignmentBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
-    new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS),
-    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  );
-  const schroederActiveNodeBuffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-fused-sequence-empty-schroeder-active-nodes',
-    new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS),
-    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  );
+  const schroederAssignmentBuffer = schroederLevelFilter.assignmentBuffer;
+  const schroederActiveNodeBuffer = schroederActiveNodeFilter.activeNodeBuffer;
   const pressureRowsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
@@ -2984,8 +3005,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
     productEventBuffer,
-    schroederAssignmentBuffer,
-    schroederActiveNodeBuffer,
+    ...(schroederLevelFilter.ownsAssignmentBuffer ? [schroederAssignmentBuffer] : []),
+    ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeBuffer] : []),
     pressureRowsBuffer,
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
@@ -3310,7 +3331,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
       activeGridDispatch,
-      activeGridIndirectDispatch
+      activeGridIndirectDispatch,
+      schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
+      schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
+      schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
+      schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true
     };
     const gridUpdate = {
       schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -3410,7 +3436,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
       activeGridDispatch,
-      activeGridIndirectDispatch
+      activeGridIndirectDispatch,
+      schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
+      schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
+      schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
+      schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true
     };
     const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
     const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
@@ -3568,6 +3599,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       compactSummaryRequested: typeof summaryRunner === 'function',
       activeGridDispatchPlanOnlyRequested: typeof summaryRunner !== 'function' && activeGridDispatch.useActiveGrid,
       compactSummaryScope,
+      schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
+      schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
+      schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
+      schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
       mechanicsRefreshRequested: useThermalSidecarFusion,
       thermalRequested: useThermalSidecarFusion,
       reactionRequested: false,
@@ -3638,6 +3674,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       queueFenceMethod: fusedMechanicsSequenceQueueFenceMethod,
       dispatchTopology,
       activeGridDispatch,
+      schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
+      schroederLevelFilterEnabled: schroederLevelFilter.enabled === true,
+      schroederSelectedLevel: schroederLevelFilter.enabled === true ? schroederLevelFilter.selectedLevel : null,
+      schroederActiveNodeFilter: fusedSchroederActiveNodeFilterMetadata(schroederActiveNodeFilter),
+      schroederActiveNodeFilterEnabled: schroederActiveNodeFilter.enabled === true,
       residentPositionBoundsSource: continuationBounds.source,
       retainedBufferMode: 'ping-pong-state-mechanics-single-grid',
       finalSourceSlot,
@@ -3649,8 +3690,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       gridUpdateParamsBuffer,
       g2pParamsBuffer,
       productEventBuffer,
-      schroederAssignmentBuffer,
-      schroederActiveNodeBuffer,
+      ...(schroederLevelFilter.ownsAssignmentBuffer ? [schroederAssignmentBuffer] : []),
+      ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeBuffer] : []),
       pressureRowsBuffer,
       ...statePingBuffers.filter((buffer) => buffer !== finalStateBuffer),
       ...mechanicsPingBuffers.filter((buffer) => buffer !== finalMechanicsBuffer)
@@ -14476,6 +14517,9 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   sourceSlot = sphParticleUpload?.slot ?? 0,
   readbackMode = NO_FULL_READBACK_MODE,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+  schroederLevelAssignment = null,
+  schroederSelectedLevel = null,
+  schroederActiveNodeList = null,
   compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   sequenceIndex = null,
   sequenceStepCount = null,
@@ -14574,7 +14618,10 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     internalPressureScale,
     fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
     activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
-    p2gBackend
+    p2gBackend,
+    schroederLevelAssignment,
+    schroederSelectedLevel,
+    schroederActiveNodeList
   }));
   stageMs.p2gGridProjection = 0;
   stageMs.gridUpdate = 0;
@@ -15220,6 +15267,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       fuseActiveGrid: Boolean(args.fuseNoFullResidentMechanicsActiveGrid || args.fuseNoFullResidentActiveGrid),
       activeGridSafetyCells: args.fusedActiveGridSafetyCells ?? args.activeGridSafetyCells,
       p2gBackend: args.p2gBackend ?? MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
+      schroederLevelAssignment: args.schroederLevelAssignment ?? null,
+      schroederSelectedLevel: args.schroederSelectedLevel ?? null,
+      schroederActiveNodeList: args.schroederActiveNodeList ?? null,
       measureQueueFence: Boolean(
         args.measureFusedSequenceQueueFence
         || args.measureGpuQueueFence

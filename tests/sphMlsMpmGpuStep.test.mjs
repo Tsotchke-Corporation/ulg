@@ -6450,6 +6450,141 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });
 
+test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder active nodes', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const schroederAssignmentBuffer = tracker.buffer('retained-schroeder-sequence-assignment');
+  const schroederActiveNodeBuffer = tracker.buffer('retained-schroeder-sequence-active-nodes');
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    schroederLevelAssignment: {
+      schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+      status: 'schroeder-level-assignment-submitted',
+      particleCount: buffers.sphParticleState.particleCount,
+      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length,
+      assignmentBuffer: schroederAssignmentBuffer,
+      assignmentBufferByteLength: SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      retainedAssignmentBuffer: true
+    },
+    schroederSelectedLevel: 2,
+    schroederActiveNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+      status: 'schroeder-active-node-list-submitted',
+      particleCount: buffers.sphParticleState.particleCount,
+      activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length,
+      activeNodeBuffer: schroederActiveNodeBuffer,
+      activeNodeBufferByteLength: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      retainedActiveNodeBuffer: true
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    summaryRunner({ gridUpdate, g2pReconstruction }) {
+      assert.equal(gridUpdate.fusedResidentSequence, true);
+      assert.equal(g2pReconstruction.fusedResidentSequence, true);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-resident-summary-execution.v0',
+        backend: 'webgpu',
+        status: 'compact-summary-ready',
+        compactGpuSummaryAvailable: true,
+        readbackMode: 'no-full-readback',
+        summaryScope: 'full',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: gridUpdate.gridNodeCount,
+        activeGridNodeCount: null,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
+        gridNodeScanCount: 0,
+        gridNodeScanSkipped: true,
+        sourceMassKg: 8,
+        nextMassKg: 8,
+        massDeltaKg: 0,
+        maxSpeedMPerS: 0,
+        maxDisplacementM: 0,
+        minVolumeRatioJ: 1,
+        maxVolumeRatioJ: 1,
+        phaseMassKg: { solid: 0, liquid: 8, gas: 0, plasma: 0 },
+        phaseMassTotalKg: 8,
+        thermalPhaseSummaryAvailable: true,
+        compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+        timing: {
+          schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+          totalMs: 0,
+          setupMs: 0,
+          encodeMs: 0,
+          submitMs: 0,
+          mapAsyncWaitMs: 0,
+          decodeMs: 0,
+          queueFenceAttribution: 'unit-summary-runner',
+          summaryKernelDispatchCount: 0,
+          summaryWorkgroupCount: 0,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        },
+        mapAsyncWaitMs: 0,
+        queueFenceAttribution: 'unit-summary-runner'
+      };
+    }
+  });
+
+  assert.equal(execution.fusedResidentSequence.schroederLevelFilterEnabled, true);
+  assert.equal(execution.fusedResidentSequence.schroederSelectedLevel, 2);
+  assert.equal(execution.fusedResidentSequence.schroederActiveNodeFilterEnabled, true);
+  assert.equal(execution.finalStep.p2gGridProjection.schroederLevelFilterEnabled, true);
+  assert.equal(execution.finalStep.p2gGridProjection.schroederActiveNodeFilterEnabled, true);
+  assert.equal(execution.finalStep.p2gGridProjection.schroederLevelFilter.assignmentBufferSource, 'retained-schroeder-level-assignment-buffer');
+  assert.equal(execution.finalStep.p2gGridProjection.schroederActiveNodeFilter.activeNodeBufferSource, 'retained-schroeder-active-node-buffer');
+  assert.equal(execution.finalStep.g2pReconstruction.schroederActiveNodeFilterEnabled, true);
+  assert.equal(execution.finalStep.stageTiming.schroederLevelFilterEnabled, true);
+  assert.equal(execution.finalStep.stageTiming.schroederActiveNodeFilterEnabled, true);
+  const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-sequence-p2g-params');
+  assert.ok(p2gParamWrite);
+  const p2gParams = new DataView(p2gParamWrite.data);
+  assert.equal(p2gParams.getUint32(44, true), 1);
+  assert.equal(p2gParams.getInt32(48, true), 2);
+  assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
+  assert.equal(p2gParams.getUint32(56, true), 1);
+  assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-sequence-g2p-params');
+  assert.ok(g2pParamWrite);
+  const g2pParams = new DataView(g2pParamWrite.data);
+  assert.equal(g2pParams.getUint32(24, true), 1);
+  assert.equal(g2pParams.getInt32(28, true), 2);
+  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(g2pParams.getUint32(72, true), 1);
+  const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
+    return group.entries.some((entry) => entry.binding === 8);
+  });
+  assert.equal(p2gSchroederBindGroups.length, 4);
+  assert.ok(p2gSchroederBindGroups.every((group) => {
+    return group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer;
+  }));
+  assert.ok(p2gSchroederBindGroups.every((group) => {
+    return group.entries.find((entry) => entry.binding === 8)?.resource?.buffer === schroederActiveNodeBuffer;
+  }));
+  assert.notEqual(schroederAssignmentBuffer.destroyed, true);
+  assert.notEqual(schroederActiveNodeBuffer.destroyed, true);
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.notEqual(schroederAssignmentBuffer.destroyed, true);
+  assert.notEqual(schroederActiveNodeBuffer.destroyed, true);
+});
+
 test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatch', async () => {
   const buffers = manualBuffers({ velocity: [0, 0, 0] });
   const tracker = fakeBufferTracker();

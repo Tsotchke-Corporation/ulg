@@ -54,6 +54,50 @@ function normalizeString(value, fallback = null) {
   return text || fallback;
 }
 
+function uniqueStringList(values = []) {
+  const source = Array.isArray(values) ? values : [];
+  return [...new Set(source.map((value) => normalizeString(value, null)).filter(Boolean))];
+}
+
+function firstPositiveInteger(values = [], fallback = 0) {
+  for (const value of values) {
+    const number = Math.trunc(Number(value));
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return Math.max(0, Math.trunc(Number(fallback) || 0));
+}
+
+function isGasPressureBufferRef(ref) {
+  const text = String(ref || '').toLowerCase();
+  return text.includes('gaspressure')
+    || text.includes('gas-pressure')
+    || text.includes('gascell')
+    || text.includes('gas-cell')
+    || text.includes('resident-gas-pressure-cells-buffer');
+}
+
+function workerRetainedGasPressureBufferRefsFrom(value = null) {
+  if (!value || typeof value !== 'object') return [];
+  return uniqueStringList([
+    ...(value.workerRetainedGasPressureBufferRefs || []),
+    ...(value.retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs || []),
+    ...(value.pressureInterfaceGasCellFieldAdmission?.workerRetainedGasPressureBufferRefs || []),
+    ...(value.gasCellFieldAdmission?.workerRetainedGasPressureBufferRefs || []),
+    ...(value.admission?.workerRetainedGasPressureBufferRefs || [])
+  ]).filter(isGasPressureBufferRef);
+}
+
+function retainedGasPressureBufferRefsFrom(value = null) {
+  if (!value || typeof value !== 'object') return [];
+  return uniqueStringList([
+    ...(value.retainedGasPressureBufferRefs || []),
+    ...(value.retainedGasCellFieldSource?.retainedGasPressureBufferRefs || []),
+    ...(value.pressureInterfaceGasCellFieldAdmission?.retainedGasPressureBufferRefs || []),
+    ...(value.gasCellFieldAdmission?.retainedGasPressureBufferRefs || []),
+    ...(value.admission?.retainedGasPressureBufferRefs || [])
+  ]).filter(isGasPressureBufferRef);
+}
+
 function laneKeyFor(payload = {}) {
   return [
     normalizeString(payload.lease?.laneId ?? payload.lane?.laneId, 'worker-lane:default'),
@@ -533,6 +577,23 @@ function retainedWorkerRefs(value = {}, out = []) {
 
 function pressureInterfaceLocalGasCellFieldReadyFromOptions(options = {}) {
   const importValue = options.pressureInterfaceGasCellFieldImport || options.gasCellFieldImport || null;
+  const retainedSource = importValue?.retainedGasCellFieldSource
+    || importValue?.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+    || null;
+  const rowCount = firstPositiveInteger([
+    importValue?.pressureInterfaceGasPressureCellRowCount,
+    importValue?.gasPressureCellRowCount,
+    retainedSource?.pressureInterfaceGasPressureCellRowCount
+  ]);
+  const retainedRowsDescriptorReady = Boolean(
+    importValue
+      && rowCount > 0
+      && (
+        workerRetainedGasPressureBufferRefsFrom(importValue).length > 0
+        || retainedGasPressureBufferRefsFrom(importValue).length > 0
+      )
+  );
+  if (retainedRowsDescriptorReady) return true;
   const importedField = importValue?.gasCellFieldSnapshot || importValue?.gasCellField || null;
   const gasCellField = importedField
     || options.pressureFeedback?.gasCellField
@@ -1000,6 +1061,145 @@ function pressureFeedbackWithGasCellEosProducer(record, pressureFeedback = null)
     schema: pressureFeedback.schema || 'peercompute.ulg.sph-gas-pressure-feedback.v0',
     status: pressureFeedback.status || 'worker-gas-cell-eos-producer-pressure-feedback-local',
     gasCellField
+  };
+}
+
+function gasCellEosProducerRetainedGasPressureBuffer(record) {
+  const result = record?.stageResults?.gasCellEosProducer || null;
+  return result?.gasPressureCellsBuffer || result?.pressureInterfaceGasPressureCellsBuffer || null;
+}
+
+function pressureInterfaceRetainedGasPressureBuffer(record) {
+  const result = record?.stageResults?.pressureInterface || null;
+  return result?.pressureInterfaceGasCellFieldImport?.retainedGasPressureCellsBuffer
+    || result?.pressureInterfaceGasCellFieldImport?.gasPressureCellsBuffer
+    || result?.pressureInterfaceGasCellFieldImport?.pressureInterfaceGasPressureCellsBuffer
+    || result?.gasPressureCellsBuffer
+    || result?.pressureInterfaceGasPressureCellsBuffer
+    || result?.pressureInterfaceForceSolver?.gasPressureCellsBuffer
+    || null;
+}
+
+function resolveRetainedGasPressureBufferFromWorkerRefs(record, refs = []) {
+  for (const ref of uniqueStringList(refs).filter(isGasPressureBufferRef)) {
+    const buffer = record?.retainedBuffers?.get?.(ref);
+    if (buffer) return { ref, buffer, source: 'worker-retained-buffer-ref' };
+  }
+  return null;
+}
+
+function resolveRetainedGasPressureBufferFromGenericRefs(record, refs = []) {
+  if (!uniqueStringList(refs).some(isGasPressureBufferRef)) return null;
+  const gasCellEosBuffer = gasCellEosProducerRetainedGasPressureBuffer(record);
+  if (gasCellEosBuffer) {
+    return {
+      ref: 'resident-gas-pressure-cells-buffer',
+      buffer: gasCellEosBuffer,
+      source: 'worker-retained-gas-cell-eos-output'
+    };
+  }
+  const pressureInterfaceBuffer = pressureInterfaceRetainedGasPressureBuffer(record);
+  if (pressureInterfaceBuffer) {
+    return {
+      ref: 'resident-gas-pressure-cells-buffer',
+      buffer: pressureInterfaceBuffer,
+      source: 'worker-retained-pressure-interface-import'
+    };
+  }
+  return null;
+}
+
+function applyWorkerRetainedGasCellFieldImport({ stageId, data, record }) {
+  if (stageId !== 'pressureInterface') return null;
+  const importValue = data?.pressureInterfaceGasCellFieldImport || data?.gasCellFieldImport || null;
+  if (!importValue || typeof importValue !== 'object') return null;
+  const existingBuffer = importValue.retainedGasPressureCellsBuffer
+    || importValue.gasPressureCellsBuffer
+    || importValue.pressureInterfaceGasPressureCellsBuffer
+    || null;
+  if (existingBuffer) {
+    return {
+      status: 'pressure-interface-gas-cell-import-buffer-already-present',
+      applied: false,
+      retainedGasPressureCellsBuffer: true
+    };
+  }
+  const retainedSource = importValue.retainedGasCellFieldSource
+    || importValue.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+    || null;
+  const workerRefs = workerRetainedGasPressureBufferRefsFrom(importValue);
+  const retainedRefs = retainedGasPressureBufferRefsFrom(importValue);
+  const resolved = resolveRetainedGasPressureBufferFromWorkerRefs(record, workerRefs)
+    || resolveRetainedGasPressureBufferFromGenericRefs(record, retainedRefs)
+    || resolveRetainedGasPressureBufferFromGenericRefs(record, workerRefs);
+  const rowCount = firstPositiveInteger([
+    importValue.pressureInterfaceGasPressureCellRowCount,
+    importValue.gasPressureCellRowCount,
+    retainedSource?.pressureInterfaceGasPressureCellRowCount
+  ]);
+  const rowStrideFloats = firstPositiveInteger([
+    importValue.pressureInterfaceGasPressureCellRowStrideFloats,
+    importValue.gasPressureCellRowStrideFloats,
+    retainedSource?.pressureInterfaceGasPressureCellRowStrideFloats
+  ], 12);
+  const rowByteLength = firstPositiveInteger([
+    importValue.pressureInterfaceGasPressureCellRowByteLength,
+    importValue.gasPressureCellRowByteLength,
+    retainedSource?.pressureInterfaceGasPressureCellRowByteLength
+  ], rowCount * rowStrideFloats * Float32Array.BYTES_PER_ELEMENT);
+  if (!resolved?.buffer || rowCount <= 0) {
+    return {
+      status: resolved?.buffer
+        ? 'blocked-worker-retained-gas-cell-row-metadata-missing'
+        : 'blocked-worker-retained-gas-cell-buffer-missing',
+      applied: false,
+      requested: true,
+      workerRetainedGasPressureBufferRefs: workerRefs,
+      retainedGasPressureBufferRefs: retainedRefs,
+      pressureInterfaceGasPressureCellRowCount: rowCount,
+      pressureInterfaceGasPressureCellRowByteLength: rowByteLength
+    };
+  }
+  const nextImport = {
+    ...importValue,
+    status: importValue.status || 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasPressureCellsBuffer: resolved.buffer,
+    gasPressureCellsBuffer: resolved.buffer,
+    pressureInterfaceGasPressureCellsBuffer: resolved.buffer,
+    pressureInterfaceGasPressureCellRowCount: rowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    gasPressureCellRowsBufferRetained: true,
+    workerRetainedGasPressureBufferRefs: workerRefs,
+    retainedGasPressureBufferRefs: retainedRefs,
+    retainedGasCellFieldSource: retainedSource
+      ? {
+          ...retainedSource,
+          pressureInterfaceGasPressureCellRowsBufferRetained: true,
+          workerRetainedGasPressureBufferRefs: workerRefs,
+          retainedGasPressureBufferRefs: retainedRefs
+        }
+      : retainedSource
+  };
+  data.pressureInterfaceGasCellFieldImport = nextImport;
+  data.gasCellFieldImport = nextImport;
+  data.pressureInterfaceGasCellFieldAdmission = data.pressureInterfaceGasCellFieldAdmission
+    || nextImport.pressureInterfaceGasCellFieldAdmission
+    || nextImport.gasCellFieldAdmission
+    || nextImport.admission
+    || null;
+  return {
+    status: 'applied-worker-retained-gas-cell-field-import',
+    applied: true,
+    requested: true,
+    resolvedRef: resolved.ref,
+    resolvedSource: resolved.source,
+    workerRetainedGasPressureBufferRefs: workerRefs,
+    retainedGasPressureBufferRefs: retainedRefs,
+    pressureInterfaceGasPressureCellRowCount: rowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: rowByteLength
   };
 }
 
@@ -1542,6 +1742,11 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     record,
     workerDeviceResult
   });
+  const workerRetainedGasCellFieldImportInput = applyWorkerRetainedGasCellFieldImport({
+    stageId,
+    data,
+    record
+  });
   const rawResult = await runner(data);
   const compactSnapshotExportSources = stageId === 'g2p'
     && data.captureRetainedCompactSnapshotExportSources === true
@@ -1584,7 +1789,30 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     ...retainedRefsForStageResult(stageId, rawResult),
     ...workerRetainedBufferRefs
   ])];
+  const workerRetainedGasPressureBufferRefs = uniqueStringList([
+    ...(cloneableResult.workerRetainedGasPressureBufferRefs || []),
+    ...(cloneableResult.retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs || []),
+    ...workerRetainedBufferRefs.filter(isGasPressureBufferRef)
+  ]);
   cloneableResult.retainedBufferRefs = retainedBufferRefs;
+  if (workerRetainedGasPressureBufferRefs.length > 0) {
+    cloneableResult.workerRetainedGasPressureBufferRefs = workerRetainedGasPressureBufferRefs;
+    if (cloneableResult.retainedGasCellFieldSource && typeof cloneableResult.retainedGasCellFieldSource === 'object') {
+      cloneableResult.retainedGasCellFieldSource = {
+        ...cloneableResult.retainedGasCellFieldSource,
+        workerRetainedGasPressureBufferRefs: workerRetainedGasPressureBufferRefs
+      };
+    }
+    if (cloneableResult.pressureInterfaceGasCellFieldImport && typeof cloneableResult.pressureInterfaceGasCellFieldImport === 'object') {
+      cloneableResult.pressureInterfaceGasCellFieldImport = {
+        ...cloneableResult.pressureInterfaceGasCellFieldImport,
+        workerRetainedGasPressureBufferRefs: uniqueStringList([
+          ...(cloneableResult.pressureInterfaceGasCellFieldImport.workerRetainedGasPressureBufferRefs || []),
+          ...workerRetainedGasPressureBufferRefs
+        ])
+      };
+    }
+  }
   cloneableResult.workerResidentStage = {
     schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
     status: 'worker-stage-completed',
@@ -1604,6 +1832,9 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerRetainedContinuationInputStatus: workerRetainedContinuationInput?.status || null,
     workerRetainedThermoInput,
     workerRetainedThermoInputStatus: workerRetainedThermoInput?.status || null,
+    workerRetainedGasCellFieldImportInput,
+    workerRetainedGasCellFieldImportInputStatus: workerRetainedGasCellFieldImportInput?.status || null,
+    workerRetainedGasCellFieldImportApplied: workerRetainedGasCellFieldImportInput?.applied === true,
     workerRetainedThermoOutput,
     workerRetainedThermoOutputStatus: workerRetainedThermoOutput?.status || null,
     compactSnapshotExportSources,

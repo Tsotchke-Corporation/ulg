@@ -3675,6 +3675,8 @@ export async function mountSphPhaseDemoOverlay({
   let pendingResidentInterfaceRefreshPromise = null;
   let residentInterfaceRefreshToken = 0;
   let pendingMountedMechanicsStageWorkerLanePromise = null;
+  let mountedMechanicsStageWorkerRunner = null;
+  let mountedMechanicsStageWorkerRunnerHost = null;
   let mountedMechanicsStageWorkerLaneSequence = 0;
   let particleSyncGeneration = 0;
   let resetRebuildPending = false;
@@ -5047,6 +5049,153 @@ export async function mountSphPhaseDemoOverlay({
     };
   }
 
+  function mountedWorkerStringList(values = []) {
+    const source = Array.isArray(values) ? values : [];
+    return [...new Set(source.map((value) => String(value ?? '').trim()).filter(Boolean))];
+  }
+
+  function mountedWorkerPositiveInteger(values = [], fallback = 0) {
+    for (const value of values) {
+      const number = Math.trunc(Number(value));
+      if (Number.isFinite(number) && number > 0) return number;
+    }
+    return Math.max(0, Math.trunc(Number(fallback) || 0));
+  }
+
+  function mountedWorkerGasPressureRefs(importDescriptor = null, fieldName) {
+    if (!importDescriptor || typeof importDescriptor !== 'object') return [];
+    return mountedWorkerStringList([
+      ...(importDescriptor[fieldName] || []),
+      ...(importDescriptor.retainedGasCellFieldSource?.[fieldName] || []),
+      ...(importDescriptor.pressureInterfaceGasCellFieldAdmission?.[fieldName] || []),
+      ...(importDescriptor.gasCellFieldAdmission?.[fieldName] || []),
+      ...(importDescriptor.admission?.[fieldName] || [])
+    ]);
+  }
+
+  function mountedWorkerPressureInterfaceGasCellImportDescriptor() {
+    const pressureState = scene.getSphResidentPressureInterfaceState?.()
+      || overlay.__sphResidentPressureInterfaceState
+      || null;
+    const publication = pressureState?.pressureInterfaceGasCellFieldImportPublication
+      || scene.userData?.sphPressureInterfaceGasCellFieldImportPublication
+      || null;
+    const source = pressureState?.pressureInterfaceGasCellFieldImport
+      || publication?.pressureInterfaceGasCellFieldImport
+      || scene.userData?.sphPressureInterfaceGasCellFieldImport
+      || null;
+    if (!source || typeof source !== 'object') return null;
+    const retainedSource = source.retainedGasCellFieldSource
+      || source.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+      || source.admission?.retainedGasCellFieldSource
+      || null;
+    const admission = source.pressureInterfaceGasCellFieldAdmission
+      || source.gasCellFieldAdmission
+      || source.admission
+      || null;
+    const workerRetainedGasPressureBufferRefs =
+      mountedWorkerGasPressureRefs(source, 'workerRetainedGasPressureBufferRefs');
+    const retainedGasPressureBufferRefs =
+      mountedWorkerGasPressureRefs(source, 'retainedGasPressureBufferRefs');
+    const rowCount = mountedWorkerPositiveInteger([
+      source.pressureInterfaceGasPressureCellRowCount,
+      source.gasPressureCellRowCount,
+      publication?.pressureInterfaceGasPressureCellRowCount,
+      retainedSource?.pressureInterfaceGasPressureCellRowCount
+    ]);
+    const rowStrideFloats = mountedWorkerPositiveInteger([
+      source.pressureInterfaceGasPressureCellRowStrideFloats,
+      source.gasPressureCellRowStrideFloats,
+      publication?.pressureInterfaceGasPressureCellRowStrideFloats,
+      retainedSource?.pressureInterfaceGasPressureCellRowStrideFloats
+    ], 12);
+    const rowByteLength = mountedWorkerPositiveInteger([
+      source.pressureInterfaceGasPressureCellRowByteLength,
+      source.gasPressureCellRowByteLength,
+      publication?.pressureInterfaceGasPressureCellRowByteLength,
+      retainedSource?.pressureInterfaceGasPressureCellRowByteLength
+    ], rowCount * rowStrideFloats * Float32Array.BYTES_PER_ELEMENT);
+    const hasRefs = workerRetainedGasPressureBufferRefs.length > 0 || retainedGasPressureBufferRefs.length > 0;
+    const admissionApproved = admission?.schema === 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0'
+      && admission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
+      && admission?.gasCellFieldConsumptionApproved === true;
+    const sourceReady = source.status === 'pressure-interface-gas-cell-field-import-ready'
+      || source.pressureInterfaceImportReady === true
+      || publication?.pressureInterfaceGasCellFieldImportReady === true;
+    if (!sourceReady || !admissionApproved || !hasRefs || rowCount <= 0 || rowByteLength <= 0) {
+      return null;
+    }
+    const retainedGasCellFieldSource = retainedSource
+      ? {
+          schema: retainedSource.schema || 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0',
+          status: retainedSource.status || 'pressure-interface-retained-gas-cell-field-source-ready',
+          sourceHotBufferKey:
+            retainedSource.sourceHotBufferKey
+              || source.sourceHotBufferKey
+              || publication?.hotBufferKey
+              || null,
+          sourceTaskId: retainedSource.sourceTaskId || source.sourceTaskId || publication?.sourceTaskId || null,
+          sourceStage: retainedSource.sourceStage || source.sourceStage || publication?.sourceStage || null,
+          workerRetainedGasPressureBufferRefs,
+          retainedGasPressureBufferRefs,
+          pressureInterfaceGasPressureCellRowCount: rowCount,
+          pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+          pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+          pressureInterfaceGasPressureCellRowsBufferRetained: true,
+          pressureFieldMode: retainedSource.pressureFieldMode || source.pressureFieldMode || null,
+          pressureFieldResolution: retainedSource.pressureFieldResolution || source.pressureFieldResolution || null,
+          localPressureGradientReady: true,
+          localPressureGradientStatus:
+            retainedSource.localPressureGradientStatus
+              || source.localPressureGradientStatus
+              || 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+          sourceFamilies: mountedWorkerStringList(retainedSource.sourceFamilies || ['resident-gas-pressure']),
+          stateManagerAdmissionRequired: true,
+          authoritativeStateMutation: false
+        }
+      : null;
+    return {
+      schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0',
+      status: 'pressure-interface-gas-cell-field-import-ready',
+      sourceSchema: source.sourceSchema || source.schema || null,
+      sourceHotBufferKey: source.sourceHotBufferKey || publication?.hotBufferKey || null,
+      sourceTaskId: source.sourceTaskId || publication?.sourceTaskId || null,
+      sourceNodeId: source.sourceNodeId || publication?.sourceNodeId || null,
+      sourceStage: source.sourceStage || publication?.sourceStage || null,
+      retainedGasPressureBufferRefs,
+      workerRetainedGasPressureBufferRefs,
+      pressureInterfaceGasPressureCellRowCount: rowCount,
+      pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+      pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+      pressureInterfaceGasPressureCellRowsBufferRetained: true,
+      pressureFieldMode: source.pressureFieldMode || retainedSource?.pressureFieldMode || null,
+      pressureFieldResolution: source.pressureFieldResolution || retainedSource?.pressureFieldResolution || null,
+      localPressureGradientStatus:
+        source.localPressureGradientStatus
+          || retainedSource?.localPressureGradientStatus
+          || 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+      pressureInterfaceGasCellFieldAdmission: {
+        schema: admission.schema,
+        status: admission.status,
+        gasCellFieldConsumptionApproved: true,
+        sourceHotBufferKey: admission.sourceHotBufferKey || source.sourceHotBufferKey || publication?.hotBufferKey || null,
+        sourceTaskId: admission.sourceTaskId || source.sourceTaskId || null,
+        sourceStage: admission.sourceStage || source.sourceStage || null,
+        retainedGasPressureBufferRefs,
+        workerRetainedGasPressureBufferRefs,
+        retainedGasCellFieldSource,
+        pressureInterfaceGasPressureCellRowCount: rowCount,
+        pressureInterfaceGasPressureCellRowStrideFloats: rowStrideFloats,
+        pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+        stateManagerAdmitted: true,
+        authoritativeStateMutation: false
+      },
+      retainedGasCellFieldSource,
+      stateManagerAdmissionRequired: true,
+      authoritativeStateMutation: false
+    };
+  }
+
   function mountedPressureInterfaceGasCellImportTelemetry() {
     const pressureState = scene.getSphResidentPressureInterfaceState?.()
       || overlay.__sphResidentPressureInterfaceState
@@ -5102,6 +5251,41 @@ export async function mountSphPhaseDemoOverlay({
         ? 'main-thread-retained-import-observed-not-posted-to-worker-lane'
         : 'no-main-thread-retained-import'
     };
+  }
+
+  function disposeMountedMechanicsStageWorkerRunner(reason = 'dispose') {
+    try {
+      mountedMechanicsStageWorkerRunner?.dispose?.();
+    } catch {}
+    mountedMechanicsStageWorkerRunner = null;
+    mountedMechanicsStageWorkerRunnerHost = null;
+    overlay.__sphMountedMechanicsStageWorkerRunnerStatus = {
+      schema: 'peercompute.ulg.sph-demo-mounted-mechanics-stage-worker-runner.v0',
+      status: 'disposed',
+      reason,
+      updatedAtMs: performance.now()
+    };
+  }
+
+  function mountedMechanicsStageWorkerRunnerForHost(resolvedHost, sequence) {
+    if (!mountedMechanicsStageWorkerRunner || mountedMechanicsStageWorkerRunnerHost !== resolvedHost) {
+      disposeMountedMechanicsStageWorkerRunner(
+        mountedMechanicsStageWorkerRunner ? 'host-changed' : 'initial-create'
+      );
+      mountedMechanicsStageWorkerRunner = resolvedHost.createUlgMechanicsResidentStageWorkerRunner({
+        timeoutMs: 60000,
+        requestIdPrefix: 'ulg-mounted-mechanics-stage-worker'
+      });
+      mountedMechanicsStageWorkerRunnerHost = resolvedHost;
+      overlay.__sphMountedMechanicsStageWorkerRunnerStatus = {
+        schema: 'peercompute.ulg.sph-demo-mounted-mechanics-stage-worker-runner.v0',
+        status: 'ready',
+        sequence,
+        reusedAcrossSchedules: true,
+        updatedAtMs: performance.now()
+      };
+    }
+    return mountedMechanicsStageWorkerRunner;
   }
 
   function publishMountedMechanicsStageWorkerLane(status, extra = {}) {
@@ -5201,12 +5385,33 @@ export async function mountSphPhaseDemoOverlay({
             || null
           )
         : null;
-      const workerRunner = resolvedHost.createUlgMechanicsResidentStageWorkerRunner({
-        timeoutMs: 60000,
-        requestIdPrefix: `ulg-mounted-mechanics-stage-worker-${sequence}`
-      });
-      try {
-        const stageResult = await resolvedHost.runMechanicsStageTaskChain({
+      const workerRunner = mountedMechanicsStageWorkerRunnerForHost(resolvedHost, sequence);
+      const pressureInterfaceGasCellFieldImportForWorkerLane =
+        mountedWorkerPressureInterfaceGasCellImportDescriptor();
+      const mountedWorkerGasPressureSummary = currentGasPressureSummary(
+        overlay.__sphResidentGasPressureSummary
+          || activeViewStateGasPressure
+          || activeViewState?.gasPressureSummary
+          || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+      );
+      const mountedWorkerMaterialInterfaceState = scene.getSphResidentMaterialInterfaceState?.()
+        || overlay.__sphResidentMaterialInterfaceState
+        || scene.getSphResidentPressureInterfaceState?.()?.materialInterfaceField
+        || null;
+      const mountedWorkerMaterialInterfaceField =
+        mountedWorkerMaterialInterfaceState?.materialInterfaceField
+          || mountedWorkerMaterialInterfaceState;
+      const includeMountedPressureInterfaceStage = Boolean(
+        mountedWorkerMaterialInterfaceField?.schema
+          && mountedWorkerGasPressureSummary
+      );
+      const includeMountedGasCellEosProducerStage = includeMountedPressureInterfaceStage
+        && !pressureInterfaceGasCellFieldImportForWorkerLane
+        && Boolean(
+          mountedWorkerGasPressureSummary?.spatialGasSpeciesLedger
+            || mountedWorkerGasPressureSummary?.pressureFeedback?.spatialGasSpeciesLedger
+        );
+      const stageResult = await resolvedHost.runMechanicsStageTaskChain({
           sphParticleState,
           mlsMpmParticleState,
           stageTaskIdPrefix: `ulg:mounted:mechanics-stage-worker:${sequence}`,
@@ -5223,13 +5428,32 @@ export async function mountSphPhaseDemoOverlay({
           gpuHubResidentStageWorkerRunner: workerRunner,
           gpuHubResidentStageWorkerModuleUrl: resolvedHost.ulgMechanicsResidentStageWorkerModulePath,
           sameDeviceRetainedBufferImport,
+          includeGasCellEosProducerStage: includeMountedGasCellEosProducerStage,
+          includePressureInterfaceStage: includeMountedPressureInterfaceStage,
+          approveSameFramePressureInterfaceGridForces: includeMountedPressureInterfaceStage,
+          gasPressureSummary: mountedWorkerGasPressureSummary,
+          pressureSummary: mountedWorkerGasPressureSummary,
+          pressureFeedback:
+            mountedWorkerGasPressureSummary?.pressureFeedback
+              || mountedWorkerGasPressureSummary
+              || null,
+          materialInterfaceField: mountedWorkerMaterialInterfaceField,
+          pressureInterfaceGasCellFieldImport: pressureInterfaceGasCellFieldImportForWorkerLane,
+          pressureInterfaceGasCellFieldAdmission:
+            pressureInterfaceGasCellFieldImportForWorkerLane?.pressureInterfaceGasCellFieldAdmission
+              || scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission
+              || null,
           gpuHubResidentStageWorkerOutputPublisher: (payload) => (
             resolvedHost.publishWorkerRetainedMechanicsStageOutput({
               ...payload,
               sameDeviceRetainedBufferImport
             })
-          )
-        });
+          ),
+          gpuHubResidentPressureInterfaceStageWorkerOutputPublisher:
+            typeof resolvedHost.publishWorkerRetainedPressureInterfaceStageOutput === 'function'
+              ? ((payload) => resolvedHost.publishWorkerRetainedPressureInterfaceStageOutput(payload))
+              : null
+      });
         const chain = stageResult?.mechanicsStageTaskChain || null;
         const hotBufferKey = chain?.workerCompactPublicationHotBufferKey || null;
         const hotBufferRecord = hotBufferKey
@@ -5303,7 +5527,7 @@ export async function mountSphPhaseDemoOverlay({
           updatedGridBufferByteLength: 0,
           totalByteLength: 0
         });
-        return publishMountedMechanicsStageWorkerLane(
+      return publishMountedMechanicsStageWorkerLane(
           published ? 'worker-stage-lane-published' : 'worker-stage-lane-executed',
           {
             signature,
@@ -5320,6 +5544,19 @@ export async function mountSphPhaseDemoOverlay({
               sameDeviceRetainedBufferImport?.sameDevice === true && Boolean(sameDeviceSourceHotBufferKey),
             sameDeviceRetainedBufferImportSourceHotBufferKey: sameDeviceSourceHotBufferKey,
             ...mountedPressureInterfaceGasCellImportTelemetry(),
+            mountedWorkerLaneRunnerReusedAcrossSchedules: true,
+            mountedWorkerLanePressureInterfaceStageIncluded: includeMountedPressureInterfaceStage,
+            mountedWorkerLaneGasCellEosProducerStageIncluded: includeMountedGasCellEosProducerStage,
+            mountedWorkerLanePressureInterfaceGasCellImportTransferStatus:
+              pressureInterfaceGasCellFieldImportForWorkerLane
+                ? 'worker-lane-retained-import-descriptor-posted'
+                : mountedPressureInterfaceGasCellImportTelemetry().mountedWorkerLanePressureInterfaceGasCellImportTransferStatus,
+            mountedWorkerLanePressureInterfaceGasCellImportDescriptorReady:
+              Boolean(pressureInterfaceGasCellFieldImportForWorkerLane),
+            mountedWorkerLanePressureInterfaceGasCellImportWorkerRetainedRefCount:
+              pressureInterfaceGasCellFieldImportForWorkerLane?.workerRetainedGasPressureBufferRefs?.length ?? 0,
+            mountedWorkerLanePressureInterfaceGasCellImportRetainedRefCount:
+              pressureInterfaceGasCellFieldImportForWorkerLane?.retainedGasPressureBufferRefs?.length ?? 0,
             pressureInterfaceWorkerLaneSummaryPresent: Boolean(pressureStageLaneSummary),
             pressureInterfaceWorkerLaneGasCellFieldImportReady:
               pressureStageLaneSummary?.pressureInterfaceGasCellFieldImportReady === true,
@@ -5452,10 +5689,7 @@ export async function mountSphPhaseDemoOverlay({
             nextRequiredImplementation:
               'main-thread-render-import-from-worker-retained-compact-surface-or-same-device-renderer'
           }
-        );
-      } finally {
-        workerRunner?.dispose?.();
-      }
+      );
     })().catch((error) => publishMountedMechanicsStageWorkerLane('worker-stage-lane-error', {
       signature,
       scheduleToken,
@@ -6249,6 +6483,7 @@ export async function mountSphPhaseDemoOverlay({
     resetRebuildPending = true;
     particleSyncGeneration += 1;
     pendingMlsMpmResidentStepsToken += 1;
+    disposeMountedMechanicsStageWorkerRunner(`${reason}-resident-reset`);
     clearSceneDerivedSignatures();
     scene.resetResidentStateForParticleReset?.({ reason, clearOverlay: true });
     overlay.__sphLastStepResult = null;
@@ -6296,6 +6531,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function resetSceneForDimensions(boxDimsM, resetReason) {
     const nextDims = Array.isArray(boxDimsM) ? [...boxDimsM] : boxDimensionsFromControls();
+    disposeMountedMechanicsStageWorkerRunner(`${resetReason}-scene-reset`);
     if (dimensionsEqual(sceneBoxDimsM, nextDims)) {
       scene.setResidentAuthorityHost?.(currentResidentAuthorityHostForScene());
       scene.setSurfaceRadiusScale(blobScaleOf());
@@ -7416,6 +7652,7 @@ export async function mountSphPhaseDemoOverlay({
     staticTableCacheReadGeneration += 1;
     staticTableCacheGeneration += 1;
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
+    disposeMountedMechanicsStageWorkerRunner('demo-close');
     scene.dispose();
     initialRendererWebGpuDeviceResult?.device?.destroy?.();
     overlay.remove();

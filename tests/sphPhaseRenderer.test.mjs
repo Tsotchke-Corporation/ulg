@@ -20,6 +20,7 @@ import {
   ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_VISIBLE_CONSUMER_SCHEMA,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -38,6 +39,7 @@ import {
   createProductEventSurfaceBatches,
   createSchroederRenderSourceMetadata,
   createSchroederRenderProxyDescriptorPlan,
+  resolveSchroederRenderProxyVisibleConsumer,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
@@ -3136,6 +3138,43 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(lawQueue.renderParticipation, 'diagnostic-metadata-only');
   assert.equal(lawQueue.proxyCount, 5);
 
+  const proxyConsumer = resolveSchroederRenderProxyVisibleConsumer({
+    proxyDescriptorPlan: proxyPlan
+  });
+  assert.equal(proxyConsumer.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_VISIBLE_CONSUMER_SCHEMA);
+  assert.equal(proxyConsumer.status, 'schroeder-render-proxy-visible-consumer-ready');
+  assert.equal(proxyConsumer.ready, true);
+  assert.equal(proxyConsumer.consumerKind, 'renderer-visible-descriptor-import');
+  assert.equal(proxyConsumer.metadataDescriptorImportReady, true);
+  assert.equal(proxyConsumer.rawGpuBufferDrawBindingReady, false);
+  assert.equal(
+    proxyConsumer.rawGpuBufferDrawBindingStatus,
+    'deferred-raw-gpubuffer-draw-binding-not-admitted'
+  );
+  assert.equal(proxyConsumer.frameCopyReadbackRequired, false);
+  assert.equal(proxyConsumer.overlayRequired, false);
+  assert.equal(proxyConsumer.presentationOwnsPhysicsCadence, false);
+
+  const rawBlocked = resolveSchroederRenderProxyVisibleConsumer({
+    proxyDescriptorPlan: proxyPlan,
+    requestRawGpuBufferDrawBinding: true,
+    rendererCapability: {
+      status: 'same-device-gpu-buffer-geometry-blocked-webgl-renderer',
+      reason: 'same-device GPUBuffer geometry requires Three WebGPU renderer',
+      rendererBackend: 'three-webgl',
+      visibleNoReadbackSupported: false
+    }
+  });
+  assert.equal(
+    rawBlocked.status,
+    'schroeder-render-proxy-visible-consumer-blocked-renderer-capability'
+  );
+  assert.equal(
+    rawBlocked.rawGpuBufferDrawBindingStatus,
+    'blocked-raw-gpubuffer-draw-binding-renderer-capability'
+  );
+  assert.equal(rawBlocked.ready, false);
+
   const metadata = createResidentRenderSourceMetadata({
     residentSteps: {
       signature: 'steps-with-schroeder-summary',
@@ -3152,6 +3191,10 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(
     metadata.schroederRenderProxyDescriptorPlan.status,
     'schroeder-render-proxy-descriptors-ready'
+  );
+  assert.equal(
+    metadata.schroederRenderProxyVisibleConsumer.status,
+    'schroeder-render-proxy-visible-consumer-ready'
   );
 
   const target = {};
@@ -3183,6 +3226,29 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
     'schroeder-render-lod-proxy-descriptors'
   );
   assert.equal(target.sourceSchroederRenderProxyPresentationOwnsPhysicsCadence, false);
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleConsumerStatus,
+    'schroeder-render-proxy-visible-consumer-ready'
+  );
+  assert.equal(target.sourceSchroederRenderProxyVisibleConsumerReady, true);
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleConsumerKind,
+    'renderer-visible-descriptor-import'
+  );
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleConsumerMetadataDescriptorImportReady,
+    true
+  );
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleConsumerRawGpuBufferDrawBindingStatus,
+    'deferred-raw-gpubuffer-draw-binding-not-admitted'
+  );
+  assert.equal(target.sourceSchroederRenderProxyVisibleConsumerFrameCopyReadbackRequired, false);
+  assert.equal(target.sourceSchroederRenderProxyVisibleConsumerOverlayRequired, false);
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleConsumerPresentationOwnsPhysicsCadence,
+    false
+  );
 });
 
 test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {
@@ -3210,6 +3276,11 @@ test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs'
   assert.equal(proxyPlan.blocker, 'schroeder-portable-summary-raw-gpubuffer-transfer-detected');
   assert.equal(proxyPlan.rawGpuBufferTransferDetected, true);
   assert.equal(proxyPlan.fullParticleReadbackAvoided, false);
+
+  const consumer = resolveSchroederRenderProxyVisibleConsumer({ proxyDescriptorPlan: proxyPlan });
+  assert.equal(consumer.status, 'schroeder-render-proxy-visible-consumer-blocked-input');
+  assert.equal(consumer.inputBlocked, true);
+  assert.equal(consumer.ready, false);
 });
 
 test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {

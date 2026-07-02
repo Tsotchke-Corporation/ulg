@@ -613,11 +613,26 @@ Completed in this slice:
    validate descriptor schema, copy mode, raw-transfer flags, authoritative
    particle count, and warm-entry replay consistency.
 
-The next code slice on `SS` is **SS adopted storage hot-buffer publication**:
+Completed in this slice:
 
-1. Add a browser resident-host admission/publication helper that stores the
-   descriptor in StateManager hot storage under an SS particle-storage key.
-2. Preserve same-device retained buffers as private lane handles while
-   publishing only descriptor/admission/lease evidence to PeerCompute.
-3. Add host tests proving accepted descriptors publish as hot-buffer metadata
-   and raw-buffer descriptor attempts are rejected before StateManager commit.
+1. Added `peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0`
+   and the `ulg-schroeder-adopted-particle-storage-publications` StateManager
+   scope.
+2. Added browser resident-host publication for accepted SS adopted particle
+   storage descriptors. The hot-buffer record and warm delta carry only
+   descriptor/admission/lease evidence, not retained GPUBuffer handles.
+3. Added fail-closed validation that rejects malformed descriptors, wrong copy
+   modes, raw-transfer flags, or actual raw buffer handle fields before
+   StateManager hot-buffer storage or commit.
+
+The next code slice on `SS` is **SS adopted storage continuation planner**:
+
+1. Add a small planner/import contract that consumes the published hot-buffer
+   descriptor and reports same-device continuation readiness versus cross-peer
+   portable-materialization requirements.
+2. Thread the planner through the browser resident host summary so use cases can
+   decide whether to continue locally, request a portable snapshot, or rerun
+   materialization on the peer.
+3. Add tests that same-device descriptor refs are accepted as private-lane
+   continuation evidence and cross-peer attempts stay blocked without a
+   portable snapshot/materialization seed.

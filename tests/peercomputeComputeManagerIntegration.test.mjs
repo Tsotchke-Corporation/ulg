@@ -24,6 +24,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
   ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
@@ -88,6 +89,8 @@ import {
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3463,6 +3466,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, true);
   assert.equal(summary.residentSchroederStateDeltaMergeAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederPhaseVolumeMigrationAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederAdoptedParticleStoragePublicationReady, true);
   assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, true);
 
   const schroederPortableSummary = {
@@ -3637,6 +3641,109 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(
     host.stateManager.getHotBuffer(phaseVolumeAdmissionPublication.hotBufferKey).copyMode,
     'descriptor-only-no-raw-gpubuffer-transfer'
+  );
+
+  const adoptedParticleStorageDescriptor = {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
+    status: 'schroeder-adopted-particle-storage-descriptor-ready',
+    ready: true,
+    cacheKey: 'ulg:test:schroeder-adopted-storage-cache',
+    stateKey: 'ulg:test:schroeder-adopted-storage-state',
+    sourceStage: 'schroeder-particle-storage-materialization',
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: true,
+    authoritativeParticleCount: 4,
+    sameDeviceReplayReady: true,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: 'descriptor-evidence-ready-cross-peer-requires-portable-materialization',
+    crossPeerReplayBlocker: 'materialized-gpu-buffers-remain-device-local',
+    portableSnapshotRequired: true,
+    retainedBufferRefs: [
+      'sph-state-buffer',
+      'sph-thermo-buffer',
+      'mls-mpm-mechanics-buffer'
+    ],
+    retainedRefs: [
+      { ref: 'sph-state-buffer', transferMode: 'descriptor-only-no-raw-gpubuffer-transfer' },
+      { ref: 'sph-thermo-buffer', transferMode: 'descriptor-only-no-raw-gpubuffer-transfer' },
+      { ref: 'mls-mpm-mechanics-buffer', transferMode: 'descriptor-only-no-raw-gpubuffer-transfer' }
+    ],
+    outputFamilies: [
+      'sph-particle-state',
+      'sph-particle-thermo',
+      'mls-mpm-particle-mechanics',
+      'schroeder-particle-storage'
+    ]
+  };
+  const adoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
+    descriptor: adoptedParticleStorageDescriptor,
+    sourceTaskId: 'ulg:test:schroeder-adopted-storage-source',
+    taskId: 'ulg:test:schroeder-adopted-storage-publication'
+  });
+  assert.equal(
+    adoptedStoragePublication.schema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    adoptedStoragePublication.status,
+    'schroeder-adopted-particle-storage-descriptor-published'
+  );
+  assert.equal(adoptedStoragePublication.accepted, true);
+  assert.equal(adoptedStoragePublication.committed, true);
+  assert.equal(adoptedStoragePublication.rawGpuBufferTransferDetected, false);
+  assert.equal(adoptedStoragePublication.authoritativeParticleCount, 4);
+  assert.deepEqual(adoptedStoragePublication.retainedBufferRefs, [
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE)
+      [adoptedStoragePublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-adopted-particle-storage-descriptor-admitted'
+  );
+  const adoptedStorageHotBuffer = host.stateManager.getHotBuffer(adoptedStoragePublication.hotBufferKey);
+  assert.equal(adoptedStorageHotBuffer.copyMode, 'descriptor-only-no-raw-gpubuffer-transfer');
+  assert.equal(adoptedStorageHotBuffer.status, 'schroeder-adopted-particle-storage-hot-buffer-source-stored');
+  assert.equal(
+    adoptedStorageHotBuffer.schroederAdoptedParticleStorageDescriptor.schema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA
+  );
+  assert.equal(JSON.stringify(adoptedStorageHotBuffer).includes('raw-gpu-buffer-label'), false);
+
+  const rejectedAdoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
+    descriptor: {
+      ...adoptedParticleStorageDescriptor,
+      rawGpuBufferTransferDetected: true,
+      stateBuffer: { label: 'raw-gpu-buffer-label' }
+    },
+    hotBufferKey: 'ulg:test:schroeder-adopted-storage-rejected-hot-buffer',
+    taskId: 'ulg:test:schroeder-adopted-storage-rejected'
+  });
+  assert.equal(
+    rejectedAdoptedStoragePublication.status,
+    'schroeder-adopted-particle-storage-descriptor-publication-rejected'
+  );
+  assert.equal(rejectedAdoptedStoragePublication.accepted, false);
+  assert.equal(rejectedAdoptedStoragePublication.committed, false);
+  assert.equal(
+    rejectedAdoptedStoragePublication.reason,
+    'schroeder-adopted-particle-storage-raw-gpubuffer-transfer-detected'
+  );
+  assert.equal(
+    host.stateManager.getHotBuffer('ulg:test:schroeder-adopted-storage-rejected-hot-buffer'),
+    undefined
+  );
+  assert.equal(
+    host.stateManager.getWarmDeltas(ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE)
+      ['ulg:test:schroeder-adopted-storage-rejected'],
+    undefined
   );
 
   const candidate = {

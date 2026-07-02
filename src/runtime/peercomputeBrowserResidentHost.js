@@ -11,6 +11,7 @@ import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
   createMlsMpmMechanicsG2pStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmMechanicsP2gStageComputeTask,
@@ -98,6 +99,10 @@ export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATI
   'peercompute.ulg.schroeder-phase-volume-migration-admission-hot-buffer-publication.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE =
   'ulg-schroeder-phase-volume-migration-admissions';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE =
+  'ulg-schroeder-adopted-particle-storage-publications';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
@@ -3366,6 +3371,210 @@ export function publishUlgSchroederPhaseVolumeMigrationAdmission({
     ...payload,
     status: 'schroeder-phase-volume-migration-admission-published',
     committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+function descriptorContainsRawGpuBufferHandle(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return false;
+  const rawBufferKeys = new Set([
+    'buffer',
+    'gpuBuffer',
+    'stateBuffer',
+    'thermoBuffer',
+    'mechanicsBuffer',
+    'materializationBuffer',
+    'particleStateBuffer',
+    'particleThermoBuffer',
+    'particleMechanicsBuffer',
+    'outputStateBuffer',
+    'outputThermoBuffer',
+    'outputMechanicsBuffer'
+  ]);
+  for (const [key, entry] of Object.entries(value)) {
+    if (rawBufferKeys.has(key) && entry && typeof entry === 'object') return true;
+    if (entry && typeof entry === 'object' && descriptorContainsRawGpuBufferHandle(entry, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateSchroederAdoptedParticleStorageDescriptor(descriptor = null) {
+  const issues = [];
+  if (!descriptor || typeof descriptor !== 'object') {
+    return {
+      accepted: false,
+      issues: ['descriptor-not-object'],
+      reason: 'descriptor-not-object',
+      retainedBufferRefs: [],
+      outputFamilies: [],
+      authoritativeParticleCount: 0
+    };
+  }
+  if (descriptor.schema !== ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA) {
+    issues.push('unexpected-schroeder-adopted-particle-storage-descriptor-schema');
+  }
+  if (descriptor.ready !== true) {
+    issues.push('schroeder-adopted-particle-storage-descriptor-not-ready');
+  }
+  if (descriptor.copyMode !== 'descriptor-only-no-raw-gpubuffer-transfer') {
+    issues.push('schroeder-adopted-particle-storage-copy-mode-not-portable');
+  }
+  if (
+    descriptor.rawGpuBufferTransferAllowed === true
+    || descriptor.rawGpuBufferTransferDetected === true
+    || descriptorContainsRawGpuBufferHandle(descriptor)
+  ) {
+    issues.push('schroeder-adopted-particle-storage-raw-gpubuffer-transfer-detected');
+  }
+  const rawAuthoritativeParticleCount = finiteSeedNumber(
+    descriptor.authoritativeParticleCount,
+    -1
+  );
+  if (rawAuthoritativeParticleCount < 0) {
+    issues.push('invalid-schroeder-adopted-particle-storage-authoritative-count');
+  }
+  const authoritativeParticleCount = Math.max(0, Math.round(rawAuthoritativeParticleCount));
+  const retainedBufferRefs = uniqueStringList(descriptor.retainedBufferRefs);
+  if (retainedBufferRefs.length === 0) {
+    issues.push('schroeder-adopted-particle-storage-retained-buffer-refs-missing');
+  }
+  const outputFamilies = uniqueStringList(descriptor.outputFamilies || [
+    'sph-particle-state',
+    'sph-particle-thermo',
+    'mls-mpm-particle-mechanics',
+    'schroeder-particle-storage'
+  ]);
+  return {
+    accepted: issues.length === 0,
+    issues,
+    reason: issues[0] || null,
+    retainedBufferRefs,
+    outputFamilies,
+    authoritativeParticleCount
+  };
+}
+
+export function publishUlgSchroederAdoptedParticleStorageDescriptor({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  descriptor = null,
+  adoptedParticleStorageDescriptor = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-particle-storage-materialization',
+  sourceStage = 'schroederParticleStorageMaterialization',
+  scope = ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgSchroederAdoptedParticleStorageDescriptor requires StateManager hot storage and commitDelta');
+  }
+  const storageDescriptor = descriptor || adoptedParticleStorageDescriptor || null;
+  const validation = validateSchroederAdoptedParticleStorageDescriptor(storageDescriptor);
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    storageDescriptor?.cacheKey || storageDescriptor?.peerComputeUseCase || null
+  );
+  const resolvedStateKey = normalizeString(stateKey, storageDescriptor?.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:schroeder-adopted-particle-storage',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const base = {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA,
+    accepted: validation.accepted,
+    reason: validation.reason,
+    issues: [...validation.issues],
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    sourceMode: 'state-manager-schroeder-adopted-particle-storage-descriptor',
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    publicationMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected:
+      storageDescriptor?.rawGpuBufferTransferDetected === true
+      || descriptorContainsRawGpuBufferHandle(storageDescriptor),
+    descriptorSchema: storageDescriptor?.schema || null,
+    descriptorStatus: storageDescriptor?.status || null,
+    descriptorReady: storageDescriptor?.ready === true,
+    stateManagerAdmissionRequired: storageDescriptor?.stateManagerAdmissionRequired === true,
+    authoritativeStateMutation: true,
+    stateMutationFamily: 'schroeder-particle-storage',
+    authoritativeParticleCount: validation.authoritativeParticleCount,
+    retainedBufferRefs: validation.retainedBufferRefs,
+    outputFamilies: validation.outputFamilies,
+    sameDeviceReplayReady: storageDescriptor?.sameDeviceReplayReady === true,
+    crossPeerReplayReady: storageDescriptor?.crossPeerReplayReady === true,
+    crossPeerReplayStatus: storageDescriptor?.crossPeerReplayStatus || null,
+    crossPeerReplayBlocker: storageDescriptor?.crossPeerReplayBlocker || null,
+    portableSnapshotRequired: storageDescriptor?.portableSnapshotRequired === true,
+    descriptorOnlyPeerComputeHandoff: true,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (!validation.accepted) {
+    return {
+      ...base,
+      status: 'schroeder-adopted-particle-storage-descriptor-publication-rejected',
+      committed: false,
+      hotBufferStored: false
+    };
+  }
+  const committedAt = Date.now();
+  const publication = {
+    ...base,
+    status: 'schroeder-adopted-particle-storage-descriptor-admitted',
+    stateManagerAdmitted: true,
+    committed: true,
+    committedAt,
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    schroederAdoptedParticleStorageDescriptor: cloneSerializableValue(storageDescriptor)
+  };
+  const hotBufferRecord = {
+    ...publication,
+    status: 'schroeder-adopted-particle-storage-hot-buffer-source-stored'
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-schroeder-adopted-particle-storage:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    ...publication,
+    status: 'schroeder-adopted-particle-storage-descriptor-admitted'
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'schroeder-adopted-particle-storage-descriptor-published',
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
     commitDeltaScope: deltaScope,
@@ -6786,6 +6995,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishSchroederAdoptedParticleStorageDescriptor(options = {}) {
+      return publishUlgSchroederAdoptedParticleStorageDescriptor({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     createSchroederPortableSummaryReplayDescriptor(options = {}) {
       return createSchroederPortableSummaryReplayDescriptor({
         stateManager,
@@ -7602,6 +7818,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.publishSchroederStateDeltaMergeAdmission === 'function',
     residentSchroederPhaseVolumeMigrationAdmissionPublicationReady:
       typeof host?.publishSchroederPhaseVolumeMigrationAdmission === 'function',
+    residentSchroederAdoptedParticleStoragePublicationReady:
+      typeof host?.publishSchroederAdoptedParticleStorageDescriptor === 'function',
     residentSchroederPortableSummaryReplayDescriptorReady:
       typeof host?.createSchroederPortableSummaryReplayDescriptor === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:

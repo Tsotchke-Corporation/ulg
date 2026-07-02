@@ -35827,3 +35827,36 @@ Next:
 - Add browser resident-host hot-buffer publication/admission for the adopted
   storage descriptor so PeerCompute can store/publish SS particle-storage
   continuation evidence without exposing raw retained GPUBuffer handles.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Hot-Buffer Publication
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0`
+  and the `ulg-schroeder-adopted-particle-storage-publications` scope.
+- Browser resident authority hosts can now publish admitted SS adopted
+  particle-storage descriptors into StateManager hot storage and warm deltas
+  without exposing private GPUBuffer handles.
+- The publication helper validates descriptor schema/readiness, copy mode,
+  retained buffer refs, authoritative particle count, raw-transfer flags, and
+  actual raw buffer handle fields before committing.
+- Host summary now exposes adopted particle-storage publication readiness.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/peercomputeResidentCommitBridge.test.mjs tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `102/102` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `943/946` passing and `3` skipped.
+
+Next:
+
+- Add an SS adopted storage continuation planner/import contract that consumes
+  the published descriptor, accepts same-device private-lane continuation
+  evidence, and keeps cross-peer replay blocked unless a portable materialized
+  snapshot or peer-local materialization seed is available.

@@ -1,5 +1,39 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Resident Far-Force Delta Fusion
+
+Status:
+
+- Added `peercompute.ulg.mls-mpm-schroeder-far-force-delta-fusion-execution.v0`
+  as the resident MLS-MPM bridge for admitted SS far-force application rows.
+- The new WebGPU pass copies the retained G2P SPH state buffer, scatters only
+  StateManager-admitted velocity deltas from retained far-force application rows,
+  and emits a retained fused SPH state buffer without default full particle
+  readback.
+- Resident mechanics now runs this fusion stage after G2P and before thermal,
+  reaction, and mechanics-refresh sidecars, so downstream sidecars read the
+  fused state when available.
+- The resident authority ledger now treats `schroeder-far-force` as its own
+  state family and marks the fused state buffer as the next
+  `particle-kinematics` owner when it wins the handoff.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/residentStateAuthority.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `76/76` passing.
+- PASS:
+  `node --test tests/residentStateAuthority.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `89/89` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Continue Slice 7 with law-specific far-aggregate consumers behind explicit
+  admissibility and compact diagnostics, starting with radiation/plasma/gas
+  summary adapters rather than local incompressibility or reaction work.
+
 ## 2026-07-01 AKDT - SS Admitted Far-Aggregate Force Application
 
 Status:

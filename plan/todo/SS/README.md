@@ -228,11 +228,16 @@ Landed checkpoints:
     emits velocity/momentum/energy delta rows only after admission, forwards the
     retained delta buffer into same-level resident mechanics, and publishes
     descriptor-only portable refs without full particle readback.
+59. `ed15162` fuses admitted far-force application rows into resident SPH state.
+    The resident MLS-MPM path now copies retained G2P state, scatters admitted
+    velocity deltas into a retained fused state buffer, routes thermal/reaction
+    sidecars from that state, and records `schroeder-far-force` authority in
+    the resident StateManager ledger without default full particle readback.
 
 Next implementation queue:
 
-1. Continue Slice 7 by fusing admitted far-force application delta rows into the
-   resident mechanics/StateManager mutation path.
+1. Continue Slice 7 by adding law-specific far-aggregate consumers behind
+   explicit admissibility, compact diagnostics, and StateManager admission.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Add radiation, plasma/electromagnetic approximation, and gas-summary

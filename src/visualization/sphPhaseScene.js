@@ -160,6 +160,8 @@ export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_VISIBLE_CONSUMER_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-visible-consumer.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DRAW_SOURCE_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-draw-source.v0';
+export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-render-proxy-backend-selection.v0';
 
 const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
   Object.fromEntries(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.map((entry, index) => [
@@ -953,6 +955,196 @@ export function createSchroederRenderProxyDrawSource({
     presentationOwnsPhysicsCadence: false,
     closurePbrAvailable: Boolean(plan.closurePbrAvailable),
     pbrMaterialSource: plan.pbrMaterialSource ?? null,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function normalizeSchroederRenderProxyBackendPreference(value = 'auto') {
+  const normalized = String(value ?? 'auto').trim().toLowerCase();
+  if (['0', 'false', 'off', 'disabled', 'disable', 'none'].includes(normalized)) return 'disabled';
+  if (['native', 'webgpu', 'gpu', 'native-webgpu', 'retained-gpu', 'retained-webgpu'].includes(normalized)) {
+    return 'native-webgpu';
+  }
+  if (['cpu', 'diagnostic', 'diagnostic-cpu', 'cpu-diagnostic', 'descriptor-cpu'].includes(normalized)) {
+    return 'diagnostic-cpu';
+  }
+  return 'auto';
+}
+
+function schroederRenderProxyBackendBridgeState({
+  renderBridgeMode = null,
+  renderBridgeStatus = null
+} = {}) {
+  const threeWebGpuBridgeBound = Boolean(
+    renderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+      && renderBridgeStatus === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
+  );
+  const nativeWebGpuBridgeBound = Boolean(
+    renderBridgeMode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && renderBridgeStatus === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS
+  );
+  return {
+    threeWebGpuBridgeBound,
+    nativeWebGpuBridgeBound,
+    renderBridgeBound: threeWebGpuBridgeBound || nativeWebGpuBridgeBound
+  };
+}
+
+function schroederRenderProxyNativeVisibleValidationReady({
+  rendererCapability = null,
+  renderBridgeMode = null,
+  pixelValidationStatus = null
+} = {}) {
+  if (renderBridgeMode !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return true;
+  return Boolean(
+    pixelValidationStatus === 'passed'
+      || rendererCapability?.nativeSurfaceConsumerPixelValidationStatus === 'passed'
+      || rendererCapability?.nativeSurfaceConsumerReadbackSmokeValidationStatus === 'passed'
+      || rendererCapability?.nativeSurfaceConsumerOffscreenValidationStatus === 'passed'
+  );
+}
+
+export function resolveSchroederRenderProxyBackendSelection({
+  drawSource = null,
+  rendererCapability = null,
+  renderBridgeMode = null,
+  renderBridgeStatus = null,
+  pixelValidationStatus = null,
+  backendPreference = 'auto',
+  allowDiagnosticCpuProxy = false,
+  diagnosticMaxProxyCount = 256,
+  source = 'resident-render-refresh'
+} = {}) {
+  const resolvedDrawSource = drawSource?.schroederRenderProxyDrawSource || drawSource || null;
+  if (!resolvedDrawSource) return null;
+
+  const preference = normalizeSchroederRenderProxyBackendPreference(backendPreference);
+  const inputReady = resolvedDrawSource.status === 'schroeder-render-proxy-draw-source-ready';
+  const proxyCount = Math.max(0, Math.round(Number(resolvedDrawSource.drawableProxyCount) || 0));
+  const drawBatchCount = Math.max(0, Math.round(Number(resolvedDrawSource.drawBatchCount) || 0));
+  const visibleNoReadbackSupported = Boolean(rendererCapability?.visibleNoReadbackSupported);
+  const {
+    threeWebGpuBridgeBound,
+    nativeWebGpuBridgeBound,
+    renderBridgeBound
+  } = schroederRenderProxyBackendBridgeState({ renderBridgeMode, renderBridgeStatus });
+  const nativeSubmitReady = Boolean(inputReady && visibleNoReadbackSupported && renderBridgeBound);
+  const visibleValidationReady = nativeSubmitReady && schroederRenderProxyNativeVisibleValidationReady({
+    rendererCapability,
+    renderBridgeMode,
+    pixelValidationStatus
+  });
+  const diagnosticLimit = Math.max(0, Math.round(Number(diagnosticMaxProxyCount) || 0));
+  const diagnosticAllowed = Boolean(allowDiagnosticCpuProxy);
+  const diagnosticWithinBudget = proxyCount <= diagnosticLimit;
+  const diagnosticReady = Boolean(inputReady && diagnosticAllowed && diagnosticWithinBudget);
+  const nativeRequested = preference === 'auto' || preference === 'native-webgpu';
+  const diagnosticRequested = preference === 'auto' || preference === 'diagnostic-cpu';
+
+  let selectedBackend = 'none';
+  let status = 'blocked-schroeder-render-proxy-backend-source';
+  let blocker = resolvedDrawSource.blocker || resolvedDrawSource.status || 'schroeder-render-proxy-draw-source-not-ready';
+  if (preference === 'disabled') {
+    status = 'schroeder-render-proxy-backend-disabled';
+    blocker = 'schroeder-render-proxy-backend-disabled-by-policy';
+  } else if (!inputReady) {
+    status = 'blocked-schroeder-render-proxy-backend-source';
+  } else if (nativeRequested && nativeSubmitReady) {
+    selectedBackend = 'native-webgpu-retained-proxy';
+    status = visibleValidationReady
+      ? 'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+      : 'schroeder-render-proxy-backend-native-webgpu-submit-ready';
+    blocker = null;
+  } else if (diagnosticRequested && diagnosticReady) {
+    selectedBackend = 'diagnostic-cpu-descriptor-proxy';
+    status = 'schroeder-render-proxy-backend-diagnostic-cpu-ready';
+    blocker = null;
+  } else if (preference === 'diagnostic-cpu' && !diagnosticAllowed) {
+    selectedBackend = 'diagnostic-cpu-descriptor-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-diagnostic-not-admitted';
+    blocker = 'diagnostic CPU SS proxy geometry requires explicit diagnostic admission';
+  } else if (preference === 'diagnostic-cpu' && !diagnosticWithinBudget) {
+    selectedBackend = 'diagnostic-cpu-descriptor-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-diagnostic-budget';
+    blocker = 'diagnostic CPU SS proxy geometry exceeds the configured descriptor proxy budget';
+  } else if (nativeRequested && !visibleNoReadbackSupported) {
+    selectedBackend = 'native-webgpu-retained-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-renderer-capability';
+    blocker = rendererCapability?.reason || 'native SS proxy backend requires a same-device no-readback renderer capability';
+  } else if (nativeRequested && visibleNoReadbackSupported && !renderBridgeBound) {
+    selectedBackend = 'native-webgpu-retained-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-render-bridge';
+    blocker = 'native SS proxy backend requires a bound same-device render bridge';
+  } else if (diagnosticRequested && !diagnosticAllowed) {
+    selectedBackend = 'diagnostic-cpu-descriptor-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-diagnostic-not-admitted';
+    blocker = 'diagnostic CPU SS proxy geometry requires explicit diagnostic admission';
+  } else {
+    selectedBackend = 'diagnostic-cpu-descriptor-proxy';
+    status = 'blocked-schroeder-render-proxy-backend-diagnostic-budget';
+    blocker = 'diagnostic CPU SS proxy geometry exceeds the configured descriptor proxy budget';
+  }
+
+  const nativeSelected = selectedBackend === 'native-webgpu-retained-proxy';
+  const diagnosticSelected = selectedBackend === 'diagnostic-cpu-descriptor-proxy';
+  const backendReady = status === 'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+    || status === 'schroeder-render-proxy-backend-native-webgpu-submit-ready'
+    || status === 'schroeder-render-proxy-backend-diagnostic-cpu-ready';
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA,
+    status,
+    blocker,
+    ready: backendReady,
+    source,
+    backendPreference: preference,
+    selectedBackend,
+    selectedBackendKind: nativeSelected
+      ? 'same-device-retained-webgpu-draw'
+      : (diagnosticSelected ? 'diagnostic-descriptor-cpu-proxy' : null),
+    inputReady,
+    inputSchema: resolvedDrawSource.schema ?? null,
+    inputStatus: resolvedDrawSource.status ?? null,
+    drawBatchCount,
+    drawableProxyCount: proxyCount,
+    sourceRefsReady: Boolean(resolvedDrawSource.sourceRefsReady),
+    materializationMode: nativeSelected
+      ? 'same-device-retained-ss-source-webgpu-draw'
+      : (diagnosticSelected ? 'diagnostic-cpu-descriptor-proxy' : null),
+    rendererCapabilitySchema: rendererCapability?.schema ?? null,
+    rendererCapabilityStatus: rendererCapability?.status ?? null,
+    rendererCapabilityReason: rendererCapability?.reason ?? null,
+    rendererBackend: rendererCapability?.rendererBackend ?? null,
+    visibleNoReadbackSupported,
+    renderBridgeMode,
+    renderBridgeStatus,
+    renderBridgeBound,
+    threeWebGpuBridgeBound,
+    nativeWebGpuBridgeBound,
+    nativeSubmitReady,
+    visibleValidationReady,
+    pixelValidationStatus: pixelValidationStatus || rendererCapability?.nativeSurfaceConsumerPixelValidationStatus || null,
+    sameDeviceRetainedBufferBindingRequired: nativeSelected,
+    sameDeviceRetainedBufferBindingReady: nativeSubmitReady,
+    rawGpuBufferTransferRequired: false,
+    rawGpuBufferBinding: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    frameCopyReadbackRequired: false,
+    overlayRequired: false,
+    fullParticleReadbackRequired: false,
+    presentationOwnsPhysicsCadence: false,
+    diagnosticCpuProxyAdmitted: diagnosticSelected && diagnosticAllowed,
+    diagnosticCpuProxyReady: diagnosticSelected && diagnosticReady,
+    diagnosticCpuProxyBudget: diagnosticLimit,
+    diagnosticCpuProxyWithinBudget: diagnosticWithinBudget,
+    diagnosticOnly: diagnosticSelected,
+    peerComputeHotPath: nativeSelected,
+    cpuGeometryMaterialized: false,
+    cpuGeometryMaterializationAdmitted: diagnosticSelected && diagnosticAllowed,
+    closurePbrAvailable: Boolean(resolvedDrawSource.closurePbrAvailable),
+    pbrMaterialSource: resolvedDrawSource.pbrMaterialSource ?? null,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -5472,6 +5664,13 @@ export function createResidentRenderSourceMetadata({
   schroederRenderLodSummary = null,
   schroederPortableSummaryAdmission = null,
   renderOwnershipPolicy = null,
+  schroederRenderProxyRendererCapability = null,
+  schroederRenderProxyRenderBridgeMode = null,
+  schroederRenderProxyRenderBridgeStatus = null,
+  schroederRenderProxyPixelValidationStatus = null,
+  schroederRenderProxyBackendPreference = 'auto',
+  schroederRenderProxyAllowDiagnosticCpuProxy = false,
+  schroederRenderProxyDiagnosticMaxProxyCount = 256,
   source = 'resident-render-refresh'
 } = {}) {
   const step = finalStep || residentSteps?.finalStep || null;
@@ -5531,6 +5730,17 @@ export function createResidentRenderSourceMetadata({
     visibleConsumer: schroederRenderProxyVisibleConsumer,
     source
   });
+  const schroederRenderProxyBackendSelection = resolveSchroederRenderProxyBackendSelection({
+    drawSource: schroederRenderProxyDrawSource,
+    rendererCapability: schroederRenderProxyRendererCapability,
+    renderBridgeMode: schroederRenderProxyRenderBridgeMode,
+    renderBridgeStatus: schroederRenderProxyRenderBridgeStatus,
+    pixelValidationStatus: schroederRenderProxyPixelValidationStatus,
+    backendPreference: schroederRenderProxyBackendPreference,
+    allowDiagnosticCpuProxy: schroederRenderProxyAllowDiagnosticCpuProxy,
+    diagnosticMaxProxyCount: schroederRenderProxyDiagnosticMaxProxyCount,
+    source
+  });
 
   return {
     schema: 'peercompute.ulg.sph-resident-render-source.v0',
@@ -5559,6 +5769,7 @@ export function createResidentRenderSourceMetadata({
     schroederRenderProxyDescriptorPlan,
     schroederRenderProxyVisibleConsumer,
     schroederRenderProxyDrawSource,
+    schroederRenderProxyBackendSelection,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -5709,6 +5920,45 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
     Boolean(metadata.schroederRenderProxyDrawSource?.frameCopyReadbackRequired);
   target.sourceSchroederRenderProxyDrawOverlayRequired =
     Boolean(metadata.schroederRenderProxyDrawSource?.overlayRequired);
+  target.schroederRenderProxyBackendSelection = metadata.schroederRenderProxyBackendSelection || null;
+  target.sourceSchroederRenderProxyBackendSelectionSchema =
+    metadata.schroederRenderProxyBackendSelection?.schema ?? null;
+  target.sourceSchroederRenderProxyBackendSelectionStatus =
+    metadata.schroederRenderProxyBackendSelection?.status ?? null;
+  target.sourceSchroederRenderProxyBackendSelectionBlocker =
+    metadata.schroederRenderProxyBackendSelection?.blocker ?? null;
+  target.sourceSchroederRenderProxyBackendSelectionReady =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.ready);
+  target.sourceSchroederRenderProxyBackendSelected =
+    metadata.schroederRenderProxyBackendSelection?.selectedBackend ?? null;
+  target.sourceSchroederRenderProxyBackendSelectedKind =
+    metadata.schroederRenderProxyBackendSelection?.selectedBackendKind ?? null;
+  target.sourceSchroederRenderProxyBackendPreference =
+    metadata.schroederRenderProxyBackendSelection?.backendPreference ?? null;
+  target.sourceSchroederRenderProxyBackendNativeSubmitReady =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.nativeSubmitReady);
+  target.sourceSchroederRenderProxyBackendVisibleValidationReady =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.visibleValidationReady);
+  target.sourceSchroederRenderProxyBackendRenderBridgeBound =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.renderBridgeBound);
+  target.sourceSchroederRenderProxyBackendVisibleNoReadbackSupported =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.visibleNoReadbackSupported);
+  target.sourceSchroederRenderProxyBackendSameDeviceRetainedBufferBindingRequired =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.sameDeviceRetainedBufferBindingRequired);
+  target.sourceSchroederRenderProxyBackendSameDeviceRetainedBufferBindingReady =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.sameDeviceRetainedBufferBindingReady);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyReady =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyReady);
+  target.sourceSchroederRenderProxyBackendDiagnosticOnly =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticOnly);
+  target.sourceSchroederRenderProxyBackendPeerComputeHotPath =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.peerComputeHotPath);
+  target.sourceSchroederRenderProxyBackendFrameCopyReadbackRequired =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.frameCopyReadbackRequired);
+  target.sourceSchroederRenderProxyBackendOverlayRequired =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.overlayRequired);
+  target.sourceSchroederRenderProxyBackendFullParticleReadbackRequired =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.fullParticleReadbackRequired);
   target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
   target.sourceResidentRetentionReason = retentionReason ?? null;
   return target;
@@ -9161,11 +9411,13 @@ export function createSphPhaseScene(container, {
   scene.userData.schroederRenderProxyDescriptorPlan = null;
   scene.userData.schroederRenderProxyVisibleConsumer = null;
   scene.userData.schroederRenderProxyDrawSource = null;
+  scene.userData.schroederRenderProxyBackendSelection = null;
   renderer.userData.schroederPhaseVolumeDiagnostics = null;
   renderer.userData.schroederRenderSource = null;
   renderer.userData.schroederRenderProxyDescriptorPlan = null;
   renderer.userData.schroederRenderProxyVisibleConsumer = null;
   renderer.userData.schroederRenderProxyDrawSource = null;
+  renderer.userData.schroederRenderProxyBackendSelection = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
@@ -11274,11 +11526,13 @@ export function createSphPhaseScene(container, {
     scene.userData.schroederRenderProxyDescriptorPlan = null;
     scene.userData.schroederRenderProxyVisibleConsumer = null;
     scene.userData.schroederRenderProxyDrawSource = null;
+    scene.userData.schroederRenderProxyBackendSelection = null;
     renderer.userData.schroederPhaseVolumeDiagnostics = null;
     renderer.userData.schroederRenderSource = null;
     renderer.userData.schroederRenderProxyDescriptorPlan = null;
     renderer.userData.schroederRenderProxyVisibleConsumer = null;
     renderer.userData.schroederRenderProxyDrawSource = null;
+    renderer.userData.schroederRenderProxyBackendSelection = null;
     const cleanup = () => destroyCapturedMlsMpmResidentExecutionArtifacts({
       ...captured,
       preserveBuffers: normalizedPreserveBuffers
@@ -16013,6 +16267,10 @@ export function createSphPhaseScene(container, {
       residentRenderSource.schroederRenderProxyDrawSource || null;
     renderer.userData.schroederRenderProxyDrawSource =
       residentRenderSource.schroederRenderProxyDrawSource || null;
+    scene.userData.schroederRenderProxyBackendSelection =
+      residentRenderSource.schroederRenderProxyBackendSelection || null;
+    renderer.userData.schroederRenderProxyBackendSelection =
+      residentRenderSource.schroederRenderProxyBackendSelection || null;
     const markRenderArtifactStale = (target, reason) => {
       if (!target) return;
       target.residentRenderSourceStaleAfterPublish = true;
@@ -21547,6 +21805,10 @@ export function createSphPhaseScene(container, {
       residentRenderSource.schroederRenderProxyDrawSource || null;
     renderer.userData.schroederRenderProxyDrawSource =
       residentRenderSource.schroederRenderProxyDrawSource || null;
+    scene.userData.schroederRenderProxyBackendSelection =
+      residentRenderSource.schroederRenderProxyBackendSelection || null;
+    renderer.userData.schroederRenderProxyBackendSelection =
+      residentRenderSource.schroederRenderProxyBackendSelection || null;
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
       particleCount: nextSphParticleState?.particleCount ?? 0,
@@ -26114,6 +26376,9 @@ export function createSphPhaseScene(container, {
     },
     getSchroederRenderProxyDrawSource() {
       return scene.userData.schroederRenderProxyDrawSource || null;
+    },
+    getSchroederRenderProxyBackendSelection() {
+      return scene.userData.schroederRenderProxyBackendSelection || null;
     },
     getMlsMpmResidentRequestedReadbackMode() {
       return scene.userData.mlsMpmResidentRequestedReadbackMode;

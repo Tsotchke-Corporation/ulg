@@ -22,6 +22,7 @@ import {
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_VISIBLE_CONSUMER_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DRAW_SOURCE_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -42,6 +43,7 @@ import {
   createSchroederRenderProxyDescriptorPlan,
   resolveSchroederRenderProxyVisibleConsumer,
   createSchroederRenderProxyDrawSource,
+  resolveSchroederRenderProxyBackendSelection,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
@@ -3195,6 +3197,65 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(drawSource.drawBatches[0].sourceRef.retainedBufferRef, 'active-node-list:test');
   assert.equal(drawSource.drawBatches[1].sourceRef.retainedBufferRef, 'aggregate-node:test');
 
+  const nativeBackend = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    rendererCapability: {
+      schema: 'peercompute.ulg.sph-extension-surface-renderer-capability.v0',
+      status: 'native-webgpu-surface-consumer-supported',
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerPixelValidationStatus: 'passed'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'passed'
+  });
+  assert.equal(nativeBackend.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA);
+  assert.equal(nativeBackend.status, 'schroeder-render-proxy-backend-native-webgpu-visible-ready');
+  assert.equal(nativeBackend.ready, true);
+  assert.equal(nativeBackend.selectedBackend, 'native-webgpu-retained-proxy');
+  assert.equal(nativeBackend.selectedBackendKind, 'same-device-retained-webgpu-draw');
+  assert.equal(nativeBackend.nativeSubmitReady, true);
+  assert.equal(nativeBackend.visibleValidationReady, true);
+  assert.equal(nativeBackend.sameDeviceRetainedBufferBindingRequired, true);
+  assert.equal(nativeBackend.sameDeviceRetainedBufferBindingReady, true);
+  assert.equal(nativeBackend.rawGpuBufferTransferRequired, false);
+  assert.equal(nativeBackend.frameCopyReadbackRequired, false);
+  assert.equal(nativeBackend.overlayRequired, false);
+  assert.equal(nativeBackend.peerComputeHotPath, true);
+
+  const pendingNativeBackend = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerPixelValidationStatus: 'not-run'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(pendingNativeBackend.status, 'schroeder-render-proxy-backend-native-webgpu-submit-ready');
+  assert.equal(pendingNativeBackend.ready, true);
+  assert.equal(pendingNativeBackend.nativeSubmitReady, true);
+  assert.equal(pendingNativeBackend.visibleValidationReady, false);
+
+  const diagnosticBackend = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    backendPreference: 'diagnostic-cpu',
+    allowDiagnosticCpuProxy: true,
+    diagnosticMaxProxyCount: 20
+  });
+  assert.equal(diagnosticBackend.status, 'schroeder-render-proxy-backend-diagnostic-cpu-ready');
+  assert.equal(diagnosticBackend.ready, true);
+  assert.equal(diagnosticBackend.selectedBackend, 'diagnostic-cpu-descriptor-proxy');
+  assert.equal(diagnosticBackend.diagnosticOnly, true);
+  assert.equal(diagnosticBackend.peerComputeHotPath, false);
+  assert.equal(diagnosticBackend.cpuGeometryMaterialized, false);
+  assert.equal(diagnosticBackend.cpuGeometryMaterializationAdmitted, true);
+  assert.equal(diagnosticBackend.fullParticleReadbackRequired, false);
+
   const rawBlocked = resolveSchroederRenderProxyVisibleConsumer({
     proxyDescriptorPlan: proxyPlan,
     requestRawGpuBufferDrawBinding: true,
@@ -3239,6 +3300,42 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(
     metadata.schroederRenderProxyDrawSource.status,
     'schroeder-render-proxy-draw-source-ready'
+  );
+  assert.equal(
+    metadata.schroederRenderProxyBackendSelection.status,
+    'blocked-schroeder-render-proxy-backend-renderer-capability'
+  );
+  assert.equal(metadata.schroederRenderProxyBackendSelection.ready, false);
+  assert.equal(metadata.schroederRenderProxyBackendSelection.selectedBackend, 'native-webgpu-retained-proxy');
+
+  const nativeMetadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      signature: 'steps-with-schroeder-summary',
+      residentExecutionGeneration: 12,
+      currentResidentExecutionGeneration: 12,
+      nextSphParticleState: { step: 8, time: 0.04, particleCount: 128 },
+      portableSummary
+    },
+    schroederPortableSummaryAdmission: admission,
+    schroederRenderProxyRendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerPixelValidationStatus: 'passed'
+    },
+    schroederRenderProxyRenderBridgeMode: 'native-webgpu-surface-consumer',
+    schroederRenderProxyRenderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    schroederRenderProxyPixelValidationStatus: 'passed',
+    source: 'resident-render-refresh'
+  });
+  assert.equal(
+    nativeMetadata.schroederRenderProxyBackendSelection.status,
+    'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+  );
+  assert.equal(nativeMetadata.schroederRenderProxyBackendSelection.ready, true);
+  assert.equal(
+    nativeMetadata.schroederRenderProxyBackendSelection.selectedBackend,
+    'native-webgpu-retained-proxy'
   );
 
   const target = {};
@@ -3306,6 +3403,16 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(target.sourceSchroederRenderProxyDrawCpuGeometryMaterialized, false);
   assert.equal(target.sourceSchroederRenderProxyDrawFrameCopyReadbackRequired, false);
   assert.equal(target.sourceSchroederRenderProxyDrawOverlayRequired, false);
+  assert.equal(
+    target.sourceSchroederRenderProxyBackendSelectionStatus,
+    'blocked-schroeder-render-proxy-backend-renderer-capability'
+  );
+  assert.equal(target.sourceSchroederRenderProxyBackendSelectionReady, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendSelected, 'native-webgpu-retained-proxy');
+  assert.equal(target.sourceSchroederRenderProxyBackendNativeSubmitReady, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendFrameCopyReadbackRequired, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendOverlayRequired, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendFullParticleReadbackRequired, false);
 });
 
 test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {
@@ -3344,6 +3451,11 @@ test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs'
   });
   assert.equal(drawSource.status, 'blocked-schroeder-render-proxy-draw-source');
   assert.equal(drawSource.drawBatchCount, 0);
+
+  const backendSelection = resolveSchroederRenderProxyBackendSelection({ drawSource });
+  assert.equal(backendSelection.status, 'blocked-schroeder-render-proxy-backend-source');
+  assert.equal(backendSelection.ready, false);
+  assert.equal(backendSelection.inputReady, false);
 });
 
 test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {

@@ -211,7 +211,36 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'surfaceDraw',
   'surfaceDrawDiagnostic',
   'nativeSurfacePixelValidation',
-  'surfaceOverlay'
+  'surfaceOverlay',
+  'schroeder',
+  'ss',
+  'schroederSimulation',
+  'schroederLevel',
+  'schroederSelectedLevel',
+  'ssLevel',
+  'schroederBaseGridSpacing',
+  'schroederBaseGridSpacingM',
+  'schroederMinLevel',
+  'ssMinLevel',
+  'schroederMaxLevel',
+  'ssMaxLevel',
+  'schroederTileCellCount',
+  'schroederTile',
+  'schroederPortableSummary',
+  'ssPortableSummary',
+  'schroederActiveNodeIndex',
+  'ssIndex',
+  'schroederActiveNodeSortedIndex',
+  'ssSortedIndex',
+  'schroederActiveNodeSortedIndexPolicy',
+  'schroederCrossLevelCoupling',
+  'schroederLawQueue',
+  'schroederLawNeighbors',
+  'schroederLawNeighborCandidates',
+  'schroederLawNeighborTraversal',
+  'schroederTraversal',
+  'schroederLawNeighborCandidateReadback',
+  'schroederUseCase'
 ]);
 
 const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
@@ -272,8 +301,13 @@ function residentSurfaceDrawModeUsesParticleBridge(mode) {
   return residentSurfaceDrawParticleRenderMode(mode) != null;
 }
 
+function residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode) {
+  return normalizeResidentSurfaceDrawDiagnosticMode(mode, 'auto') === 'native-webgpu-surface-consumer';
+}
+
 function residentSurfaceDrawModeNeedsInitialVisualRefresh(mode) {
-  return residentSurfaceDrawModeUsesParticleBridge(mode);
+  return residentSurfaceDrawModeUsesParticleBridge(mode)
+    || residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode);
 }
 
 function residentSurfaceDrawModeUsesCompactBridge(mode) {
@@ -2013,6 +2047,162 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('reactionParticleBinMetadataReadback'),
     false
   );
+  const peerSchroederSimulationPolicy =
+    currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
+    || runtime?.peercomputeSchroederSimulationPolicy
+    || runtime?.schroederSimulationPolicy
+    || null;
+  function initialUrlParamValue(keys = []) {
+    for (const key of keys) {
+      const value = initialHash.get(key) ?? initialQuery.get(key);
+      if (value != null && value !== '') return value;
+    }
+    return null;
+  }
+  function policyParamValue(policy, keys = []) {
+    if (!policy || typeof policy !== 'object') return null;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(policy, key)) return policy[key];
+    }
+    return null;
+  }
+  function initialUrlOrSchroederPolicyValue(urlKeys = [], policyKeys = urlKeys) {
+    const urlValue = initialUrlParamValue(urlKeys);
+    if (urlValue != null) return urlValue;
+    return policyParamValue(peerSchroederSimulationPolicy, policyKeys);
+  }
+  function optionalStringParam(value) {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text ? text : null;
+  }
+  const initialSchroederSimulationEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederSimulation', 'schroeder', 'ss'],
+      ['enabled', 'schroederSimulation', 'sameLevelSimulation']
+    ),
+    false
+  );
+  const initialSchroederSelectedLevel = nonNegativeIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederSelectedLevel', 'schroederLevel', 'ssLevel'],
+      ['selectedLevel', 'level', 'schroederSelectedLevel']
+    )
+  ) ?? 0;
+  const initialSchroederBaseGridSpacingM = positiveNumberUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederBaseGridSpacingM', 'schroederBaseGridSpacing'],
+      ['baseGridSpacingM', 'baseGridSpacing', 'schroederBaseGridSpacingM']
+    )
+  );
+  const initialSchroederMinLevel = nonNegativeIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederMinLevel', 'ssMinLevel'],
+      ['minLevel', 'schroederMinLevel']
+    )
+  );
+  const initialSchroederMaxLevel = nonNegativeIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederMaxLevel', 'ssMaxLevel'],
+      ['maxLevel', 'schroederMaxLevel']
+    )
+  );
+  const initialSchroederTileCellCount = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederTileCellCount', 'schroederTile'],
+      ['tileCellCount', 'tileCellCountPerEdge', 'schroederTileCellCount']
+    )
+  );
+  const initialSchroederPortableSummaryEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederPortableSummary', 'ssPortableSummary'],
+      ['enablePortableSummary', 'portableSummary', 'schroederEnablePortableSummary']
+    ),
+    initialSchroederSimulationEnabled
+  );
+  const initialSchroederActiveNodeIndexEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederActiveNodeIndex', 'ssIndex'],
+      ['enableActiveNodeIndex', 'activeNodeIndex', 'schroederEnableActiveNodeIndex']
+    ),
+    initialSchroederSimulationEnabled
+  );
+  const initialSchroederActiveNodeSortedIndexEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederActiveNodeSortedIndex', 'ssSortedIndex'],
+      ['enableActiveNodeSortedIndex', 'activeNodeSortedIndex', 'schroederEnableActiveNodeSortedIndex']
+    ),
+    false
+  );
+  const initialSchroederCrossLevelCouplingEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederCrossLevelCoupling'],
+      ['enableCrossLevelCoupling', 'crossLevelCoupling', 'schroederEnableCrossLevelCoupling']
+    ),
+    true
+  );
+  const initialSchroederLawQueueEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLawQueue'],
+      ['enableLawQueue', 'lawQueue', 'schroederEnableLawQueue']
+    ),
+    true
+  );
+  const initialSchroederLawNeighborCandidatesEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLawNeighborCandidates', 'schroederLawNeighbors'],
+      ['enableLawNeighborCandidates', 'lawNeighborCandidates', 'schroederEnableLawNeighborCandidates']
+    ),
+    true
+  );
+  const initialSchroederActiveNodeSortedIndexPolicyMode = optionalStringParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederActiveNodeSortedIndexPolicy'],
+      ['activeNodeSortedIndexPolicyMode', 'schroederActiveNodeSortedIndexPolicyMode']
+    )
+  );
+  const initialSchroederLawNeighborTraversalPolicyMode = optionalStringParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLawNeighborTraversal', 'schroederTraversal'],
+      ['lawNeighborTraversalPolicyMode', 'schroederLawNeighborTraversalPolicyMode']
+    )
+  );
+  const initialSchroederLawNeighborCandidateReadbackMode = optionalStringParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLawNeighborCandidateReadback'],
+      ['lawNeighborCandidateReadbackMode', 'schroederLawNeighborCandidateReadbackMode']
+    )
+  );
+  const initialSchroederPortableSummaryPeerComputeUseCase =
+    optionalStringParam(
+      initialUrlOrSchroederPolicyValue(
+        ['schroederUseCase'],
+        ['portableSummaryPeerComputeUseCase', 'useCase', 'peerComputeUseCase']
+      )
+    ) || 'scene-native-schroeder-render-lod';
+  const initialSchroederSimulationConfig = Object.freeze({
+    schema: 'peercompute.ulg.sph-demo-schroeder-simulation-config.v0',
+    enabled: initialSchroederSimulationEnabled,
+    selectedLevel: initialSchroederSelectedLevel,
+    baseGridSpacingM: initialSchroederBaseGridSpacingM,
+    minLevel: initialSchroederMinLevel,
+    maxLevel: initialSchroederMaxLevel,
+    tileCellCount: initialSchroederTileCellCount,
+    enablePortableSummary: initialSchroederPortableSummaryEnabled,
+    portableSummaryPeerComputeUseCase: initialSchroederPortableSummaryPeerComputeUseCase,
+    enableActiveNodeIndex: initialSchroederActiveNodeIndexEnabled,
+    enableActiveNodeSortedIndex: initialSchroederActiveNodeSortedIndexEnabled,
+    activeNodeSortedIndexPolicyMode: initialSchroederActiveNodeSortedIndexPolicyMode,
+    lawNeighborTraversalPolicyMode: initialSchroederLawNeighborTraversalPolicyMode,
+    lawNeighborCandidateReadbackMode: initialSchroederLawNeighborCandidateReadbackMode,
+    enableCrossLevelCoupling: initialSchroederCrossLevelCouplingEnabled,
+    enableLawQueue: initialSchroederLawQueueEnabled,
+    enableLawNeighborCandidates: initialSchroederLawNeighborCandidatesEnabled,
+    source: initialUrlParamValue(['schroederSimulation', 'schroeder', 'ss']) != null
+      ? 'url'
+      : (peerSchroederSimulationPolicy ? 'peercompute-policy' : 'default')
+  });
+  overlay.__sphSchroederSimulationConfig = initialSchroederSimulationConfig;
   function residentExecutionPolicyFromUrl() {
     return {
       schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
@@ -2026,6 +2216,29 @@ export async function mountSphPhaseDemoOverlay({
         initialContactBinMetadataReadbackEnabled,
       reactionParticleBinMetadataReadback:
         initialReactionBinMetadataReadbackEnabled
+    };
+  }
+  function schroederResidentExecutionOptionsFromConfig(
+    config = initialSchroederSimulationConfig
+  ) {
+    if (!config?.enabled) return { schroederSimulation: false };
+    return {
+      schroederSimulation: true,
+      schroederSelectedLevel: config.selectedLevel,
+      schroederBaseGridSpacingM: config.baseGridSpacingM,
+      schroederMinLevel: config.minLevel,
+      schroederMaxLevel: config.maxLevel,
+      schroederTileCellCount: config.tileCellCount,
+      schroederEnablePortableSummary: config.enablePortableSummary,
+      schroederPortableSummaryPeerComputeUseCase: config.portableSummaryPeerComputeUseCase,
+      schroederEnableActiveNodeIndex: config.enableActiveNodeIndex,
+      schroederEnableActiveNodeSortedIndex: config.enableActiveNodeSortedIndex,
+      schroederActiveNodeSortedIndexPolicyMode: config.activeNodeSortedIndexPolicyMode,
+      schroederLawNeighborTraversalPolicyMode: config.lawNeighborTraversalPolicyMode,
+      schroederLawNeighborCandidateReadbackMode: config.lawNeighborCandidateReadbackMode,
+      schroederEnableCrossLevelCoupling: config.enableCrossLevelCoupling,
+      schroederEnableLawQueue: config.enableLawQueue,
+      schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates
     };
   }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
@@ -2369,6 +2582,28 @@ export async function mountSphPhaseDemoOverlay({
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
     if (initialContactBinMetadataReadbackEnabled) q.set('contactBinMetadataReadback', '1');
     if (initialReactionBinMetadataReadbackEnabled) q.set('reactionBinMetadataReadback', '1');
+    if (initialSchroederSimulationEnabled) {
+      q.set('ss', '1');
+      q.set('schroederLevel', String(initialSchroederSelectedLevel));
+      q.set('schroederPortableSummary', initialSchroederPortableSummaryEnabled ? '1' : '0');
+      q.set('schroederActiveNodeIndex', initialSchroederActiveNodeIndexEnabled ? '1' : '0');
+      if (initialSchroederBaseGridSpacingM != null) q.set('schroederBaseGridSpacingM', String(initialSchroederBaseGridSpacingM));
+      if (initialSchroederMinLevel != null) q.set('schroederMinLevel', String(initialSchroederMinLevel));
+      if (initialSchroederMaxLevel != null) q.set('schroederMaxLevel', String(initialSchroederMaxLevel));
+      if (initialSchroederTileCellCount != null) q.set('schroederTileCellCount', String(initialSchroederTileCellCount));
+      if (initialSchroederActiveNodeSortedIndexEnabled) q.set('schroederActiveNodeSortedIndex', '1');
+      if (initialSchroederActiveNodeSortedIndexPolicyMode) {
+        q.set('schroederActiveNodeSortedIndexPolicy', initialSchroederActiveNodeSortedIndexPolicyMode);
+      }
+      if (!initialSchroederCrossLevelCouplingEnabled) q.set('schroederCrossLevelCoupling', '0');
+      if (!initialSchroederLawQueueEnabled) q.set('schroederLawQueue', '0');
+      if (!initialSchroederLawNeighborCandidatesEnabled) q.set('schroederLawNeighborCandidates', '0');
+      if (initialSchroederLawNeighborTraversalPolicyMode) q.set('schroederTraversal', initialSchroederLawNeighborTraversalPolicyMode);
+      if (initialSchroederLawNeighborCandidateReadbackMode) {
+        q.set('schroederLawNeighborCandidateReadback', initialSchroederLawNeighborCandidateReadbackMode);
+      }
+      q.set('schroederUseCase', initialSchroederPortableSummaryPeerComputeUseCase);
+    }
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
   applyUrlToControls(); // restore from the URL before the first build
@@ -2586,6 +2821,76 @@ export async function mountSphPhaseDemoOverlay({
       `queue-fence=${effective?.measureFusedSequenceQueueFence ? 'on' : 'off'}`,
       `contact-bin=${effective?.contactKinematicsParticleBinMetadataReadback ? 'readback' : 'off'}`,
       `reaction-bin=${effective?.reactionParticleBinMetadataReadback ? 'readback' : 'off'}`
+    ].join(' ');
+  }
+
+  function schroederSimulationStatusText({
+    residentSteps = null,
+    residentStep = null,
+    residentRenderState = null,
+    residentSurfaceDraw = null,
+    schroederRenderSource = null,
+    schroederDrawSource = null,
+    schroederBackendSelection = null
+  } = {}) {
+    const config = initialSchroederSimulationConfig;
+    const mechanics = residentSteps?.schroederSameLevelMechanics
+      || residentStep?.schroederSameLevelMechanics
+      || null;
+    const portableSummary = residentSteps?.portableSummary
+      || residentStep?.portableSummary
+      || mechanics?.portableSummary
+      || null;
+    const renderLod = portableSummary?.renderLod
+      || residentSteps?.renderLod
+      || mechanics?.renderLod
+      || null;
+    const enabled = Boolean(
+      config.enabled
+      || residentSteps?.schroederSimulation
+      || residentStep?.schroederSimulation
+    );
+    const sequenceStatus = residentSteps?.schroederSameLevelSequenceStatus
+      || residentStep?.schroederSameLevelSequenceStatus
+      || mechanics?.status
+      || (enabled ? 'pending' : 'disabled');
+    const selectedLevel = renderLod?.selectedLevel
+      ?? schroederRenderSource?.selectedLevel
+      ?? mechanics?.selectedLevel
+      ?? residentSteps?.schroederSelectedLevel
+      ?? config.selectedLevel;
+    const nativeGridSpacingM = renderLod?.nativeGridSpacingM
+      ?? schroederRenderSource?.nativeGridSpacingM
+      ?? mechanics?.mechanicsGridSpacingM
+      ?? null;
+    const activeLeafProxyCount = renderLod?.activeLeafProxyCount
+      ?? schroederRenderSource?.activeLeafProxyCount
+      ?? schroederDrawSource?.activeLeafProxyCount
+      ?? 0;
+    const drawBatchCount = schroederDrawSource?.drawBatchCount ?? 0;
+    const retainedRefCount = residentSteps?.schroederLocalRetainedRenderBuffers?.retainedBufferRefs?.length
+      ?? residentSteps?.localRetainedRenderBuffers?.retainedBufferRefs?.length
+      ?? residentRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+      ?? residentSurfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+      ?? 0;
+    const nativeSubmitDrawCount =
+      residentRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+      ?? residentSurfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+      ?? 0;
+    const backendStatus = schroederBackendSelection?.status
+      || residentRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyBackendSelectionStatus
+      || 'pending';
+    return [
+      `request=${enabled ? 'on' : 'off'}`,
+      `source=${config.source}`,
+      `status=${sequenceStatus}`,
+      `level=${selectedLevel ?? 'pending'}`,
+      `dx=${Number.isFinite(nativeGridSpacingM) ? fmt(nativeGridSpacingM, 4) : 'pending'}m`,
+      `leaves=${activeLeafProxyCount}`,
+      `draw-batches=${drawBatchCount}`,
+      `retained=${retainedRefCount}`,
+      `native-draws=${nativeSubmitDrawCount}`,
+      `backend=${backendStatus}`
     ].join(' ');
   }
 
@@ -3985,6 +4290,7 @@ export async function mountSphPhaseDemoOverlay({
         surfaceDrawDiagnosticMode: mode,
         particleRenderMode
       });
+      const nativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode);
       const renderStartMs = performance.now();
       const cadence = residentRenderReadbackDecision({
         forceDue: true,
@@ -4005,8 +4311,12 @@ export async function mountSphPhaseDemoOverlay({
           pressureInterfaceGasCellFieldAdmission:
             scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
           pressureInterfaceGasCellFieldImportStateKey: null,
-          renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(mode) ? 'skip' : 'auto',
-          surfaceDrawDiagnosticMode: mode
+          renderFieldReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
+          renderRowsReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
+          renderFieldSurfaceSummaryMode:
+            (residentSurfaceDrawModeUsesCompactBridge(mode) || nativeSurfaceConsumerRefresh) ? 'skip' : 'auto',
+          surfaceDrawDiagnosticMode: mode,
+          allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
         });
         if (!overlay.isConnected || generation !== particleSyncGeneration) return renderState;
         residentRenderReadbackCount += 1;
@@ -4252,7 +4562,22 @@ export async function mountSphPhaseDemoOverlay({
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
     activeGridSafetyCells = null,
-    measureFusedSequenceQueueFence = false
+    measureFusedSequenceQueueFence = false,
+    schroederSimulation = false,
+    schroederSelectedLevel = 0,
+    schroederBaseGridSpacingM = null,
+    schroederMinLevel = null,
+    schroederMaxLevel = null,
+    schroederTileCellCount = null,
+    schroederEnablePortableSummary = true,
+    schroederEnableActiveNodeIndex = true,
+    schroederEnableActiveNodeSortedIndex = false,
+    schroederActiveNodeSortedIndexPolicyMode = null,
+    schroederLawNeighborTraversalPolicyMode = null,
+    schroederLawNeighborCandidateReadbackMode = null,
+    schroederEnableCrossLevelCoupling = true,
+    schroederEnableLawQueue = true,
+    schroederEnableLawNeighborCandidates = true
   } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
@@ -4273,7 +4598,22 @@ export async function mountSphPhaseDemoOverlay({
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid) ? 1 : 0}`,
       `activeGridSafety=${activeGridSafetyCells ?? 'default'}`,
-      `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`
+      `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`,
+      `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
+      `ssLevel=${schroederSelectedLevel ?? 0}`,
+      `ssBaseDx=${schroederBaseGridSpacingM ?? 'auto'}`,
+      `ssMin=${schroederMinLevel ?? 'auto'}`,
+      `ssMax=${schroederMaxLevel ?? 'auto'}`,
+      `ssTile=${schroederTileCellCount ?? 'auto'}`,
+      `ssPortable=${Boolean(schroederEnablePortableSummary) ? 1 : 0}`,
+      `ssIndex=${Boolean(schroederEnableActiveNodeIndex) ? 1 : 0}`,
+      `ssSorted=${Boolean(schroederEnableActiveNodeSortedIndex) ? 1 : 0}`,
+      `ssSortedPolicy=${schroederActiveNodeSortedIndexPolicyMode ?? 'default'}`,
+      `ssTraversal=${schroederLawNeighborTraversalPolicyMode ?? 'default'}`,
+      `ssCandidateReadback=${schroederLawNeighborCandidateReadbackMode ?? 'default'}`,
+      `ssCross=${Boolean(schroederEnableCrossLevelCoupling) ? 1 : 0}`,
+      `ssLawQueue=${Boolean(schroederEnableLawQueue) ? 1 : 0}`,
+      `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`
     ].join('|');
   }
 
@@ -5065,10 +5405,12 @@ export async function mountSphPhaseDemoOverlay({
   } = {}) {
     const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
+    const schroederExecutionOptions = schroederResidentExecutionOptionsFromConfig();
     const baseSignature = mlsMpmResidentStepsSignature({
       stepCount: normalizedStepCount,
       readbackMode,
-      ...residentExecutionPolicy
+      ...residentExecutionPolicy,
+      ...schroederExecutionOptions
     });
     const signature = baseSignature
       ? `${baseSignature}|sync=${generation}|continue=${Boolean(continueFromResidentState)}`
@@ -5076,6 +5418,8 @@ export async function mountSphPhaseDemoOverlay({
     if (!signature || (pendingMlsMpmResidentStepsSignature && !force)) return;
     overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
     overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
+    overlay.__sphSchroederSimulationConfig = initialSchroederSimulationConfig;
+    overlay.__mlsMpmSchroederExecutionOptions = schroederExecutionOptions;
     const scheduleToken = pendingMlsMpmResidentStepsToken + 1;
     pendingMlsMpmResidentStepsToken = scheduleToken;
     pendingMlsMpmResidentStepsSignature = signature;
@@ -5088,6 +5432,8 @@ export async function mountSphPhaseDemoOverlay({
       readbackMode,
       continueFromResidentState: Boolean(continueFromResidentState),
       residentExecutionPolicy,
+      schroederSimulationConfig: initialSchroederSimulationConfig,
+      schroederExecutionOptions,
       generation,
       startedAtMs: performance.now()
     };
@@ -5099,6 +5445,8 @@ export async function mountSphPhaseDemoOverlay({
       readbackMode,
       continueFromResidentState: Boolean(continueFromResidentState),
       residentExecutionPolicy,
+      schroederSimulationConfig: initialSchroederSimulationConfig,
+      schroederExecutionOptions,
       generation
     });
     overlay.__mlsMpmResidentStepsSlow = null;
@@ -5168,6 +5516,8 @@ export async function mountSphPhaseDemoOverlay({
         readbackMode,
         continueFromResidentState: Boolean(continueFromResidentState),
         residentExecutionPolicy,
+        schroederSimulationConfig: initialSchroederSimulationConfig,
+        schroederExecutionOptions,
         generation
       });
       updateResidentPerf({
@@ -5232,6 +5582,8 @@ export async function mountSphPhaseDemoOverlay({
         readbackMode,
         continueFromResidentState: Boolean(continueFromResidentState),
         residentExecutionPolicy,
+        schroederSimulationConfig: initialSchroederSimulationConfig,
+        schroederExecutionOptions,
         generation
       });
       remoteRefreshPreludePromise = runRemoteResidentTaskGraphRefreshPrelude({
@@ -5253,6 +5605,8 @@ export async function mountSphPhaseDemoOverlay({
           generation,
           force: Boolean(force || continueFromResidentState),
           residentExecutionPolicy,
+          schroederSimulationConfig: initialSchroederSimulationConfig,
+          schroederExecutionOptions,
           computeManager: residentComputeManagerForSchedule,
           residentStateManager: residentStateManagerForSchedule,
           residentComputeManagerMode: residentComputeManagerModeForSchedule,
@@ -5288,6 +5642,7 @@ export async function mountSphPhaseDemoOverlay({
       compactSummaryMode: readbackMode === 'no-full-readback' ? 'none' : undefined,
       continueFromResidentState,
       ...residentExecutionPolicy,
+      ...schroederExecutionOptions,
       force: Boolean(force || continueFromResidentState)
     })).then(async (execution) => {
       const residentMs = performance.now() - residentStartMs;
@@ -5463,6 +5818,9 @@ export async function mountSphPhaseDemoOverlay({
       if (execution?.backend === 'webgpu') {
         const selectedSurfaceDrawDiagnosticMode = currentResidentSurfaceDrawDiagnosticMode();
         const selectedParticleRenderMode = residentSurfaceDrawParticleRenderMode(selectedSurfaceDrawDiagnosticMode);
+        const selectedNativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(
+          selectedSurfaceDrawDiagnosticMode
+        );
         const forceParticleRenderModeRefresh = residentSurfaceDrawModeUsesParticleBridge(
           selectedSurfaceDrawDiagnosticMode
         );
@@ -5519,10 +5877,20 @@ export async function mountSphPhaseDemoOverlay({
               pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
               pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
               pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
-              renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
+              renderFieldReadbackMode: selectedNativeSurfaceConsumerRefresh
+                ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+                : undefined,
+              renderRowsReadbackMode: selectedNativeSurfaceConsumerRefresh
+                ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+                : undefined,
+              renderFieldSurfaceSummaryMode: (
+                residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
+                || selectedNativeSurfaceConsumerRefresh
+              )
                 ? 'skip'
                 : 'auto',
               surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode,
+              allowNativeSurfaceExtraction: selectedNativeSurfaceConsumerRefresh ? true : undefined,
               skipPressureInterfaceRefresh: true
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
@@ -5686,6 +6054,7 @@ export async function mountSphPhaseDemoOverlay({
       return null;
     }
     const renderStartMs = performance.now();
+    const nativeSurfaceConsumerRefresh = residentSurfaceDrawModeUsesNativeSurfaceConsumer(mode);
     try {
       const renderState = await scene.refreshSphResidentRenderState?.({
         preferWebGpu: true,
@@ -5702,8 +6071,12 @@ export async function mountSphPhaseDemoOverlay({
         pressureInterfaceGasCellFieldAdmission:
           scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
         pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
-        renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(mode) ? 'skip' : 'auto',
-        surfaceDrawDiagnosticMode: mode
+        renderFieldReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
+        renderRowsReadbackMode: nativeSurfaceConsumerRefresh ? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT : undefined,
+        renderFieldSurfaceSummaryMode:
+          (residentSurfaceDrawModeUsesCompactBridge(mode) || nativeSurfaceConsumerRefresh) ? 'skip' : 'auto',
+        surfaceDrawDiagnosticMode: mode,
+        allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
       });
       if (token !== renderModeRefreshToken) return renderState;
       overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(renderState, {
@@ -6473,6 +6846,15 @@ export async function mountSphPhaseDemoOverlay({
       const residentSurfaceOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
         || overlay.__sphResidentSurfaceDrawOverlayPolicy
         || null;
+      const schroederRenderSource = scene.getSchroederRenderSource?.()
+        || scene.scene?.userData?.schroederRenderSource
+        || null;
+      const schroederDrawSource = scene.getSchroederRenderProxyDrawSource?.()
+        || scene.scene?.userData?.schroederRenderProxyDrawSource
+        || null;
+      const schroederBackendSelection = scene.getSchroederRenderProxyBackendSelection?.()
+        || scene.scene?.userData?.schroederRenderProxyBackendSelection
+        || null;
       const reactionTable = scene.getSphReactionTable?.() || overlay.__sphReactionTable || null;
       const residentRequestedReadback = residentSteps?.requestedReadbackMode
         || residentStep?.requestedReadbackMode
@@ -6529,6 +6911,7 @@ export async function mountSphPhaseDemoOverlay({
         `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
         `resident workers : ${initialResidentWorkersEnabled ? 'enabled' : 'disabled-by-url'}`,
         `resident policy  : ${residentExecutionPolicyStatus}`,
+        `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
         `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
@@ -6698,6 +7081,15 @@ export async function mountSphPhaseDemoOverlay({
     const residentSurfaceOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
       || overlay.__sphResidentSurfaceDrawOverlayPolicy
       || null;
+    const schroederRenderSource = scene.getSchroederRenderSource?.()
+      || scene.scene?.userData?.schroederRenderSource
+      || null;
+    const schroederDrawSource = scene.getSchroederRenderProxyDrawSource?.()
+      || scene.scene?.userData?.schroederRenderProxyDrawSource
+      || null;
+    const schroederBackendSelection = scene.getSchroederRenderProxyBackendSelection?.()
+      || scene.scene?.userData?.schroederRenderProxyBackendSelection
+      || null;
     const renderPressureSource = residentRenderState?.gasPressureSummarySource
       || overlay.__sphResidentGasPressureSummary?.source
       || gasPressure?.source
@@ -6748,6 +7140,7 @@ export async function mountSphPhaseDemoOverlay({
       `law groups       : ${lawGroupStatusText()}`,
       `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
       `resident policy  : ${residentExecutionPolicyStatus}`,
+      `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
       `resident backend : ${residentBackend}`,
       `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,

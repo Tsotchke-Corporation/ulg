@@ -7651,6 +7651,149 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase URL Schroeder config drives native resident schedule', async ({ page }) => {
+  test.setTimeout(240_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|too many warnings|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentStepsPerSchedule=1&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer&ss=1&schroederLevel=0&schroederPortableSummary=1&schroederActiveNodeIndex=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps;
+    const renderState = overlay?.__sphResidentRenderState;
+    const scene = overlay?.__sphScene;
+    const surfaceDraw = scene?.getSphResidentSurfaceDraw?.() || overlay?.__sphResidentSurfaceDraw || null;
+    return Boolean(
+      overlay?.__sphSchroederSimulationConfig?.enabled === true
+      && overlay?.__mlsMpmSchroederExecutionOptions?.schroederSimulation === true
+      && execution?.status === 'resident-steps-executed'
+      && execution?.schroederSimulation === true
+      && execution?.schroederSameLevelSequenceStatus === 'schroeder-same-level-resident-steps-executed'
+      && execution?.portableSummary?.renderLod?.activeLeafProxyCount > 0
+      && renderState?.status === 'resident-render-field-applied'
+      && (
+        renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorReady === true
+        || surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorReady === true
+      )
+    );
+  }, null, { timeout: 180_000 });
+
+  const result = await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const execution = overlay.__mlsMpmResidentSteps || scene.getMlsMpmResidentSteps?.() || null;
+    const renderState = overlay.__sphResidentRenderState || scene.getSphResidentRenderState?.() || null;
+    const surfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+    const bridge = scene.getSphResidentSurfaceDrawRenderBridge?.() || null;
+    const renderSource = scene.getSchroederRenderSource?.() || scene.scene?.userData?.schroederRenderSource || null;
+    const drawSource = scene.getSchroederRenderProxyDrawSource?.()
+      || scene.scene?.userData?.schroederRenderProxyDrawSource
+      || null;
+    const backendSelection = scene.getSchroederRenderProxyBackendSelection?.()
+      || scene.scene?.userData?.schroederRenderProxyBackendSelection
+      || null;
+    const statusText = overlay.querySelector('#sph-status')?.textContent || '';
+    return {
+      hash: window.location.hash,
+      config: overlay.__sphSchroederSimulationConfig || null,
+      options: overlay.__mlsMpmSchroederExecutionOptions || null,
+      autoScheduleStatus: overlay.__mlsMpmResidentAutoSchedule?.status || null,
+      autoScheduleResidentAuto: overlay.__mlsMpmResidentAutoSchedule?.residentAuto ?? null,
+      pendingSchroederSimulation:
+        overlay.__mlsMpmResidentStepsPending?.schroederExecutionOptions?.schroederSimulation ?? null,
+      executionStatus: execution?.status ?? null,
+      executionSchroederSimulation: execution?.schroederSimulation ?? null,
+      executionSchroederSequenceStatus: execution?.schroederSameLevelSequenceStatus ?? null,
+      executionResidentComputeManagerMode: execution?.residentComputeManagerMode ?? null,
+      portableSummaryStatus: execution?.portableSummary?.status ?? null,
+      renderLodStatus: execution?.portableSummary?.renderLodStatus ?? null,
+      renderLodSelectedLevel: execution?.portableSummary?.renderLod?.selectedLevel ?? null,
+      renderLodNativeGridSpacingM: execution?.portableSummary?.renderLod?.nativeGridSpacingM ?? null,
+      renderLodActiveLeafProxyCount:
+        execution?.portableSummary?.renderLod?.activeLeafProxyCount ?? null,
+      localResolverStatus: execution?.schroederLocalRetainedRenderBuffers?.status ?? null,
+      localResolverRefCount:
+        execution?.schroederLocalRetainedRenderBuffers?.retainedBufferRefs?.length ?? null,
+      renderSourceStatus: renderSource?.status ?? null,
+      renderSourcePresentationReady: renderSource?.renderLodPresentationReady ?? null,
+      drawSourceStatus: drawSource?.status ?? null,
+      drawSourceDrawBatchCount: drawSource?.drawBatchCount ?? null,
+      backendSelectionStatus: backendSelection?.status ?? null,
+      backendSelectedBackend: backendSelection?.selectedBackend ?? null,
+      renderStateStatus: renderState?.status ?? null,
+      nativeExecutorReady:
+        renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorReady
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorReady
+        ?? bridge?.schroederRenderProxyNativeExecutorReady
+        ?? null,
+      nativeLastSubmitStatus:
+        renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitStatus
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitStatus
+        ?? bridge?.lastSchroederRenderProxyNativeSubmitStatus
+        ?? null,
+      nativeLastSubmitDrawCommandCount:
+        renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+        ?? bridge?.lastSchroederRenderProxyNativeDrawCommandCount
+        ?? null,
+      bridgeStatus: bridge?.status ?? null,
+      bridgeFrameCount: bridge?.frameCount ?? null,
+      statusTextIncludesSchroederLine:
+        statusText.includes('schroeder sim') && statusText.includes('request=on'),
+      statusTextIncludesSequence:
+        statusText.includes('schroeder-same-level-resident-steps-executed')
+    };
+  });
+
+  expect(result.hash).toContain('ss=1');
+  expect(result.config?.enabled).toBe(true);
+  expect(result.config?.source).toBe('url');
+  expect(result.config?.selectedLevel).toBe(0);
+  expect(result.options?.schroederSimulation).toBe(true);
+  expect(result.options?.schroederEnablePortableSummary).toBe(true);
+  expect(result.options?.schroederEnableActiveNodeIndex).toBe(true);
+  expect(result.autoScheduleResidentAuto).toBe(true);
+  expect(result.autoScheduleStatus).toBe('resident-auto-schedule-enabled');
+  expect(result.executionStatus).toBe('resident-steps-executed');
+  expect(result.executionSchroederSimulation).toBe(true);
+  expect(result.executionSchroederSequenceStatus)
+    .toBe('schroeder-same-level-resident-steps-executed');
+  expect(result.executionResidentComputeManagerMode).toBe('direct-schroeder-scene');
+  expect(result.portableSummaryStatus).toBe('schroeder-portable-summary-plan-ready');
+  expect(result.renderLodStatus).toBe('schroeder-render-lod-summary-planned');
+  expect(result.renderLodSelectedLevel).toBe(0);
+  expect(result.renderLodNativeGridSpacingM).toBeGreaterThan(0);
+  expect(result.renderLodActiveLeafProxyCount).toBeGreaterThan(0);
+  expect(result.localResolverStatus).toBe('schroeder-local-retained-render-buffers-ready');
+  expect(result.localResolverRefCount).toBeGreaterThan(0);
+  expect(result.renderSourceStatus).toBe('schroeder-render-source-local-observation-ready');
+  expect(result.renderSourcePresentationReady).toBe(true);
+  expect(result.drawSourceStatus).toBe('schroeder-render-proxy-draw-source-ready');
+  expect(result.drawSourceDrawBatchCount).toBeGreaterThan(0);
+  expect([
+    'schroeder-render-proxy-backend-native-webgpu-submit-ready',
+    'schroeder-render-proxy-backend-native-webgpu-visible-ready'
+  ]).toContain(result.backendSelectionStatus);
+  expect(result.backendSelectedBackend).toBe('native-webgpu-retained-proxy');
+  expect(result.renderStateStatus).toBe('resident-render-field-applied');
+  expect(result.nativeExecutorReady).toBe(true);
+  expect(result.nativeLastSubmitStatus)
+    .toBe('schroeder-render-proxy-native-executor-submitted-to-pass');
+  expect(result.nativeLastSubmitDrawCommandCount).toBeGreaterThan(0);
+  expect(result.bridgeStatus).toBe('native-webgpu-surface-consumer-ready');
+  expect(result.bridgeFrameCount).toBeGreaterThan(0);
+  expect(result.statusTextIncludesSchroederLine).toBe(true);
+  expect(result.statusTextIncludesSequence).toBe(true);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH WebGPU extension surface translation maps MC grid positions into ULG world meters', async ({ page }) => {
   await page.goto('/');
   const result = await page.evaluate(async () => {

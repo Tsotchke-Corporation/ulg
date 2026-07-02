@@ -143,12 +143,17 @@ Landed checkpoints:
     `schroederRenderSource`, separating drawable active-leaf/coherent-aggregate
     proxy batches from diagnostic law-queue metadata without generating
     per-node JavaScript geometry.
+42. `9b31697` binds SS render proxy descriptor plans into a renderer-visible
+    consumer contract that defaults to descriptor import, leaves raw
+    `GPUBuffer` drawing deferred until renderer capability/admission exists,
+    and explicitly requires no frame-copy readback or overlay-owned physics.
 
 Next implementation queue:
 
-1. Bind SS render proxy descriptor plans into an existing renderer-visible
-   consumer path without creating overlay-owned physics cadence.
-2. Add the first concrete active-leaf/coherent-aggregate proxy draw source while
+1. Add the first concrete active-leaf/coherent-aggregate proxy draw source while
    preserving closure-derived PBR and no-full-readback defaults.
+2. Decide whether that first draw source should start as CPU-materialized
+   descriptor geometry, native WebGPU descriptor consumption, or an explicit
+   same-device raw-buffer capability gate.
 3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

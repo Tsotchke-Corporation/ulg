@@ -35005,3 +35005,33 @@ Next:
 - Defer raw same-device `GPUBuffer` draw binding until a renderer capability and
   admission contract proves it can avoid frame-copy readback and overlay-only
   integration.
+
+## 2026-07-01 AKDT - SS Render Proxy Visible Consumer Binding
+
+Status:
+
+- Added `sph-scene-schroeder-render-proxy-visible-consumer` as the
+  renderer-visible consumer contract for SS proxy descriptor plans.
+- The default path is descriptor import, so it is visible to renderer/scene
+  state without admitting raw browser `GPUBuffer` drawing.
+- Raw same-device `GPUBuffer` draw binding is fail-closed behind renderer
+  capability and bridge binding checks.
+- The consumer contract reports that frame-copy readback and overlay ownership
+  are not required, and presentation still does not own physics cadence.
+- Resident render-source metadata/apply and scene/renderer `userData` now carry
+  the visible-consumer status.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `84/84` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Add the first concrete active-leaf/coherent-aggregate proxy draw source under
+  this consumer contract.
+- Choose the initial draw-source strategy conservatively: metadata/descriptor
+  geometry first, unless a same-device raw-buffer capability/admission gate is
+  explicit and testable.

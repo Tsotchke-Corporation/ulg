@@ -73,9 +73,12 @@ Landed checkpoints:
 19. `81f51cd` adds an auto-selected bounded bucket aggregate-node reducer for
     larger SS aggregate row counts while preserving the exact reducer for
     diagnostic counts.
+20. `f7cf080` adds retained active-node law-queue descriptors for
+    reaction/contact/interface candidate work, including exact-near-field,
+    sedenion reaction scope, and state-admission metadata.
 
 Next implementation queue:
 
-1. Route reaction/contact/interface work queues through SS active nodes.
+1. Wire retained SS law-queue rows into reaction/contact/interface consumers.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

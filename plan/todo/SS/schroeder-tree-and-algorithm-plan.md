@@ -167,7 +167,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-tree-node.v0`
 - `peercompute.ulg.schroeder-level-assignment.v0`
 - `peercompute.ulg.schroeder-active-node-list.v0`
-- `peercompute.ulg.schroeder-law-query-plan.v0`
+- `peercompute.ulg.schroeder-law-queue.v0`
 - `peercompute.ulg.schroeder-cross-level-coupling.v0`
 - `peercompute.ulg.schroeder-conservation-summary.v0`
 - `peercompute.ulg.schroeder-cross-level-transfer.v0`
@@ -255,10 +255,13 @@ Suggested schemas:
 
 ### Slice 6: Law Work Queues
 
+- Status: retained active-node local law-queue descriptors landed in `f7cf080`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
+- Current caveat: the GPU descriptors are produced and retained without full
+  readback, but reaction/contact/interface kernels still need to consume them.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -276,8 +279,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - route reaction/contact/interface candidate generation through retained SS
-     active-node rows;
+   - consume retained SS law-queue rows in reaction/contact/interface candidate
+     generation;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:

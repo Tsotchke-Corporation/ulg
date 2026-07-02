@@ -10510,6 +10510,210 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateLawConsumerDiagnosticSummaryWgsl = `
+struct SchroederFarAggregateLawConsumerDiagnosticSummaryParams {
+  law_consumer_row_count: u32,
+  law_consumer_stride: u32,
+  diagnostic_stride: u32,
+  flags: u32,
+  radiation_pressure_threshold: f32,
+  plasma_pressure_threshold: f32,
+  gas_pressure_threshold: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> law_consumer_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> diagnostic_summary_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederFarAggregateLawConsumerDiagnosticSummaryParams;
+
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_STRIDE_FOR_DIAGNOSTICS: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_STRIDE: u32 = 32u;
+const SCHROEDER_FAR_LAW_RADIATION_DIAGNOSTIC_MASK_WGSL: u32 = 16u;
+const SCHROEDER_FAR_LAW_PLASMA_DIAGNOSTIC_MASK_WGSL: u32 = 32u;
+const SCHROEDER_FAR_LAW_GAS_DIAGNOSTIC_MASK_WGSL: u32 = 64u;
+
+fn ss_consumer_diagnostic_mask_enabled(mask: u32, bit: u32) -> bool {
+  return (mask & bit) != 0u;
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  let consumer_stride = max(
+    params.law_consumer_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_STRIDE_FOR_DIAGNOSTICS
+  );
+  let diagnostic_stride = max(
+    params.diagnostic_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_STRIDE
+  );
+  let diagnostic_offset = 0u * diagnostic_stride;
+
+  var active_consumer_count = 0.0;
+  var blocked_consumer_count = 0.0;
+  var pressure_consumer_count = 0.0;
+  var radiation_consumer_count = 0.0;
+  var plasma_consumer_count = 0.0;
+  var gas_summary_consumer_count = 0.0;
+  var total_radiation_exposure = 0.0;
+  var max_radiation_exposure = 0.0;
+  var max_plasma_acceleration = 0.0;
+  var total_gas_density = 0.0;
+  var max_gas_pressure = 0.0;
+  var total_aggregate_mass = 0.0;
+  var max_acceleration = 0.0;
+  var max_potential = 0.0;
+  var max_opening_ratio = 0.0;
+  var max_far_field_error = 0.0;
+  var error_pressure_count = 0.0;
+  var opening_pressure_count = 0.0;
+  var overflow_pressure_count = 0.0;
+  var enabled_consumer_mask_union = 0u;
+  var emitted_consumer_mask_union = 0u;
+  var max_radiation_source_particle = 0.0;
+  var max_gas_pressure_source_particle = 0.0;
+
+  for (var row_index = 0u; row_index < params.law_consumer_row_count; row_index = row_index + 1u) {
+    let row_offset = row_index * consumer_stride;
+    let source_particle_index = law_consumer_rows[row_offset + 0u];
+    let enabled_consumer_mask = u32(max(law_consumer_rows[row_offset + 4u], 0.0));
+    let emitted_consumer_mask = u32(max(law_consumer_rows[row_offset + 5u], 0.0));
+    let status = law_consumer_rows[row_offset + 6u];
+    let aggregate_mass = max(law_consumer_rows[row_offset + 10u], 0.0);
+    let opening_ratio = max(law_consumer_rows[row_offset + 12u], 0.0);
+    let far_field_error = max(law_consumer_rows[row_offset + 13u], 0.0);
+    let acceleration_magnitude = max(law_consumer_rows[row_offset + 14u], 0.0);
+    let potential_magnitude = max(law_consumer_rows[row_offset + 15u], 0.0);
+    let radiation_exposure = max(law_consumer_rows[row_offset + 16u], 0.0);
+    let plasma_acceleration = max(law_consumer_rows[row_offset + 17u], 0.0);
+    let gas_density = max(law_consumer_rows[row_offset + 18u], 0.0);
+    let gas_pressure = max(law_consumer_rows[row_offset + 19u], 0.0);
+    let error_pressure = law_consumer_rows[row_offset + 20u] > 0.0;
+    let opening_pressure = law_consumer_rows[row_offset + 21u] > 0.0;
+    let overflow_pressure = law_consumer_rows[row_offset + 22u] > 0.0;
+
+    enabled_consumer_mask_union = enabled_consumer_mask_union | enabled_consumer_mask;
+    emitted_consumer_mask_union = emitted_consumer_mask_union | emitted_consumer_mask;
+
+    if (status > 0.0 && status < 32.0) {
+      active_consumer_count = active_consumer_count + 1.0;
+    } else if (status >= 96.0 || status <= 0.0) {
+      blocked_consumer_count = blocked_consumer_count + 1.0;
+    }
+
+    let radiation_pressure = params.radiation_pressure_threshold > 0.0
+      && radiation_exposure > params.radiation_pressure_threshold;
+    let plasma_pressure = params.plasma_pressure_threshold > 0.0
+      && plasma_acceleration > params.plasma_pressure_threshold;
+    let gas_pressure_limit = params.gas_pressure_threshold > 0.0
+      && gas_pressure > params.gas_pressure_threshold;
+    if (status >= 64.0 && status < 96.0
+      || error_pressure
+      || opening_pressure
+      || overflow_pressure
+      || radiation_pressure
+      || plasma_pressure
+      || gas_pressure_limit
+    ) {
+      pressure_consumer_count = pressure_consumer_count + 1.0;
+    }
+    if (error_pressure) {
+      error_pressure_count = error_pressure_count + 1.0;
+    }
+    if (opening_pressure) {
+      opening_pressure_count = opening_pressure_count + 1.0;
+    }
+    if (overflow_pressure) {
+      overflow_pressure_count = overflow_pressure_count + 1.0;
+    }
+
+    if (ss_consumer_diagnostic_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_RADIATION_DIAGNOSTIC_MASK_WGSL)
+      && radiation_exposure > 0.0
+    ) {
+      radiation_consumer_count = radiation_consumer_count + 1.0;
+      total_radiation_exposure = total_radiation_exposure + radiation_exposure;
+      if (radiation_exposure > max_radiation_exposure) {
+        max_radiation_exposure = radiation_exposure;
+        max_radiation_source_particle = source_particle_index;
+      }
+    }
+    if (ss_consumer_diagnostic_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_PLASMA_DIAGNOSTIC_MASK_WGSL)
+      && plasma_acceleration > 0.0
+    ) {
+      plasma_consumer_count = plasma_consumer_count + 1.0;
+      max_plasma_acceleration = max(max_plasma_acceleration, plasma_acceleration);
+    }
+    if (ss_consumer_diagnostic_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_GAS_DIAGNOSTIC_MASK_WGSL)
+      && gas_density > 0.0
+    ) {
+      gas_summary_consumer_count = gas_summary_consumer_count + 1.0;
+      total_gas_density = total_gas_density + gas_density;
+      if (gas_pressure > max_gas_pressure) {
+        max_gas_pressure = gas_pressure;
+        max_gas_pressure_source_particle = source_particle_index;
+      }
+    }
+
+    total_aggregate_mass = total_aggregate_mass + aggregate_mass;
+    max_acceleration = max(max_acceleration, acceleration_magnitude);
+    max_potential = max(max_potential, potential_magnitude);
+    max_opening_ratio = max(max_opening_ratio, opening_ratio);
+    max_far_field_error = max(max_far_field_error, far_field_error);
+  }
+
+  var summary_status = 32.0;
+  if (active_consumer_count > 0.0) {
+    summary_status = 1.0;
+  }
+  if (pressure_consumer_count > 0.0) {
+    summary_status = 64.0;
+  }
+  if (overflow_pressure_count > 0.0) {
+    summary_status = 128.0;
+  }
+
+  diagnostic_summary_rows[diagnostic_offset + 0u] = f32(params.law_consumer_row_count);
+  diagnostic_summary_rows[diagnostic_offset + 1u] = active_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 2u] = blocked_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 3u] = pressure_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 4u] = radiation_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 5u] = plasma_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 6u] = gas_summary_consumer_count;
+  diagnostic_summary_rows[diagnostic_offset + 7u] = total_radiation_exposure;
+  diagnostic_summary_rows[diagnostic_offset + 8u] = max_radiation_exposure;
+  diagnostic_summary_rows[diagnostic_offset + 9u] = max_plasma_acceleration;
+  diagnostic_summary_rows[diagnostic_offset + 10u] = total_gas_density;
+  diagnostic_summary_rows[diagnostic_offset + 11u] = max_gas_pressure;
+  diagnostic_summary_rows[diagnostic_offset + 12u] = total_aggregate_mass;
+  diagnostic_summary_rows[diagnostic_offset + 13u] = max_acceleration;
+  diagnostic_summary_rows[diagnostic_offset + 14u] = max_potential;
+  diagnostic_summary_rows[diagnostic_offset + 15u] = max_opening_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 16u] = max_far_field_error;
+  diagnostic_summary_rows[diagnostic_offset + 17u] = error_pressure_count;
+  diagnostic_summary_rows[diagnostic_offset + 18u] = opening_pressure_count;
+  diagnostic_summary_rows[diagnostic_offset + 19u] = overflow_pressure_count;
+  diagnostic_summary_rows[diagnostic_offset + 20u] = f32(enabled_consumer_mask_union);
+  diagnostic_summary_rows[diagnostic_offset + 21u] = f32(emitted_consumer_mask_union);
+  diagnostic_summary_rows[diagnostic_offset + 22u] = params.queue_epoch;
+  diagnostic_summary_rows[diagnostic_offset + 23u] = params.state_family_id;
+  diagnostic_summary_rows[diagnostic_offset + 24u] = max_radiation_source_particle;
+  diagnostic_summary_rows[diagnostic_offset + 25u] = max_gas_pressure_source_particle;
+  diagnostic_summary_rows[diagnostic_offset + 26u] = 1.0;
+  diagnostic_summary_rows[diagnostic_offset + 27u] = summary_status;
+  diagnostic_summary_rows[diagnostic_offset + 28u] = 0.0;
+  diagnostic_summary_rows[diagnostic_offset + 29u] = 0.0;
+  diagnostic_summary_rows[diagnostic_offset + 30u] = 0.0;
+  diagnostic_summary_rows[diagnostic_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederFarAggregateForceApplicationWgsl = `
 struct SchroederFarAggregateForceApplicationParams {
   particle_count: u32,

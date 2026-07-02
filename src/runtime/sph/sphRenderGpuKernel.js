@@ -4,6 +4,7 @@ import {
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
   SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT,
+  SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
@@ -12,6 +13,7 @@ import {
   SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
@@ -83,6 +85,7 @@ export {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
@@ -106,6 +109,7 @@ export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS = SPH_GPU_RENDER_FIELD_
 export const SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_DRAW_FLOATS = SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
+export const SPH_INTERFACE_SOURCE_KEY_FLOATS = SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS = SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
@@ -1036,14 +1040,15 @@ function createMaterialInterfaceCandidateParamsArray({
   candidateCount,
   fieldPadding,
   refEdgeM,
-  isolationScale
+  isolationScale,
+  sourceKeyEnabled = false
 }) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setUint32(0, surfaceCount, true);
   view.setUint32(4, totalFieldCells, true);
   view.setUint32(8, candidateCount, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, sourceKeyEnabled ? 1 : 0, true);
   view.setFloat32(16, fieldPadding, true);
   view.setFloat32(20, refEdgeM, true);
   view.setFloat32(24, isolationScale, true);
@@ -2072,11 +2077,21 @@ function compactMaterialInterfaceCandidateCapacity({
   return Math.max(1, Math.min(candidateCount, surfaceScaled));
 }
 
+function countReadyInterfaceSourceKeyRows(sourceKeyRows = null) {
+  if (!(sourceKeyRows instanceof Float32Array) || sourceKeyRows.length <= 0) return 0;
+  let readyCount = 0;
+  for (let offset = 0; offset + 2 < sourceKeyRows.length; offset += SPH_INTERFACE_SOURCE_KEY_FLOATS) {
+    if ((sourceKeyRows[offset + 2] || 0) > 0) readyCount += 1;
+  }
+  return readyCount;
+}
+
 export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   device,
   renderField,
   fieldRowsBuffer = null,
   surfaceBuffer = null,
+  sourceIndexFieldBuffer = null,
   isolationScale = 1,
   compactCandidateCapacity = null
 } = {}) {
@@ -2106,12 +2121,19 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
   const compactCandidateRowsByteLength = compactCapacity
     * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const compactSourceKeyRowsByteLength = compactCapacity
+    * SPH_INTERFACE_SOURCE_KEY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
   assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', Math.max(4, compactCandidateRowsByteLength));
   assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-compact-candidates', Math.max(4, compactCandidateRowsByteLength));
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-source-keys', Math.max(4, compactSourceKeyRowsByteLength));
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-source-keys', Math.max(4, compactSourceKeyRowsByteLength));
   assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-compact-metadata', 16);
   assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-compact-metadata', 16);
   const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
   const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const borrowedSourceIndexFieldBuffer = sourceIndexFieldBuffer || renderField.sourceIndexFieldBuffer || null;
+  const sourceIndexFieldAvailable = Boolean(borrowedSourceIndexFieldBuffer);
   const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-interface-source-render-field',
@@ -2123,9 +2145,19 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     'ulg-sph-interface-render-surfaces',
     renderField.surfaceTable.records
   );
+  const sourceIndexFieldInputBuffer = borrowedSourceIndexFieldBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-interface-source-index-disabled',
+    new Uint32Array(Math.max(1, totalFieldCells))
+  );
   const candidateRowsBuffer = device.createBuffer({
     label: 'ulg-sph-interface-compact-candidates',
     size: Math.max(4, compactCandidateRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const interfaceSourceKeyBuffer = device.createBuffer({
+    label: 'ulg-sph-interface-source-keys',
+    size: Math.max(4, compactSourceKeyRowsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
   const compactMetadataBuffer = device.createBuffer({
@@ -2144,8 +2176,14 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     candidateCount,
     fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
     refEdgeM: finiteNumber(renderField.refEdgeM, 10),
-    isolationScale: finiteNumber(isolationScale, 1)
+    isolationScale: finiteNumber(isolationScale, 1),
+    sourceKeyEnabled: sourceIndexFieldAvailable
   }));
+  device.queue.writeBuffer(
+    interfaceSourceKeyBuffer,
+    0,
+    new Float32Array(compactCapacity * SPH_INTERFACE_SOURCE_KEY_FLOATS)
+  );
   device.queue.writeBuffer(compactMetadataBuffer, 0, new Uint32Array([
     0,
     0,
@@ -2158,7 +2196,9 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'uniform'),
-    computeBufferBinding(4, 'storage')
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage')
   ];
   const {
     pipeline,
@@ -2178,7 +2218,9 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
       { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
       { binding: 2, resource: { buffer: candidateRowsBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } },
-      { binding: 4, resource: { buffer: compactMetadataBuffer } }
+      { binding: 4, resource: { buffer: compactMetadataBuffer } },
+      { binding: 5, resource: { buffer: sourceIndexFieldInputBuffer } },
+      { binding: 6, resource: { buffer: interfaceSourceKeyBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -2212,15 +2254,31 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
       'ulg-sph-interface-compact-candidate-readback'
     ))
     : new Float32Array();
+  const activeSourceKeyRowsByteLength = compactRowCount
+    * SPH_INTERFACE_SOURCE_KEY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const interfaceSourceKeyRows = sourceIndexFieldAvailable && activeSourceKeyRowsByteLength > 0
+    ? new Float32Array(await readBuffer(
+      device,
+      interfaceSourceKeyBuffer,
+      activeSourceKeyRowsByteLength,
+      'ulg-sph-interface-source-key-readback'
+    ))
+    : new Float32Array();
+  const interfaceSourceKeyReadyCount = countReadyInterfaceSourceKeyRows(interfaceSourceKeyRows);
+  const keepInterfaceSourceKeyBuffer = Boolean(sourceIndexFieldAvailable && compactRowCount > 0);
 
   if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
   if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  if (!borrowedSourceIndexFieldBuffer) sourceIndexFieldInputBuffer.destroy?.();
   candidateRowsBuffer.destroy?.();
   compactMetadataBuffer.destroy?.();
   paramsBuffer.destroy?.();
+  if (!keepInterfaceSourceKeyBuffer) interfaceSourceKeyBuffer.destroy?.();
 
   const surfaces = summarizeMaterialInterfaceCandidateSurfaces(renderField, candidateRows, isolationScale);
-  return {
+  let retainedInterfaceSourceKeyBufferDestroyed = false;
+  const result = {
     schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
     backend: 'webgpu-compact',
     status: compactOverflowCount > 0 || activeCandidateCount > compactCapacity
@@ -2253,17 +2311,59 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     surfaces,
     fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    sourceIndexFieldBufferBound: sourceIndexFieldAvailable,
     queueCompletionStatus: 'compact-readback-map-completed',
     queueCompletionMethod: 'mapAsync(compact-candidate-readback-buffer)',
     pipelineCacheStatus,
     candidateReadback: true,
     candidateReadbackMode: MATERIAL_INTERFACE_COMPACT_CANDIDATE_READBACK_MODE,
     candidateMetadataReadback: true,
+    interfaceSourceKeySchema: ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
+    interfaceSourceKeyStatus: sourceIndexFieldAvailable
+      ? (interfaceSourceKeyReadyCount > 0 ? 'interface-source-key-retained' : 'interface-source-key-empty')
+      : 'interface-source-key-unavailable',
+    interfaceSourceKeyReason: sourceIndexFieldAvailable
+      ? null
+      : 'source-local material-interface source-index field was unavailable',
+    interfaceSourceKeyRows,
+    interfaceSourceKeyReadback: Boolean(interfaceSourceKeyRows.length > 0),
+    interfaceSourceKeyRowCount: compactRowCount,
+    interfaceSourceKeyReadyCount,
+    interfaceSourceKeyStrideFloats: SPH_INTERFACE_SOURCE_KEY_FLOATS,
+    interfaceSourceKeyRowByteLength: activeSourceKeyRowsByteLength,
+    interfaceSourceKeyBufferRetained: keepInterfaceSourceKeyBuffer,
+    interfaceSourceKeyBufferByteLength: keepInterfaceSourceKeyBuffer ? compactSourceKeyRowsByteLength : 0,
+    interfaceSourceKeySurfaceIndexFallbackEnabled: false,
     scientificValidation: false,
     sphValidation: false,
     forceCouplingValidation: false,
     fullPhysicsValidation: false
   };
+  if (keepInterfaceSourceKeyBuffer) {
+    result.interfaceSourceKeyBuffer = interfaceSourceKeyBuffer;
+    result.destroyMaterialInterfaceCandidateFieldBuffers = ({
+      reason = 'material-interface-candidate-field-buffer-cleanup'
+    } = {}) => {
+      if (retainedInterfaceSourceKeyBufferDestroyed) {
+        return {
+          schema: 'peercompute.ulg.sph-material-interface-candidate-field-buffer-cleanup.v0',
+          status: 'material-interface-candidate-field-buffers-already-destroyed',
+          reason
+        };
+      }
+      retainedInterfaceSourceKeyBufferDestroyed = true;
+      interfaceSourceKeyBuffer.destroy?.();
+      result.interfaceSourceKeyBufferRetained = false;
+      result.interfaceSourceKeyBufferDestroyed = true;
+      return {
+        schema: 'peercompute.ulg.sph-material-interface-candidate-field-buffer-cleanup.v0',
+        status: 'material-interface-candidate-field-buffers-destroyed',
+        reason,
+        interfaceSourceKeyBufferDestroyed: true
+      };
+    };
+  }
+  return result;
 }
 
 const MARCHING_CUBE_EDGE_CORNER_PAIRS = Object.freeze([
@@ -5344,6 +5444,9 @@ function assertMaterialInterfaceCandidateField(candidateField) {
 export function compactSphMaterialInterfaceCandidates(candidateField) {
   assertMaterialInterfaceCandidateField(candidateField);
   const candidateRows = candidateField.candidateRows;
+  const interfaceSourceKeyRows = candidateField.interfaceSourceKeyRows instanceof Float32Array
+    ? candidateField.interfaceSourceKeyRows
+    : null;
   const surfaceAccumulators = (candidateField.surfaces || []).map((surface) => ({
     ...surface,
     crossingFaceCount: 0,
@@ -5356,6 +5459,16 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
   const elementValues = [];
   const elements = [];
   const rowCount = candidateRows.length / SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+  const sourceParticleIndexForElementIndex = (elementIndex) => {
+    if (!interfaceSourceKeyRows) return null;
+    const sourceKeyOffset = elementIndex * SPH_INTERFACE_SOURCE_KEY_FLOATS;
+    if (sourceKeyOffset + 2 >= interfaceSourceKeyRows.length) return null;
+    const rowElementIndex = Math.round(finiteNumber(interfaceSourceKeyRows[sourceKeyOffset], -1));
+    const rowStatus = interfaceSourceKeyRows[sourceKeyOffset + 2] || 0;
+    if (rowElementIndex !== elementIndex || !(rowStatus > 0)) return null;
+    const sourceParticleIndex = Math.round(finiteNumber(interfaceSourceKeyRows[sourceKeyOffset + 1], -1));
+    return sourceParticleIndex >= 0 ? sourceParticleIndex : null;
+  };
   for (let candidateIndex = 0; candidateIndex < rowCount; candidateIndex += 1) {
     const offset = candidateIndex * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
     const status = candidateRows[offset + 15];
@@ -5380,8 +5493,10 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
       candidateRows[offset + 9],
       candidateRows[offset + 10]
     ];
+    const elementIndex = elements.length;
+    const sourceParticleIndex = sourceParticleIndexForElementIndex(elementIndex);
     const element = {
-      index: elements.length,
+      index: elementIndex,
       surfaceIndex,
       surfaceKey: surface.surfaceKey,
       material: surface.material,
@@ -5395,6 +5510,7 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
       normal,
       normalAreaVectorM2,
       crossingSign: candidateRows[offset + 14],
+      ...(sourceParticleIndex == null ? {} : { sourceParticleIndex }),
       status: 'interface-element-ready'
     };
     elements.push(element);
@@ -5456,7 +5572,7 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
   }));
   const totalSurfaceAreaM2 = surfaces.reduce((sum, surface) => sum + surface.surfaceAreaM2, 0);
   const readySurfaceCount = surfaces.filter((surface) => surface.surfaceAreaM2 > 0).length;
-  return {
+  const field = {
     schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
     status: readySurfaceCount > 0 ? 'material-interface-field-ready' : 'material-interface-field-empty',
     sourceSchema: candidateField.sourceSchema,
@@ -5475,6 +5591,21 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
     elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
     elementRows: Float32Array.from(elementValues),
     elements,
+    interfaceSourceKeySchema: candidateField.interfaceSourceKeySchema ?? null,
+    interfaceSourceKeySourceStatus: candidateField.interfaceSourceKeyStatus ?? null,
+    interfaceSourceKeyStatus: candidateField.interfaceSourceKeyStatus ?? null,
+    interfaceSourceKeyReason: candidateField.interfaceSourceKeyReason ?? null,
+    interfaceSourceKeyRows: candidateField.interfaceSourceKeyRows instanceof Float32Array
+      ? candidateField.interfaceSourceKeyRows
+      : new Float32Array(),
+    interfaceSourceKeyReadback: Boolean(candidateField.interfaceSourceKeyReadback),
+    interfaceSourceKeyRowCount: candidateField.interfaceSourceKeyRowCount ?? 0,
+    interfaceSourceKeyReadyCount: candidateField.interfaceSourceKeyReadyCount ?? 0,
+    interfaceSourceKeyStrideFloats: candidateField.interfaceSourceKeyStrideFloats ?? SPH_INTERFACE_SOURCE_KEY_FLOATS,
+    interfaceSourceKeyBufferRetained: Boolean(candidateField.interfaceSourceKeyBufferRetained),
+    interfaceSourceKeyBufferByteLength: candidateField.interfaceSourceKeyBufferByteLength ?? 0,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      candidateField.interfaceSourceKeySurfaceIndexFallbackEnabled !== false,
     forceCouplingStatus: readySurfaceCount > 0
       ? 'blocked-pressure-force-solver-not-implemented'
       : 'blocked-material-surface-normals-not-resolved',
@@ -5484,6 +5615,15 @@ export function compactSphMaterialInterfaceCandidates(candidateField) {
     forceCouplingValidation: false,
     fullPhysicsValidation: false
   };
+  if (candidateField.interfaceSourceKeyBuffer) {
+    field.interfaceSourceKeyBuffer = candidateField.interfaceSourceKeyBuffer;
+  }
+  if (typeof candidateField.destroyMaterialInterfaceCandidateFieldBuffers === 'function') {
+    field.destroyMaterialInterfaceFieldBuffers = ({
+      reason = 'material-interface-field-buffer-cleanup'
+    } = {}) => candidateField.destroyMaterialInterfaceCandidateFieldBuffers({ reason });
+  }
+  return field;
 }
 
 function maxAbsDiff(left, right) {
@@ -5691,6 +5831,7 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
       renderField: sourceRenderField,
       fieldRowsBuffer: resolvedFieldRowsBuffer,
       surfaceBuffer: resolvedSurfaceBuffer,
+      sourceIndexFieldBuffer: sourceField?.sourceIndexFieldBuffer || sourceRenderField?.sourceIndexFieldBuffer || null,
       isolationScale,
       compactCandidateCapacity
     });

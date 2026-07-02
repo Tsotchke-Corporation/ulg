@@ -53,6 +53,7 @@ struct SourceFieldParams {
 @group(0) @binding(2) var<storage, read_write> density_accum: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform> params: SourceFieldParams;
 @group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> source_index_accum: array<atomic<u32>>;
 
 const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
 const PRODUCT_EVENT_VEC4_STRIDE: u32 = 8u;
@@ -120,7 +121,13 @@ fn field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
   return z * resolution * resolution + y * resolution + x;
 }
 
-fn splat_source(position: vec3<f32>, surface_index: u32, surface0: vec4<f32>, surface1: vec4<f32>) {
+fn splat_source(
+  position: vec3<f32>,
+  surface_index: u32,
+  surface0: vec4<f32>,
+  surface1: vec4<f32>,
+  source_key: u32
+) {
   let field_offset = u32(surface0.z);
   let field_cell_count = u32(surface0.w);
   let resolution = max(u32(surface1.x), 1u);
@@ -167,6 +174,9 @@ fn splat_source(position: vec3<f32>, surface_index: u32, surface0: vec4<f32>, su
         let out_index = field_offset + local_cell;
         if (out_index < params.total_field_cells) {
           atomicAdd(&density_accum[out_index], quantized_density(value));
+          if (source_key > 0u) {
+            let _source_claim = atomicCompareExchangeWeak(&source_index_accum[out_index], 0u, source_key);
+          }
         }
       }
     }
@@ -194,7 +204,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (row1.x != material_id || row1.y != phase_id || !source_matches_domain(row2.w, render_domain_id)) {
       return;
     }
-    splat_source(normalized_position(row0.xyz), surface_index, s0, s1);
+    splat_source(normalized_position(row0.xyz), surface_index, s0, s1, source_index + 1u);
     return;
   }
 
@@ -219,7 +229,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   ) {
     return;
   }
-  splat_source(normalized_position(event0.xyz), surface_index, s0, s1);
+  splat_source(normalized_position(event0.xyz), surface_index, s0, s1, 0u);
 }
 `;
 
@@ -372,6 +382,7 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   readbackMode = NO_FULL_READBACK_MODE,
   retainFieldRowsBuffer = true,
   retainSurfaceBuffer = true,
+  retainSourceIndexFieldBuffer = true,
   waitForQueueCompletion = false,
   deferCleanup = true,
   useQueueFenceForCleanup = true,
@@ -409,6 +420,7 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   const fieldRowByteLength = surfaceTable.totalFieldCells
     * SPH_GPU_RENDER_FIELD_CELL_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const sourceIndexFieldByteLength = surfaceTable.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT;
   const targetFieldRowsByteLength = targetFieldRowsBuffer
     ? Math.max(0, Math.round(finiteNumber(
       targetFieldRowsBufferByteLength
@@ -451,6 +463,12 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     new Uint32Array(surfaceTable.totalFieldCells),
     GPU_BUFFER_USAGE.COPY_SRC
   );
+  const sourceIndexAccumBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-material-interface-source-local-source-index-atomic',
+    new Uint32Array(surfaceTable.totalFieldCells),
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
   const fieldRowsBuffer = targetFieldRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-material-interface-source-local-field-cells',
@@ -478,7 +496,8 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'uniform'),
-    computeBufferBinding(4, 'read-only-storage')
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'storage')
   ];
   const splatPipelineState = createCachedExplicitComputePipeline(device, {
     cacheKey: 'ulg-sph-material-interface-source-local-splat-v1',
@@ -494,7 +513,8 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
       { binding: 1, resource: { buffer: surfaceBuffer } },
       { binding: 2, resource: { buffer: densityAccumBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } },
-      { binding: 4, resource: { buffer: sourceProductEventBuffer } }
+      { binding: 4, resource: { buffer: sourceProductEventBuffer } },
+      { binding: 5, resource: { buffer: sourceIndexAccumBuffer } }
     ]
   });
 
@@ -577,6 +597,7 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     paramsBuffer.destroy?.();
     if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
     if (!retainFieldRowsBuffer && !fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
+    if (!retainSourceIndexFieldBuffer) sourceIndexAccumBuffer.destroy?.();
   };
   let renderFieldDeferredCleanup = false;
   if (deferNoFullCleanup && useQueueFenceForCleanup) {
@@ -633,6 +654,13 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     fieldRowsBufferOwnedByResult: !fieldRowsBufferBorrowed,
     surfaceBufferRetained: Boolean(retainSurfaceBuffer),
     surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
+    sourceIndexFieldSchema: 'peercompute.ulg.sph-material-interface-source-index-field.v0',
+    sourceIndexFieldStatus: retainSourceIndexFieldBuffer
+      ? 'source-local-source-index-field-retained'
+      : 'source-local-source-index-field-transient',
+    sourceIndexFieldBufferRetained: Boolean(retainSourceIndexFieldBuffer),
+    sourceIndexFieldBufferByteLength: retainSourceIndexFieldBuffer ? sourceIndexFieldByteLength : 0,
+    sourceIndexFieldStrideUints: 1,
     sourceLocalDensityScale: SOURCE_LOCAL_DENSITY_SCALE,
     sourceLocalSourceCount: sourceCount,
     sourceLocalEstimatedCellVisits: visitEstimate.estimatedCellVisits,
@@ -651,6 +679,7 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
   };
   if (retainFieldRowsBuffer) sourceRenderField.fieldRowsBuffer = fieldRowsBuffer;
   if (retainSurfaceBuffer) sourceRenderField.surfaceBuffer = surfaceBuffer;
+  if (retainSourceIndexFieldBuffer) sourceRenderField.sourceIndexFieldBuffer = sourceIndexAccumBuffer;
 
   let retainedBuffersDestroyed = false;
   const destroyRetainedBuffers = () => {
@@ -658,6 +687,7 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     retainedBuffersDestroyed = true;
     if (!fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
     surfaceBuffer.destroy?.();
+    sourceIndexAccumBuffer.destroy?.();
   };
   return {
     schema: ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
@@ -704,6 +734,12 @@ export async function buildSphMaterialInterfaceSourceFieldLocalWebGpu({
     fieldRowsBufferOwnedByResult: sourceRenderField.fieldRowsBufferOwnedByResult ?? null,
     surfaceBufferRetained: Boolean(sourceRenderField.surfaceBufferRetained),
     surfaceBufferByteLength: sourceRenderField.surfaceBufferByteLength ?? 0,
+    sourceIndexFieldSchema: sourceRenderField.sourceIndexFieldSchema,
+    sourceIndexFieldStatus: sourceRenderField.sourceIndexFieldStatus,
+    sourceIndexFieldBuffer: sourceRenderField.sourceIndexFieldBuffer || null,
+    sourceIndexFieldBufferRetained: Boolean(sourceRenderField.sourceIndexFieldBufferRetained),
+    sourceIndexFieldBufferByteLength: sourceRenderField.sourceIndexFieldBufferByteLength ?? 0,
+    sourceIndexFieldStrideUints: sourceRenderField.sourceIndexFieldStrideUints ?? 1,
     readbackMode: sourceRenderField.readbackMode ?? null,
     queueCompletionStatus: sourceRenderField.queueCompletionStatus ?? null,
     queueCompletionMethod: sourceRenderField.queueCompletionMethod ?? null,

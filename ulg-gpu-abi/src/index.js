@@ -38,6 +38,7 @@ export const ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA = 'peerco
 export const ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-source-field.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field-execution.v0';
+export const ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA = 'peercompute.ulg.sph-interface-source-key.v0';
 export const ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA = 'peercompute.ulg.sph-gpu-render-marching-cube-cells.v0';
 export const ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-marching-cube-cells-execution.v0';
 export const ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA = 'peercompute.ulg.sph-gpu-render-surface-vertices.v0';
@@ -492,6 +493,12 @@ export const SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT = Object.freeze([
   'normalAreaZM2:f32',
   'crossingSign:f32',
   'status:f32'
+]);
+export const SPH_INTERFACE_SOURCE_KEY_ROW_LAYOUT = Object.freeze([
+  'elementIndex:f32',
+  'sourceParticleIndex:f32',
+  'status:f32',
+  'flags:f32'
 ]);
 export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT = Object.freeze([
   'surfaceIndex:f32',

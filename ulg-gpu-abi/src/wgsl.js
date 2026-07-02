@@ -3732,7 +3732,7 @@ struct InterfaceCandidateParams {
   surface_count: u32,
   total_field_cells: u32,
   candidate_count: u32,
-  _pad0: u32,
+  source_key_enabled: u32,
   field_padding: f32,
   ref_edge_m: f32,
   isolation_scale: f32,
@@ -3867,7 +3867,7 @@ struct InterfaceCandidateParams {
   surface_count: u32,
   total_field_cells: u32,
   candidate_count: u32,
-  _pad0: u32,
+  source_key_enabled: u32,
   field_padding: f32,
   ref_edge_m: f32,
   isolation_scale: f32,
@@ -3879,6 +3879,8 @@ struct InterfaceCandidateParams {
 @group(0) @binding(2) var<storage, read_write> interface_candidates: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: InterfaceCandidateParams;
 @group(0) @binding(4) var<storage, read_write> compact_metadata: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> source_index_field: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> interface_source_keys: array<vec4<f32>>;
 
 fn compact_surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -3892,7 +3894,13 @@ fn compact_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
   return z * resolution * resolution + y * resolution + x;
 }
 
-fn compact_write_candidate(row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, row3: vec4<f32>) {
+fn compact_write_candidate(
+  row0: vec4<f32>,
+  row1: vec4<f32>,
+  row2: vec4<f32>,
+  row3: vec4<f32>,
+  source_field_index: u32
+) {
   let compact_index = atomicAdd(&compact_metadata[0], 1u);
   let capacity = atomicLoad(&compact_metadata[2]);
   if (compact_index >= capacity) {
@@ -3904,6 +3912,21 @@ fn compact_write_candidate(row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, ro
   interface_candidates[base + 1u] = row1;
   interface_candidates[base + 2u] = row2;
   interface_candidates[base + 3u] = row3;
+  var source_particle_index = 0.0;
+  var key_status = 0.0;
+  if (params.source_key_enabled != 0u && source_field_index < params.total_field_cells) {
+    let packed_source_key = atomicLoad(&source_index_field[source_field_index]);
+    if (packed_source_key > 0u) {
+      source_particle_index = f32(packed_source_key - 1u);
+      key_status = 1.0;
+    }
+  }
+  interface_source_keys[compact_index] = vec4<f32>(
+    f32(compact_index),
+    source_particle_index,
+    key_status,
+    0.0
+  );
 }
 
 fn compact_physical_coord_m(coord: f32, resolution: u32) -> f32 {
@@ -3951,7 +3974,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let value = render_field_cells[field_offset + cell_index].x;
-  let neighbor = render_field_cells[field_offset + compact_field_index_3d(nx, ny, nz, resolution)].x;
+  let neighbor_cell_index = compact_field_index_3d(nx, ny, nz, resolution);
+  let neighbor = render_field_cells[field_offset + neighbor_cell_index].x;
   let isolation = s1.y * params.isolation_scale;
   let inside = value >= isolation;
   let neighbor_inside = neighbor >= isolation;
@@ -3981,11 +4005,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     compact_physical_coord_m((f32(z) + f32(nz)) * 0.5, resolution)
   );
   let normal_area = normal * area_m2;
+  let source_field_index = field_offset + select(neighbor_cell_index, cell_index, inside);
   compact_write_candidate(
     vec4<f32>(f32(surface_index), s0.x, s0.y, f32(axis)),
     vec4<f32>(centroid, area_m2),
     vec4<f32>(normal, normal_area.x),
-    vec4<f32>(normal_area.y, normal_area.z, sign, 1.0)
+    vec4<f32>(normal_area.y, normal_area.z, sign, 1.0),
+    source_field_index
   );
 }
 `;

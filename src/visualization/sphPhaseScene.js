@@ -4921,6 +4921,22 @@ function compactMaterialInterfaceFieldSummary(field = null) {
     interfaceSourceFieldRowsBufferPoolReason: field.interfaceSourceFieldRowsBufferPoolReason ?? null,
     interfaceSourceFieldRowsBufferPoolReused: Boolean(field.interfaceSourceFieldRowsBufferPoolReused),
     interfaceSourceFieldRowsBufferPoolByteLength: field.interfaceSourceFieldRowsBufferPoolByteLength ?? 0,
+    interfaceSourceFieldSourceIndexStatus: field.interfaceSourceFieldSourceIndexStatus ?? null,
+    interfaceSourceFieldSourceIndexBufferRetained:
+      Boolean(field.interfaceSourceFieldSourceIndexBufferRetained),
+    interfaceSourceFieldSourceIndexBufferByteLength:
+      field.interfaceSourceFieldSourceIndexBufferByteLength ?? 0,
+    interfaceSourceKeySchema: field.interfaceSourceKeySchema ?? null,
+    interfaceSourceKeyStatus: field.interfaceSourceKeyStatus ?? null,
+    interfaceSourceKeySourceStatus: field.interfaceSourceKeySourceStatus ?? null,
+    interfaceSourceKeyReason: field.interfaceSourceKeyReason ?? null,
+    interfaceSourceKeyRowCount: field.interfaceSourceKeyRowCount ?? 0,
+    interfaceSourceKeyReadyCount: field.interfaceSourceKeyReadyCount ?? 0,
+    interfaceSourceKeyStrideFloats: field.interfaceSourceKeyStrideFloats ?? null,
+    interfaceSourceKeyBufferRetained: Boolean(field.interfaceSourceKeyBufferRetained),
+    interfaceSourceKeyBufferByteLength: field.interfaceSourceKeyBufferByteLength ?? 0,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      field.interfaceSourceKeySurfaceIndexFallbackEnabled !== false,
     sourceFieldPipelineCacheStatus: field.sourceFieldPipelineCacheStatus ?? null,
     sourceRenderFieldPipelineCacheStatus: field.sourceRenderFieldPipelineCacheStatus ?? null,
     candidatePipelineCacheStatus: field.candidatePipelineCacheStatus ?? null,
@@ -11197,6 +11213,15 @@ export function createSphPhaseScene(container, {
   }
 
   function publishSphResidentMaterialInterfaceState(state) {
+    if (
+      sphResidentMaterialInterfaceState
+      && sphResidentMaterialInterfaceState !== state
+      && typeof sphResidentMaterialInterfaceState.destroyMaterialInterfaceFieldBuffers === 'function'
+    ) {
+      sphResidentMaterialInterfaceState.destroyMaterialInterfaceFieldBuffers({
+        reason: 'resident-material-interface-state-replaced'
+      });
+    }
     sphResidentMaterialInterfaceState = state || null;
     scene.userData.sphResidentMaterialInterfaceState = sphResidentMaterialInterfaceState;
     return sphResidentMaterialInterfaceState;
@@ -11921,6 +11946,12 @@ export function createSphPhaseScene(container, {
         interfaceSourceField.sourceLocalSourceCount ?? null;
       materialInterfaceField.interfaceSourceFieldSourceLocalDensityScale =
         interfaceSourceField.sourceLocalDensityScale ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceIndexStatus =
+        interfaceSourceField.sourceIndexFieldStatus ?? null;
+      materialInterfaceField.interfaceSourceFieldSourceIndexBufferRetained =
+        Boolean(interfaceSourceField.sourceIndexFieldBufferRetained);
+      materialInterfaceField.interfaceSourceFieldSourceIndexBufferByteLength =
+        interfaceSourceField.sourceIndexFieldBufferByteLength ?? 0;
       materialInterfaceField.interfaceSourceFieldQueueCompletionStatus = interfaceSourceField.queueCompletionStatus ?? null;
       materialInterfaceField.interfaceSourceFieldQueueCompletionMethod = interfaceSourceField.queueCompletionMethod ?? null;
       materialInterfaceField.renderFieldReadback = Boolean(interfaceSourceField.sourceRenderFieldReadback);

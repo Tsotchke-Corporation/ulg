@@ -23,6 +23,7 @@ import {
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
   SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
   SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+  SPH_INTERFACE_SOURCE_KEY_FLOATS,
   SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
   SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT,
   SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
@@ -46,6 +47,8 @@ import {
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
+  ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
+  buildSphMaterialInterfaceCompactCandidateFieldWebGpu,
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderFieldCpu,
   buildSphRenderFieldWebGpu,
@@ -269,10 +272,21 @@ function centeredSingleSurfaceRenderField() {
   });
 }
 
+function compactActiveCandidateRows(candidateRows) {
+  const rows = [];
+  for (let offset = 0; offset < candidateRows.length; offset += SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS) {
+    if ((candidateRows[offset + 15] || 0) <= 0) continue;
+    rows.push(...candidateRows.slice(offset, offset + SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS));
+  }
+  return Float32Array.from(rows);
+}
+
 function fakeSurfaceDrawDevice({
   drawRows = new Float32Array(),
   compactedVertexRows = new Float32Array(),
   drawIndirectRows = new Uint32Array(),
+  candidateMetadataRows = null,
+  sourceKeyRows = new Float32Array(),
   summaryRows = null,
   stateRows = null,
   thermoRows = null
@@ -286,7 +300,12 @@ function fakeSurfaceDrawDevice({
   const device = {
     queue: {
       writeBuffer(buffer, offset, data) {
-        queueWrites.push({ buffer, offset, byteLength: data?.byteLength ?? 0 });
+        queueWrites.push({
+          buffer,
+          offset,
+          byteLength: data?.byteLength ?? 0,
+          snapshot: data?.buffer?.slice(data.byteOffset ?? 0, (data.byteOffset ?? 0) + (data.byteLength ?? 0)) ?? null
+        });
       },
       submit(commands) {
         this.submitted = commands;
@@ -303,6 +322,10 @@ function fakeSurfaceDrawDevice({
         getMappedRange() {
           const source = label.includes('render-field-surface-summary-readback')
             ? (summaryRows || drawRows)
+            : label.includes('compact-candidate-metadata-readback')
+            ? (candidateMetadataRows || new Uint32Array([0, 0, 0, 0]))
+            : label.includes('source-key-readback')
+            ? sourceKeyRows
             : label.includes('resident-debug-state-readback')
             ? (stateRows || drawRows)
             : label.includes('resident-debug-thermo-readback')
@@ -1301,6 +1324,67 @@ test('SPH material interface candidate field falls back before oversized storage
   assert.equal(execution.webgpuStatus.status, 'fallback-cpu');
   assert.match(execution.webgpuStatus.reason, /exceeds WebGPU device maxStorageBufferBindingSize/);
   assert.equal(execution.candidateReadback, false);
+});
+
+test('SPH compact material interface candidate field emits retained source-key sidecar', async () => {
+  const field = twoSurfaceRenderField();
+  const denseCandidateField = deriveSphMaterialInterfaceCandidateField(field);
+  const activeCandidateRows = compactActiveCandidateRows(denseCandidateField.candidateRows);
+  const activeCandidateCount = activeCandidateRows.length / SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+  const sourceKeyRows = new Float32Array(activeCandidateCount * SPH_INTERFACE_SOURCE_KEY_FLOATS);
+  for (let index = 0; index < activeCandidateCount; index += 1) {
+    const offset = index * SPH_INTERFACE_SOURCE_KEY_FLOATS;
+    sourceKeyRows.set([index, index % 3, 1, 0], offset);
+  }
+  const { device, bindGroups } = fakeSurfaceDrawDevice({
+    drawRows: activeCandidateRows,
+    candidateMetadataRows: new Uint32Array([
+      activeCandidateCount,
+      0,
+      activeCandidateCount,
+      denseCandidateField.candidateCount
+    ]),
+    sourceKeyRows
+  });
+  const sourceIndexFieldBuffer = device.createBuffer({
+    label: 'test-source-index-field',
+    size: Math.max(4, field.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT),
+    usage: 0
+  });
+
+  const compactField = await buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
+    device,
+    renderField: field,
+    sourceIndexFieldBuffer,
+    compactCandidateCapacity: activeCandidateCount
+  });
+  const interfaceField = compactSphMaterialInterfaceCandidates(compactField);
+
+  assert.equal(compactField.schema, 'peercompute.ulg.sph-material-interface-candidate-field.v0');
+  assert.equal(compactField.backend, 'webgpu-compact');
+  assert.equal(compactField.status, 'material-interface-candidate-field-ready');
+  assert.equal(compactField.sourceIndexFieldBufferBound, true);
+  assert.equal(compactField.interfaceSourceKeySchema, ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA);
+  assert.equal(compactField.interfaceSourceKeyStatus, 'interface-source-key-retained');
+  assert.equal(compactField.interfaceSourceKeyRowCount, activeCandidateCount);
+  assert.equal(compactField.interfaceSourceKeyReadyCount, activeCandidateCount);
+  assert.equal(compactField.interfaceSourceKeyStrideFloats, SPH_INTERFACE_SOURCE_KEY_FLOATS);
+  assert.deepEqual(Array.from(compactField.interfaceSourceKeyRows), Array.from(sourceKeyRows));
+  assert.equal(compactField.interfaceSourceKeyBufferRetained, true);
+  assert.equal(compactField.interfaceSourceKeyBuffer.label, 'ulg-sph-interface-source-keys');
+  assert.equal(compactField.interfaceSourceKeySurfaceIndexFallbackEnabled, false);
+  assert.equal(bindGroups[0].entries.length, 7);
+  assert.equal(bindGroups[0].entries[5].resource.buffer, sourceIndexFieldBuffer);
+  assert.equal(bindGroups[0].entries[6].resource.buffer, compactField.interfaceSourceKeyBuffer);
+  assert.equal(interfaceField.interfaceSourceKeyStatus, 'interface-source-key-retained');
+  assert.equal(interfaceField.interfaceSourceKeyReadyCount, activeCandidateCount);
+  assert.equal(interfaceField.elements[0].sourceParticleIndex, 0);
+  assert.equal(interfaceField.elements[1].sourceParticleIndex, 1);
+  assert.equal(interfaceField.interfaceSourceKeyBuffer, compactField.interfaceSourceKeyBuffer);
+
+  const cleanup = interfaceField.destroyMaterialInterfaceFieldBuffers({ reason: 'test-cleanup' });
+  assert.equal(cleanup.status, 'material-interface-candidate-field-buffers-destroyed');
+  assert.equal(compactField.interfaceSourceKeyBuffer.destroyed, true);
 });
 
 test('SPH material interface field derives surface normals and areas from render-field crossings', () => {

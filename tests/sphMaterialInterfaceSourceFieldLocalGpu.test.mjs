@@ -164,6 +164,11 @@ test('source-local material interface field splats particles instead of dense ce
   assert.equal(sourceField.fieldRowsBuffer, targetFieldRowsBuffer);
   assert.equal(sourceField.fieldRowsBufferBorrowed, true);
   assert.equal(sourceField.fieldRowsBufferReused, true);
+  assert.equal(sourceField.sourceIndexFieldStatus, 'source-local-source-index-field-retained');
+  assert.equal(sourceField.sourceIndexFieldBufferRetained, true);
+  assert.equal(sourceField.sourceIndexFieldBufferByteLength, surfaceTable.totalFieldCells * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(sourceField.sourceIndexFieldStrideUints, 1);
+  assert.equal(sourceField.sourceIndexFieldBuffer.label, 'ulg-sph-material-interface-source-local-source-index-atomic');
   assert.equal(sourceField.queueCompletionStatus, 'queue-submitted-gpu-handoff-no-cpu-fence');
   assert.equal(sourceField.queueCompletionMethod, 'queue.submit(in-order-gpu-source-local-field-handoff)');
   assert.equal(sourceField.sourceLocalDenseCellParticlePairs, surfaceTable.totalFieldCells * 2);
@@ -177,11 +182,14 @@ test('source-local material interface field splats particles instead of dense ce
   ]);
   assert.equal(submissions.length, 1);
   assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-material-interface-source-local-density-atomic');
+  assert.equal(bindGroups[0].entries[5].resource.buffer, sourceField.sourceIndexFieldBuffer);
   assert.equal(bindGroups[1].entries[2].resource.buffer, targetFieldRowsBuffer);
   assert.ok(shaderModules.some((module) => /array<atomic<u32>>/.test(module.code) && /atomicAdd/.test(module.code)));
+  assert.ok(shaderModules.some((module) => /atomicCompareExchangeWeak/.test(module.code)));
   assert.ok(shaderModules.some((module) => /atomicLoad/.test(module.code) && /render_field_cells/.test(module.code)));
 
   sourceField.destroyMaterialInterfaceSourceFieldBuffers();
   assert.equal(targetFieldRowsBuffer.destroyed, false);
   assert.equal(sourceField.surfaceBuffer.destroyed, true);
+  assert.equal(sourceField.sourceIndexFieldBuffer.destroyed, true);
 });

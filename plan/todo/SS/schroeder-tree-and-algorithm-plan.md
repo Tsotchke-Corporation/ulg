@@ -302,7 +302,11 @@ Suggested schemas:
   adds explicit `sph-interface-source-key` sidecar rows so pressure contact
   kinematics can resolve source-span keys from retained interface/source
   descriptors instead of overloading `surfaceIndex`; legacy fields still have a
-  controlled surface-index fallback.
+  controlled surface-index fallback. The source-key production checkpoint adds
+  a source-local source-index accumulator, emits compact candidate
+  `sph-interface-source-key` rows keyed by compact interface element index, and
+  carries the retained buffer through resident material-interface state for
+  same-device pressure-interface consumption.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -472,13 +476,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS material-interface source-key production**:
+The next code slice on `SS` is **SS source-key retained-ref admission**:
 
-1. Extend the GPU material-interface candidate/source-field extraction path to
-   emit retained interface source-key rows next to interface elements or
-   resident candidate summaries.
-2. Thread those retained source-key descriptors through scene and worker
-   pressure-interface scheduling so mounted hot-loop runs do not rely on
-   CPU-packed element source keys.
-3. Keep descriptor-only PeerCompute replay artifacts and no-full-readback
-   validation as the default path.
+1. Promote material-interface source-key sidecars into descriptor-only
+   PeerCompute retained refs so worker-owned and replayed pressure-interface
+   tasks can admit the same buffer without raw GPUBuffer serialization.
+2. Add worker/ComputeManager admission evidence for `sph-interface-source-key`
+   refs alongside existing material-interface and pressure force-row families.
+3. Keep the current same-device hot-loop path as the fast path: source-local
+   source-index buffer -> compact candidate source-key sidecar -> pressure
+   contact-kinematics binding, with no full material-interface readback.

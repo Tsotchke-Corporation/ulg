@@ -288,6 +288,7 @@ const GAS_CELL_EOS_PRODUCER_STAGE_ID = 'gasCellEosProducer';
 const PRESSURE_INTERFACE_STAGE_ID = 'pressureInterface';
 const THERMAL_PHASE_STAGE_ID = 'thermalPhase';
 const REACTION_PRODUCT_STAGE_ID = 'reactionProduct';
+const PRESSURE_INTERFACE_SOURCE_KEY_BUFFER_REF = 'sph-interface-source-key-buffer';
 export const SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS = 12;
 
 function nowMs() {
@@ -703,9 +704,26 @@ function pressureInterfaceLocalGasCellFieldReadyFromOptions(options = {}) {
     && gasCellField.cells.length > 0;
 }
 
+function pressureInterfaceSourceKeyBufferReadyFromOptions(options = {}) {
+  const field = options?.materialInterfaceField || null;
+  return Boolean(
+    field
+    && (
+      field.interfaceSourceKeyBuffer
+      || field.sourceKeyBuffer
+      || field.interfaceSourceKeyBufferRetained === true
+      || field.sourceKeyBufferRetained === true
+    )
+    && Math.max(0, finiteNumber(field.interfaceSourceKeyRowCount ?? field.sourceKeyRowCount, 0)) > 0
+  );
+}
+
 function pressureInterfaceStageRetainedBufferRefs(retainedBufferRefs = [], stageOptions = {}) {
   return uniqueNonEmptyStrings([
     ...(Array.isArray(retainedBufferRefs) ? retainedBufferRefs : []),
+    ...(pressureInterfaceSourceKeyBufferReadyFromOptions(stageOptions)
+      ? [PRESSURE_INTERFACE_SOURCE_KEY_BUFFER_REF]
+      : []),
     ...(pressureInterfaceLocalGasCellFieldReadyFromOptions(stageOptions)
       ? ['resident-gas-pressure-cells-buffer']
       : [])
@@ -8805,6 +8823,26 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     interfaceContactKinematicsParticleBinGridIndexBufferByteLength: finiteNumber(solver?.interfaceContactKinematicsParticleBinGridIndexBufferByteLength, 0),
     interfaceContactKinematicsParticleBinOverflowStatus: solver?.interfaceContactKinematicsParticleBinOverflowStatus || null,
     interfaceContactKinematicsParticleBinOverflowCount: solver?.interfaceContactKinematicsParticleBinOverflowCount ?? null,
+    interfaceSourceKeySchema: solver?.interfaceSourceKeySchema || pressureResult?.interfaceSourceKeySchema || null,
+    interfaceSourceKeyStatus: solver?.interfaceSourceKeyStatus || pressureResult?.interfaceSourceKeyStatus || null,
+    interfaceSourceKeyConsumerStatus:
+      solver?.interfaceSourceKeyConsumerStatus || pressureResult?.interfaceSourceKeyConsumerStatus || null,
+    interfaceSourceKeyRowCount: finiteNumber(
+      solver?.interfaceSourceKeyRowCount ?? pressureResult?.interfaceSourceKeyRowCount,
+      0
+    ),
+    interfaceSourceKeyReadyCount: finiteNumber(
+      solver?.interfaceSourceKeyReadyCount ?? pressureResult?.interfaceSourceKeyReadyCount,
+      0
+    ),
+    interfaceSourceKeyBufferObserved: solver?.interfaceSourceKeyBufferObserved === true
+      || pressureResult?.interfaceSourceKeyBufferObserved === true,
+    interfaceSourceKeyBufferConsumed: solver?.interfaceSourceKeyBufferConsumed === true
+      || pressureResult?.interfaceSourceKeyBufferConsumed === true,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      solver?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? pressureResult?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? null,
     pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
     pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
     pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
@@ -9168,6 +9206,27 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     pressureInterfaceCoupling,
     pressureInterfaceForcePreview,
     pressureInterfaceForceSolver,
+    materialInterfaceField: stageOptions.materialInterfaceField || null,
+    interfaceSourceKeySchema: pressureInterfaceForceSolver?.interfaceSourceKeySchema
+      ?? stageOptions.materialInterfaceField?.interfaceSourceKeySchema
+      ?? null,
+    interfaceSourceKeyStatus: pressureInterfaceForceSolver?.interfaceSourceKeyStatus
+      ?? stageOptions.materialInterfaceField?.interfaceSourceKeyStatus
+      ?? null,
+    interfaceSourceKeyConsumerStatus: pressureInterfaceForceSolver?.interfaceSourceKeyConsumerStatus ?? null,
+    interfaceSourceKeyRowCount: pressureInterfaceForceSolver?.interfaceSourceKeyRowCount
+      ?? stageOptions.materialInterfaceField?.interfaceSourceKeyRowCount
+      ?? 0,
+    interfaceSourceKeyReadyCount: pressureInterfaceForceSolver?.interfaceSourceKeyReadyCount
+      ?? stageOptions.materialInterfaceField?.interfaceSourceKeyReadyCount
+      ?? 0,
+    interfaceSourceKeyBufferObserved: pressureInterfaceForceSolver?.interfaceSourceKeyBufferObserved === true
+      || stageOptions.materialInterfaceField?.interfaceSourceKeyBufferRetained === true,
+    interfaceSourceKeyBufferConsumed: pressureInterfaceForceSolver?.interfaceSourceKeyBufferConsumed === true,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      pressureInterfaceForceSolver?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? stageOptions.materialInterfaceField?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? null,
     pressureInterfaceGasCellFieldAdmission,
     pressureInterfaceGasCellFieldAdmissionSchema: pressureInterfaceGasCellFieldAdmission?.schema || null,
     pressureInterfaceGasCellFieldAdmissionStatus,
@@ -10016,6 +10075,15 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
   )) {
     refs.push('resident-gas-pressure-cells-buffer');
   }
+  if (stageId === PRESSURE_INTERFACE_STAGE_ID && (
+    result?.interfaceSourceKeyBufferConsumed === true
+    || result?.interfaceSourceKeyBufferObserved === true
+    || result?.pressureInterfaceForceSolver?.interfaceSourceKeyBufferConsumed === true
+    || result?.pressureInterfaceForceSolver?.interfaceSourceKeyBufferObserved === true
+    || result?.materialInterfaceField?.interfaceSourceKeyBufferRetained === true
+  )) {
+    refs.push(PRESSURE_INTERFACE_SOURCE_KEY_BUFFER_REF);
+  }
   if (stageId === SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID && (
     result?.spatialGasLedgerRowsBufferRetained
     || result?.spatialGasLedgerRowsBuffer
@@ -10081,6 +10149,16 @@ function isPressureInterfaceForceRowRef(ref) {
   return text.includes('pressure-interface-force-rows')
     || text.includes('force-rows')
     || squashed.includes('forcerows');
+}
+
+function isPressureInterfaceSourceKeyRef(ref) {
+  const text = String(ref || '').toLowerCase();
+  const squashed = text.replace(/[^a-z0-9]/g, '');
+  return text.includes('sph-interface-source-key')
+    || text.includes('interface-source-key')
+    || text.includes('source-key-buffer')
+    || squashed.includes('interfacesourcekey')
+    || squashed.includes('sourcekeybuffer');
 }
 
 function isWorkerRetainedRef(ref) {
@@ -10342,6 +10420,41 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
       || Boolean(result?.forceRowsBuffer || result?.pressureInterfaceForceRowsBuffer)
       || result?.pressureInterfaceForceSolver?.forceRowsBufferRetained === true
       || result?.pressureInterfaceForceSolver?.pressureInterfaceForceRowsBufferRetained === true,
+    pressureInterfaceSourceKeySchema: result?.interfaceSourceKeySchema
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeySchema
+      || result?.materialInterfaceField?.interfaceSourceKeySchema
+      || null,
+    pressureInterfaceSourceKeyStatus: result?.interfaceSourceKeyStatus
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeyStatus
+      || result?.materialInterfaceField?.interfaceSourceKeyStatus
+      || null,
+    pressureInterfaceSourceKeyConsumerStatus: result?.interfaceSourceKeyConsumerStatus
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeyConsumerStatus
+      || null,
+    pressureInterfaceSourceKeyRowCount: finiteNumber(
+      result?.interfaceSourceKeyRowCount
+        ?? result?.pressureInterfaceForceSolver?.interfaceSourceKeyRowCount
+        ?? result?.materialInterfaceField?.interfaceSourceKeyRowCount,
+      0
+    ),
+    pressureInterfaceSourceKeyReadyCount: finiteNumber(
+      result?.interfaceSourceKeyReadyCount
+        ?? result?.pressureInterfaceForceSolver?.interfaceSourceKeyReadyCount
+        ?? result?.materialInterfaceField?.interfaceSourceKeyReadyCount,
+      0
+    ),
+    pressureInterfaceSourceKeyBufferObserved: result?.interfaceSourceKeyBufferObserved === true
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeyBufferObserved === true,
+    pressureInterfaceSourceKeyBufferConsumed: result?.interfaceSourceKeyBufferConsumed === true
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeyBufferConsumed === true,
+    pressureInterfaceSourceKeyBufferRetained: result?.materialInterfaceField?.interfaceSourceKeyBufferRetained === true
+      || result?.interfaceSourceKeyBufferObserved === true
+      || result?.pressureInterfaceForceSolver?.interfaceSourceKeyBufferObserved === true,
+    pressureInterfaceSourceKeySurfaceIndexFallbackEnabled:
+      result?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? result?.pressureInterfaceForceSolver?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? result?.materialInterfaceField?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? null,
     pressureInterfaceGridForceAdmissionStatus: result?.pressureInterfaceGridForceAdmissionStatus || null,
     pressureInterfaceGridForceAdmissionApproved: result?.pressureInterfaceGridForceAdmissionApproved ?? false,
     pressureInterfaceGridForceAdmissionSourceHotBufferKey: result?.pressureInterfaceGridForceAdmissionSourceHotBufferKey || null,
@@ -10538,14 +10651,21 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const workerRetainedGasPressureBufferRefs = uniqueNonEmptyStrings(
     workerRetainedBufferRefs.filter(isPressureInterfaceGasPressureRef)
   );
+  const workerRetainedSourceKeyBufferRefs = uniqueNonEmptyStrings(
+    workerRetainedBufferRefs.filter(isPressureInterfaceSourceKeyRef)
+  );
   const retainedPressureBufferRefs = uniqueNonEmptyStrings(
     retainedBufferRefs.filter((ref) => !isWorkerRetainedRef(ref) && isPressureInterfaceForceRowRef(ref))
   );
   const retainedGasPressureBufferRefs = uniqueNonEmptyStrings(
     retainedBufferRefs.filter((ref) => !isWorkerRetainedRef(ref) && isPressureInterfaceGasPressureRef(ref))
   );
+  const retainedSourceKeyBufferRefs = uniqueNonEmptyStrings(
+    retainedBufferRefs.filter((ref) => !isWorkerRetainedRef(ref) && isPressureInterfaceSourceKeyRef(ref))
+  );
   const hasPressureRef = workerRetainedPressureBufferRefs.length > 0 || retainedPressureBufferRefs.length > 0;
   const hasGasPressureRef = workerRetainedGasPressureBufferRefs.length > 0 || retainedGasPressureBufferRefs.length > 0;
+  const hasSourceKeyRef = workerRetainedSourceKeyBufferRefs.length > 0 || retainedSourceKeyBufferRefs.length > 0;
   const forceRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowCount, 0));
   const forceRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS));
   const forceRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowByteLength, 0));
@@ -10556,6 +10676,11 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const gasPressureCellRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowByteLength, 0));
   const gasPressureCellRowsBufferRetained = pressureSummary.pressureInterfaceGasPressureCellRowsBufferRetained === true;
   const gasPressureCellRowsBufferBorrowed = pressureSummary.pressureInterfaceGasPressureCellRowsBufferBorrowed === true;
+  const sourceKeyRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceSourceKeyRowCount, 0));
+  const sourceKeyReadyCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceSourceKeyReadyCount, 0));
+  const sourceKeyBufferRetained = pressureSummary.pressureInterfaceSourceKeyBufferRetained === true
+    || pressureSummary.pressureInterfaceSourceKeyBufferObserved === true
+    || pressureSummary.pressureInterfaceSourceKeyBufferConsumed === true;
   const retainedImportLocalPressureGradientReady =
     pressureSummary.pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady === true;
   const retainedGasPressureCellsBufferImported =
@@ -10584,6 +10709,9 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const retainedGasCellFieldSourceReady = localPressureGradientReady
     && retainedGpuGasCellsProven
     && hasGasPressureRef;
+  const retainedSourceKeySourceReady = sourceKeyBufferRetained
+    && sourceKeyRowCount > 0
+    && hasSourceKeyRef;
   let blocker = null;
   if (!workerRunnerSupplied) {
     blocker = 'worker-runner-not-supplied';
@@ -10647,6 +10775,24 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsRetained: pressureSummary.pressureInterfaceForceRowsRetained === true,
     pressureInterfaceForceRowsBufferRetained: pressureSummary.pressureInterfaceForceRowsBufferRetained === true,
+    pressureInterfaceSourceKeySchema: pressureSummary.pressureInterfaceSourceKeySchema || null,
+    pressureInterfaceSourceKeyStatus: pressureSummary.pressureInterfaceSourceKeyStatus || null,
+    pressureInterfaceSourceKeyConsumerStatus: pressureSummary.pressureInterfaceSourceKeyConsumerStatus || null,
+    pressureInterfaceSourceKeyRowCount: sourceKeyRowCount,
+    pressureInterfaceSourceKeyReadyCount: sourceKeyReadyCount,
+    pressureInterfaceSourceKeyBufferObserved: pressureSummary.pressureInterfaceSourceKeyBufferObserved === true,
+    pressureInterfaceSourceKeyBufferConsumed: pressureSummary.pressureInterfaceSourceKeyBufferConsumed === true,
+    pressureInterfaceSourceKeyBufferRetained: sourceKeyBufferRetained,
+    pressureInterfaceSourceKeySurfaceIndexFallbackEnabled:
+      pressureSummary.pressureInterfaceSourceKeySurfaceIndexFallbackEnabled,
+    retainedSourceKeySourceStatus: retainedSourceKeySourceReady
+      ? 'pressure-interface-retained-source-key-source-ready'
+      : (sourceKeyBufferRetained
+          ? 'blocked-retained-source-key-ref-required'
+          : 'not-required-no-interface-source-key-sidecar'),
+    retainedSourceKeySourceReady,
+    retainedSourceKeySourceFamilies: retainedSourceKeySourceReady ? ['sph-material-interface-field'] : [],
+    retainedSourceKeySourceRefCount: workerRetainedSourceKeyBufferRefs.length + retainedSourceKeyBufferRefs.length,
     pressureFieldMode: pressureSummary.pressureFieldMode || null,
     pressureFieldResolution: pressureSummary.pressureFieldResolution || null,
     localPressureGradientReady,
@@ -10692,12 +10838,15 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     retainedBufferRefs,
     retainedPressureBufferRefs,
     retainedGasPressureBufferRefs,
+    retainedSourceKeyBufferRefs,
     workerRetainedBufferRefs,
     workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
     workerRetainedPressureBufferRefs,
     workerRetainedPressureBufferRefCount: workerRetainedPressureBufferRefs.length,
     workerRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefCount: workerRetainedGasPressureBufferRefs.length,
+    workerRetainedSourceKeyBufferRefs,
+    workerRetainedSourceKeyBufferRefCount: workerRetainedSourceKeyBufferRefs.length,
     inputFamilies: ['resident-gas-pressure', 'sph-material-interface-field'],
     outputFamilies: ['pressure-interface-force-rows'],
     retainedSourceFamilies: retainedGasCellFieldSourceReady ? ['resident-gas-pressure'] : [],

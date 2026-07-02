@@ -306,7 +306,11 @@ Suggested schemas:
   a source-local source-index accumulator, emits compact candidate
   `sph-interface-source-key` rows keyed by compact interface element index, and
   carries the retained buffer through resident material-interface state for
-  same-device pressure-interface consumption.
+  same-device pressure-interface consumption. The retained-ref admission
+  checkpoint declares `sph-interface-source-key-buffer` as an optional
+  pressure-interface input descriptor in ComputeManager GPU lane tasks, worker
+  stage retained refs, pressure-stage evidence, and worker publication
+  summaries; older material-interface fields remain valid without the sidecar.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -476,13 +480,14 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS source-key retained-ref admission**:
+The next code slice on `SS` is **SS source-key replay diagnostics**:
 
-1. Promote material-interface source-key sidecars into descriptor-only
-   PeerCompute retained refs so worker-owned and replayed pressure-interface
-   tasks can admit the same buffer without raw GPUBuffer serialization.
-2. Add worker/ComputeManager admission evidence for `sph-interface-source-key`
-   refs alongside existing material-interface and pressure force-row families.
+1. Add compact scene/demo diagnostics that show source-key production,
+   retained-ref publication, and pressure contact-kinematics consumption in the
+   same derived summary.
+2. Add a replay-style worker/PeerCompute fixture proving a pressure-interface
+   task can observe the `sph-interface-source-key-buffer` descriptor without
+   serializing a raw GPUBuffer in the portable payload.
 3. Keep the current same-device hot-loop path as the fast path: source-local
    source-index buffer -> compact candidate source-key sidecar -> pressure
    contact-kinematics binding, with no full material-interface readback.

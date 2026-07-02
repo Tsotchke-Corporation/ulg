@@ -98,6 +98,20 @@ function retainedGasPressureBufferRefsFrom(value = null) {
   ]).filter(isGasPressureBufferRef);
 }
 
+function pressureInterfaceSourceKeyBufferReadyFromOptions(options = {}) {
+  const field = options?.materialInterfaceField || null;
+  return Boolean(
+    field
+    && (
+      field.interfaceSourceKeyBuffer
+      || field.sourceKeyBuffer
+      || field.interfaceSourceKeyBufferRetained === true
+      || field.sourceKeyBufferRetained === true
+    )
+    && firstPositiveInteger([field.interfaceSourceKeyRowCount, field.sourceKeyRowCount]) > 0
+  );
+}
+
 function laneKeyFor(payload = {}) {
   return [
     normalizeString(payload.lease?.laneId ?? payload.lane?.laneId, 'worker-lane:default'),
@@ -508,6 +522,15 @@ function retainedRefsForStageResult(stageId, result = {}) {
     || result.forceRowByteLength > 0
   )) {
     refs.push('pressure-interface-force-rows-buffer');
+  }
+  if (stageId === 'pressureInterface' && (
+    result.interfaceSourceKeyBufferConsumed === true
+    || result.interfaceSourceKeyBufferObserved === true
+    || result.pressureInterfaceForceSolver?.interfaceSourceKeyBufferConsumed === true
+    || result.pressureInterfaceForceSolver?.interfaceSourceKeyBufferObserved === true
+    || result.materialInterfaceField?.interfaceSourceKeyBufferRetained === true
+  )) {
+    refs.push('sph-interface-source-key-buffer');
   }
   if (stageId === 'spatialGasLedgerProducer' && (
     result.spatialGasLedgerRowsBufferRetained
@@ -1551,6 +1574,9 @@ function baseStageData(payload = {}) {
       : (stageId === 'pressureInterface'
         ? [
             'pressure-interface-force-rows-buffer',
+            ...(pressureInterfaceSourceKeyBufferReadyFromOptions(stageOptionSnapshot)
+              ? ['sph-interface-source-key-buffer']
+              : []),
             ...(pressureInterfaceLocalGasCellFieldReadyFromOptions(stageOptionSnapshot)
               ? ['resident-gas-pressure-cells-buffer']
               : [])

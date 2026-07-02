@@ -3880,6 +3880,57 @@ test('SPH pressure interface stage requires admission before consuming local gas
   assert.equal(result.pressureInterfaceStageTaskAuthority.pressureInterfaceGasCellFieldAdmissionApproved, false);
 });
 
+test('SPH pressure interface stage retains interface source-key descriptors', () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    elements: [],
+    interfaceSourceKeySchema: 'peercompute.ulg.sph-interface-source-key.v0',
+    interfaceSourceKeyStatus: 'interface-source-key-retained',
+    interfaceSourceKeyBuffer: { label: 'retained-interface-source-key-buffer' },
+    interfaceSourceKeyBufferRetained: true,
+    interfaceSourceKeyRowCount: 2,
+    interfaceSourceKeyReadyCount: 2,
+    interfaceSourceKeyStrideFloats: 4,
+    interfaceSourceKeySurfaceIndexFallbackEnabled: false
+  };
+
+  const task = createSphPressureInterfaceStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:pressure-interface-stage-source-key-ref',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-pressure',
+      totalPressurePa: 120000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {}
+    },
+    materialInterfaceField
+  });
+
+  assert.deepEqual(task.webgpu.retainedBufferRefs, [
+    'pressure-interface-force-rows-buffer',
+    'sph-interface-source-key-buffer'
+  ]);
+  assert.deepEqual(task.gpuFence.retainedBufferRefs, [
+    'pressure-interface-force-rows-buffer',
+    'sph-interface-source-key-buffer'
+  ]);
+  assert.deepEqual(task.gpuResidentLane.retainedBufferRefs, [
+    'pressure-interface-force-rows-buffer',
+    'sph-interface-source-key-buffer'
+  ]);
+  assert.deepEqual(task.data.gpuFenceRequirement.retainedBufferRefs, [
+    'pressure-interface-force-rows-buffer',
+    'sph-interface-source-key-buffer'
+  ]);
+});
+
 test('SPH pressure interface stage records admitted local gas-cell pressure field consumption', async () => {
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',

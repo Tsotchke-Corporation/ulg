@@ -290,6 +290,20 @@ test('ULG resident stage worker can run pressure interface force-row stage', asy
         readySurfaceCount: 1,
         totalSurfaceAreaM2: 2,
         elementCount: 2,
+        interfaceSourceKeySchema: 'peercompute.ulg.sph-interface-source-key.v0',
+        interfaceSourceKeyStatus: 'interface-source-key-retained',
+        interfaceSourceKeyBuffer: {
+          label: 'worker-pressure-interface-source-key-buffer',
+          async mapAsync() {},
+          getMappedRange() {
+            return new ArrayBuffer(0);
+          }
+        },
+        interfaceSourceKeyBufferRetained: true,
+        interfaceSourceKeyRowCount: 2,
+        interfaceSourceKeyReadyCount: 2,
+        interfaceSourceKeyStrideFloats: 4,
+        interfaceSourceKeySurfaceIndexFallbackEnabled: false,
         elements: [
           {
             status: 'interface-element-ready',
@@ -339,6 +353,11 @@ test('ULG resident stage worker can run pressure interface force-row stage', asy
   assert.equal(pressure.value.pressureInterfaceStageTaskAuthority.gridForceApplicationApproved, false);
   assert.equal(pressure.value.pressureInterfaceForceSolver.forceRowCount, 2);
   assert.ok(pressure.retainedBufferRefs.includes('pressure-interface-force-rows-buffer'));
+  assert.ok(pressure.retainedBufferRefs.includes('sph-interface-source-key-buffer'));
+  assert.ok(
+    pressure.value.workerResidentStage.workerRetainedBufferRefs
+      .some((ref) => ref.includes('interfaceSourceKeyBuffer'))
+  );
 });
 
 test('ULG resident stage worker can run gas-cell EOS producer stage', async () => {

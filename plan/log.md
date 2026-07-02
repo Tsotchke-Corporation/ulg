@@ -34473,3 +34473,41 @@ Next:
 - After traversal rows are authoritative, bind retained candidate rows directly
   into reaction/contact/interface candidate generation and demote the fixed
   particle-bin/all-particle enumerators to diagnostic fallbacks.
+
+## 2026-07-01 AKDT - SS Active-Node Law Neighbor Traversal
+
+Status:
+
+- Replaced the law-neighbor candidate producer's source-index modulo window
+  with a GPU active-node traversal over retained support-inflated tile rows.
+- The candidate pass now binds law queue rows, active-node rows, SPH state rows,
+  output candidate rows, and a 48-byte params uniform. Each fixed-budget output
+  slot selects the Nth overlapping active-node tile for the queue source and
+  then applies exact distance/mass gates before writing a candidate.
+- Same-level SS orchestration forwards the retained active-node list into the
+  candidate producer automatically. The runner now requires active-node input,
+  which prevents a hidden fallback to the old source-window behavior.
+- Reaction and pressure/interface diagnostics now distinguish
+  traversal-backed candidate rows from bounded-window rows, while still marking
+  them observed-not-authoritative until the consumer kernels bind the candidate
+  buffer directly.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/sphReactionGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs` with `140/140` passing.
+- PASS: `node --test tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with `20/20` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Bind retained traversal-backed candidate rows directly into reaction and
+  pressure/interface candidate generation.
+- Once direct consumers are in place, use their candidate counts and timing to
+  decide when to replace the unsorted active-node broad phase with sorted/radix
+  SS tree indexing.

@@ -263,16 +263,18 @@ Suggested schemas:
   same-level orchestration forwarding landed in `ae7f7d3`. Reaction and
   pressure/interface consumers now validate and observe retained neighbor
   candidate artifacts in `9f6f961`, but still fail closed because the first
-  producer is not yet active-node/tree authoritative.
+  producer is not yet a direct consumer input. Active-node tile traversal over
+  retained support-inflated rows landed in `126f5d1`, replacing the source-index
+  candidate window while leaving sorted/radix tree indexing as future work.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
 - Current caveat: reaction and pressure/interface contact now consume queue
-  eligibility gates and observe candidate artifacts. A first GPU-resident
-  queue-neighbor producer exists, but it is a bounded source-window enumerator;
-  true active-node/tree traversal and direct consumer replacement remain future
-  work.
+  eligibility gates and observe traversal-backed candidate artifacts. The
+  candidate producer walks active-node tile overlaps directly, but still uses an
+  unsorted broad phase and consumers have not yet replaced their particle-bin/
+  all-particle candidate enumeration with the retained candidate rows.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -290,10 +292,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - replace the bounded queue-neighbor window with true active-node/tree
-     traversal over SS rows;
    - promote retained SS neighbor-candidate rows from observed fail-closed
      metadata into authoritative reaction/contact/interface input;
+   - replace the unsorted active-node broad phase with sorted/radix SS tree
+     indexing when candidate counts make it necessary;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -348,11 +350,11 @@ Suggested schemas:
 The next code slice on `SS` is **SS active-node/tree neighbor traversal and
 mechanics consumption**:
 
-1. Replace the bounded law-neighbor candidate source-window with SS active-node
-   / tree traversal that respects support-inflated level tiles.
-2. Make reaction/contact/interface consumers use those traversal-backed rows as
+1. Make reaction/contact/interface consumers use traversal-backed rows as
    authoritative input so fixed particle-bin/all-particle enumeration can become
    a diagnostic fallback.
+2. Add sorted/radix active-node indexing once direct consumers expose candidate
+   count or throughput pressure.
 3. Consume retained active-node rows directly inside same-level P2G/G2P instead
    of only filtering by level assignment.
 4. Keep all new outputs GPU-resident, no-full-readback, and

@@ -91,11 +91,15 @@ Landed checkpoints:
 25. `9f6f961` routes retained `schroeder-law-neighbor-candidate` artifacts into
     reaction and pressure/interface consumers as validated, observed, fail-closed
     metadata.
+26. `126f5d1` replaces the law-neighbor source-index window with a retained
+    active-node tile traversal broad phase over support-inflated SS rows.
 
 Next implementation queue:
 
-1. Replace the bounded queue-neighbor window with true Schroeder active-node /
-   tree traversal over support-inflated level tiles, then promote candidate rows
-   from observed metadata to authoritative reaction/contact/interface input.
-2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
-3. Add render LOD and PeerCompute portable SS summaries.
+1. Promote traversal-backed candidate rows from observed metadata to
+   authoritative reaction/contact/interface input, keeping particle-bin/all-scan
+   paths as diagnostic fallbacks.
+2. Replace the unsorted active-node broad phase with a sorted/radix SS tree
+   index when candidate counts become the next bottleneck.
+3. Consume retained SS active-node rows directly inside same-level P2G/G2P.
+4. Add render LOD and PeerCompute portable SS summaries.

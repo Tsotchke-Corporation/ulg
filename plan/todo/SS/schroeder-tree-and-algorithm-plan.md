@@ -329,7 +329,12 @@ Suggested schemas:
   diagnostics for admission/policy decisions. `794e4aa` adds the fail-closed
   authority policy over those diagnostics: read-only remains the default, and
   opt-in state-delta mutation only reports that a future StateManager-admitted
-  delta path is required. Those rows are not yet authoritative state mutations.
+  delta path is required. `b3f62cf` adds the first admitted gas-pressure
+  state-delta path: retained rows carry gas density, pressure, represented
+  volume, pressure-work proxy, authority/admission status, and pressure import
+  intent through same-level, resident, and portable descriptor paths without
+  full particle readback. These rows are admitted state-delta descriptors; they
+  are not yet materialized into pressure-interface gas-cell rows.
 
 ### Slice 8: Render And Distribution
 
@@ -363,9 +368,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - define the first concrete far-field consumer state-delta target only after
-     choosing the physical state family, conservation rule, and admission
-     contract;
+   - materialize admitted far-aggregate gas state-delta rows into retained
+     pressure-interface gas-cell rows through the existing gas-cell import path;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -424,14 +428,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **far-field consumer state-delta design**:
+The next code slice on `SS` is **far-field gas state-delta materialization**:
 
-1. Choose one physically justified far-field consumer target family, such as a
-   radiation/plasma/gas-summary aggregate state-delta, and define its conserved
-   quantities before implementation.
-2. Preserve the current fail-closed behavior: summaries, diagnostics, and
-   authority policies may be
-   read-only, but state mutation requires explicit admission and retained delta
-   rows.
+1. Consume admitted `schroeder-far-aggregate-gas-state-delta` rows and produce
+   retained `SPH_GAS_PRESSURE_CELL_FLOATS`-compatible gas-cell rows for the
+   `gas-pressure` state family.
+2. Preserve the boundary between far aggregate gas pressure summaries and
+   exact-near-field pressure/interface contact work.
 3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;
    do not introduce full particle readback as the validation path.

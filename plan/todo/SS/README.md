@@ -247,12 +247,17 @@ Landed checkpoints:
     compact diagnostics. The default policy keeps pressure/exposure signals
     read-only, while opt-in use cases can mark a future
     StateManager-admitted state-delta path as required without mutating state.
+63. `b3f62cf` adds StateManager-admitted retained far-aggregate gas state-delta
+    rows. The pass consumes read-only gas-summary consumer rows and authority
+    policy, emits retained density/pressure/work proxy deltas for the
+    `gas-pressure` state family, forwards descriptor-only refs through
+    same-level/resident paths, and keeps full particle readback disabled.
 
 Next implementation queue:
 
-1. Continue Slice 7 by defining the first concrete far-field consumer state
-   delta only after choosing a physically justified target family and admission
-   contract.
+1. Continue Slice 7 by materializing admitted far-aggregate gas state-delta
+   rows into retained pressure-interface gas-cell rows, with admission and
+   conservation metadata carried through the existing gas-cell import path.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

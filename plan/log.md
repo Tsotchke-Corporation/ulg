@@ -34511,3 +34511,36 @@ Next:
 - Once direct consumers are in place, use their candidate counts and timing to
   decide when to replace the unsorted active-node broad phase with sorted/radix
   SS tree indexing.
+
+## 2026-07-01 AKDT - SS Direct Candidate Consumer Binding
+
+Status:
+
+- Bound traversal-backed `schroeder-law-neighbor-candidate` rows directly into
+  the SPH reaction proposal WGSL as retained GPU candidate input.
+- Bound the same retained candidate rows into pressure/interface
+  contact-kinematics WGSL so contact source/target searches can use SS
+  candidate rows before falling back to fixed particle bins.
+- Reaction and pressure/interface consumers now mark traversal-backed rows as
+  consumed-authoritative, while bounded-window rows remain observed-only and
+  fail closed.
+- Corrected the reaction consumer contract to scan compact candidate rows and
+  filter by row source because the current producer lays rows out by law-queue
+  row, not by raw particle index.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/sphReactionGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check tests/sphReactionGpuKernel.test.mjs`.
+- PASS: `node --test tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/schroederHierarchyGpu.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with `160/160` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Add sorted/radix source offsets for retained law-neighbor candidate rows so
+  reaction/contact consumers can address per-source spans instead of scanning
+  all retained candidate rows.
+- Then consume retained SS active-node rows directly inside same-level P2G/G2P.

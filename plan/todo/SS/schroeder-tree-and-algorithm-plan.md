@@ -299,10 +299,18 @@ Suggested schemas:
 
 ### Slice 7: Far-Field Aggregate Laws
 
+- Status: retained far-aggregate candidate row ABI, WGSL producer, WebGPU
+  runner, same-level orchestration forwarding, and descriptor-only portable
+  summary propagation landed in `0fee1ef`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
 - Do not use aggregate traversal for local incompressibility or reactions.
+- Current caveat: `0fee1ef` emits read-only aggregate-admissible candidate
+  descriptors from active nodes and retained hierarchy aggregate nodes. It does
+  not yet apply a law-specific force, radiation, plasma, or gas-summary update;
+  those consumers must declare physical error bounds and StateManager admission
+  before mutating state.
 
 ### Slice 8: Render And Distribution
 
@@ -335,16 +343,24 @@ Suggested schemas:
 
 ## Current Implementation Queue
 
-1. Render and distribution:
+1. Far-field aggregate laws:
+   - add the first read-only far-field consumer over
+     `schroeder-far-aggregate-candidate` rows with an explicit error-bound
+     contract;
+   - keep local incompressibility, reaction, contact, and interface laws on the
+     exact-near-field queue path;
+   - expose compact far-field candidate diagnostics without full particle
+     readback.
+2. Render and distribution:
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep StateManager admissions and replay descriptors descriptor-only across
      PeerCompute boundaries.
-2. Law work queues:
+3. Law work queues:
    - keep compact traversal diagnostics as the escalation input rather than
      making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
-3. Phase-volume migration:
+4. Phase-volume migration:
    - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;

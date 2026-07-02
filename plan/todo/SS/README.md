@@ -207,8 +207,19 @@ Landed checkpoints:
     explicitly keeps the retained bucket index as the small-scene/default GPU
     index and records the sorted/radix escalation trigger only when forced by
     PeerCompute/traversal policy or justified by compact diagnostics.
+55. `0fee1ef` adds retained GPU far-aggregate candidate traversal rows for
+    aggregate-admissible laws. The same-level SS path now runs a
+    Barnes-Hut-style aggregate-opening pass over active nodes and retained
+    aggregate nodes, forwards descriptor-only far-field refs through portable
+    summaries, excludes near-field/local laws, and keeps the default hot path
+    no-full-readback.
 
 Next implementation queue:
 
-1. Re-scan the SS and legacy todo sources for the next unlanded architecture
-   slice.
+1. Continue Slice 7 by adding law-specific far-aggregate consumers with
+   explicit physical error bounds, starting with read-only force/summary
+   adapters rather than state mutation.
+2. Keep pressure/interface exact-near-field work separate from far-aggregate
+   traversal.
+3. Keep render/distribution descriptor-only and no-full-readback while far-field
+   candidates become replayable PeerCompute artifacts.

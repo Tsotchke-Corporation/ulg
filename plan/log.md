@@ -1,5 +1,43 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Far-Aggregate Candidate Traversal
+
+Status:
+
+- Added `peercompute.ulg.schroeder-far-aggregate-candidate.v0` and execution
+  schema with a 32-float retained row layout for aggregate-admissible far-field
+  laws.
+- Added a GPU-first WebGPU producer that traverses active nodes against retained
+  hierarchy aggregate nodes with a Barnes-Hut-style opening ratio
+  (`nodeSize / distance <= theta`), excludes near-field work, and preserves a
+  no-full-readback default.
+- Same-level SS orchestration now runs the far-aggregate candidate pass after
+  aggregate-node reduction when that retained path exists, forwards it to the
+  resident backend, and exposes descriptor-only refs through portable summaries.
+- The new artifact is read-only: local incompressibility, reaction, contact, and
+  interface laws stay on exact-near-field queues, and later far-field consumers
+  must declare law-specific physical error bounds before mutating state.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `68/68`
+  passing.
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `30/30` passing.
+
+Next:
+
+- Add the first far-field consumer over
+  `schroeder-far-aggregate-candidate` rows, starting as a read-only
+  force/summary adapter with explicit physical error-bound telemetry and no
+  StateManager mutation.
+
 ## 2026-06-30 AKDT - Benchmark RAF Wall-Time Attribution
 
 Status:

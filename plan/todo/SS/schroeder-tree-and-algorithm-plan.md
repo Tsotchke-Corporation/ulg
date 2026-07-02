@@ -625,14 +625,22 @@ Completed in this slice:
    modes, raw-transfer flags, or actual raw buffer handle fields before
    StateManager hot-buffer storage or commit.
 
-The next code slice on `SS` is **SS adopted storage continuation planner**:
+Completed in this slice:
 
-1. Add a small planner/import contract that consumes the published hot-buffer
-   descriptor and reports same-device continuation readiness versus cross-peer
-   portable-materialization requirements.
-2. Thread the planner through the browser resident host summary so use cases can
-   decide whether to continue locally, request a portable snapshot, or rerun
-   materialization on the peer.
-3. Add tests that same-device descriptor refs are accepted as private-lane
-   continuation evidence and cross-peer attempts stay blocked without a
-   portable snapshot/materialization seed.
+1. Added `peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0`.
+2. Added a browser resident-host planner that consumes the published hot-buffer
+   descriptor and reports same-device private-lane continuation readiness
+   separately from cross-peer portable replay readiness.
+3. Same-device consumers can use retained descriptor refs as private-lane
+   continuation evidence. Cross-peer consumers stay blocked until a portable
+   snapshot or peer-local materialization seed is supplied.
+
+The next code slice on `SS` is **SS adopted storage continuation scheduling**:
+
+1. Feed the continuation plan into resident task construction so same-device
+   use cases can request the adopted storage hot-buffer descriptor explicitly.
+2. Keep cross-peer scheduling fail-closed unless the plan reports portable
+   materialization/snapshot readiness.
+3. Add tests proving the scheduler chooses same-device continuation for local
+   descriptor refs and refuses cross-peer adopted-storage execution without a
+   portable replay source.

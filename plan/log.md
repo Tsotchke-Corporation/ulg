@@ -35860,3 +35860,34 @@ Next:
   the published descriptor, accepts same-device private-lane continuation
   evidence, and keeps cross-peer replay blocked unless a portable materialized
   snapshot or peer-local materialization seed is available.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Continuation Planner
+
+Status:
+
+- Added `peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0`.
+- Browser resident authority hosts can now plan continuation from a published
+  adopted storage hot-buffer descriptor without moving GPUBuffer handles.
+- The planner reports same-device private-lane continuation readiness, retained
+  descriptor refs, cross-peer replay status, portable snapshot/materialization
+  requirements, and raw-transfer status.
+- Cross-peer continuation remains blocked unless the descriptor is already
+  cross-peer ready or a portable snapshot/materialization seed is supplied.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `102/102` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `943/946` passing and `3` skipped.
+
+Next:
+
+- Feed the adopted storage continuation plan into resident scheduling so local
+  same-device use cases can explicitly request descriptor-backed continuation
+  while cross-peer adopted-storage execution remains blocked without portable
+  replay evidence.

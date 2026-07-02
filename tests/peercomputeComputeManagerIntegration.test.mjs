@@ -91,6 +91,7 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3467,6 +3468,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentSchroederStateDeltaMergeAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederPhaseVolumeMigrationAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStoragePublicationReady, true);
+  assert.equal(summary.residentSchroederAdoptedParticleStorageContinuationPlannerReady, true);
   assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, true);
 
   const schroederPortableSummary = {
@@ -3716,6 +3718,62 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA
   );
   assert.equal(JSON.stringify(adoptedStorageHotBuffer).includes('raw-gpu-buffer-label'), false);
+  const sameDeviceAdoptedStoragePlan = host.planSchroederAdoptedParticleStorageContinuation({
+    hotBufferKey: adoptedStoragePublication.hotBufferKey,
+    consumerMode: 'same-device'
+  });
+  assert.equal(
+    sameDeviceAdoptedStoragePlan.schema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA
+  );
+  assert.equal(
+    sameDeviceAdoptedStoragePlan.status,
+    'schroeder-adopted-particle-storage-same-device-continuation-ready'
+  );
+  assert.equal(sameDeviceAdoptedStoragePlan.ready, true);
+  assert.equal(sameDeviceAdoptedStoragePlan.sameDeviceContinuationReady, true);
+  assert.equal(sameDeviceAdoptedStoragePlan.sameDevicePrivateLaneContinuation, true);
+  assert.equal(sameDeviceAdoptedStoragePlan.crossPeerContinuationReady, false);
+  assert.equal(sameDeviceAdoptedStoragePlan.rawGpuBufferTransferDetected, false);
+  assert.deepEqual(sameDeviceAdoptedStoragePlan.sameDevicePrivateLaneRefs, [
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+
+  const crossPeerAdoptedStoragePlan = host.planSchroederAdoptedParticleStorageContinuation({
+    hotBufferKey: adoptedStoragePublication.hotBufferKey,
+    consumerMode: 'cross-peer'
+  });
+  assert.equal(
+    crossPeerAdoptedStoragePlan.status,
+    'blocked-schroeder-adopted-particle-storage-cross-peer-continuation'
+  );
+  assert.equal(crossPeerAdoptedStoragePlan.ready, false);
+  assert.equal(crossPeerAdoptedStoragePlan.sameDevicePrivateLaneRefs.length, 0);
+  assert.equal(crossPeerAdoptedStoragePlan.portableSnapshotRequired, true);
+  assert.equal(crossPeerAdoptedStoragePlan.portableReplayAvailable, false);
+  assert.equal(
+    crossPeerAdoptedStoragePlan.crossPeerReplayBlocker,
+    'materialized-gpu-buffers-remain-device-local'
+  );
+
+  const crossPeerSeededPlan = host.planSchroederAdoptedParticleStorageContinuation({
+    hotBufferKey: adoptedStoragePublication.hotBufferKey,
+    consumerMode: 'cross-peer',
+    portableMaterializationSeed: {
+      schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
+      status: 'portable-materialization-seed-ready'
+    }
+  });
+  assert.equal(
+    crossPeerSeededPlan.status,
+    'schroeder-adopted-particle-storage-cross-peer-continuation-ready'
+  );
+  assert.equal(crossPeerSeededPlan.ready, true);
+  assert.equal(crossPeerSeededPlan.crossPeerContinuationReady, true);
+  assert.equal(crossPeerSeededPlan.portableMaterializationSeedAvailable, true);
+  assert.equal(crossPeerSeededPlan.crossPeerReplayBlocker, null);
 
   const rejectedAdoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
     descriptor: {

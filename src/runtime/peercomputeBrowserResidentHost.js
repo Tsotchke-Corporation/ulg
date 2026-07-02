@@ -103,6 +103,8 @@ export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEM
   'peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE =
   'ulg-schroeder-adopted-particle-storage-publications';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
@@ -3582,6 +3584,134 @@ export function publishUlgSchroederAdoptedParticleStorageDescriptor({
   };
 }
 
+function adoptedParticleStorageDescriptorSource({
+  stateManager = null,
+  hotBufferKey = null,
+  publication = null,
+  descriptor = null
+} = {}) {
+  const resolvedHotBufferKey = normalizeString(
+    hotBufferKey || publication?.hotBufferKey || publication?.sourceHotBufferKey,
+    null
+  );
+  const hotBufferRecord = resolvedHotBufferKey && stateManager?.getHotBuffer
+    ? (stateManager.getHotBuffer(resolvedHotBufferKey) || null)
+    : null;
+  const source = hotBufferRecord || publication || null;
+  const storageDescriptor =
+    descriptor
+    || source?.schroederAdoptedParticleStorageDescriptor
+    || publication?.schroederAdoptedParticleStorageDescriptor
+    || null;
+  return {
+    hotBufferKey: resolvedHotBufferKey || source?.hotBufferKey || null,
+    hotBufferRecord,
+    source,
+    descriptor: storageDescriptor
+  };
+}
+
+export function planSchroederAdoptedParticleStorageContinuation({
+  stateManager = null,
+  hotBufferKey = null,
+  publication = null,
+  descriptor = null,
+  consumerMode = 'same-device',
+  portableSnapshot = null,
+  portableMaterializationSeed = null
+} = {}) {
+  const source = adoptedParticleStorageDescriptorSource({
+    stateManager,
+    hotBufferKey,
+    publication,
+    descriptor
+  });
+  const validation = validateSchroederAdoptedParticleStorageDescriptor(source.descriptor);
+  const mode = String(consumerMode || 'same-device').trim().toLowerCase();
+  const crossPeerRequested = ['cross-peer', 'remote-peer', 'distributed-peer'].includes(mode);
+  const portableSnapshotAvailable = Boolean(portableSnapshot);
+  const portableMaterializationSeedAvailable = Boolean(portableMaterializationSeed);
+  const portableReplayAvailable = portableSnapshotAvailable || portableMaterializationSeedAvailable;
+  const rawGpuBufferTransferDetected =
+    source.descriptor?.rawGpuBufferTransferDetected === true
+    || descriptorContainsRawGpuBufferHandle(source.descriptor);
+  const sameDeviceContinuationReady = Boolean(
+    validation.accepted
+    && !crossPeerRequested
+    && source.descriptor?.sameDeviceReplayReady === true
+    && validation.retainedBufferRefs.length > 0
+    && !rawGpuBufferTransferDetected
+  );
+  const crossPeerContinuationReady = Boolean(
+    validation.accepted
+    && crossPeerRequested
+    && !rawGpuBufferTransferDetected
+    && (
+      source.descriptor?.crossPeerReplayReady === true
+      || portableReplayAvailable
+    )
+  );
+  const ready = sameDeviceContinuationReady || crossPeerContinuationReady;
+  const blocker = validation.reason
+    || (rawGpuBufferTransferDetected ? 'schroeder-adopted-particle-storage-raw-gpubuffer-transfer-detected' : null)
+    || (crossPeerRequested && !portableReplayAvailable && source.descriptor?.crossPeerReplayReady !== true
+      ? (source.descriptor?.crossPeerReplayBlocker || 'cross-peer-portable-materialization-required')
+      : null)
+    || (!crossPeerRequested && source.descriptor?.sameDeviceReplayReady !== true
+      ? 'same-device-private-lane-continuation-not-ready'
+      : null);
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA,
+    status: ready
+      ? (crossPeerRequested
+          ? 'schroeder-adopted-particle-storage-cross-peer-continuation-ready'
+          : 'schroeder-adopted-particle-storage-same-device-continuation-ready')
+      : (crossPeerRequested
+          ? 'blocked-schroeder-adopted-particle-storage-cross-peer-continuation'
+          : 'blocked-schroeder-adopted-particle-storage-same-device-continuation'),
+    ready,
+    accepted: validation.accepted,
+    reason: blocker,
+    issues: [...validation.issues],
+    consumerMode: crossPeerRequested ? 'cross-peer' : 'same-device',
+    hotBufferKey: source.hotBufferKey,
+    hotBufferStatus: source.hotBufferRecord?.status || null,
+    sourceStatus: source.source?.status || null,
+    sourceMode: source.source?.sourceMode || 'state-manager-schroeder-adopted-particle-storage-descriptor',
+    stateKey: source.source?.stateKey || source.descriptor?.stateKey || null,
+    cacheKey: source.source?.cacheKey || source.descriptor?.cacheKey || null,
+    descriptorSchema: source.descriptor?.schema || null,
+    descriptorStatus: source.descriptor?.status || null,
+    descriptorReady: source.descriptor?.ready === true,
+    authoritativeParticleCount: validation.authoritativeParticleCount,
+    retainedBufferRefs: validation.retainedBufferRefs,
+    retainedBufferRefCount: validation.retainedBufferRefs.length,
+    outputFamilies: validation.outputFamilies,
+    sameDeviceContinuationReady,
+    sameDevicePrivateLaneRefs: crossPeerRequested ? [] : validation.retainedBufferRefs,
+    sameDevicePrivateLaneContinuation: sameDeviceContinuationReady,
+    crossPeerContinuationReady,
+    crossPeerReplayReady: source.descriptor?.crossPeerReplayReady === true || crossPeerContinuationReady,
+    crossPeerReplayStatus: crossPeerContinuationReady
+      ? 'portable-replay-evidence-ready'
+      : (source.descriptor?.crossPeerReplayStatus || null),
+    crossPeerReplayBlocker: crossPeerContinuationReady ? null : blocker,
+    portableSnapshotRequired: crossPeerRequested && !crossPeerContinuationReady,
+    portableSnapshotAvailable,
+    portableMaterializationSeedAvailable,
+    portableReplayAvailable,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected,
+    descriptorOnlyPeerComputeHandoff: true,
+    stateManagerAdmissionRequired: source.descriptor?.stateManagerAdmissionRequired === true,
+    authoritativeStateMutation: false,
+    admittedAuthoritativeStorageDescriptor: validation.accepted,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 export function createSchroederPortableSummaryReplayDescriptor({
   stateManager = null,
   admission = null,
@@ -7002,6 +7132,12 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    planSchroederAdoptedParticleStorageContinuation(options = {}) {
+      return planSchroederAdoptedParticleStorageContinuation({
+        stateManager,
+        ...options
+      });
+    },
     createSchroederPortableSummaryReplayDescriptor(options = {}) {
       return createSchroederPortableSummaryReplayDescriptor({
         stateManager,
@@ -7820,6 +7956,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.publishSchroederPhaseVolumeMigrationAdmission === 'function',
     residentSchroederAdoptedParticleStoragePublicationReady:
       typeof host?.publishSchroederAdoptedParticleStorageDescriptor === 'function',
+    residentSchroederAdoptedParticleStorageContinuationPlannerReady:
+      typeof host?.planSchroederAdoptedParticleStorageContinuation === 'function',
     residentSchroederPortableSummaryReplayDescriptorReady:
       typeof host?.createSchroederPortableSummaryReplayDescriptor === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:

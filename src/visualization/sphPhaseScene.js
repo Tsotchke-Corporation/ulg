@@ -8,6 +8,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+} from '../../ulg-gpu-abi/src/index.js';
+import {
   createBufferVolumeDescriptor as createWebGpuMarchingCubesBufferVolumeDescriptor,
   createMarchingCubesSurfaceAdapter
 } from 'three-webgpu-marching-cubes';
@@ -142,6 +146,15 @@ export const ULG_WORKER_RETAINED_PORTABLE_MATERIALIZATION_CONTRACT_SCHEMA =
   'peercompute.ulg.worker-retained-portable-materialization-contract.v0';
 export const ULG_PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
+export const ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-phase-volume-diagnostic-status.v0';
+
+const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
+  Object.fromEntries(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.map((entry, index) => [
+    String(entry).split(':')[0],
+    index
+  ]))
+);
 
 function normalizeHexColor(value) {
   const raw = String(value ?? '').trim();
@@ -160,6 +173,127 @@ export function normalizeSphSceneBackgroundColorHex(
   return normalizeHexColor(value)
     || normalizeHexColor(fallback)
     || SPH_SCENE_BACKGROUND_COLOR_DEFAULT;
+}
+
+function schroederPhaseVolumeDiagnosticField(row, fieldName) {
+  const index = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX[fieldName];
+  return Number.isInteger(index) ? finiteNumberOrNull(row?.[index]) : null;
+}
+
+function schroederPhaseVolumeDiagnosticCount(row, fieldName) {
+  const value = schroederPhaseVolumeDiagnosticField(row, fieldName);
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : null;
+}
+
+function normalizeSchroederPhaseVolumeDiagnosticSummaryRow(summary = null) {
+  const rows = summary?.summaryRows ?? summary?.summaryRow ?? null;
+  if (rows instanceof Float32Array) return Array.from(rows);
+  if (ArrayBuffer.isView(rows)) return Array.from(rows);
+  if (!Array.isArray(rows)) return null;
+  const first = rows[0];
+  if (Array.isArray(first) || ArrayBuffer.isView(first)) return Array.from(first);
+  return [...rows];
+}
+
+export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution = null) {
+  const sourceStep = residentExecution?.finalStep || residentExecution || null;
+  const sourceSummary = sourceStep?.phaseVolumeDiagnosticSummary
+    || residentExecution?.phaseVolumeDiagnosticSummary
+    || null;
+  const sourceStatus = sourceStep?.phaseVolumeDiagnosticSummaryStatus
+    || residentExecution?.phaseVolumeDiagnosticSummaryStatus
+    || sourceSummary?.status
+    || null;
+  if (!sourceSummary && !sourceStatus) return null;
+  const row = normalizeSchroederPhaseVolumeDiagnosticSummaryRow(sourceSummary);
+  const activeUpdateCount = schroederPhaseVolumeDiagnosticCount(row, 'activeUpdateCount');
+  const steamExpansionCandidateCount = schroederPhaseVolumeDiagnosticCount(row, 'steamExpansionCandidateCount');
+  const visibleMigrationCount = schroederPhaseVolumeDiagnosticCount(row, 'visibleMigrationCount');
+  const levelChangedCount = schroederPhaseVolumeDiagnosticCount(row, 'levelChangedCount');
+  const migrationObserved = Boolean(
+    (steamExpansionCandidateCount ?? 0) > 0
+      || (visibleMigrationCount ?? 0) > 0
+      || (levelChangedCount ?? 0) > 0
+  );
+  const noFullParticleReadback = sourceSummary
+    ? sourceSummary.fullParticleReadbackPerformed !== true && sourceSummary.fullReadbackPerformed !== true
+    : null;
+  const status = row
+    ? 'schroeder-phase-volume-visible-diagnostics-ready'
+    : 'schroeder-phase-volume-visible-diagnostics-missing-summary-row';
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA,
+    status,
+    sourceSchema: residentExecution?.schema ?? null,
+    sourceStatus: residentExecution?.status ?? null,
+    sourceStepSchema: sourceStep?.schema ?? null,
+    sourceStepStatus: sourceStep?.status ?? null,
+    phaseVolumeDiagnosticSummarySchema:
+      sourceSummary?.schema ?? ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+    phaseVolumeDiagnosticSummaryStatus: sourceStatus,
+    phaseVolumeMigrationStatus: sourceStep?.phaseVolumeMigrationStatus ?? null,
+    phaseVolumeLevelUpdateStatus: sourceStep?.phaseVolumeLevelUpdateStatus ?? null,
+    visibleStressCaseStatus: sourceSummary?.visibleStressCaseStatus ?? null,
+    readbackPolicy: sourceSummary?.readbackPolicy ?? 'compact-summary-only-no-particle-readback',
+    compactSummaryReadbackPerformed: sourceSummary?.compactSummaryReadbackPerformed ?? null,
+    fullReadbackPerformed: sourceSummary?.fullReadbackPerformed ?? null,
+    fullParticleReadbackPerformed: sourceSummary?.fullParticleReadbackPerformed ?? null,
+    noFullParticleReadback,
+    summaryRowCount: sourceSummary?.summaryRowCount ?? (row ? 1 : 0),
+    summaryStrideFloats: sourceSummary?.summaryStrideFloats ?? row?.length ?? null,
+    migrationRowCount: schroederPhaseVolumeDiagnosticCount(row, 'migrationRowCount'),
+    activeUpdateCount,
+    coarsenEligibleCount: schroederPhaseVolumeDiagnosticCount(row, 'coarsenEligibleCount'),
+    refineRequiredCount: schroederPhaseVolumeDiagnosticCount(row, 'refineRequiredCount'),
+    aggregateCoherentCount: schroederPhaseVolumeDiagnosticCount(row, 'aggregateCoherentCount'),
+    conservationResidualIssueCount:
+      schroederPhaseVolumeDiagnosticCount(row, 'conservationResidualIssueCount'),
+    minSourceLevelId: activeUpdateCount > 0
+      ? schroederPhaseVolumeDiagnosticField(row, 'minSourceLevelId')
+      : null,
+    maxSourceLevelId: activeUpdateCount > 0
+      ? schroederPhaseVolumeDiagnosticField(row, 'maxSourceLevelId')
+      : null,
+    minTargetLevelId: activeUpdateCount > 0
+      ? schroederPhaseVolumeDiagnosticField(row, 'minTargetLevelId')
+      : null,
+    maxTargetLevelId: activeUpdateCount > 0
+      ? schroederPhaseVolumeDiagnosticField(row, 'maxTargetLevelId')
+      : null,
+    maxPositiveLevelDelta: schroederPhaseVolumeDiagnosticField(row, 'maxPositiveLevelDelta'),
+    maxNegativeLevelDelta: schroederPhaseVolumeDiagnosticField(row, 'maxNegativeLevelDelta'),
+    totalRestVolumeM3: schroederPhaseVolumeDiagnosticField(row, 'totalRestVolumeM3'),
+    totalRepresentedVolumeM3: schroederPhaseVolumeDiagnosticField(row, 'totalRepresentedVolumeM3'),
+    totalAggregateMassKg: schroederPhaseVolumeDiagnosticField(row, 'totalAggregateMassKg'),
+    totalAggregateRepresentedVolumeM3:
+      schroederPhaseVolumeDiagnosticField(row, 'totalAggregateRepresentedVolumeM3'),
+    totalAbsAggregateMassResidualKg:
+      schroederPhaseVolumeDiagnosticField(row, 'totalAbsAggregateMassResidualKg'),
+    totalAbsAggregateVolumeResidualM3:
+      schroederPhaseVolumeDiagnosticField(row, 'totalAbsAggregateVolumeResidualM3'),
+    steamExpansionCandidateCount,
+    admittedUpdateCount: schroederPhaseVolumeDiagnosticCount(row, 'admittedUpdateCount'),
+    stateAdmissionRequiredCount:
+      schroederPhaseVolumeDiagnosticCount(row, 'stateAdmissionRequiredCount'),
+    visibleMigrationCount,
+    aggregateMissingCount: schroederPhaseVolumeDiagnosticCount(row, 'aggregateMissingCount'),
+    levelChangedCount,
+    summaryModeId: schroederPhaseVolumeDiagnosticField(row, 'summaryModeId'),
+    migrationEpoch: schroederPhaseVolumeDiagnosticField(row, 'migrationEpoch'),
+    stateFamilyId: schroederPhaseVolumeDiagnosticField(row, 'stateFamilyId'),
+    capacityStatus: schroederPhaseVolumeDiagnosticField(row, 'capacityStatus'),
+    waterToSteamScaleMigrationObserved: migrationObserved,
+    waterToSteamStressCaseStatus: migrationObserved
+      ? 'water-to-steam-level-migration-observable'
+      : (sourceSummary?.visibleStressCaseStatus || 'water-to-steam-level-migration-not-observed'),
+    particleExplosionAvoidanceStatus: migrationObserved
+      ? 'phase-volume-level-migration-represented-without-particle-count-growth'
+      : 'phase-volume-level-migration-not-observed',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -8209,6 +8343,8 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmG2pReconstruction = null;
   scene.userData.mlsMpmResidentStep = null;
   scene.userData.mlsMpmResidentSteps = null;
+  scene.userData.schroederPhaseVolumeDiagnostics = null;
+  renderer.userData.schroederPhaseVolumeDiagnostics = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
@@ -10312,6 +10448,8 @@ export function createSphPhaseScene(container, {
     mlsMpmResidentSteps = null;
     mlsMpmResidentStepsSignature = null;
     scene.userData.mlsMpmResidentSteps = null;
+    scene.userData.schroederPhaseVolumeDiagnostics = null;
+    renderer.userData.schroederPhaseVolumeDiagnostics = null;
     const cleanup = () => destroyCapturedMlsMpmResidentExecutionArtifacts({
       ...captured,
       preserveBuffers: normalizedPreserveBuffers
@@ -15016,6 +15154,10 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
     scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
     scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
+    const schroederPhaseVolumeDiagnostics =
+      summarizeSchroederPhaseVolumeDiagnosticStatus(stepsExecution || step || null);
+    scene.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
+    renderer.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
     const residentRenderSource = createResidentRenderSourceMetadata({
       residentSteps: stepsExecution,
       finalStep: step,
@@ -25097,6 +25239,9 @@ export function createSphPhaseScene(container, {
     },
     getMlsMpmResidentSteps() {
       return mlsMpmResidentSteps;
+    },
+    getSchroederPhaseVolumeDiagnostics() {
+      return scene.userData.schroederPhaseVolumeDiagnostics || null;
     },
     getMlsMpmResidentRequestedReadbackMode() {
       return scene.userData.mlsMpmResidentRequestedReadbackMode;

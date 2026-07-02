@@ -16,6 +16,7 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
   SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL,
+  ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -80,6 +81,7 @@ import {
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial,
   summarizeRenderRowSphereBridgeMaterial,
+  summarizeSchroederPhaseVolumeDiagnosticStatus,
   stabilizeSurfaceMeshMaterialForRenderer,
   createThreeWebGpuResidentBridgeMaterialProxy,
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
@@ -98,6 +100,9 @@ import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
 
 function srgbToLinear(value) {
   const v = Math.max(0, Math.min(1, Number(value)));
@@ -117,6 +122,82 @@ test('SPH scene background color defaults to sky blue and normalizes URL hex val
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');
+});
+
+test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-to-steam status', () => {
+  const row = new Array(32).fill(0);
+  row[0] = 12; // migrationRowCount
+  row[1] = 3; // activeUpdateCount
+  row[2] = 2; // coarsenEligibleCount
+  row[3] = 1; // refineRequiredCount
+  row[4] = 3; // aggregateCoherentCount
+  row[5] = 0; // conservationResidualIssueCount
+  row[6] = 1; // minSourceLevelId
+  row[7] = 2; // maxSourceLevelId
+  row[8] = 4; // minTargetLevelId
+  row[9] = 5; // maxTargetLevelId
+  row[10] = 3; // maxPositiveLevelDelta
+  row[11] = -1; // maxNegativeLevelDelta
+  row[12] = 1; // totalRestVolumeM3
+  row[13] = 700; // totalRepresentedVolumeM3
+  row[14] = 0.1; // totalAggregateMassKg
+  row[15] = 700; // totalAggregateRepresentedVolumeM3
+  row[18] = 2; // steamExpansionCandidateCount
+  row[19] = 3; // admittedUpdateCount
+  row[21] = 2; // visibleMigrationCount
+  row[23] = 2; // levelChangedCount
+  row[24] = 1; // summaryModeId
+  row[25] = 9; // migrationEpoch
+  row[26] = 1; // status
+  row[28] = 1; // stateFamilyId
+
+  const status = summarizeSchroederPhaseVolumeDiagnosticStatus({
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    finalStep: {
+      schema: 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0',
+      status: 'schroeder-same-level-mechanics-submitted',
+      phaseVolumeMigrationStatus: 'schroeder-phase-volume-migration-submitted',
+      phaseVolumeLevelUpdateStatus: 'schroeder-phase-volume-level-update-submitted',
+      phaseVolumeDiagnosticSummaryStatus: 'schroeder-phase-volume-diagnostic-summary-submitted',
+      phaseVolumeDiagnosticSummary: {
+        schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+        status: 'schroeder-phase-volume-diagnostic-summary-submitted',
+        visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-submitted',
+        compactSummaryReadbackPerformed: true,
+        fullReadbackPerformed: false,
+        fullParticleReadbackPerformed: false,
+        summaryRowCount: 1,
+        summaryStrideFloats: 32,
+        summaryRows: row
+      }
+    }
+  });
+
+  assert.equal(status.schema, ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA);
+  assert.equal(status.status, 'schroeder-phase-volume-visible-diagnostics-ready');
+  assert.equal(status.phaseVolumeDiagnosticSummaryStatus, 'schroeder-phase-volume-diagnostic-summary-submitted');
+  assert.equal(status.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
+  assert.equal(status.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(status.noFullParticleReadback, true);
+  assert.equal(status.migrationRowCount, 12);
+  assert.equal(status.activeUpdateCount, 3);
+  assert.equal(status.coarsenEligibleCount, 2);
+  assert.equal(status.refineRequiredCount, 1);
+  assert.equal(status.steamExpansionCandidateCount, 2);
+  assert.equal(status.admittedUpdateCount, 3);
+  assert.equal(status.visibleMigrationCount, 2);
+  assert.equal(status.levelChangedCount, 2);
+  assert.equal(status.minSourceLevelId, 1);
+  assert.equal(status.maxTargetLevelId, 5);
+  assert.equal(status.totalRepresentedVolumeM3, 700);
+  assert.equal(status.waterToSteamScaleMigrationObserved, true);
+  assert.equal(status.waterToSteamStressCaseStatus, 'water-to-steam-level-migration-observable');
+  assert.equal(
+    status.particleExplosionAvoidanceStatus,
+    'phase-volume-level-migration-represented-without-particle-count-growth'
+  );
+  assert.equal(status.fullPhysicsValidation, false);
 });
 
 test('worker resident particle-state source cache keys avoid full hashes for versioned CPU-visible state', () => {

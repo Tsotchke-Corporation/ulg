@@ -15,6 +15,8 @@ import {
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -53,6 +55,7 @@ import {
   schroederHierarchyAggregateNodeBucketReduceWgsl,
   schroederHierarchyAggregateNodeReduceWgsl,
   schroederHierarchyAggregateWgsl,
+  schroederActiveNodeIndexWgsl,
   schroederActiveNodeListWgsl,
   schroederConservationSummaryWgsl,
   schroederCrossLevelCouplingWgsl,
@@ -75,6 +78,8 @@ import {
 import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
 
 export {
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -124,6 +129,7 @@ export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS = SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
+export const SCHROEDER_ACTIVE_NODE_INDEX_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
@@ -139,6 +145,7 @@ export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
+export const SCHROEDER_ACTIVE_NODE_INDEX_SCOPE = 'schroeder-gpu-active-node-index';
 export const SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE = 'schroeder-gpu-cross-level-coupling';
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCOPE = 'schroeder-gpu-law-neighbor-candidates';
 export const SCHROEDER_LAW_QUEUE_SCOPE = 'schroeder-gpu-law-queue';
@@ -147,6 +154,7 @@ export const SCHROEDER_SAME_LEVEL_MECHANICS_SCOPE = 'schroeder-same-level-mls-mp
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
+export const SCHROEDER_FULL_ACTIVE_NODE_INDEX_READBACK_MODE = 'full-active-node-index-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE = 'full-cross-level-readback';
 export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservation-summary-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_MERGE_READBACK_MODE = 'full-cross-level-state-delta-merge-readback';
@@ -165,6 +173,7 @@ export const SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE =
 export const SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE = 'auto';
 export const DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS = 512;
 export const DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY = 32;
+export const DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY = 32;
 export const SCHROEDER_LOCAL_LAW_REACTION_MASK = 1;
 export const SCHROEDER_LOCAL_LAW_CONTACT_MASK = 2;
 export const SCHROEDER_LOCAL_LAW_INTERFACE_MASK = 4;
@@ -272,6 +281,32 @@ function aggregateNodeBucketPlan({
     bucketCountByteLength: Math.max(4, resolvedBucketCount * Uint32Array.BYTES_PER_ELEMENT),
     bucketSlotByteLength: Math.max(4, bucketSlotCount * Uint32Array.BYTES_PER_ELEMENT),
     rowBucketSlotByteLength: Math.max(4, rowCount * Uint32Array.BYTES_PER_ELEMENT)
+  };
+}
+
+function activeNodeIndexBucketPlan({
+  activeNodeCount = 0,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY
+} = {}) {
+  const nodeCount = Math.max(0, Math.round(finiteNumber(activeNodeCount, 0)));
+  const slotCapacity = Math.max(1, Math.round(finiteNumber(
+    bucketSlotCapacity,
+    DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY
+  )));
+  const targetBucketCount = bucketCount == null
+    ? Math.max(1, Math.ceil(nodeCount / Math.max(1, Math.floor(slotCapacity / 2))))
+    : Math.max(1, Math.round(finiteNumber(bucketCount, 1)));
+  const resolvedBucketCount = nextPowerOfTwo(targetBucketCount);
+  const bucketSlotCount = Math.max(1, resolvedBucketCount * slotCapacity);
+  return {
+    bucketCount: resolvedBucketCount,
+    bucketSlotCapacity: slotCapacity,
+    bucketSlotCount,
+    bucketCountByteLength: Math.max(4, resolvedBucketCount * Uint32Array.BYTES_PER_ELEMENT),
+    bucketSlotByteLength: Math.max(4, bucketSlotCount * Uint32Array.BYTES_PER_ELEMENT),
+    nodeBucketSlotByteLength: Math.max(4, nodeCount * Uint32Array.BYTES_PER_ELEMENT),
+    overflowCounterByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT
   };
 }
 
@@ -443,6 +478,42 @@ export function createSchroederActiveNodeParamsArray({
   view.setFloat32(20, Math.max(0, finiteNumber(minTileSpacingM, 0)), true);
   view.setFloat32(24, Math.max(0, finiteNumber(maxTileSpacingM, 0)), true);
   view.setFloat32(28, 0, true);
+  return buffer;
+}
+
+export function createSchroederActiveNodeIndexParamsArray({
+  activeNodeCount = 0,
+  activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
+  bucketCount = 0,
+  bucketSlotCapacity = DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
+  bucketSlotCount = 0,
+  nodeSlotCount = 0,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(bucketCount, 0))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    bucketSlotCapacity,
+    DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY
+  ))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(bucketSlotCount, 0))), true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(nodeSlotCount, 0))), true);
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(28, 0, true);
+  view.setUint32(32, 0, true);
+  view.setUint32(36, 0, true);
+  view.setUint32(40, 0, true);
+  view.setUint32(44, 0, true);
+  view.setUint32(48, 0, true);
+  view.setUint32(52, 0, true);
+  view.setUint32(56, 0, true);
+  view.setUint32(60, 0, true);
   return buffer;
 }
 
@@ -1281,6 +1352,50 @@ export function createSchroederActiveNodeListPlan({
     activeNodeStrideBytes: SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     activeNodeByteLength,
     outputCompaction: 'unsorted-one-row-per-particle-tile-range',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederActiveNodeIndexPlan({
+  activeNodeList,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY
+} = {}) {
+  assertLawNeighborActiveNodeInput(activeNodeList);
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    0
+  )));
+  const bucketPlan = activeNodeIndexBucketPlan({
+    activeNodeCount,
+    bucketCount,
+    bucketSlotCapacity
+  });
+  return {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA,
+    status: 'schroeder-active-node-index-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: SCHROEDER_ACTIVE_NODE_INDEX_SCOPE,
+    sourceActiveNodeSchema: activeNodeList.schema,
+    sourceActiveNodeStatus: activeNodeList.status ?? null,
+    activeNodeCount,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    bucketCount: bucketPlan.bucketCount,
+    bucketSlotCapacity: bucketPlan.bucketSlotCapacity,
+    bucketSlotCount: bucketPlan.bucketSlotCount,
+    nodeSlotCount: activeNodeCount,
+    bucketCountByteLength: bucketPlan.bucketCountByteLength,
+    bucketSlotByteLength: bucketPlan.bucketSlotByteLength,
+    nodeBucketSlotByteLength: bucketPlan.nodeBucketSlotByteLength,
+    overflowCounterByteLength: bucketPlan.overflowCounterByteLength,
+    indexTopology: 'bucketed-active-node-tile-anchor-index',
+    outputCompaction: 'bucketed-active-node-indirection-slots',
+    capacityStatus: 'bucket-capacity-provisioned-fail-closed-on-overflow',
+    indexCoverageStatus: 'tile-min-anchor-index-not-authoritative-overlap-pruning',
+    consumerStatus: 'available-for-next-law-neighbor-indexed-traversal-slice',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -2285,6 +2400,225 @@ export async function runSchroederActiveNodeListWebGpu({
       if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) activeNodeBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
+export async function runSchroederActiveNodeIndexWebGpu({
+  device,
+  activeNodeList,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
+  retainIndexBuffers = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederActiveNodeIndexWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederActiveNodeIndexPlan({
+    activeNodeList,
+    bucketCount,
+    bucketSlotCapacity
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedActiveNodeBuffer = activeNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
+    ? activeNodeList.activeNodes
+    : null;
+  if (!borrowedActiveNodeBuffer && !(activeNodeRows instanceof Float32Array && activeNodeRows.byteLength > 0)) {
+    throw new TypeError('Schroeder active-node index requires a retained active-node buffer or explicit active-node rows');
+  }
+  const activeNodeBuffer = borrowedActiveNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-active-node-index-active-nodes-in', activeNodeRows);
+  const bucketCountBuffer = device.createBuffer({
+    label: 'ulg-schroeder-active-node-index-bucket-counts',
+    size: plan.bucketCountByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const bucketSlotBuffer = device.createBuffer({
+    label: 'ulg-schroeder-active-node-index-bucket-slots',
+    size: plan.bucketSlotByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const nodeBucketSlotBuffer = device.createBuffer({
+    label: 'ulg-schroeder-active-node-index-node-bucket-slots',
+    size: plan.nodeBucketSlotByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const overflowCounterBuffer = device.createBuffer({
+    label: 'ulg-schroeder-active-node-index-overflow-counters',
+    size: plan.overflowCounterByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-active-node-index-params',
+    size: 64,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const bucketCountReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-active-node-index-bucket-counts-readback',
+      size: plan.bucketCountByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  const bucketSlotReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-active-node-index-bucket-slots-readback',
+      size: plan.bucketSlotByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  const nodeBucketSlotReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-active-node-index-node-bucket-slots-readback',
+      size: plan.nodeBucketSlotByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  const overflowCounterReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-active-node-index-overflow-counters-readback',
+      size: plan.overflowCounterByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedIndexBuffers = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederActiveNodeIndexParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'uniform')
+    ];
+    const clearPipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-active-node-index.clear.v0',
+      label: 'ulg-schroeder-active-node-index-clear',
+      code: schroederActiveNodeIndexWgsl,
+      entryPoint: 'clearIndex',
+      bindings
+    });
+    const assignPipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-active-node-index.assign.v0',
+      label: 'ulg-schroeder-active-node-index-assign',
+      code: schroederActiveNodeIndexWgsl,
+      entryPoint: 'assignIndex',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: assignPipeline.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: activeNodeBuffer } },
+        { binding: 1, resource: { buffer: bucketCountBuffer } },
+        { binding: 2, resource: { buffer: bucketSlotBuffer } },
+        { binding: 3, resource: { buffer: nodeBucketSlotBuffer } },
+        { binding: 4, resource: { buffer: overflowCounterBuffer } },
+        { binding: 5, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(clearPipeline.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(Math.max(plan.bucketCount, plan.bucketSlotCount, plan.activeNodeCount, 4) / SCHROEDER_ACTIVE_NODE_INDEX_WORKGROUP_SIZE)
+    ));
+    pass.setPipeline(assignPipeline.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(plan.activeNodeCount / SCHROEDER_ACTIVE_NODE_INDEX_WORKGROUP_SIZE)));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(bucketCountBuffer, 0, bucketCountReadBuffer, 0, plan.bucketCountByteLength);
+      encoder.copyBufferToBuffer(bucketSlotBuffer, 0, bucketSlotReadBuffer, 0, plan.bucketSlotByteLength);
+      encoder.copyBufferToBuffer(nodeBucketSlotBuffer, 0, nodeBucketSlotReadBuffer, 0, plan.nodeBucketSlotByteLength);
+      encoder.copyBufferToBuffer(overflowCounterBuffer, 0, overflowCounterReadBuffer, 0, plan.overflowCounterByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let bucketCounts = new Uint32Array();
+    let bucketSlots = new Uint32Array();
+    let nodeBucketSlots = new Uint32Array();
+    let overflowCounters = new Uint32Array();
+    if (!noFullReadback) {
+      await bucketCountReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      bucketCounts = new Uint32Array(bucketCountReadBuffer.getMappedRange()).slice(0, plan.bucketCount);
+      bucketCountReadBuffer.unmap();
+      await bucketSlotReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      bucketSlots = new Uint32Array(bucketSlotReadBuffer.getMappedRange()).slice(0, plan.bucketSlotCount);
+      bucketSlotReadBuffer.unmap();
+      await nodeBucketSlotReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      nodeBucketSlots = new Uint32Array(nodeBucketSlotReadBuffer.getMappedRange()).slice(0, plan.activeNodeCount);
+      nodeBucketSlotReadBuffer.unmap();
+      await overflowCounterReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      overflowCounters = new Uint32Array(overflowCounterReadBuffer.getMappedRange()).slice(0, 4);
+      overflowCounterReadBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+      activeNodeIndexSchema: plan.schema,
+      status: 'schroeder-active-node-index-submitted',
+      backend: 'webgpu',
+      clearPipelineCacheStatus: clearPipeline.cacheStatus,
+      assignPipelineCacheStatus: assignPipeline.cacheStatus,
+      readbackMode: noFullReadback ? SCHROEDER_NO_FULL_READBACK_MODE : SCHROEDER_FULL_ACTIVE_NODE_INDEX_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedIndexBuffers: Boolean(retainIndexBuffers),
+      bucketCounts,
+      bucketSlots,
+      nodeBucketSlots,
+      overflowCounters,
+      indexStatus: 'bucketed-active-node-index-submitted',
+      capacityStatus: plan.capacityStatus,
+      indexCoverageStatus: plan.indexCoverageStatus,
+      stateMutationStatus: 'active-node-index-submitted-no-state-mutation',
+      stateAuthorityStatus: 'index-buffer-derived-from-active-node-list-no-state-admission-required',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainIndexBuffers) {
+      result.bucketCountBuffer = bucketCountBuffer;
+      result.bucketSlotBuffer = bucketSlotBuffer;
+      result.nodeBucketSlotBuffer = nodeBucketSlotBuffer;
+      result.overflowCounterBuffer = overflowCounterBuffer;
+      result.destroyIndexBuffers = () => {
+        bucketCountBuffer.destroy?.();
+        bucketSlotBuffer.destroy?.();
+        nodeBucketSlotBuffer.destroy?.();
+        overflowCounterBuffer.destroy?.();
+      };
+      returnedRetainedIndexBuffers = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      if (!retainIndexBuffers || !returnedRetainedIndexBuffers) {
+        bucketCountBuffer.destroy?.();
+        bucketSlotBuffer.destroy?.();
+        nodeBucketSlotBuffer.destroy?.();
+        overflowCounterBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      bucketCountReadBuffer?.destroy?.();
+      bucketSlotReadBuffer?.destroy?.();
+      nodeBucketSlotReadBuffer?.destroy?.();
+      overflowCounterReadBuffer?.destroy?.();
     };
     if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);
@@ -4209,6 +4543,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   mlsMpmParticleUpload = null,
   levelAssignment = null,
   activeNodeList = null,
+  activeNodeIndex = null,
   lawQueue = null,
   lawNeighborCandidates = null,
   crossLevelCoupling = null,
@@ -4231,6 +4566,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   supportRadiusScale = DEFAULT_SUPPORT_RADIUS_SCALE,
   tileCellCount = DEFAULT_TILE_CELL_COUNT,
   supportInflateCells = DEFAULT_SUPPORT_INFLATE_CELLS,
+  enableActiveNodeIndex = false,
+  activeNodeIndexBucketCount = null,
+  activeNodeIndexBucketSlotCapacity = DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
   enableLawQueue = true,
   enableLawNeighborCandidates = true,
   enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
@@ -4259,6 +4597,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
   cflFactor = mlsMpmParticleState?.gridCflFactor,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  activeNodeIndexRunner = runSchroederActiveNodeIndexWebGpu,
   lawQueueRunner = runSchroederLawQueueWebGpu,
   lawNeighborCandidateRunner = runSchroederLawNeighborCandidateWebGpu,
   crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
@@ -4281,6 +4620,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (typeof residentStepRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a residentStepRunner function');
+  }
+  if (enableActiveNodeIndex && typeof activeNodeIndexRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires an activeNodeIndexRunner function');
   }
   if (enableLawQueue && typeof lawQueueRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a lawQueueRunner function');
@@ -4401,6 +4743,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
+  const resolvedActiveNodeIndex = !enableActiveNodeIndex
+    ? null
+    : activeNodeIndex || await activeNodeIndexRunner({
+      device,
+      activeNodeList: resolvedActiveNodeList,
+      bucketCount: activeNodeIndexBucketCount,
+      bucketSlotCapacity: activeNodeIndexBucketSlotCapacity,
+      retainIndexBuffers: true,
+      readbackMode
+    });
   const resolvedLawQueue = !enableLawQueue
     ? null
     : lawQueue || await lawQueueRunner({
@@ -4590,6 +4942,28 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainedActiveNodeBuffer: Boolean(resolvedActiveNodeList.activeNodeBuffer),
       activeNodeBufferByteLength: resolvedActiveNodeList.activeNodeBufferByteLength ?? resolvedActiveNodeList.activeNodeByteLength ?? 0
     },
+    activeNodeIndex: resolvedActiveNodeIndex ? {
+      schema: resolvedActiveNodeIndex.schema,
+      activeNodeIndexSchema: resolvedActiveNodeIndex.activeNodeIndexSchema,
+      status: resolvedActiveNodeIndex.status,
+      activeNodeCount: resolvedActiveNodeIndex.activeNodeCount,
+      bucketCount: resolvedActiveNodeIndex.bucketCount,
+      bucketSlotCapacity: resolvedActiveNodeIndex.bucketSlotCapacity,
+      bucketSlotCount: resolvedActiveNodeIndex.bucketSlotCount,
+      outputCompaction: resolvedActiveNodeIndex.outputCompaction,
+      capacityStatus: resolvedActiveNodeIndex.capacityStatus,
+      indexCoverageStatus: resolvedActiveNodeIndex.indexCoverageStatus,
+      retainedIndexBuffers: Boolean(
+        resolvedActiveNodeIndex.bucketCountBuffer
+        || resolvedActiveNodeIndex.bucketSlotBuffer
+        || resolvedActiveNodeIndex.nodeBucketSlotBuffer
+        || resolvedActiveNodeIndex.overflowCounterBuffer
+      ),
+      bucketCountBufferByteLength: resolvedActiveNodeIndex.bucketCountByteLength ?? 0,
+      bucketSlotBufferByteLength: resolvedActiveNodeIndex.bucketSlotByteLength ?? 0,
+      nodeBucketSlotBufferByteLength: resolvedActiveNodeIndex.nodeBucketSlotByteLength ?? 0,
+      overflowCounterBufferByteLength: resolvedActiveNodeIndex.overflowCounterByteLength ?? 0
+    } : null,
     lawQueue: resolvedLawQueue ? {
       schema: resolvedLawQueue.schema,
       status: resolvedLawQueue.status,
@@ -4763,6 +5137,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     mechanicsGridSpacingM: plan.nativeGridSpacingM,
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
     activeNodeConsumerStatus: 'active-node-list-forwarded-to-mls-mpm-p2g-g2p',
+    activeNodeIndexStatus: resolvedActiveNodeIndex?.status ?? 'disabled-active-node-index',
+    activeNodeIndexConsumerStatus: resolvedActiveNodeIndex
+      ? 'active-node-index-available-not-yet-authoritative-for-law-neighbor-traversal'
+      : 'disabled-active-node-index',
     lawQueueStatus: resolvedLawQueue?.status ?? 'disabled-local-law-queue',
     lawQueueConsumerStatus: resolvedLawQueue
       ? (resolvedLawNeighborCandidates

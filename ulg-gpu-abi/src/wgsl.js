@@ -7849,6 +7849,113 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederActiveNodeIndexWgsl = `
+struct SchroederActiveNodeIndexParams {
+  active_node_count: u32,
+  active_node_stride: u32,
+  bucket_count: u32,
+  bucket_slot_capacity: u32,
+  bucket_slot_count: u32,
+  node_slot_count: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
+  pad4: u32,
+  pad5: u32,
+  pad6: u32,
+  pad7: u32,
+  pad8: u32,
+};
+
+@group(0) @binding(0) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(1) var<storage, read_write> bucket_counts: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> bucket_slots: array<u32>;
+@group(0) @binding(3) var<storage, read_write> node_bucket_slots: array<u32>;
+@group(0) @binding(4) var<storage, read_write> overflow_counters: array<atomic<u32>>;
+@group(0) @binding(5) var<uniform> params: SchroederActiveNodeIndexParams;
+
+const SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL: u32 = 0xffffffffu;
+const SCHROEDER_ACTIVE_NODE_INDEX_STRIDE: u32 = 16u;
+
+fn ss_active_index_hash_mix(value: u32, seed: u32) -> u32 {
+  var hash = seed ^ (value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn ss_active_index_i32_bits(value: f32) -> u32 {
+  return bitcast<u32>(i32(round(value)));
+}
+
+fn ss_active_index_bucket(active_offset: u32) -> u32 {
+  var hash = 0x811c9dc5u;
+  hash = ss_active_index_hash_mix(ss_active_index_i32_bits(active_nodes[active_offset + 0u]), hash);
+  hash = ss_active_index_hash_mix(ss_active_index_i32_bits(active_nodes[active_offset + 1u]), hash);
+  hash = ss_active_index_hash_mix(ss_active_index_i32_bits(active_nodes[active_offset + 2u]), hash);
+  hash = ss_active_index_hash_mix(ss_active_index_i32_bits(active_nodes[active_offset + 3u]), hash);
+  hash = ss_active_index_hash_mix(ss_active_index_i32_bits(active_nodes[active_offset + 15u]), hash);
+  return hash % max(params.bucket_count, 1u);
+}
+
+fn ss_active_index_ready(active_offset: u32) -> bool {
+  let status = active_nodes[active_offset + 11u];
+  return status > 0.0 && status < 32.0;
+}
+
+@compute @workgroup_size(64)
+fn clearIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let index = global_id.x;
+  if (index < params.bucket_count) {
+    atomicStore(&bucket_counts[index], 0u);
+  }
+  if (index < params.bucket_slot_count) {
+    bucket_slots[index] = SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL;
+  }
+  if (index < params.node_slot_count) {
+    node_bucket_slots[index] = SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL;
+  }
+  if (index < 4u) {
+    atomicStore(&overflow_counters[index], 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn assignIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let active_index = global_id.x;
+  if (active_index >= params.active_node_count) {
+    return;
+  }
+  let active_stride = max(params.active_node_stride, SCHROEDER_ACTIVE_NODE_INDEX_STRIDE);
+  let active_offset = active_index * active_stride;
+  if (!ss_active_index_ready(active_offset)) {
+    node_bucket_slots[active_index] = SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL;
+    return;
+  }
+  atomicAdd(&overflow_counters[1], 1u);
+  let bucket_index = ss_active_index_bucket(active_offset);
+  let slot_index = atomicAdd(&bucket_counts[bucket_index], 1u);
+  if (slot_index >= params.bucket_slot_capacity) {
+    atomicAdd(&overflow_counters[0], 1u);
+    node_bucket_slots[active_index] = SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL;
+    return;
+  }
+  let absolute_slot = bucket_index * params.bucket_slot_capacity + slot_index;
+  if (absolute_slot >= params.bucket_slot_count) {
+    atomicAdd(&overflow_counters[0], 1u);
+    node_bucket_slots[active_index] = SCHROEDER_ACTIVE_NODE_INDEX_SENTINEL;
+    return;
+  }
+  bucket_slots[absolute_slot] = active_index;
+  node_bucket_slots[active_index] = absolute_slot;
+  atomicAdd(&overflow_counters[2], 1u);
+}
+`;
+
 export const schroederLawQueueWgsl = `
 struct SchroederLawQueueParams {
   active_node_count: u32,

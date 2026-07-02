@@ -17,6 +17,8 @@ import {
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
   ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -70,10 +72,13 @@ import {
   SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE,
   DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
   DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY,
+  DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
   DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+  createSchroederActiveNodeIndexParamsArray,
+  createSchroederActiveNodeIndexPlan,
   createSchroederActiveNodeListPlan,
   createSchroederActiveNodeParamsArray,
   createSchroederCrossLevelCouplingParamsArray,
@@ -105,6 +110,7 @@ import {
   createSchroederSameLevelMechanicsPlan,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
+  runSchroederActiveNodeIndexWebGpu,
   runSchroederActiveNodeListWebGpu,
   runSchroederConservationSummaryWebGpu,
   runSchroederCrossLevelCouplingWebGpu,
@@ -309,6 +315,11 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS, 16);
   assert.equal(SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length, SCHROEDER_ACTIVE_NODE_FLOATS);
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA, 'peercompute.ulg.schroeder-active-node-index.v0');
+  assert.equal(
+    ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-active-node-index-execution.v0'
+  );
   assert.equal(ULG_SCHROEDER_LAW_QUEUE_SCHEMA, 'peercompute.ulg.schroeder-law-queue.v0');
   assert.equal(
     ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
@@ -538,6 +549,52 @@ test('Schroeder active-node plan uses retained level assignments as unsorted til
   assert.equal(view.getUint32(0, true), 5);
   assert.equal(view.getUint32(4, true), 4);
   assert.equal(view.getFloat32(16, true), 2);
+});
+
+test('Schroeder active-node index plan builds a retained bucket indirection table', () => {
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 5,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const plan = createSchroederActiveNodeIndexPlan({
+    activeNodeList,
+    bucketSlotCapacity: 4
+  });
+
+  assert.equal(plan.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA);
+  assert.equal(plan.status, 'schroeder-active-node-index-plan-ready');
+  assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(plan.activeNodeCount, 5);
+  assert.equal(plan.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(plan.bucketCount, 4);
+  assert.equal(plan.bucketSlotCapacity, 4);
+  assert.equal(plan.bucketSlotCount, 16);
+  assert.equal(plan.nodeSlotCount, 5);
+  assert.equal(plan.bucketCountByteLength, 4 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.bucketSlotByteLength, 16 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.nodeBucketSlotByteLength, 5 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.overflowCounterByteLength, 4 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.outputCompaction, 'bucketed-active-node-indirection-slots');
+  assert.equal(plan.capacityStatus, 'bucket-capacity-provisioned-fail-closed-on-overflow');
+  assert.equal(plan.indexCoverageStatus, 'tile-min-anchor-index-not-authoritative-overlap-pruning');
+  assert.equal(plan.consumerStatus, 'available-for-next-law-neighbor-indexed-traversal-slice');
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederActiveNodeIndexParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 64);
+  assert.equal(view.getUint32(0, true), 5);
+  assert.equal(view.getUint32(4, true), SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(view.getUint32(8, true), 4);
+  assert.equal(view.getUint32(12, true), 4);
+  assert.equal(view.getUint32(16, true), 16);
+  assert.equal(view.getUint32(20, true), 5);
+  assert.equal(view.getUint32(24, true), 0);
 });
 
 test('Schroeder law queue plan projects active nodes into local law work descriptors', () => {
@@ -1234,6 +1291,75 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
   assert.equal(activeNodes.activeNodes.length, 0);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder WebGPU active-node index builds retained bucket slots without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1
+  });
+  const index = await runSchroederActiveNodeIndexWebGpu({
+    device,
+    activeNodeList: activeNodes,
+    bucketSlotCapacity: DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY
+  });
+
+  assert.equal(index.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(index.activeNodeIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA);
+  assert.equal(index.status, 'schroeder-active-node-index-submitted');
+  assert.equal(index.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(index.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(index.fullReadbackPerformed, false);
+  assert.equal(index.fullParticleReadbackPerformed, false);
+  assert.equal(index.normalHotLoopReadbackFree, true);
+  assert.equal(index.retainedIndexBuffers, true);
+  assert.ok(index.bucketCountBuffer);
+  assert.ok(index.bucketSlotBuffer);
+  assert.ok(index.nodeBucketSlotBuffer);
+  assert.ok(index.overflowCounterBuffer);
+  assert.equal(index.bucketCountBuffer.destroyed, false);
+  assert.equal(index.bucketSlotBuffer.destroyed, false);
+  assert.equal(index.nodeBucketSlotBuffer.destroyed, false);
+  assert.equal(index.overflowCounterBuffer.destroyed, false);
+  assert.equal(index.activeNodeCount, 3);
+  assert.equal(index.bucketCount, 1);
+  assert.equal(index.bucketSlotCapacity, DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY);
+  assert.equal(index.bucketSlotCount, DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY);
+  assert.equal(index.nodeSlotCount, 3);
+  assert.equal(index.bucketCounts.length, 0);
+  assert.equal(index.bucketSlots.length, 0);
+  assert.equal(index.nodeBucketSlots.length, 0);
+  assert.equal(index.overflowCounters.length, 0);
+  assert.equal(index.indexStatus, 'bucketed-active-node-index-submitted');
+  assert.equal(index.capacityStatus, 'bucket-capacity-provisioned-fail-closed-on-overflow');
+  assert.equal(index.indexCoverageStatus, 'tile-min-anchor-index-not-authoritative-overlap-pruning');
+  assert.equal(index.stateMutationStatus, 'active-node-index-submitted-no-state-mutation');
+  assert.equal(
+    index.stateAuthorityStatus,
+    'index-buffer-derived-from-active-node-list-no-state-admission-required'
+  );
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeIndexParams')));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-active-node-index-bucket-counts'));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-active-node-index-bucket-slots'));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-active-node-index-node-bucket-slots'));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-active-node-index-overflow-counters'));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
@@ -2111,6 +2237,58 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
     device.dispatches,
     [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
+});
+
+test('Schroeder same-level mechanics can build an opt-in active-node index before resident backend', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeIndex: true,
+    activeNodeIndexBucketSlotCapacity: 4,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasActiveNodeList: Boolean(options.schroederActiveNodeList),
+        hasLawQueue: Boolean(options.schroederLawQueue)
+      };
+    }
+  });
+
+  assert.equal(result.activeNodeIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(result.activeNodeIndex.activeNodeIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA);
+  assert.equal(result.activeNodeIndex.status, 'schroeder-active-node-index-submitted');
+  assert.equal(result.activeNodeIndex.activeNodeCount, 3);
+  assert.equal(result.activeNodeIndex.bucketCount, 2);
+  assert.equal(result.activeNodeIndex.bucketSlotCapacity, 4);
+  assert.equal(result.activeNodeIndex.bucketSlotCount, 8);
+  assert.equal(result.activeNodeIndex.outputCompaction, 'bucketed-active-node-indirection-slots');
+  assert.equal(result.activeNodeIndex.capacityStatus, 'bucket-capacity-provisioned-fail-closed-on-overflow');
+  assert.equal(result.activeNodeIndex.indexCoverageStatus, 'tile-min-anchor-index-not-authoritative-overlap-pruning');
+  assert.equal(result.activeNodeIndex.retainedIndexBuffers, true);
+  assert.equal(result.activeNodeIndex.bucketSlotBufferByteLength, 8 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.activeNodeIndexStatus, 'schroeder-active-node-index-submitted');
+  assert.equal(
+    result.activeNodeIndexConsumerStatus,
+    'active-node-index-available-not-yet-authoritative-for-law-neighbor-traversal'
+  );
+  assert.equal(result.activeNodeConsumerStatus, 'active-node-list-forwarded-to-mls-mpm-p2g-g2p');
+  assert.equal(result.lawQueue, null);
+  assert.equal(result.lawQueueStatus, 'disabled-local-law-queue');
+  assert.equal(result.residentStep.hasActiveNodeList, true);
+  assert.equal(result.residentStep.hasLawQueue, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].schroederActiveNodeList.schema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(calls[0].schroederLawQueue, null);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
 });
 
 test('Schroeder same-level mechanics can run admitted state-delta merge before resident backend', async () => {

@@ -17,8 +17,10 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -41,6 +43,8 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA,
+  createSchroederFarForceDeltaFusionParamsArray,
   ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
@@ -70,6 +74,7 @@ import {
   runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu,
+  runSchroederFarForceDeltaFusionWebGpu,
   createSphReactionProductStageComputeTask,
   runSphReactionProductStageComputeTask,
   runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks,
@@ -773,6 +778,72 @@ function fakeSummaryDevice(summaryValues) {
     }
   };
 }
+
+test('Schroeder far-force delta fusion emits retained state without full readback', async () => {
+  const buffers = manualBuffers({ velocity: [0, 0, 0] });
+  const device = fakeSummaryDevice({
+    buffer: new ArrayBuffer(buffers.sphParticleState.state.byteLength),
+    byteOffset: 0,
+    byteLength: buffers.sphParticleState.state.byteLength
+  });
+  const sourceStateBuffer = device.createBuffer({
+    label: 'retained-g2p-state',
+    size: buffers.sphParticleState.state.byteLength,
+    usage: 0
+  });
+  const forceApplicationBuffer = device.createBuffer({
+    label: 'retained-schroeder-far-force-application',
+    size: SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const schroederFarAggregateForceApplication = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-force-application-submitted',
+    forceApplicationRowCount: 1,
+    forceApplicationStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length,
+    forceApplicationBuffer,
+    farAggregateForceApplicationAdmissionApproved: true,
+    stateMutationRequired: true
+  };
+
+  const params = createSchroederFarForceDeltaFusionParamsArray({
+    particleCount: 1,
+    forceApplicationRowCount: 1
+  });
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 32);
+  assert.equal(view.getUint32(0, true), 1);
+  assert.equal(view.getUint32(4, true), 8);
+  assert.equal(view.getUint32(8, true), 1);
+  assert.equal(view.getUint32(12, true), SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length);
+
+  const fusion = await runSchroederFarForceDeltaFusionWebGpu({
+    device,
+    sphParticleState: buffers.sphParticleState,
+    sourceStateBuffer,
+    schroederFarAggregateForceApplication,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(fusion.schema, ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA);
+  assert.equal(fusion.status, 'schroeder-far-force-delta-fusion-submitted');
+  assert.equal(fusion.readbackMode, 'no-full-readback');
+  assert.equal(fusion.fullReadbackPerformed, false);
+  assert.equal(fusion.normalHotLoopReadbackFree, true);
+  assert.equal(fusion.forceApplicationRowCount, 1);
+  assert.equal(fusion.stateBufferByteLength, buffers.sphParticleState.state.byteLength);
+  assert.ok(fusion.stateBuffer);
+  assert.equal(fusion.stateBuffer.label, 'ulg-schroeder-far-force-delta-fusion-state-out');
+  assert.equal(fusion.velocityDeltaFusionStatus, 'admitted-far-force-deltas-applied-to-sph-state-buffer');
+  assert.equal(fusion.stateMutationStatus, 'admitted-far-force-delta-fused-state-buffer-submitted');
+  assert.equal(fusion.stateAuthorityStatus, 'resident-state-manager-admitted-far-force-delta-state-owner');
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('fn apply_delta')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('schroeder-far-force-delta-fusion-readback')),
+    false
+  );
+});
 
 test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not requested', async () => {
   const buffers = manualBuffers();
@@ -1896,6 +1967,88 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
+});
+
+test('MLS-MPM resident step fuses admitted Schroeder far-force deltas into next resident state', async () => {
+  const { buffers, tracker, sourceThermoBuffer, options } = noFullReadbackResidentStepFixture();
+  const fusedStateBuffer = tracker.buffer('schroeder-far-force-fused-state');
+  const forceApplicationBuffer = tracker.buffer('schroeder-force-application');
+  const schroederFarAggregateForceApplication = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-force-application-submitted',
+    forceApplicationRowCount: 1,
+    forceApplicationStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length,
+    forceApplicationBuffer,
+    farAggregateForceApplicationAdmissionApproved: true,
+    stateMutationRequired: true
+  };
+  let fusionCalls = 0;
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    schroederFarAggregateForceApplication,
+    schroederFarForceDeltaFusionRunner: async (args) => {
+      fusionCalls += 1;
+      assert.equal(args.sourceStateBuffer.label, 'g2p-state-unread');
+      assert.equal(args.schroederFarAggregateForceApplication, schroederFarAggregateForceApplication);
+      assert.equal(args.readbackMode, 'no-full-readback');
+      return {
+        schema: ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'schroeder-far-force-delta-fusion-submitted',
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        fullReadbackPerformed: false,
+        particleCount: buffers.sphParticleState.particleCount,
+        forceApplicationRowCount: 1,
+        state: new Float32Array(),
+        stateBuffer: fusedStateBuffer,
+        outputStateBuffer: fusedStateBuffer,
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        retainedOutputParticleBuffers: true,
+        velocityDeltaFusionStatus: 'admitted-far-force-deltas-applied-to-sph-state-buffer',
+        stateMutationStatus: 'admitted-far-force-delta-fused-state-buffer-submitted',
+        stateAuthorityStatus: 'resident-state-manager-admitted-far-force-delta-state-owner',
+        destroyOutputParticleBuffers() {
+          fusedStateBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(fusionCalls, 1);
+  assert.equal(step.schroederFarForceDeltaFusionStatus, 'schroeder-far-force-delta-fusion-submitted');
+  assert.equal(step.schroederFarForceDeltaFusionVelocityDeltaStatus, 'admitted-far-force-deltas-applied-to-sph-state-buffer');
+  assert.equal(step.schroederFarForceDeltaFusionStateMutationStatus, 'admitted-far-force-delta-fused-state-buffer-submitted');
+  assert.equal(step.schroederFarForceDeltaFusionStateAuthorityStatus, 'resident-state-manager-admitted-far-force-delta-state-owner');
+  assert.equal(step.schroederFarForceDeltaFusionRowCount, 1);
+  assert.equal(step.schroederFarForceDeltaFusionStateBufferRetained, true);
+  assert.equal(step.schroederFarForceDeltaFusionStateBufferByteLength, buffers.sphParticleState.state.byteLength);
+  assert.equal(step.stageStatus.schroederFarForceDeltaFusion, 'schroeder-far-force-delta-fusion-submitted');
+  assert.equal(step.stageBackends.schroederFarForceDeltaFusion, 'webgpu');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, fusedStateBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'g2p-mechanics-unread');
+  assert.equal(step.nextParticleBufferMode, 'retained-schroeder-far-force-fused-state-and-g2p-mechanics-buffers');
+  assert.equal(step.nextParticleStateBufferByteLength, buffers.sphParticleState.state.byteLength);
+  assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
+  assert.equal(step.g2pStateBufferReplacedBySchroederFarForceDeltaFusion, true);
+  assert.equal(step.g2pStateBufferReplacedByThermalStep, false);
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage,
+    'schroeder-far-force-delta-fusion'
+  );
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.SCHROEDER_FAR_FORCE].ownerStage,
+    'schroeder-far-force-delta-fusion'
+  );
+  assert.equal(step.diagnostics.schroederFarForceDeltaFusionStatus, 'schroeder-far-force-delta-fusion-submitted');
+  assert.equal(
+    step.diagnostics.schroederFarForceDeltaFusionVelocityDeltaStatus,
+    'admitted-far-force-deltas-applied-to-sph-state-buffer'
+  );
+  assert.equal(step.diagnostics.schroederFarForceDeltaFusionStateBufferRetained, true);
+  assert.equal(step.diagnostics.schroederFarForceDeltaFusionReadbackMode, 'no-full-readback');
 });
 
 test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', async () => {

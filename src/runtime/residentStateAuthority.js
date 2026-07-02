@@ -11,6 +11,7 @@ export const RESIDENT_STATE_FAMILIES = Object.freeze({
   REACTION_PRODUCTS: 'reaction-products',
   GAS_PRESSURE: 'gas-pressure',
   PRESSURE_INTERFACE: 'pressure-interface',
+  SCHROEDER_FAR_FORCE: 'schroeder-far-force',
   RENDER_SURFACE: 'render-surface',
   DIAGNOSTICS: 'diagnostics'
 });
@@ -197,6 +198,8 @@ export function buildMlsMpmResidentStepAuthorityLedger({
   backend = null,
   stageStatus = {},
   stageBackends = {},
+  schroederFarForceDeltaFusion = null,
+  nextUsesSchroederFarForceState = false,
   thermalStep = null,
   reactionStep = null,
   reactionOutputParticleMutation = false,
@@ -219,6 +222,7 @@ export function buildMlsMpmResidentStepAuthorityLedger({
   const warnings = [];
   const thermalActive = Boolean(thermalStep);
   const reactionActive = Boolean(reactionStep);
+  const schroederFarForceActive = Boolean(schroederFarForceDeltaFusion);
   if (readbackMode === 'no-full-readback') {
     warnings.push('cpu-mirrors-stale-unless-admitted-readback');
   } else {
@@ -268,16 +272,42 @@ export function buildMlsMpmResidentStepAuthorityLedger({
 
   const particleOwner = nextUsesReactionState
     ? 'reaction-step'
-    : (nextUsesThermalState ? 'thermal-phase-step' : 'g2p');
+    : (nextUsesThermalState
+        ? 'thermal-phase-step'
+        : (nextUsesSchroederFarForceState ? 'schroeder-far-force-delta-fusion' : 'g2p'));
   add(RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS, particleOwner, {
     status: nextUsesReactionState
       ? 'reaction-output-buffers-drive-next-particles'
-      : (nextUsesThermalState ? 'thermal-state-buffer-drives-next-particles' : 'g2p-output-drives-next-particles'),
-    backend: nextUsesReactionState ? (stageBackends.reaction || backend) : (stageBackends.g2p || backend),
-    reads: nextUsesReactionState ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS] : [RESIDENT_STATE_FAMILIES.GRID_UPDATE],
+      : (nextUsesThermalState
+          ? 'thermal-state-buffer-drives-next-particles'
+          : (nextUsesSchroederFarForceState
+              ? 'schroeder-far-force-delta-fused-state-buffer-drives-next-particles'
+              : 'g2p-output-drives-next-particles')),
+    backend: nextUsesReactionState
+      ? (stageBackends.reaction || backend)
+      : (nextUsesThermalState
+          ? (stageBackends.thermal || backend)
+          : (nextUsesSchroederFarForceState
+              ? (stageBackends.schroederFarForceDeltaFusion || backend)
+              : (stageBackends.g2p || backend))),
+    reads: nextUsesReactionState
+      ? [RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS]
+      : (nextUsesSchroederFarForceState
+          ? [RESIDENT_STATE_FAMILIES.GRID_UPDATE, RESIDENT_STATE_FAMILIES.SCHROEDER_FAR_FORCE]
+          : [RESIDENT_STATE_FAMILIES.GRID_UPDATE]),
     writes: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS],
     nextConsumers: ['next-resident-step']
   });
+
+  if (schroederFarForceActive) {
+    add(RESIDENT_STATE_FAMILIES.SCHROEDER_FAR_FORCE, 'schroeder-far-force-delta-fusion', {
+      status: stageStatus.schroederFarForceDeltaFusion || 'schroeder-far-force-delta-fusion-observed',
+      backend: stageBackends.schroederFarForceDeltaFusion || backend,
+      reads: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS],
+      writes: [RESIDENT_STATE_FAMILIES.SCHROEDER_FAR_FORCE],
+      nextConsumers: ['particle-kinematics', 'diagnostics']
+    });
+  }
 
   const mechanicsOwner = nextUsesReactionMechanics
     ? 'reaction-step'

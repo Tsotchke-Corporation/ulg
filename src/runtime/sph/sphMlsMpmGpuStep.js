@@ -1,5 +1,6 @@
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
@@ -14,6 +15,8 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -118,6 +121,11 @@ const STEP_SCOPE = 'mls-mpm-resident-step-p2g-grid-update-g2p';
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const DEFAULT_GRAVITY_M_PER_S2 = Object.freeze([0, -9.80665, 0]);
 const DEFAULT_CFL_FACTOR = 0.6;
+export const ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA =
+  'peercompute.ulg.mls-mpm-schroeder-far-force-delta-fusion-execution.v0';
+export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS =
+  SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_FORCE_DELTA_FUSION_WORKGROUP_SIZE = 64;
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP = 'every-step';
@@ -799,6 +807,301 @@ function writeGpuBuffer(device, label, data, usage = GPU_BUFFER_USAGE.STORAGE | 
   const buffer = device.createBuffer({ label, size: byteLength, usage });
   if (data?.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+export function createSchroederFarForceDeltaFusionParamsArray({
+  particleCount = 0,
+  stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
+  forceApplicationRowCount = 0,
+  forceApplicationStrideFloats = SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(stateStrideFloats, SPH_GPU_PARTICLE_STATE_FLOATS))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(forceApplicationRowCount, 0))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    forceApplicationStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS
+  ))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
+const schroederFarForceDeltaFusionWgsl = `
+struct SchroederFarForceDeltaFusionParams {
+  particle_count: u32,
+  state_stride: u32,
+  force_application_row_count: u32,
+  force_application_stride: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> force_application_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output_state_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederFarForceDeltaFusionParams;
+
+const DEFAULT_STATE_STRIDE: u32 = 8u;
+const DEFAULT_FORCE_APPLICATION_STRIDE: u32 = 32u;
+
+@compute @workgroup_size(64)
+fn copy_state(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  let state_stride = max(params.state_stride, DEFAULT_STATE_STRIDE);
+  let offset = particle_index * state_stride;
+  for (var component = 0u; component < state_stride; component = component + 1u) {
+    output_state_rows[offset + component] = source_state_rows[offset + component];
+  }
+}
+
+@compute @workgroup_size(64)
+fn apply_delta(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.force_application_row_count) {
+    return;
+  }
+  let state_stride = max(params.state_stride, DEFAULT_STATE_STRIDE);
+  let force_stride = max(params.force_application_stride, DEFAULT_FORCE_APPLICATION_STRIDE);
+  let force_offset = row_index * force_stride;
+  let source_particle_f = force_application_rows[force_offset + 0u];
+  let source_particle = u32(max(source_particle_f, 0.0));
+  if (source_particle >= params.particle_count) {
+    return;
+  }
+  let status = force_application_rows[force_offset + 29u];
+  let admitted = force_application_rows[force_offset + 24u] > 0.0;
+  let mutation_required = force_application_rows[force_offset + 25u] > 0.0;
+  let full_particle_readback_required = force_application_rows[force_offset + 26u] > 0.0;
+  if (!(admitted && mutation_required && !full_particle_readback_required && status > 0.0 && status < 32.0)) {
+    return;
+  }
+  let state_offset = source_particle * state_stride;
+  output_state_rows[state_offset + 4u] = output_state_rows[state_offset + 4u] + force_application_rows[force_offset + 8u];
+  output_state_rows[state_offset + 5u] = output_state_rows[state_offset + 5u] + force_application_rows[force_offset + 9u];
+  output_state_rows[state_offset + 6u] = output_state_rows[state_offset + 6u] + force_application_rows[force_offset + 10u];
+}
+`;
+
+function assertSchroederFarAggregateForceApplicationInput(schroederFarAggregateForceApplication) {
+  if (
+    schroederFarAggregateForceApplication?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA
+    && schroederFarAggregateForceApplication?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA
+  ) {
+    throw new TypeError('Schroeder far-force delta fusion requires a Schroeder far-force application artifact');
+  }
+  if (schroederFarAggregateForceApplication.farAggregateForceApplicationAdmissionApproved !== true) {
+    throw new Error('Schroeder far-force delta fusion requires admitted far-force application rows');
+  }
+  if (schroederFarAggregateForceApplication.stateMutationRequired !== true) {
+    throw new Error('Schroeder far-force delta fusion requires mutation-ready far-force application rows');
+  }
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    schroederFarAggregateForceApplication.forceApplicationRowCount,
+    0
+  )));
+  if (rowCount <= 0) {
+    throw new RangeError('Schroeder far-force delta fusion requires at least one force-application row');
+  }
+  const stride = Math.max(1, Math.round(finiteNumber(
+    schroederFarAggregateForceApplication.forceApplicationStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS
+  )));
+  if (stride !== SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS) {
+    throw new RangeError('Schroeder far-force delta fusion requires the current force-application row layout');
+  }
+}
+
+export async function runSchroederFarForceDeltaFusionWebGpu({
+  device,
+  sphParticleState,
+  sourceStateBuffer = null,
+  schroederFarAggregateForceApplication = null,
+  retainOutputParticleBuffers = true,
+  readbackMode = NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederFarForceDeltaFusionWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('Schroeder far-force delta fusion requires a packed SPH GPU particle buffer');
+  }
+  assertSchroederFarAggregateForceApplicationInput(schroederFarAggregateForceApplication);
+  const particleCount = Math.max(0, Math.round(finiteNumber(sphParticleState.particleCount, 0)));
+  if (particleCount !== sphParticleState.particleCount) {
+    throw new RangeError('Schroeder far-force delta fusion requires an integral SPH particle count');
+  }
+  const forceApplicationRowCount = Math.max(0, Math.round(finiteNumber(
+    schroederFarAggregateForceApplication.forceApplicationRowCount,
+    0
+  )));
+  const stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS;
+  const stateByteLength = Math.max(4, particleCount * stateStrideFloats * Float32Array.BYTES_PER_ELEMENT);
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const borrowedStateBuffer = sourceStateBuffer || sphParticleState.stateBuffer || null;
+  const sourceStateRows = sphParticleState.state instanceof Float32Array ? sphParticleState.state : null;
+  if (!borrowedStateBuffer && !(sourceStateRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-force delta fusion requires retained/uploaded SPH state or explicit state rows');
+  }
+  if (sourceStateRows && sourceStateRows.length < particleCount * stateStrideFloats) {
+    throw new RangeError('Schroeder far-force delta fusion received too few SPH state rows');
+  }
+  const borrowedForceApplicationBuffer = schroederFarAggregateForceApplication.forceApplicationBuffer || null;
+  const forceApplicationRows = schroederFarAggregateForceApplication.forceApplicationRows instanceof Float32Array
+    ? schroederFarAggregateForceApplication.forceApplicationRows
+    : null;
+  if (!borrowedForceApplicationBuffer && !(forceApplicationRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-force delta fusion requires retained force-application rows or explicit rows');
+  }
+
+  const stateBuffer = borrowedStateBuffer
+    || writeGpuBuffer(device, 'ulg-schroeder-far-force-delta-fusion-state-in', sourceStateRows);
+  const forceApplicationBuffer = borrowedForceApplicationBuffer
+    || writeGpuBuffer(device, 'ulg-schroeder-far-force-delta-fusion-application-in', forceApplicationRows);
+  const outputStateBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-force-delta-fusion-state-out',
+    size: stateByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsArray = createSchroederFarForceDeltaFusionParamsArray({
+    particleCount,
+    stateStrideFloats,
+    forceApplicationRowCount,
+    forceApplicationStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS
+  });
+  const paramsBuffer = writeGpuBuffer(
+    device,
+    'ulg-schroeder-far-force-delta-fusion-params',
+    paramsArray,
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-far-force-delta-fusion-readback',
+      size: stateByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedOutputStateBuffer = false;
+  try {
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ];
+    const { pipeline: copyPipeline, bindGroupLayout: copyLayout, cacheStatus: copyCacheStatus } =
+      createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-schroeder-far-force-delta-fusion-copy.v0',
+        label: 'ulg-schroeder-far-force-delta-fusion-copy',
+        code: schroederFarForceDeltaFusionWgsl,
+        entryPoint: 'copy_state',
+        bindings
+      });
+    const { pipeline: applyPipeline, bindGroupLayout: applyLayout, cacheStatus: applyCacheStatus } =
+      createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-schroeder-far-force-delta-fusion-apply.v0',
+        label: 'ulg-schroeder-far-force-delta-fusion-apply',
+        code: schroederFarForceDeltaFusionWgsl,
+        entryPoint: 'apply_delta',
+        bindings
+      });
+    const entries = [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: forceApplicationBuffer } },
+      { binding: 2, resource: { buffer: outputStateBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ];
+    const copyBindGroup = device.createBindGroup({ layout: copyLayout, entries });
+    const applyBindGroup = device.createBindGroup({ layout: applyLayout, entries });
+    const encoder = device.createCommandEncoder();
+    const copyPass = encoder.beginComputePass();
+    copyPass.setPipeline(copyPipeline);
+    copyPass.setBindGroup(0, copyBindGroup);
+    copyPass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(particleCount / SCHROEDER_FAR_FORCE_DELTA_FUSION_WORKGROUP_SIZE)
+    ));
+    copyPass.end();
+    const applyPass = encoder.beginComputePass();
+    applyPass.setPipeline(applyPipeline);
+    applyPass.setBindGroup(0, applyBindGroup);
+    applyPass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(forceApplicationRowCount / SCHROEDER_FAR_FORCE_DELTA_FUSION_WORKGROUP_SIZE)
+    ));
+    applyPass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(outputStateBuffer, 0, readBuffer, 0, stateByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let state = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      state = new Float32Array(readBuffer.getMappedRange()).slice(0, particleCount * stateStrideFloats);
+      readBuffer.unmap();
+    }
+
+    const result = {
+      schema: ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA,
+      status: 'schroeder-far-force-delta-fusion-submitted',
+      backend: 'webgpu',
+      sourceFarAggregateForceApplicationSchema: schroederFarAggregateForceApplication.schema,
+      sourceFarAggregateForceApplicationStatus: schroederFarAggregateForceApplication.status ?? null,
+      particleCount,
+      stateStrideFloats,
+      forceApplicationRowCount,
+      forceApplicationStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS,
+      stateBuffer: outputStateBuffer,
+      outputStateBuffer,
+      stateBufferByteLength: stateByteLength,
+      retainedOutputParticleBuffers: Boolean(retainOutputParticleBuffers),
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      state,
+      pipelineCacheStatus: copyCacheStatus === applyCacheStatus ? copyCacheStatus : 'mixed-cache-status',
+      velocityDeltaFusionStatus: 'admitted-far-force-deltas-applied-to-sph-state-buffer',
+      stateMutationStatus: 'admitted-far-force-delta-fused-state-buffer-submitted',
+      stateAuthorityStatus: 'resident-state-manager-admitted-far-force-delta-state-owner',
+      forceApplicationRowsConsumed: true,
+      sourceStateBufferRetained: Boolean(sourceStateBuffer || borrowedStateBuffer),
+      sourceForceApplicationBufferRetained: Boolean(borrowedForceApplicationBuffer),
+      destroyOutputParticleBuffers() {
+        outputStateBuffer.destroy?.();
+      },
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    returnedOutputStateBuffer = true;
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedStateBuffer) stateBuffer.destroy?.();
+      if (!borrowedForceApplicationBuffer) forceApplicationBuffer.destroy?.();
+      if (!retainOutputParticleBuffers || !returnedOutputStateBuffer) outputStateBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
 }
 
 function createComputeDispatchIndirectArgs(workgroupCountX, workgroupCountY = 1, workgroupCountZ = 1) {
@@ -4093,6 +4396,7 @@ export function compactMlsMpmResidentStepDiagnostics({
   p2gGridProjection,
   gridUpdate,
   g2pReconstruction,
+  schroederFarForceDeltaFusion = null,
   reactionStep = null,
   compactGpuSummary = null,
   readbackMode = FULL_READBACK_MODE,
@@ -4113,6 +4417,21 @@ export function compactMlsMpmResidentStepDiagnostics({
     compactGpuSummary,
     readbackMode
   });
+  const schroederFarForceDiagnostics = {
+    schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
+    schroederFarForceDeltaFusionVelocityDeltaStatus:
+      schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
+    schroederFarForceDeltaFusionStateMutationStatus:
+      schroederFarForceDeltaFusion?.stateMutationStatus ?? null,
+    schroederFarForceDeltaFusionStateAuthorityStatus:
+      schroederFarForceDeltaFusion?.stateAuthorityStatus ?? null,
+    schroederFarForceDeltaFusionRowCount:
+      schroederFarForceDeltaFusion?.forceApplicationRowCount ?? 0,
+    schroederFarForceDeltaFusionStateBufferRetained:
+      Boolean(schroederFarForceDeltaFusion?.stateBuffer || schroederFarForceDeltaFusion?.outputStateBuffer),
+    schroederFarForceDeltaFusionReadbackMode:
+      schroederFarForceDeltaFusion?.readbackMode ?? null
+  };
   if (compactGpuSummary?.compactGpuSummaryAvailable) {
     return {
       particleCount: compactGpuSummary.particleCount,
@@ -4165,6 +4484,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
       activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary.activeGridDispatchPlan?.metadataBufferRetained ?? false,
       activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
+      ...schroederFarForceDiagnostics,
       ...topologyDiagnostics,
       ...particleScaleStability,
       ...pressureInterfaceGridForce,
@@ -4227,6 +4547,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
       activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
       activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
+      ...schroederFarForceDiagnostics,
       ...topologyDiagnostics,
       ...particleScaleStability,
       ...pressureInterfaceGridForce,
@@ -4241,7 +4562,9 @@ export function compactMlsMpmResidentStepDiagnostics({
   const particleSummary = summarizeParticles({
     sourceState: sphParticleState.state,
     sourceMechanics: mlsMpmParticleState.mechanics,
-    nextState: g2pReconstruction?.state,
+    nextState: schroederFarForceDeltaFusion?.state?.length
+      ? schroederFarForceDeltaFusion.state
+      : g2pReconstruction?.state,
     nextMechanics: g2pReconstruction?.mechanics,
     particleCount: sphParticleState.particleCount
   });
@@ -4281,6 +4604,7 @@ export function compactMlsMpmResidentStepDiagnostics({
     activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
     activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
     activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
+    ...schroederFarForceDiagnostics,
     ...topologyDiagnostics,
     ...particleScaleStability,
     ...pressureInterfaceGridForce,
@@ -4318,6 +4642,15 @@ function retainedG2pOutputBuffers(g2pReconstruction) {
     mechanicsBuffer: source?.mechanicsBuffer || null,
     stateBufferByteLength: source?.stateBufferByteLength || 0,
     mechanicsBufferByteLength: source?.mechanicsBufferByteLength || 0,
+    destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null
+  };
+}
+
+function retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion) {
+  const source = schroederFarForceDeltaFusion?.result || schroederFarForceDeltaFusion;
+  return {
+    stateBuffer: source?.stateBuffer || source?.outputStateBuffer || null,
+    stateBufferByteLength: source?.stateBufferByteLength || 0,
     destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null
   };
 }
@@ -12912,6 +13245,7 @@ function buildNextParticleUploads({
   mlsMpmParticleState,
   sphParticleUpload,
   g2pReconstruction,
+  schroederFarForceDeltaFusion = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -12920,12 +13254,14 @@ function buildNextParticleUploads({
   particlePingPong
 }) {
   const retained = retainedG2pOutputBuffers(g2pReconstruction);
+  const schroederFarForce = retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
   const thermal = retainedThermalOutputBuffers(thermalStep);
   const reaction = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
   const stateBuffer = (reactionMutatesParticles ? reaction.stateBuffer : null)
     || thermal.stateBuffer
+    || schroederFarForce.stateBuffer
     || retained.stateBuffer;
   const thermoBuffer = (reactionMutatesParticles ? reaction.thermoBuffer : null)
     || thermal.thermoBuffer
@@ -12988,6 +13324,7 @@ async function residentStepEnvelope({
   p2gGridProjection,
   gridUpdate,
   g2pReconstruction,
+  schroederFarForceDeltaFusion = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -13005,16 +13342,20 @@ async function residentStepEnvelope({
   sidecarFusionPlan = null,
   stageTiming = null
 }) {
-  const optionalStages = [thermalStep, reactionStep, mechanicsRefreshStep].filter(Boolean).map((stage) => stage?.result || stage);
+  const optionalStages = [schroederFarForceDeltaFusion, thermalStep, reactionStep, mechanicsRefreshStep]
+    .filter(Boolean)
+    .map((stage) => stage?.result || stage);
   const stages = [p2gGridProjection, gridUpdate, g2pReconstruction, ...optionalStages];
   const backend = executionBackend(stages);
   const stageBuffersRetained = hasRetainedStageBuffers({ p2gGridProjection, gridUpdate });
   const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+  const schroederFarForceOutput = retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
   const thermalPhaseTransition = thermalPhaseTransitionDiagnostics(thermalStep);
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const reactionOutputParticleMutation = reactionOutputMutatesParticles(reactionStep);
+  const nextUsesSchroederFarForceState = Boolean(schroederFarForceOutput.stateBuffer);
   const nextUsesReactionState = Boolean(reactionOutputParticleMutation && reactionOutput.stateBuffer);
   const nextUsesReactionThermo = Boolean(reactionOutputParticleMutation && reactionOutput.thermoBuffer);
   const nextUsesReactionMechanics = Boolean(reactionOutputParticleMutation && reactionOutput.mechanicsBuffer);
@@ -13049,17 +13390,20 @@ async function residentStepEnvelope({
     mergedResidentProductMass: residentProductMass
   });
   const g2pOutputBuffersRetained = Boolean(g2pOutput.stateBuffer && g2pOutput.mechanicsBuffer);
+  const schroederFarForceOutputRequired = Boolean(schroederFarForceDeltaFusion);
   const thermalOutputRequired = Boolean(thermalStep);
   const reactionOutputRequired = Boolean(reactionStep);
   const mechanicsRefreshOutputRequired = Boolean(mechanicsRefreshStep);
   const thermalOutputBuffersRetained = thermalOutputRequired && Boolean(thermalOutput.stateBuffer && thermalOutput.thermoBuffer);
   const reactionOutputBuffersRetained = reactionOutputRequired && Boolean(reactionOutput.stateBuffer && reactionOutput.thermoBuffer && reactionOutput.mechanicsBuffer);
   const mechanicsRefreshOutputBuffersRetained = mechanicsRefreshOutputRequired && Boolean(mechanicsRefreshOutput.mechanicsBuffer);
+  const schroederFarForceOutputSatisfied = !schroederFarForceOutputRequired || Boolean(schroederFarForceOutput.stateBuffer);
   const thermalOutputSatisfied = !thermalOutputRequired || thermalOutputBuffersRetained;
   const reactionOutputSatisfied = !reactionOutputRequired || reactionOutputBuffersRetained;
   const mechanicsRefreshOutputSatisfied = !mechanicsRefreshOutputRequired || mechanicsRefreshOutputBuffersRetained;
   const residentBuffersRetained = stageBuffersRetained
     && g2pOutputBuffersRetained
+    && schroederFarForceOutputSatisfied
     && thermalOutputSatisfied
     && reactionOutputSatisfied
     && mechanicsRefreshOutputSatisfied;
@@ -13086,6 +13430,7 @@ async function residentStepEnvelope({
     mlsMpmParticleState,
     sphParticleUpload,
     g2pReconstruction,
+    schroederFarForceDeltaFusion,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -13105,6 +13450,7 @@ async function residentStepEnvelope({
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    schroederFarForceDeltaFusion,
     thermalStep,
     reactionStep,
     compactGpuSummary,
@@ -13115,6 +13461,7 @@ async function residentStepEnvelope({
     p2g: stageStatus(p2gGridProjection),
     gridUpdate: stageStatus(gridUpdate),
     g2p: stageStatus(g2pReconstruction),
+    schroederFarForceDeltaFusion: stageStatus(schroederFarForceDeltaFusion?.result || schroederFarForceDeltaFusion),
     thermal: stageStatus(thermalStep?.result || thermalStep),
     reaction: stageStatus(reactionStep?.result || reactionStep),
     mechanicsRefresh: stageStatus(mechanicsRefreshStep?.result || mechanicsRefreshStep)
@@ -13123,6 +13470,8 @@ async function residentStepEnvelope({
     p2g: p2gGridProjection?.backend || null,
     gridUpdate: gridUpdate?.backend || null,
     g2p: g2pReconstruction?.backend || null,
+    schroederFarForceDeltaFusion:
+      schroederFarForceDeltaFusion?.backend || schroederFarForceDeltaFusion?.result?.backend || null,
     thermal: thermalStep?.backend || thermalStep?.result?.backend || null,
     reaction: reactionStep?.backend || reactionStep?.result?.backend || null,
     mechanicsRefresh: mechanicsRefreshStep?.backend || mechanicsRefreshStep?.result?.backend || null
@@ -13147,6 +13496,8 @@ async function residentStepEnvelope({
     backend,
     stageStatus: stageStatusSummary,
     stageBackends: stageBackendSummary,
+    schroederFarForceDeltaFusion,
+    nextUsesSchroederFarForceState,
     thermalStep,
     reactionStep,
     reactionOutputParticleMutation,
@@ -13216,13 +13567,33 @@ async function residentStepEnvelope({
     cflFactor,
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
-    state: (reactionStep?.state?.length ? reactionStep.state : (thermalStep?.state?.length ? thermalStep.state : g2pReconstruction?.state)) ?? new Float32Array(),
+    state: (reactionStep?.state?.length
+      ? reactionStep.state
+      : (thermalStep?.state?.length
+          ? thermalStep.state
+          : (schroederFarForceDeltaFusion?.state?.length
+              ? schroederFarForceDeltaFusion.state
+              : g2pReconstruction?.state))) ?? new Float32Array(),
     mechanics: (reactionStep?.mechanics?.length
       ? reactionStep.mechanics
       : (mechanicsRefreshStep?.mechanics?.length ? mechanicsRefreshStep.mechanics : g2pReconstruction?.mechanics)) ?? new Float32Array(),
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    schroederFarForceDeltaFusion,
+    schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
+    schroederFarForceDeltaFusionVelocityDeltaStatus:
+      schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
+    schroederFarForceDeltaFusionStateMutationStatus:
+      schroederFarForceDeltaFusion?.stateMutationStatus ?? null,
+    schroederFarForceDeltaFusionStateAuthorityStatus:
+      schroederFarForceDeltaFusion?.stateAuthorityStatus ?? null,
+    schroederFarForceDeltaFusionRowCount:
+      schroederFarForceDeltaFusion?.forceApplicationRowCount ?? 0,
+    schroederFarForceDeltaFusionStateBufferRetained:
+      Boolean(schroederFarForceDeltaFusion?.stateBuffer || schroederFarForceDeltaFusion?.outputStateBuffer),
+    schroederFarForceDeltaFusionStateBufferByteLength:
+      schroederFarForceDeltaFusion?.stateBufferByteLength ?? 0,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -13353,10 +13724,13 @@ async function residentStepEnvelope({
           ? 'retained-reaction-output-buffers'
           : (thermalOutput.stateBuffer
               ? (nextUsesMechanicsRefresh ? 'retained-thermal-output-and-refreshed-mechanics-buffers' : 'retained-thermal-output-and-g2p-mechanics-buffers')
-              : 'retained-g2p-output-buffers'))
+              : (schroederFarForceOutput.stateBuffer
+                  ? 'retained-schroeder-far-force-fused-state-and-g2p-mechanics-buffers'
+                  : 'retained-g2p-output-buffers')))
       : 'not-available',
     nextParticleStateBufferByteLength: (nextUsesReactionState ? reactionOutput.stateBufferByteLength : 0)
       || (nextUsesThermalState ? thermalOutput.stateBufferByteLength : 0)
+      || (nextUsesSchroederFarForceState ? schroederFarForceOutput.stateBufferByteLength : 0)
       || g2pOutput.stateBufferByteLength,
     nextParticleThermoBufferByteLength: (nextUsesReactionThermo ? reactionOutput.thermoBufferByteLength : 0) || thermalOutput.thermoBufferByteLength,
     nextParticleMechanicsBufferByteLength: (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
@@ -13375,6 +13749,7 @@ async function residentStepEnvelope({
         : 'thermal-state-buffer-skipped-no-retained-output')
       : null,
     thermalOutputReplacedByReactionStep: nextUsesReactionState,
+    g2pStateBufferReplacedBySchroederFarForceDeltaFusion: nextUsesSchroederFarForceState,
     g2pMechanicsBufferReplacedByReactionStep: nextUsesReactionMechanics,
     reactionOutputParticleMutation,
     reactionOutputBufferHandoffStatus: reactionStep
@@ -13410,6 +13785,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederActiveNodeList = null,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
+  schroederFarAggregateForceApplication = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -13440,6 +13816,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   mechanicsMaterialTable = null,
   mechanicsRefreshRunner = runMlsMpmMechanicsRefreshWithOptionalWebGpu,
   mechanicsRefreshOptions = {},
+  schroederFarForceDeltaFusionRunner = runSchroederFarForceDeltaFusionWebGpu,
   reactionTable = null,
   reactionStepRunner = runSphReactionStepWebGpu,
   reactionStepOptions = {},
@@ -13683,6 +14060,29 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     }
   }));
 
+  let schroederFarForceDeltaFusion = null;
+  stageMs.schroederFarForceDeltaFusion = 0;
+  if (
+    schroederFarAggregateForceApplication
+    && typeof schroederFarForceDeltaFusionRunner === 'function'
+    && g2pReconstruction?.backend === 'webgpu'
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+  ) {
+    const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+    if (g2pOutput.stateBuffer) {
+      schroederFarForceDeltaFusion = await timedStage('schroederFarForceDeltaFusion', () => (
+        schroederFarForceDeltaFusionRunner({
+          device: resolvedDevice,
+          sphParticleState,
+          sourceStateBuffer: g2pOutput.stateBuffer,
+          schroederFarAggregateForceApplication,
+          retainOutputParticleBuffers: true,
+          readbackMode: requestedReadbackMode
+        })
+      ));
+    }
+  }
+
   let thermalStep = null;
   stageMs.thermalStep = 0;
   if (
@@ -13692,13 +14092,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     && sphParticleUpload?.status === 'webgpu-uploaded'
   ) {
     const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
-    if (g2pOutput.stateBuffer) {
+    const schroederFarForceOutput =
+      retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
+    const sourceStateBuffer = schroederFarForceOutput.stateBuffer || g2pOutput.stateBuffer;
+    if (sourceStateBuffer) {
       thermalStep = await timedStage('thermalStep', () => thermalStepRunner({
         device: resolvedDevice,
         sphParticleState,
         thermalMaterialTable,
         sphParticleUpload,
-        sourceStateBuffer: g2pOutput.stateBuffer,
+        sourceStateBuffer,
         sourceThermoBuffer: sphParticleUpload.thermoBuffer,
         boxDimsM: dims,
         dtS: dtSeconds,
@@ -13719,8 +14122,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     && sphParticleUpload?.status === 'webgpu-uploaded'
   ) {
     const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+    const schroederFarForceOutput =
+      retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
     const thermalOutput = retainedThermalOutputBuffers(thermalStep);
-    const sourceStateBuffer = thermalOutput.stateBuffer || g2pOutput.stateBuffer;
+    const sourceStateBuffer =
+      thermalOutput.stateBuffer
+      || schroederFarForceOutput.stateBuffer
+      || g2pOutput.stateBuffer;
     const sourceThermoBuffer = thermalOutput.thermoBuffer || sphParticleUpload.thermoBuffer;
     if (sourceStateBuffer && sourceThermoBuffer && g2pOutput.mechanicsBuffer) {
       const noFullReactionSummaryDefaults = requestedReadbackMode === NO_FULL_READBACK_MODE
@@ -13766,12 +14174,15 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     && sphParticleUpload?.status === 'webgpu-uploaded'
   ) {
     const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+    const schroederFarForceOutput =
+      retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
     const thermalOutput = retainedThermalOutputBuffers(thermalStep);
     const reactionOutput = retainedReactionOutputBuffers(reactionStep);
     const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
     const reactionHasMechanicsAuthority = Boolean(reactionMutatesParticles && reactionOutput.mechanicsBuffer);
     const sourceStateBuffer = (reactionMutatesParticles ? reactionOutput.stateBuffer : null)
       || thermalOutput.stateBuffer
+      || schroederFarForceOutput.stateBuffer
       || g2pOutput.stateBuffer;
     const sourceThermoBuffer = (reactionMutatesParticles ? reactionOutput.thermoBuffer : null)
       || thermalOutput.thermoBuffer
@@ -13948,6 +14359,20 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    schroederFarForceDeltaFusion,
+    schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
+    schroederFarForceDeltaFusionVelocityDeltaStatus:
+      schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
+    schroederFarForceDeltaFusionStateMutationStatus:
+      schroederFarForceDeltaFusion?.stateMutationStatus ?? null,
+    schroederFarForceDeltaFusionStateAuthorityStatus:
+      schroederFarForceDeltaFusion?.stateAuthorityStatus ?? null,
+    schroederFarForceDeltaFusionRowCount:
+      schroederFarForceDeltaFusion?.forceApplicationRowCount ?? 0,
+    schroederFarForceDeltaFusionStateBufferRetained:
+      Boolean(schroederFarForceDeltaFusion?.stateBuffer || schroederFarForceDeltaFusion?.outputStateBuffer),
+    schroederFarForceDeltaFusionStateBufferByteLength:
+      schroederFarForceDeltaFusion?.stateBufferByteLength ?? 0,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -14403,6 +14828,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     const usedThermoBuffer = step.nextParticleUploads.sphParticleUpload?.thermoBuffer || null;
     const usedMechanicsBuffer = step.nextParticleUploads.mlsMpmParticleUpload?.mechanicsBuffer || null;
     const g2pOutput = retainedG2pOutputBuffers(step.g2pReconstruction);
+    const schroederFarForceOutput =
+      retainedSchroederFarForceDeltaFusionOutputBuffers(step.schroederFarForceDeltaFusion);
     const thermalOutput = retainedThermalOutputBuffers(step.thermalStep);
     const reactionOutput = retainedReactionOutputBuffers(step.reactionStep);
     const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(step.mechanicsRefreshStep);
@@ -14410,6 +14837,12 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     destroySphUploadUnlessPreserved(step.nextParticleUploads.sphParticleUpload);
     destroyMlsUploadUnlessPreserved(step.nextParticleUploads.mlsMpmParticleUpload);
     if (g2pOutput.stateBuffer && g2pOutput.stateBuffer !== usedStateBuffer) destroyUnlessPreserved(g2pOutput.stateBuffer);
+    if (
+      schroederFarForceOutput.stateBuffer
+      && schroederFarForceOutput.stateBuffer !== usedStateBuffer
+    ) {
+      destroyUnlessPreserved(schroederFarForceOutput.stateBuffer);
+    }
     if (g2pOutput.mechanicsBuffer && g2pOutput.mechanicsBuffer !== usedMechanicsBuffer) destroyUnlessPreserved(g2pOutput.mechanicsBuffer);
     if (thermalOutput.stateBuffer && thermalOutput.stateBuffer !== usedStateBuffer) destroyUnlessPreserved(thermalOutput.stateBuffer);
     if (thermalOutput.thermoBuffer && thermalOutput.thermoBuffer !== usedThermoBuffer) destroyUnlessPreserved(thermalOutput.thermoBuffer);
@@ -14423,6 +14856,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       destroyInputResidentProductMass,
       preserveBuffers
     });
+  } else if (step?.schroederFarForceDeltaFusion?.destroyOutputParticleBuffers) {
+    step.schroederFarForceDeltaFusion.destroyOutputParticleBuffers();
   } else if (step?.g2pReconstruction?.destroyOutputParticleBuffers) {
     step.g2pReconstruction.destroyOutputParticleBuffers();
   } else if (step?.reactionStep?.destroyOutputParticleBuffers) {
@@ -14449,6 +14884,8 @@ export function cloneSphParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   const reactionResult = step.reactionStep?.result || step.reactionStep;
   const thermalResult = step.thermalStep?.result || step.thermalStep;
+  const schroederFarForceResult =
+    step.schroederFarForceDeltaFusion?.result || step.schroederFarForceDeltaFusion;
   const activeGridDispatch = step.stageTiming?.activeGridDispatch
     || step.fusedResidentSequence?.activeGridDispatch
     || step.gridUpdate?.activeGridDispatch
@@ -14464,7 +14901,13 @@ export function cloneSphParticleStateForNext(source, step) {
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    state: noFullReadback ? source.state : (reactionResult?.state?.length ? reactionResult.state : (thermalResult?.state?.length ? thermalResult.state : step.state)),
+    state: noFullReadback
+      ? source.state
+      : (reactionResult?.state?.length
+          ? reactionResult.state
+          : (thermalResult?.state?.length
+              ? thermalResult.state
+              : (schroederFarForceResult?.state?.length ? schroederFarForceResult.state : step.state))),
     cpuStateStale: noFullReadback,
     thermo: noFullReadback ? source.thermo : (reactionResult?.thermo?.length ? reactionResult.thermo : (thermalResult?.thermo?.length ? thermalResult.thermo : source.thermo)),
     residentPositionBoundsM: continuationBounds.boundsM,

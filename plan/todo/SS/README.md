@@ -218,13 +218,19 @@ Landed checkpoints:
     acceleration/potential summaries with explicit error-bound telemetry,
     forwards descriptor-only refs through same-level/portable-summary paths, and
     keeps force application as a future StateManager-admitted mutation.
+57. `70e21ce` adds compact GPU far-aggregate diagnostic summaries over retained
+    force-summary rows. The pass reports source/candidate activity, overflow,
+    blocked work, opening-ratio pressure, error-bound pressure, max
+    acceleration/potential, and descriptor-only portable refs with compact
+    summary readback only and no state mutation.
 
 Next implementation queue:
 
-1. Continue Slice 7 by adding law-specific far-aggregate diagnostics and then a
-   StateManager-admitted force-application path only after the error-bound
-   contract is visible and accepted.
+1. Continue Slice 7 by defining the StateManager-admitted far-force application
+   contract: conservation/energy policy, admission inputs from compact
+   diagnostics, and an explicit mutation target.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
-3. Keep render/distribution descriptor-only and no-full-readback while far-field
-   candidates become replayable PeerCompute artifacts.
+3. Keep render/distribution descriptor-only and avoid full particle readback
+   while far-field candidates, force summaries, and diagnostics become
+   replayable PeerCompute artifacts.

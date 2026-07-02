@@ -1,5 +1,43 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Far-Aggregate Diagnostic Summaries
+
+Status:
+
+- Added `peercompute.ulg.schroeder-far-aggregate-diagnostic-summary.v0` and
+  execution schema with a 32-float compact retained row layout.
+- Added a GPU-first WebGPU reducer over
+  `schroeder-far-aggregate-force-summary` rows. It emits one compact summary
+  row for active/empty source counts, accepted/active candidates, overflow,
+  blocked work, opening-ratio pressure, error-bound pressure, max
+  acceleration/potential, aggregate mass, and explicit
+  `stateMutationRequired=false` / `fullParticleReadbackRequired=false` fields.
+- Same-level SS orchestration now runs the diagnostic pass after far-force
+  summary generation, forwards it to the resident backend, exposes
+  descriptor-only portable refs, and uses compact summary readback rather than
+  particle/candidate readback.
+- Force application remains disabled until a StateManager-admitted mutation
+  contract defines conservation and energy handling.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `72/72`
+  passing.
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `30/30` passing.
+
+Next:
+
+- Define the StateManager-admitted far-force application contract, including
+  diagnostic admission inputs, conservation/energy policy, and the authoritative
+  retained mutation target.
+
 ## 2026-07-01 AKDT - SS Far-Aggregate Force Summaries
 
 Status:

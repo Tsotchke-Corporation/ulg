@@ -302,7 +302,8 @@ Suggested schemas:
 - Status: retained far-aggregate candidate row ABI, WGSL producer, WebGPU
   runner, same-level orchestration forwarding, and descriptor-only portable
   summary propagation landed in `0fee1ef`; retained read-only far-aggregate
-  force-summary rows landed in `0773c25`.
+  force-summary rows landed in `0773c25`; compact far-aggregate diagnostic
+  summaries over those force rows landed in `70e21ce`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -311,8 +312,11 @@ Suggested schemas:
   descriptors from active nodes and retained hierarchy aggregate nodes. It does
   not yet apply a law-specific force, radiation, plasma, or gas-summary update.
   `0773c25` adds the first read-only gravity-like acceleration/potential
-  summary over those candidate rows with explicit error-bound telemetry. Any
-  future force application remains a separate StateManager-admitted mutation.
+  summary over those candidate rows with explicit error-bound telemetry.
+  `70e21ce` adds a compact diagnostic reducer for active/empty sources,
+  overflow, blocked work, opening-ratio pressure, error-bound pressure, max
+  acceleration/potential, and readback-free descriptor propagation. Any future
+  force application remains a separate StateManager-admitted mutation.
 
 ### Slice 8: Render And Distribution
 
@@ -346,11 +350,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - add compact far-field diagnostics over `schroeder-far-aggregate-force-summary`
-     rows so force quality, overflow, opening-ratio, and error-bound pressure
-     can be observed without full particle readback;
-   - keep force application disabled until StateManager admission and a
-     conservation/energy policy are explicit;
+   - define the StateManager-admitted far-force application path using compact
+     diagnostic pressure, explicit conservation/energy policy, and an
+     authoritative retained mutation target;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - later add radiation, plasma/electromagnetic approximation, and gas-summary

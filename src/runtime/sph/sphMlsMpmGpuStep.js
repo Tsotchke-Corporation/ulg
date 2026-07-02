@@ -8277,6 +8277,7 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           particleThermoBuffer: stageOptions.particleThermoBuffer || stageOptions.sourceThermoBuffer || stageOptions.sphParticleUpload?.thermoBuffer || null,
           particleCount: stageOptions.particleCount ?? stageOptions.sphParticleState?.particleCount ?? stageOptions.sphParticleUpload?.particleCount ?? null,
           boxDimsM: stageOptions.boxDimsM || null,
+          schroederLawQueue: stageOptions.schroederLawQueue || null,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           contactKinematicsParticleBinMetadataReadback:
             stageOptions.contactKinematicsParticleBinMetadataReadback === true,

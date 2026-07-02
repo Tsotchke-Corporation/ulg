@@ -5655,6 +5655,13 @@ struct ContactKinematicsParams {
   particle_bin_cell_size_m: f32,
 };
 
+struct SchroederContactLawQueueParams {
+  enabled: u32,
+  active_node_count: u32,
+  law_queue_stride: u32,
+  law_mask: u32,
+};
+
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> particle_state_rows: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> particle_thermo_rows: array<vec4<f32>>;
@@ -5663,6 +5670,14 @@ struct ContactKinematicsParams {
 @group(0) @binding(5) var<uniform> params: ContactKinematicsParams;
 @group(0) @binding(6) var<storage, read> particle_bin_counts: array<u32>;
 @group(0) @binding(7) var<storage, read> particle_bin_indices: array<u32>;
+@group(0) @binding(8) var<storage, read> schroeder_contact_law_queue_rows: array<f32>;
+@group(0) @binding(9) var<uniform> schroeder_contact_law_queue_params: SchroederContactLawQueueParams;
+
+const SCHROEDER_CONTACT_LAW_QUEUE_STRIDE: u32 = 32u;
+const SCHROEDER_CONTACT_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
+const SCHROEDER_CONTACT_LAW_QUEUE_LAW_MASK_OFFSET: u32 = 12u;
+const SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET: u32 = 14u;
+const SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET: u32 = 15u;
 
 struct CkParticleCandidate {
   source_match: u32,
@@ -5691,6 +5706,43 @@ fn ck_thermo_row2(particle_index: u32) -> vec4<f32> {
 
 fn ck_phase_matches(particle_phase_id: f32, required_phase_id: f32) -> bool {
   return required_phase_id <= 0.5 || abs(particle_phase_id - required_phase_id) < 0.5;
+}
+
+fn ck_schroeder_law_queue_enabled() -> bool {
+  return schroeder_contact_law_queue_params.enabled != 0u
+    && schroeder_contact_law_queue_params.active_node_count > 0u
+    && schroeder_contact_law_queue_params.law_queue_stride > 0u
+    && schroeder_contact_law_queue_params.law_mask != 0u;
+}
+
+fn ck_schroeder_law_queue_allows_particle(particle_index: u32) -> bool {
+  if (!ck_schroeder_law_queue_enabled()) {
+    return true;
+  }
+  if (particle_index >= schroeder_contact_law_queue_params.active_node_count) {
+    return false;
+  }
+  let queue_stride = max(
+    schroeder_contact_law_queue_params.law_queue_stride,
+    SCHROEDER_CONTACT_LAW_QUEUE_STRIDE
+  );
+  let queue_offset = particle_index * queue_stride;
+  let queue_status = schroeder_contact_law_queue_rows[
+    queue_offset + SCHROEDER_CONTACT_LAW_QUEUE_STATUS_OFFSET
+  ];
+  let row_enabled = queue_status > 0.0 && queue_status < 32.0;
+  let law_mask = u32(max(round(schroeder_contact_law_queue_rows[
+    queue_offset + SCHROEDER_CONTACT_LAW_QUEUE_LAW_MASK_OFFSET
+  ]), 0.0));
+  let contact_eligible = schroeder_contact_law_queue_rows[
+    queue_offset + SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET
+  ] > 0.5;
+  let interface_eligible = schroeder_contact_law_queue_rows[
+    queue_offset + SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET
+  ] > 0.5;
+  return row_enabled
+    && (contact_eligible || interface_eligible)
+    && ((law_mask & schroeder_contact_law_queue_params.law_mask) != 0u);
 }
 
 fn ck_policy_matches_element(row0: vec4<f32>, row2: vec4<f32>, material_id: f32, phase_id: f32) -> bool {
@@ -5734,6 +5786,9 @@ fn ck_candidate_for_particle(
     vec3<f32>(0.0),
     0.0
   );
+  if (!ck_schroeder_law_queue_allows_particle(particle_index)) {
+    return candidate;
+  }
   let thermo0 = ck_thermo_row0(particle_index);
   let thermo2 = ck_thermo_row2(particle_index);
   if (thermo2.z <= 0.0) {

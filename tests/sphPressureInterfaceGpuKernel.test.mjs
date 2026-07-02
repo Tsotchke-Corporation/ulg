@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
-  SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT
+  SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
+import { sphPressureInterfaceContactKinematicsWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
   createPressureInterfaceContactKinematicsParamsArray,
   createPressureInterfaceParticleBinParamsArray,
@@ -317,6 +319,16 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   assert.equal(view.getFloat32(28, true), 1);
 });
 
+test('pressure/interface contact-kinematics WGSL can gate candidates from a Schroeder law queue', () => {
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /struct\s+SchroederContactLawQueueParams/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(8\)\s+var<storage,\s*read>\s+schroeder_contact_law_queue_rows/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(9\)\s+var<uniform>\s+schroeder_contact_law_queue_params/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_law_queue_allows_particle/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*!ck_schroeder_law_queue_allows_particle\(particle_index\)\s*\)/);
+});
+
 test('pressure/interface packs algorithm contact policy rows for GPU matching', () => {
   const policy = normalizeAlgorithmContactPairResponsePolicy({
     algorithmMaterialContactRows: algorithmContactRowsFixture(),
@@ -459,6 +471,11 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
     size: 2 * 12 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   });
+  const schroederLawQueueBuffer = device.createBuffer({
+    label: 'test-schroeder-law-queue',
+    size: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
 
   const result = await runSphPressureInterfaceForceRowsWebGpu({
     device,
@@ -488,6 +505,14 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
       stateBuffer,
       thermoBuffer
     },
+    schroederLawQueue: {
+      schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+      status: 'schroeder-law-queue-submitted',
+      lawQueueBuffer: schroederLawQueueBuffer,
+      activeNodeCount: 2,
+      lawQueueStrideFloats: 32,
+      enabledLawMask: 6
+    },
     boxDimsM: [4, 4, 4],
     contactKinematicsParticleBinMetadataReadback: true,
     retainForceRowsBuffer: true,
@@ -511,16 +536,31 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.ok(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinGridIndexBufferByteLength > 0);
   assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinOverflowStatus, 'particle-bin-overflow-readback-completed');
   assert.equal(result.pressureInterfaceForceSolver.interfaceContactKinematicsParticleBinOverflowCount, 0);
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawQueueStatus, 'schroeder-pressure-interface-law-queue-ready');
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawQueueConsumerStatus, 'schroeder-pressure-interface-law-queue-consumed');
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawQueueBufferConsumed, true);
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawQueueEnabledLawMask, 6);
+  assert.equal(result.schroederLawQueueStatus, 'schroeder-pressure-interface-law-queue-ready');
+  assert.equal(result.schroederLawQueueConsumerStatus, 'schroeder-pressure-interface-law-queue-consumed');
+  assert.equal(result.schroederLawQueueBufferConsumed, true);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(device.bindGroups.length, 3);
   assert.equal(device.bindGroups[0].entries.length, 5);
   assert.equal(device.bindGroups[0].entries[0].resource.buffer, stateBuffer);
-  assert.equal(device.bindGroups[1].entries.length, 8);
+  assert.equal(device.bindGroups[1].entries.length, 10);
   assert.equal(device.bindGroups[1].entries[1].resource.buffer, stateBuffer);
   assert.equal(device.bindGroups[1].entries[2].resource.buffer, thermoBuffer);
   assert.equal(device.bindGroups[1].entries[6].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-counts');
   assert.equal(device.bindGroups[1].entries[7].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-indices');
+  assert.equal(device.bindGroups[1].entries[8].resource.buffer, schroederLawQueueBuffer);
+  assert.equal(device.bindGroups[1].entries[9].resource.buffer.label, 'ulg-sph-pressure-interface-schroeder-law-queue-params');
   assert.equal(device.bindGroups[2].entries[5].resource.buffer.label, 'ulg-sph-pressure-interface-contact-kinematics-derived');
+  const lawQueueParamsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-schroeder-law-queue-params');
+  const lawQueueParamsView = new DataView(lawQueueParamsWrite.snapshot);
+  assert.equal(lawQueueParamsView.getUint32(0, true), 1);
+  assert.equal(lawQueueParamsView.getUint32(4, true), 2);
+  assert.equal(lawQueueParamsView.getUint32(8, true), 32);
+  assert.equal(lawQueueParamsView.getUint32(12, true), 6);
   assert.deepEqual(device.dispatches, [1, 1, 1]);
   assert.equal(device.copies.length, 1);
   assert.equal(device.copies[0].source.label, 'ulg-sph-pressure-interface-particle-bin-metadata');

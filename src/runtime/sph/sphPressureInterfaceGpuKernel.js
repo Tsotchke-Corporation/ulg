@@ -1,6 +1,9 @@
 import {
+  SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
@@ -39,6 +42,11 @@ const CONTACT_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
 const CONTACT_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
 const CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
 const CONTACT_PARTICLE_BIN_GRID_MAX_CELL_COUNT = CONTACT_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
+const SCHROEDER_PRESSURE_INTERFACE_LAW_CONTACT_MASK = 2;
+const SCHROEDER_PRESSURE_INTERFACE_LAW_INTERFACE_MASK = 4;
+const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK =
+  SCHROEDER_PRESSURE_INTERFACE_LAW_CONTACT_MASK | SCHROEDER_PRESSURE_INTERFACE_LAW_INTERFACE_MASK;
+const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -646,6 +654,145 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
+function resolveSchroederPressureInterfaceLawQueue(schroederLawQueue = null, {
+  device = null,
+  particleCount = 0
+} = {}) {
+  if (schroederLawQueue?.resolvedPressureInterfaceLawQueue === true) {
+    return schroederLawQueue;
+  }
+  const base = {
+    resolvedPressureInterfaceLawQueue: true,
+    sourceSchema: schroederLawQueue?.schema ?? null,
+    sourceStatus: schroederLawQueue?.status ?? null,
+    status: 'schroeder-pressure-interface-law-queue-unavailable',
+    consumerStatus: 'schroeder-pressure-interface-law-queue-not-provided',
+    reason: schroederLawQueue ? null : 'No Schroeder law queue was provided to the pressure/interface stage',
+    enabled: false,
+    lawQueueBuffer: null,
+    lawQueueBufferConsumed: false,
+    activeNodeCount: 0,
+    lawQueueStrideFloats: SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS,
+    enabledLawMask: 0,
+    contactInterfaceMask: SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK,
+    sourceDeviceId: null,
+    consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null
+  };
+  if (!schroederLawQueue) return base;
+  const schemaAccepted = schroederLawQueue.schema === ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA
+    || schroederLawQueue.schema === ULG_SCHROEDER_LAW_QUEUE_SCHEMA;
+  if (!schemaAccepted) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-queue-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-queue-schema-mismatch',
+      reason: 'Schroeder law queue schema is not compatible with the pressure/interface consumer'
+    };
+  }
+  const lawQueueBuffer = schroederLawQueue.lawQueueBuffer
+    || schroederLawQueue.queueBuffer
+    || schroederLawQueue.buffer
+    || null;
+  if (!lawQueueBuffer) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-queue-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-queue-buffer-missing',
+      reason: 'Schroeder law queue did not expose a resident law queue buffer'
+    };
+  }
+  const mismatch = webGpuDeviceMismatchInfo({ buffer: lawQueueBuffer, device });
+  if (mismatch.mismatch) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-queue-rejected',
+      consumerStatus: 'blocked-cross-device-schroeder-pressure-interface-law-queue',
+      reason: 'Schroeder law queue buffer was created on a different WebGPU device',
+      lawQueueBuffer,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    schroederLawQueue.activeNodeCount
+      ?? schroederLawQueue.lawQueueRowCount
+      ?? schroederLawQueue.queueRowCount
+      ?? particleCount,
+    particleCount
+  )));
+  if (activeNodeCount <= 0) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-queue-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-queue-empty',
+      reason: 'Schroeder law queue has no active rows',
+      lawQueueBuffer,
+      activeNodeCount,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  const lawQueueStrideFloats = Math.max(SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS, Math.round(finiteNumber(
+    schroederLawQueue.lawQueueStrideFloats
+      ?? schroederLawQueue.queueStrideFloats
+      ?? schroederLawQueue.rowStrideFloats
+      ?? SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS
+  )));
+  const enabledLawMask = Math.max(0, Math.round(finiteNumber(
+    schroederLawQueue.enabledLawMask
+      ?? schroederLawQueue.lawMask
+      ?? SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK
+  )));
+  if ((enabledLawMask & SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK) === 0) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-queue-bypassed',
+      consumerStatus: 'schroeder-pressure-interface-law-queue-contact-interface-mask-disabled',
+      reason: 'Schroeder law queue is present but contact/interface law dispatch is disabled',
+      lawQueueBuffer,
+      activeNodeCount,
+      lawQueueStrideFloats,
+      enabledLawMask,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  return {
+    ...base,
+    status: 'schroeder-pressure-interface-law-queue-ready',
+    consumerStatus: 'schroeder-pressure-interface-law-queue-ready',
+    reason: null,
+    enabled: true,
+    lawQueueBuffer,
+    activeNodeCount,
+    lawQueueStrideFloats,
+    enabledLawMask,
+    sourceDeviceId: mismatch.sourceDeviceId,
+    consumerDeviceId: mismatch.consumerDeviceId
+  };
+}
+
+function createSchroederPressureInterfaceLawQueueParamsArray(schroederLawQueue) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, schroederLawQueue?.enabled ? 1 : 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(
+    schroederLawQueue?.activeNodeCount,
+    0
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    schroederLawQueue?.lawQueueStrideFloats,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(
+    schroederLawQueue?.contactInterfaceMask,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK
+  ))), true);
+  return buffer;
+}
+
 function resolveParticleKinematicsSource({
   device,
   sphParticleState = null,
@@ -1050,7 +1197,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   particleBinGrid = null,
   particleBins = null,
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
-  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M
+  gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
+  schroederLawQueue = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1073,6 +1221,38 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   }), device);
   const resolvedParticleBins = particleBins || createDisabledContactParticleBinBuffers(device, particleBinGrid);
+  const resolvedSchroederLawQueue = resolveSchroederPressureInterfaceLawQueue(schroederLawQueue, {
+    device,
+    particleCount: particleSource.particleCount
+  });
+  const consumedSchroederLawQueue = resolvedSchroederLawQueue.enabled
+    ? {
+        ...resolvedSchroederLawQueue,
+        consumerStatus: 'schroeder-pressure-interface-law-queue-consumed',
+        lawQueueBufferConsumed: true
+      }
+    : resolvedSchroederLawQueue;
+  const borrowedSchroederLawQueueBuffer = consumedSchroederLawQueue.enabled
+    ? consumedSchroederLawQueue.lawQueueBuffer
+    : null;
+  const localSchroederLawQueueBuffer = borrowedSchroederLawQueueBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-schroeder-law-queue-disabled',
+      new Float32Array(SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS)
+    );
+  const schroederLawQueueBuffer = borrowedSchroederLawQueueBuffer || localSchroederLawQueueBuffer;
+  const schroederLawQueueParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-schroeder-law-queue-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  device.queue.writeBuffer(
+    schroederLawQueueParamsBuffer,
+    0,
+    createSchroederPressureInterfaceLawQueueParamsArray(consumedSchroederLawQueue)
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
@@ -1095,7 +1275,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'uniform'),
       computeBufferBinding(6, 'read-only-storage'),
-      computeBufferBinding(7, 'read-only-storage')
+      computeBufferBinding(7, 'read-only-storage'),
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'uniform')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1108,7 +1290,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 4, resource: { buffer: outputBuffer } },
       { binding: 5, resource: { buffer: paramsBuffer } },
       { binding: 6, resource: { buffer: resolvedParticleBins.countsBuffer } },
-      { binding: 7, resource: { buffer: resolvedParticleBins.indicesBuffer } }
+      { binding: 7, resource: { buffer: resolvedParticleBins.indicesBuffer } },
+      { binding: 8, resource: { buffer: schroederLawQueueBuffer } },
+      { binding: 9, resource: { buffer: schroederLawQueueParamsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1135,13 +1319,31 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     particleBinGridAverageOccupancy: resolvedParticleBins.averageOccupancy || resolvedParticleBins.particleBinGrid?.averageOccupancy || 0,
     particleBinGridEstimatedOverflowRisk: resolvedParticleBins.estimatedOverflowRisk === true || resolvedParticleBins.particleBinGrid?.estimatedOverflowRisk === true,
     particleBinGridIndexBufferByteLength: resolvedParticleBins.indexBufferByteLength || resolvedParticleBins.particleBinGrid?.indexBufferByteLength || 0,
+    schroederLawQueueSchema: consumedSchroederLawQueue.sourceSchema,
+    schroederLawQueueSourceStatus: consumedSchroederLawQueue.sourceStatus,
+    schroederLawQueueStatus: consumedSchroederLawQueue.status,
+    schroederLawQueueConsumerStatus: consumedSchroederLawQueue.consumerStatus,
+    schroederLawQueueReason: consumedSchroederLawQueue.reason,
+    schroederLawQueueEnabled: consumedSchroederLawQueue.enabled === true,
+    schroederLawQueueActiveNodeCount: consumedSchroederLawQueue.activeNodeCount,
+    schroederLawQueueStrideFloats: consumedSchroederLawQueue.lawQueueStrideFloats,
+    schroederLawQueueEnabledLawMask: consumedSchroederLawQueue.enabledLawMask,
+    schroederLawQueueContactInterfaceMask: consumedSchroederLawQueue.contactInterfaceMask,
+    schroederLawQueueBufferConsumed: consumedSchroederLawQueue.lawQueueBufferConsumed === true,
+    schroederLawQueueSourceDeviceId: consumedSchroederLawQueue.sourceDeviceId,
+    schroederLawQueueConsumerDeviceId: consumedSchroederLawQueue.consumerDeviceId,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
     derivation: resolvedParticleBins.enabled
-      ? 'gpu-interface-element-neighbor-bin-contact-kinematics'
-      : 'gpu-interface-element-nearest-particle-contact-kinematics',
+      ? `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-neighbor-bin-contact-kinematics`
+      : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`,
     source: 'resident-sph-particle-state-and-thermo-buffers',
-    cleanupBuffers: [paramsBuffer, ...(resolvedParticleBins.cleanupBuffers || [])],
+    cleanupBuffers: [
+      paramsBuffer,
+      localSchroederLawQueueBuffer,
+      schroederLawQueueParamsBuffer,
+      ...(resolvedParticleBins.cleanupBuffers || [])
+    ],
     destroyContactKinematicsBuffer() {
       outputBuffer.destroy?.();
     }
@@ -1291,7 +1493,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   contactKinematicsParticleBinMetadataReadback = false,
   boxDimsM = null,
   retainForceRowsBuffer = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  schroederLawQueue = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceForceRowsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1317,6 +1520,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     particleStateBuffer,
     particleThermoBuffer,
     particleCount
+  });
+  const schroederPressureInterfaceLawQueue = resolveSchroederPressureInterfaceLawQueue(schroederLawQueue, {
+    device,
+    particleCount: particleSource.particleCount
   });
   const contactKinematicsGpuDerivationEligible = canDeriveInterfaceContactKinematicsOnGpu({
     packedInterfaceElements: packed,
@@ -1400,6 +1607,19 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsParticleBinGrid?.averageOccupancy || 0,
         interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
         interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+        schroederLawQueueSchema: schroederPressureInterfaceLawQueue.sourceSchema,
+        schroederLawQueueSourceStatus: schroederPressureInterfaceLawQueue.sourceStatus,
+        schroederLawQueueStatus: schroederPressureInterfaceLawQueue.status,
+        schroederLawQueueConsumerStatus: schroederPressureInterfaceLawQueue.consumerStatus,
+        schroederLawQueueReason: schroederPressureInterfaceLawQueue.reason,
+        schroederLawQueueEnabled: schroederPressureInterfaceLawQueue.enabled === true,
+        schroederLawQueueActiveNodeCount: schroederPressureInterfaceLawQueue.activeNodeCount,
+        schroederLawQueueStrideFloats: schroederPressureInterfaceLawQueue.lawQueueStrideFloats,
+        schroederLawQueueEnabledLawMask: schroederPressureInterfaceLawQueue.enabledLawMask,
+        schroederLawQueueContactInterfaceMask: schroederPressureInterfaceLawQueue.contactInterfaceMask,
+        schroederLawQueueBufferConsumed: false,
+        schroederLawQueueSourceDeviceId: schroederPressureInterfaceLawQueue.sourceDeviceId,
+        schroederLawQueueConsumerDeviceId: schroederPressureInterfaceLawQueue.consumerDeviceId,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1441,7 +1661,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       particleBinGrid: contactKinematicsParticleBinGrid,
       particleBins: contactKinematicsParticleBins,
       maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
-      gapFloorM: contactKinematicsGapFloorM
+      gapFloorM: contactKinematicsGapFloorM,
+      schroederLawQueue: schroederPressureInterfaceLawQueue
     });
     contactKinematicsBuffer = contactKinematicsGpuDerivation.buffer;
     contactKinematicsGpuDerived = true;
@@ -1612,6 +1833,31 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      schroederLawQueueSchema: contactKinematicsGpuDerivation?.schroederLawQueueSchema
+        ?? schroederPressureInterfaceLawQueue.sourceSchema,
+      schroederLawQueueSourceStatus: contactKinematicsGpuDerivation?.schroederLawQueueSourceStatus
+        ?? schroederPressureInterfaceLawQueue.sourceStatus,
+      schroederLawQueueStatus: contactKinematicsGpuDerivation?.schroederLawQueueStatus
+        ?? schroederPressureInterfaceLawQueue.status,
+      schroederLawQueueConsumerStatus: contactKinematicsGpuDerivation?.schroederLawQueueConsumerStatus
+        ?? schroederPressureInterfaceLawQueue.consumerStatus,
+      schroederLawQueueReason: contactKinematicsGpuDerivation?.schroederLawQueueReason
+        ?? schroederPressureInterfaceLawQueue.reason,
+      schroederLawQueueEnabled: contactKinematicsGpuDerivation?.schroederLawQueueEnabled === true
+        || schroederPressureInterfaceLawQueue.enabled === true,
+      schroederLawQueueActiveNodeCount: contactKinematicsGpuDerivation?.schroederLawQueueActiveNodeCount
+        ?? schroederPressureInterfaceLawQueue.activeNodeCount,
+      schroederLawQueueStrideFloats: contactKinematicsGpuDerivation?.schroederLawQueueStrideFloats
+        ?? schroederPressureInterfaceLawQueue.lawQueueStrideFloats,
+      schroederLawQueueEnabledLawMask: contactKinematicsGpuDerivation?.schroederLawQueueEnabledLawMask
+        ?? schroederPressureInterfaceLawQueue.enabledLawMask,
+      schroederLawQueueContactInterfaceMask: contactKinematicsGpuDerivation?.schroederLawQueueContactInterfaceMask
+        ?? schroederPressureInterfaceLawQueue.contactInterfaceMask,
+      schroederLawQueueBufferConsumed: contactKinematicsGpuDerivation?.schroederLawQueueBufferConsumed === true,
+      schroederLawQueueSourceDeviceId: contactKinematicsGpuDerivation?.schroederLawQueueSourceDeviceId
+        ?? schroederPressureInterfaceLawQueue.sourceDeviceId,
+      schroederLawQueueConsumerDeviceId: contactKinematicsGpuDerivation?.schroederLawQueueConsumerDeviceId
+        ?? schroederPressureInterfaceLawQueue.consumerDeviceId,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1685,6 +1931,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      schroederLawQueueStatus: contactKinematicsGpuDerivation?.schroederLawQueueStatus
+        ?? schroederPressureInterfaceLawQueue.status,
+      schroederLawQueueConsumerStatus: contactKinematicsGpuDerivation?.schroederLawQueueConsumerStatus
+        ?? schroederPressureInterfaceLawQueue.consumerStatus,
+      schroederLawQueueBufferConsumed: contactKinematicsGpuDerivation?.schroederLawQueueBufferConsumed === true,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

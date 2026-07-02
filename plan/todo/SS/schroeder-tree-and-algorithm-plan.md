@@ -171,6 +171,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-cross-level-coupling.v0`
 - `peercompute.ulg.schroeder-conservation-summary.v0`
 - `peercompute.ulg.schroeder-cross-level-transfer.v0`
+- `peercompute.ulg.schroeder-cross-level-state-delta.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -221,8 +222,9 @@ Suggested schemas:
 
 - Status: candidate row planning and orchestration landed in `82044fd` and
   `9d3ea80`; GPU-resident conservation summary rows landed in `b9d35de`;
-  GPU-resident transfer rows landed in `38fd33b`; conservative state mutation
-  is next.
+  GPU-resident transfer rows landed in `38fd33b`; pending conservative
+  source/target state-delta rows landed in `c0b980f`; StateManager-admitted
+  authoritative merge is next.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -259,8 +261,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Conservative cross-level state mutation:
-   - consume adjacent-level transfer rows;
-   - write restriction/prolongation effects into retained mechanics/grid state;
+   - consume adjacent-level pending state-delta rows;
+   - admit and merge deltas into SS-owned authoritative hierarchy state;
    - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
@@ -311,17 +313,18 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **conservative transfer application**:
+The next code slice on `SS` is **StateManager-admitted state-delta merge**:
 
-1. Keep transfer-row generation GPU-resident and no-full-readback by default.
-2. Add a retained applier pass that consumes transfer rows and writes a compact
-   pending state-delta or directly mutates an SS-owned mechanics buffer.
-3. Preserve PeerCompute StateManager admission boundaries for authoritative
-   state-family mutation.
+1. Keep pending state-delta generation GPU-resident and no-full-readback by
+   default.
+2. Add an admission descriptor for SS state-delta merge authority and output
+   families.
+3. Merge only admitted deltas into SS-owned authoritative hierarchy state or a
+   retained merge buffer with explicit state-family ownership metadata.
 4. Emit compact residual summaries for mass, represented volume, momentum, and
-   internal energy.
-5. Fail closed if the target parent/child level metadata is missing or if a law
-   attempts to mutate state it does not own.
+   internal energy after merge.
+5. Fail closed if target parent/child metadata is missing, admission is absent,
+   or a law attempts to mutate state it does not own.
 
-That moves Slice 4 from diagnostics and prepared rows into actual conservative
-restriction/prolongation behavior.
+That moves Slice 4 from pending conservative deltas into authoritative
+restriction/prolongation state updates.

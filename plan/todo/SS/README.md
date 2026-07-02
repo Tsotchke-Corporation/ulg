@@ -51,10 +51,12 @@ Landed checkpoints:
    and represented volume residuals.
 10. `38fd33b` adds GPU-resident cross-level transfer rows for mass,
     represented volume, momentum, and internal energy.
+11. `c0b980f` adds GPU-resident pending cross-level state-delta rows for
+    conservative source/target transfer application.
 
 Next implementation queue:
 
-1. Add adjacent-level conservative restriction/prolongation state mutation that
-   consumes the cross-level transfer rows.
+1. Add StateManager-admitted authoritative merge for pending cross-level
+   state-delta rows.
 2. Promote water-to-steam phase-volume migration into a visible SS stress case.
 3. Route reaction/contact/interface work queues through SS active nodes.

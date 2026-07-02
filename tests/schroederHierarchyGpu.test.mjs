@@ -7,6 +7,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
+  SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
@@ -21,6 +22,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -35,6 +38,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS,
   SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
+  SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_NO_FULL_READBACK_MODE,
   createSchroederActiveNodeListPlan,
@@ -49,6 +53,8 @@ import {
   createSchroederCrossLevelStateDeltaPlan,
   createSchroederCrossLevelTransferParamsArray,
   createSchroederCrossLevelTransferPlan,
+  createSchroederHierarchyAggregateParamsArray,
+  createSchroederHierarchyAggregatePlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
   createSchroederSameLevelMechanicsPlan,
@@ -60,6 +66,7 @@ import {
   runSchroederCrossLevelStateDeltaMergeWebGpu,
   runSchroederCrossLevelStateDeltaWebGpu,
   runSchroederCrossLevelTransferWebGpu,
+  runSchroederHierarchyAggregateWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederGridSpacingForLevel,
@@ -265,6 +272,14 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS
   );
   assert.equal(SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA, 'peercompute.ulg.schroeder-hierarchy-aggregate.v0');
+  assert.equal(
+    ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-hierarchy-aggregate-execution.v0'
+  );
+  assert.equal(SCHROEDER_HIERARCHY_AGGREGATE_FLOATS, 32);
+  assert.equal(SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length, SCHROEDER_HIERARCHY_AGGREGATE_FLOATS);
+  assert.equal(SCHROEDER_HIERARCHY_AGGREGATE_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
     ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -566,6 +581,40 @@ test('Schroeder cross-level state-delta merge plan requires StateManager admissi
   assert.equal(view.getUint32(4, true), SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS);
   assert.equal(view.getFloat32(16, true), 7);
+});
+
+test('Schroeder hierarchy aggregate plan materializes admitted merge rows as unsorted contributions', () => {
+  const crossLevelStateDeltaMerge = {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA,
+    status: 'schroeder-cross-level-state-delta-merge-submitted',
+    crossLevelCandidateCount: 130,
+    mergeStrideFloats: SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS,
+    mergedStateDeltaBuffer: { label: 'fake-merged-state-delta-buffer' }
+  };
+  const plan = createSchroederHierarchyAggregatePlan({ crossLevelStateDeltaMerge });
+  assert.equal(plan.schema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA);
+  assert.equal(plan.status, 'schroeder-hierarchy-aggregate-plan-ready');
+  assert.equal(plan.sourceStateDeltaMergeSchema, ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA);
+  assert.equal(plan.aggregateRowCount, 130);
+  assert.equal(plan.outputCompaction, 'unsorted-one-aggregate-contribution-row-per-admitted-merge-row');
+  assert.equal(plan.aggregateReductionStatus, 'pending-keyed-reduction');
+  assert.equal(plan.stateFamily, 'schroeder-hierarchy');
+  assert.deepEqual(plan.outputFamilies, [
+    'schroeder-hierarchy-state-delta',
+    'schroeder-hierarchy-aggregate-contributions'
+  ]);
+  assert.equal(plan.stateMutationStatus, 'aggregate-contribution-materialization-planned');
+  assert.equal(plan.stateAuthorityStatus, 'state-manager-admitted-merge-buffer-source');
+  assert.equal(plan.aggregateByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederHierarchyAggregateParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_HIERARCHY_AGGREGATE_FLOATS);
 });
 
 test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
@@ -944,6 +993,46 @@ test('Schroeder cross-level state-delta merge consumes retained deltas after adm
   );
 });
 
+test('Schroeder hierarchy aggregate materializes retained admitted merge rows without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const crossLevelStateDeltaMerge = {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA,
+    status: 'schroeder-cross-level-state-delta-merge-submitted',
+    crossLevelCandidateCount: 130,
+    mergeStrideFloats: SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS,
+    mergedStateDeltaBuffer: { label: 'retained-merged-state-delta-buffer' }
+  };
+  const aggregate = await runSchroederHierarchyAggregateWebGpu({
+    device,
+    crossLevelStateDeltaMerge
+  });
+
+  assert.equal(aggregate.schema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA);
+  assert.equal(aggregate.hierarchyAggregateSchema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA);
+  assert.equal(aggregate.status, 'schroeder-hierarchy-aggregate-submitted');
+  assert.equal(aggregate.sourceStateDeltaMergeSchema, ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA);
+  assert.equal(aggregate.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(aggregate.fullReadbackPerformed, false);
+  assert.equal(aggregate.fullParticleReadbackPerformed, false);
+  assert.equal(aggregate.normalHotLoopReadbackFree, true);
+  assert.equal(aggregate.retainedAggregateBuffer, true);
+  assert.ok(aggregate.aggregateBuffer);
+  assert.equal(aggregate.aggregateBuffer.destroyed, false);
+  assert.equal(aggregate.aggregateBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(aggregate.aggregateRows.length, 0);
+  assert.equal(aggregate.outputCompaction, 'unsorted-one-aggregate-contribution-row-per-admitted-merge-row');
+  assert.equal(aggregate.aggregateReductionStatus, 'pending-keyed-reduction');
+  assert.equal(aggregate.conservativeTransferStatus, 'hierarchy-aggregate-contributions-submitted');
+  assert.equal(aggregate.stateMutationStatus, 'aggregate-contribution-buffer-submitted');
+  assert.equal(aggregate.stateAuthorityStatus, 'state-manager-admitted-merge-buffer-materialized');
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederHierarchyAggregateParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
 test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -961,6 +1050,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       hasCrossLevelTransfer: Boolean(options.schroederCrossLevelTransfer),
       hasCrossLevelStateDelta: Boolean(options.schroederCrossLevelStateDelta),
       hasCrossLevelStateDeltaMerge: Boolean(options.schroederCrossLevelStateDeltaMerge),
+      hasHierarchyAggregate: Boolean(options.schroederHierarchyAggregate),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
   };
@@ -997,11 +1087,13 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.crossLevelStateDelta.stateMutationStatus, 'pending-state-delta-submitted-awaiting-admission');
   assert.equal(result.crossLevelStateDelta.stateAuthorityStatus, 'requires-state-manager-admission-before-authoritative-merge');
   assert.equal(result.crossLevelStateDeltaMerge, null);
+  assert.equal(result.hierarchyAggregate, null);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.residentStep.hasConservationSummary, true);
   assert.equal(result.residentStep.hasCrossLevelTransfer, true);
   assert.equal(result.residentStep.hasCrossLevelStateDelta, true);
   assert.equal(result.residentStep.hasCrossLevelStateDeltaMerge, false);
+  assert.equal(result.residentStep.hasHierarchyAggregate, false);
   assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
   assert.equal(
     result.crossLevelCouplingStatus,
@@ -1011,6 +1103,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.crossLevelTransferStatus, 'schroeder-cross-level-transfer-submitted');
   assert.equal(result.crossLevelStateDeltaStatus, 'schroeder-cross-level-state-delta-submitted');
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'disabled-cross-level-state-delta-merge-admission-not-provided');
+  assert.equal(result.hierarchyAggregateStatus, 'disabled-cross-level-state-delta-merge');
   assert.equal(result.conservativeTransferStatus, 'state-delta-ready-pending-admission');
   assert.equal(result.stateMutationStatus, 'pending-state-delta-submitted-awaiting-admission');
   assert.equal(result.stateAuthorityStatus, 'requires-state-manager-admission-before-authoritative-merge');
@@ -1025,6 +1118,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].schroederCrossLevelTransfer.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelStateDelta.schema, ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelStateDeltaMerge, null);
+  assert.equal(calls[0].schroederHierarchyAggregate, null);
   assert.equal(calls[0].fuseNoFullResidentMechanics, true);
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
   assert.deepEqual(
@@ -1052,7 +1146,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
       return {
         schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
         status: 'resident-step-stubbed',
-        hasCrossLevelStateDeltaMerge: Boolean(options.schroederCrossLevelStateDeltaMerge)
+    hasCrossLevelStateDeltaMerge: Boolean(options.schroederCrossLevelStateDeltaMerge),
+    hasHierarchyAggregate: Boolean(options.schroederHierarchyAggregate)
       };
     }
   });
@@ -1062,19 +1157,31 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.crossLevelStateDeltaMerge.conservativeTransferStatus, 'state-delta-merge-submitted');
   assert.equal(result.crossLevelStateDeltaMerge.stateMutationStatus, 'admitted-state-delta-merge-buffer-submitted');
   assert.equal(result.crossLevelStateDeltaMerge.stateAuthorityStatus, 'state-manager-admitted-retained-merge-buffer');
+  assert.equal(result.hierarchyAggregate.retainedAggregateBuffer, true);
+  assert.equal(result.hierarchyAggregate.aggregateRowCount, 3);
+  assert.equal(result.hierarchyAggregate.aggregateReductionStatus, 'pending-keyed-reduction');
+  assert.equal(result.hierarchyAggregate.conservativeTransferStatus, 'hierarchy-aggregate-contributions-submitted');
+  assert.equal(result.hierarchyAggregate.stateMutationStatus, 'aggregate-contribution-buffer-submitted');
+  assert.equal(result.hierarchyAggregate.stateAuthorityStatus, 'state-manager-admitted-merge-buffer-materialized');
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'schroeder-cross-level-state-delta-merge-submitted');
-  assert.equal(result.conservativeTransferStatus, 'state-delta-merge-submitted');
-  assert.equal(result.stateMutationStatus, 'admitted-state-delta-merge-buffer-submitted');
-  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-retained-merge-buffer');
+  assert.equal(result.hierarchyAggregateStatus, 'schroeder-hierarchy-aggregate-submitted');
+  assert.equal(result.conservativeTransferStatus, 'hierarchy-aggregate-contributions-submitted');
+  assert.equal(result.stateMutationStatus, 'aggregate-contribution-buffer-submitted');
+  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-merge-buffer-materialized');
   assert.equal(result.residentStep.hasCrossLevelStateDeltaMerge, true);
+  assert.equal(result.residentStep.hasHierarchyAggregate, true);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederCrossLevelStateDeltaMerge.schema,
     ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA
   );
+  assert.equal(
+    calls[0].schroederHierarchyAggregate.schema,
+    ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA
+  );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -1103,11 +1210,13 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
   assert.equal(result.crossLevelTransfer, null);
   assert.equal(result.crossLevelStateDelta, null);
   assert.equal(result.crossLevelStateDeltaMerge, null);
+  assert.equal(result.hierarchyAggregate, null);
   assert.equal(result.crossLevelCouplingStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservationSummaryStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.crossLevelTransferStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.crossLevelStateDeltaStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.hierarchyAggregateStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservativeTransferStatus, 'not-run');
   assert.equal(result.stateMutationStatus, 'not-run');
   assert.equal(result.stateAuthorityStatus, 'not-run');
@@ -1118,5 +1227,6 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
   assert.equal(calls[0].schroederCrossLevelTransfer, null);
   assert.equal(calls[0].schroederCrossLevelStateDelta, null);
   assert.equal(calls[0].schroederCrossLevelStateDeltaMerge, null);
+  assert.equal(calls[0].schroederHierarchyAggregate, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
 });

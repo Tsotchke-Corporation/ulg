@@ -7932,3 +7932,106 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   merge_rows[merge_offset + 31u] = params.merge_epoch;
 }
 `;
+
+export const schroederHierarchyAggregateWgsl = `
+struct SchroederHierarchyAggregateParams {
+  row_count: u32,
+  merge_stride: u32,
+  aggregate_stride: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
+};
+
+@group(0) @binding(0) var<storage, read> merge_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> aggregate_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederHierarchyAggregateParams;
+
+const SCHROEDER_DEFAULT_STATE_DELTA_MERGE_STRIDE_FOR_AGGREGATE: u32 = 32u;
+const SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_STRIDE: u32 = 32u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.row_count) {
+    return;
+  }
+
+  let merge_stride = max(params.merge_stride, SCHROEDER_DEFAULT_STATE_DELTA_MERGE_STRIDE_FOR_AGGREGATE);
+  let aggregate_stride = max(params.aggregate_stride, SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_STRIDE);
+  let merge_offset = row_index * merge_stride;
+  let aggregate_offset = row_index * aggregate_stride;
+
+  let source_particle_index = merge_rows[merge_offset + 0u];
+  let child_level = merge_rows[merge_offset + 1u];
+  let parent_level = merge_rows[merge_offset + 2u];
+  let level_delta = merge_rows[merge_offset + 3u];
+  let parent_cell = vec3<f32>(
+    merge_rows[merge_offset + 4u],
+    merge_rows[merge_offset + 5u],
+    merge_rows[merge_offset + 6u]
+  );
+  let chart_id = merge_rows[merge_offset + 7u];
+  let source_mass_delta_kg = merge_rows[merge_offset + 8u];
+  let target_mass_delta_kg = merge_rows[merge_offset + 9u];
+  let mass_residual_kg = merge_rows[merge_offset + 10u];
+  let source_volume_delta_m3 = merge_rows[merge_offset + 11u];
+  let target_volume_delta_m3 = merge_rows[merge_offset + 12u];
+  let volume_residual_m3 = merge_rows[merge_offset + 13u];
+  let target_momentum = vec3<f32>(
+    merge_rows[merge_offset + 17u],
+    merge_rows[merge_offset + 18u],
+    merge_rows[merge_offset + 19u]
+  );
+  let momentum_residual = vec3<f32>(
+    merge_rows[merge_offset + 20u],
+    merge_rows[merge_offset + 21u],
+    merge_rows[merge_offset + 22u]
+  );
+  let target_internal_energy_j = merge_rows[merge_offset + 24u];
+  let internal_energy_residual_j = merge_rows[merge_offset + 25u];
+  let transfer_weight = merge_rows[merge_offset + 26u];
+  let target_aggregate_key = merge_rows[merge_offset + 27u];
+  let merge_status = merge_rows[merge_offset + 28u];
+  let state_family_id = merge_rows[merge_offset + 29u];
+  let admission_approved = merge_rows[merge_offset + 30u];
+  let merge_epoch = merge_rows[merge_offset + 31u];
+  let active_row = select(0.0, 1.0, merge_status > 0.0 && merge_status < 32.0 && admission_approved > 0.0);
+  let aggregate_status = select(32.0, 1.0, active_row > 0.0);
+
+  aggregate_rows[aggregate_offset + 0u] = target_aggregate_key;
+  aggregate_rows[aggregate_offset + 1u] = parent_level;
+  aggregate_rows[aggregate_offset + 2u] = chart_id;
+  aggregate_rows[aggregate_offset + 3u] = aggregate_status;
+  aggregate_rows[aggregate_offset + 4u] = parent_cell.x;
+  aggregate_rows[aggregate_offset + 5u] = parent_cell.y;
+  aggregate_rows[aggregate_offset + 6u] = parent_cell.z;
+  aggregate_rows[aggregate_offset + 7u] = state_family_id;
+  aggregate_rows[aggregate_offset + 8u] = target_mass_delta_kg * active_row;
+  aggregate_rows[aggregate_offset + 9u] = target_volume_delta_m3 * active_row;
+  aggregate_rows[aggregate_offset + 10u] = target_momentum.x * active_row;
+  aggregate_rows[aggregate_offset + 11u] = target_momentum.y * active_row;
+  aggregate_rows[aggregate_offset + 12u] = target_momentum.z * active_row;
+  aggregate_rows[aggregate_offset + 13u] = target_internal_energy_j * active_row;
+  aggregate_rows[aggregate_offset + 14u] = source_particle_index;
+  aggregate_rows[aggregate_offset + 15u] = transfer_weight * active_row;
+  aggregate_rows[aggregate_offset + 16u] = source_mass_delta_kg * active_row;
+  aggregate_rows[aggregate_offset + 17u] = target_mass_delta_kg * active_row;
+  aggregate_rows[aggregate_offset + 18u] = mass_residual_kg;
+  aggregate_rows[aggregate_offset + 19u] = source_volume_delta_m3 * active_row;
+  aggregate_rows[aggregate_offset + 20u] = target_volume_delta_m3 * active_row;
+  aggregate_rows[aggregate_offset + 21u] = volume_residual_m3;
+  aggregate_rows[aggregate_offset + 22u] = momentum_residual.x;
+  aggregate_rows[aggregate_offset + 23u] = momentum_residual.y;
+  aggregate_rows[aggregate_offset + 24u] = momentum_residual.z;
+  aggregate_rows[aggregate_offset + 25u] = internal_energy_residual_j;
+  aggregate_rows[aggregate_offset + 26u] = merge_epoch;
+  aggregate_rows[aggregate_offset + 27u] = child_level;
+  aggregate_rows[aggregate_offset + 28u] = level_delta;
+  aggregate_rows[aggregate_offset + 29u] = 1.0;
+  aggregate_rows[aggregate_offset + 30u] = admission_approved;
+  aggregate_rows[aggregate_offset + 31u] = 0.0;
+}
+`;

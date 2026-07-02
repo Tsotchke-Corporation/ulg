@@ -84,6 +84,8 @@ export const ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_EXECUTION_SCHEMA = 'peercompu
 export const ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-state-delta-merge-admission.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_SCHEMA = 'peercompute.ulg.schroeder-cross-level-state-delta-merge.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-state-delta-merge-execution.v0';
+export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate.v0';
+export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -856,6 +858,40 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT = Object.freeze(
   'stateFamilyId:f32',
   'admissionApproved:f32',
   'mergeEpoch:f32'
+]);
+export const SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT = Object.freeze([
+  'targetAggregateKey:f32',
+  'levelId:f32',
+  'chartId:f32',
+  'status:f32',
+  'parentCellX:f32',
+  'parentCellY:f32',
+  'parentCellZ:f32',
+  'stateFamilyId:f32',
+  'massKg:f32',
+  'representedVolumeM3:f32',
+  'momentumXKgMPerS:f32',
+  'momentumYKgMPerS:f32',
+  'momentumZKgMPerS:f32',
+  'internalEnergyJ:f32',
+  'sourceParticleIndex:f32',
+  'transferWeight:f32',
+  'sourceMassDeltaKg:f32',
+  'targetMassDeltaKg:f32',
+  'massResidualKg:f32',
+  'sourceVolumeDeltaM3:f32',
+  'targetVolumeDeltaM3:f32',
+  'volumeResidualM3:f32',
+  'momentumResidualXKgMPerS:f32',
+  'momentumResidualYKgMPerS:f32',
+  'momentumResidualZKgMPerS:f32',
+  'internalEnergyResidualJ:f32',
+  'mergeEpoch:f32',
+  'childLevelId:f32',
+  'levelDelta:f32',
+  'aggregateModeId:f32',
+  'admissionApproved:f32',
+  'pad0:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

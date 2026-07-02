@@ -75,6 +75,8 @@ export const ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA = 'peercompute.ulg.schroeder-
 export const ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-list-execution.v0';
 export const ULG_SCHROEDER_LAW_QUEUE_SCHEMA = 'peercompute.ulg.schroeder-law-queue.v0';
 export const ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-queue-execution.v0';
+export const ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA = 'peercompute.ulg.schroeder-law-neighbor-candidate.v0';
+export const ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-neighbor-candidate-execution.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
@@ -773,6 +775,24 @@ export const SCHROEDER_LAW_QUEUE_ROW_LAYOUT = Object.freeze([
   'pad0:f32',
   'pad1:f32',
   'pad2:f32'
+]);
+export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'neighborParticleIndex:f32',
+  'lawMask:f32',
+  'status:f32',
+  'sourceLevelId:f32',
+  'neighborLevelId:f32',
+  'sourceChartId:f32',
+  'neighborChartId:f32',
+  'distanceM:f32',
+  'supportRadiusM:f32',
+  'candidateWeight:f32',
+  'queueRowIndex:f32',
+  'sourceMaterialPhaseMask:f32',
+  'neighborMaterialPhaseMask:f32',
+  'admissibilityFlags:f32',
+  'queueEpoch:f32'
 ]);
 export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

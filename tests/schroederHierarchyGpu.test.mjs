@@ -9,6 +9,7 @@ import {
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
+  SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
@@ -31,6 +32,8 @@ import {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -56,6 +59,7 @@ import {
   SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
   SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+  SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
   SCHROEDER_LAW_QUEUE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
@@ -84,6 +88,8 @@ import {
   createSchroederHierarchyAggregateNodeParamsArray,
   createSchroederHierarchyAggregateNodePlan,
   createSchroederHierarchyAggregatePlan,
+  createSchroederLawNeighborCandidateParamsArray,
+  createSchroederLawNeighborCandidatePlan,
   createSchroederLawQueueParamsArray,
   createSchroederLawQueuePlan,
   createSchroederLevelAssignmentParamsArray,
@@ -105,6 +111,7 @@ import {
   runSchroederCrossLevelTransferWebGpu,
   runSchroederHierarchyAggregateNodeReductionWebGpu,
   runSchroederHierarchyAggregateWebGpu,
+  runSchroederLawNeighborCandidateWebGpu,
   runSchroederLawQueueWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
@@ -305,6 +312,20 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_LAW_QUEUE_FLOATS, 32);
   assert.equal(SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length, SCHROEDER_LAW_QUEUE_FLOATS);
   assert.equal(SCHROEDER_LAW_QUEUE_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
+    'peercompute.ulg.schroeder-law-neighbor-candidate.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-law-neighbor-candidate-execution.v0'
+  );
+  assert.equal(SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS, 16);
+  assert.equal(
+    SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length,
+    SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS
+  );
+  assert.equal(SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA, 'peercompute.ulg.schroeder-cross-level-coupling.v0');
   assert.equal(
     ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
@@ -554,6 +575,52 @@ test('Schroeder law queue plan projects active nodes into local law work descrip
   assert.equal(view.getFloat32(20, true), DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET);
   assert.equal(view.getFloat32(24, true), 7);
   assert.equal(view.getFloat32(28, true), 2);
+});
+
+test('Schroeder law-neighbor candidate plan expands law queues into bounded resident rows', () => {
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer: { label: 'fake-law-queue-buffer' },
+    candidateBudget: 5,
+    queueEpoch: 11
+  };
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue,
+    particleCount: 3,
+    candidateBudget: 5
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA);
+  assert.equal(plan.status, 'schroeder-law-neighbor-candidate-plan-ready');
+  assert.equal(plan.sourceLawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(plan.particleCount, 3);
+  assert.equal(plan.lawQueueCount, 3);
+  assert.equal(plan.candidateBudget, 5);
+  assert.equal(plan.neighborCandidateCount, 15);
+  assert.equal(plan.lawQueueStrideFloats, SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(plan.neighborCandidateStrideFloats, SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS);
+  assert.equal(plan.neighborCandidateByteLength, 15 * 16 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.enumerationMode, 'schroeder-law-queue-bounded-window-neighbor-enumeration');
+  assert.equal(plan.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
+  assert.equal(
+    plan.treeTraversalStatus,
+    'placeholder-window-traversal-before-sorted-schroeder-tree-neighbor-walk'
+  );
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederLawNeighborCandidateParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 3);
+  assert.equal(view.getUint32(4, true), 3);
+  assert.equal(view.getUint32(8, true), SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(view.getUint32(12, true), SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS);
+  assert.equal(view.getUint32(16, true), 8);
+  assert.equal(view.getUint32(20, true), 5);
+  assert.equal(view.getUint32(24, true), SCHROEDER_LOCAL_LAW_QUEUE_MASK);
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -1188,6 +1255,75 @@ test('Schroeder law queue consumes retained active nodes without default readbac
   );
 });
 
+test('Schroeder law-neighbor candidates consume retained law queues without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const lawQueueBuffer = device.createBuffer({
+    label: 'retained-law-queue-buffer',
+    size: 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const stateBuffer = device.createBuffer({
+    label: 'retained-state-buffer',
+    size: 3 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer,
+    enabledLawMask: SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+    candidateBudget: 4,
+    queueEpoch: 7
+  };
+  const candidates = await runSchroederLawNeighborCandidateWebGpu({
+    device,
+    lawQueue,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 3,
+      stateBuffer
+    },
+    candidateBudget: 4
+  });
+
+  assert.equal(candidates.schema, ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA);
+  assert.equal(candidates.neighborCandidateSchema, ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA);
+  assert.equal(candidates.status, 'schroeder-law-neighbor-candidates-submitted');
+  assert.equal(candidates.sourceLawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(candidates.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(candidates.fullReadbackPerformed, false);
+  assert.equal(candidates.fullParticleReadbackPerformed, false);
+  assert.equal(candidates.normalHotLoopReadbackFree, true);
+  assert.equal(candidates.particleCount, 3);
+  assert.equal(candidates.lawQueueCount, 3);
+  assert.equal(candidates.candidateBudget, 4);
+  assert.equal(candidates.neighborCandidateCount, 12);
+  assert.equal(candidates.retainedNeighborCandidateBuffer, true);
+  assert.ok(candidates.neighborCandidateBuffer);
+  assert.equal(candidates.neighborCandidateBuffer.destroyed, false);
+  assert.equal(candidates.neighborCandidateBufferByteLength, 12 * 16 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(candidates.neighborCandidateRows.length, 0);
+  assert.equal(candidates.neighborCandidateStatus, 'local-law-neighbor-candidates-submitted');
+  assert.equal(candidates.stateMutationStatus, 'law-neighbor-candidates-buffer-submitted-no-state-mutation');
+  assert.equal(
+    candidates.stateAuthorityStatus,
+    'state-manager-admission-required-before-law-neighbor-output-mutation'
+  );
+  assert.equal(candidates.enumerationMode, 'schroeder-law-queue-bounded-window-neighbor-enumeration');
+  assert.deepEqual(device.dispatches, [[1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederLawNeighborParams')));
+  assert.ok(device.writes.some((write) => (
+    write.label === 'ulg-schroeder-law-neighbor-candidates-params'
+    && write.byteLength === 32
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
 test('Schroeder WebGPU cross-level coupling consumes retained hierarchy buffers without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -1776,6 +1912,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       readbackMode: options.readbackMode,
       schroederSelectedLevel: options.schroederSelectedLevel,
       hasLawQueue: Boolean(options.schroederLawQueue),
+      hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates),
       hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
       hasConservationSummary: Boolean(options.schroederConservationSummary),
       hasCrossLevelTransfer: Boolean(options.schroederCrossLevelTransfer),
@@ -1813,6 +1950,10 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.lawQueue.lawQueueStatus, 'local-law-queues-submitted');
   assert.equal(result.lawQueue.reactionScopeStatus, 'sedenion-scope-preserved-for-reaction-queue');
   assert.equal(result.lawQueue.stateMutationStatus, 'law-queue-buffer-submitted-no-state-mutation');
+  assert.equal(result.lawNeighborCandidates.retainedNeighborCandidateBuffer, true);
+  assert.equal(result.lawNeighborCandidates.lawQueueCount, 3);
+  assert.equal(result.lawNeighborCandidates.neighborCandidateCount, 3 * DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET);
+  assert.equal(result.lawNeighborCandidates.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
   assert.equal(result.crossLevelCoupling.retainedCrossLevelBuffer, true);
   assert.equal(result.crossLevelCoupling.crossLevelCandidateCount, 3);
   assert.equal(result.conservationSummary.retainedSummaryBuffer, true);
@@ -1836,6 +1977,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(result.residentStep.hasLawQueue, true);
+  assert.equal(result.residentStep.hasLawNeighborCandidates, true);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.residentStep.hasConservationSummary, true);
   assert.equal(result.residentStep.hasCrossLevelTransfer, true);
@@ -1868,7 +2010,12 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.lawQueueStatus, 'schroeder-law-queue-submitted');
   assert.equal(
     result.lawQueueConsumerStatus,
-    'law-queue-submitted-not-yet-consumed-by-reaction-contact-interface'
+    'law-queue-consumed-by-law-neighbor-candidates-and-forwarded-to-resident-backend'
+  );
+  assert.equal(result.lawNeighborCandidateStatus, 'schroeder-law-neighbor-candidates-submitted');
+  assert.equal(
+    result.lawNeighborCandidateConsumerStatus,
+    'law-neighbor-candidates-forwarded-to-resident-backend'
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].gridSpacingM, 1);
@@ -1877,6 +2024,10 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(calls[0].preferWebGpu, true);
   assert.equal(calls[0].schroederLawQueue.schema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(
+    calls[0].schroederLawNeighborCandidates.schema,
+    ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA
+  );
   assert.equal(calls[0].schroederCrossLevelCoupling.schema, ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederConservationSummary.schema, ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederCrossLevelTransfer.schema, ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA);
@@ -1893,7 +2044,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -1994,7 +2145,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -2065,7 +2216,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -2122,7 +2273,7 @@ test('Schroeder same-level mechanics can disable cross-level candidate generatio
   assert.equal(calls[0].schroederHierarchyAggregate, null);
   assert.equal(calls[0].schroederHierarchyAggregateNode, null);
   assert.equal(calls[0].schroederPhaseVolumeMigration, null);
-  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1]]);
 });
 
 test('Schroeder same-level mechanics can disable local law queue per use case', async () => {

@@ -7662,6 +7662,144 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederLawNeighborCandidateWgsl = `
+struct SchroederLawNeighborParams {
+  law_queue_count: u32,
+  particle_count: u32,
+  law_queue_stride: u32,
+  neighbor_stride: u32,
+  state_stride: u32,
+  candidate_budget: u32,
+  enabled_law_mask: u32,
+  flags: u32,
+};
+
+@group(0) @binding(0) var<storage, read> law_queue_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> sph_state_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> neighbor_candidate_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederLawNeighborParams;
+
+const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
+const SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE: u32 = 16u;
+const SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE: u32 = 8u;
+const SCHROEDER_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
+const SCHROEDER_LAW_NEIGHBOR_STATUS_INACTIVE: f32 = 32.0;
+const SCHROEDER_LAW_NEIGHBOR_REACTION_MASK: u32 = 1u;
+const SCHROEDER_LAW_NEIGHBOR_CONTACT_MASK: u32 = 2u;
+const SCHROEDER_LAW_NEIGHBOR_INTERFACE_MASK: u32 = 4u;
+
+fn ss_neighbor_state_pos_mass(particle_index: u32, state_stride: u32) -> vec4<f32> {
+  let offset = particle_index * state_stride;
+  return vec4<f32>(
+    sph_state_rows[offset + 0u],
+    sph_state_rows[offset + 1u],
+    sph_state_rows[offset + 2u],
+    sph_state_rows[offset + 3u]
+  );
+}
+
+fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_index: u32, queue_epoch: f32) {
+  neighbor_candidate_rows[row_offset + 0u] = source_index;
+  neighbor_candidate_rows[row_offset + 1u] = -1.0;
+  neighbor_candidate_rows[row_offset + 2u] = 0.0;
+  neighbor_candidate_rows[row_offset + 3u] = SCHROEDER_LAW_NEIGHBOR_STATUS_INACTIVE;
+  neighbor_candidate_rows[row_offset + 4u] = 0.0;
+  neighbor_candidate_rows[row_offset + 5u] = 0.0;
+  neighbor_candidate_rows[row_offset + 6u] = 0.0;
+  neighbor_candidate_rows[row_offset + 7u] = 0.0;
+  neighbor_candidate_rows[row_offset + 8u] = 0.0;
+  neighbor_candidate_rows[row_offset + 9u] = 0.0;
+  neighbor_candidate_rows[row_offset + 10u] = 0.0;
+  neighbor_candidate_rows[row_offset + 11u] = f32(queue_row_index);
+  neighbor_candidate_rows[row_offset + 12u] = 0.0;
+  neighbor_candidate_rows[row_offset + 13u] = 0.0;
+  neighbor_candidate_rows[row_offset + 14u] = 0.0;
+  neighbor_candidate_rows[row_offset + 15u] = queue_epoch;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  let candidate_budget = max(params.candidate_budget, 1u);
+  let candidate_count = params.law_queue_count * candidate_budget;
+  if (candidate_index >= candidate_count) {
+    return;
+  }
+  let queue_row_index = candidate_index / candidate_budget;
+  let candidate_slot = candidate_index - queue_row_index * candidate_budget;
+  let queue_stride = max(params.law_queue_stride, SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE);
+  let neighbor_stride = max(params.neighbor_stride, SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE);
+  let state_stride = max(params.state_stride, SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE);
+  let queue_offset = queue_row_index * queue_stride;
+  let row_offset = candidate_index * neighbor_stride;
+  let source_index_f = law_queue_rows[queue_offset + 0u];
+  let queue_epoch = law_queue_rows[queue_offset + 28u];
+
+  if (params.particle_count == 0u || queue_row_index >= params.law_queue_count) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+
+  let source_index = u32(max(round(source_index_f), 0.0));
+  if (source_index >= params.particle_count) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+
+  let queue_status = law_queue_rows[queue_offset + 3u];
+  let queue_enabled = queue_status > 0.0 && queue_status < 32.0;
+  let row_law_mask = u32(max(round(law_queue_rows[queue_offset + 12u]), 0.0));
+  let enabled_law_mask = row_law_mask & params.enabled_law_mask;
+  let reaction_enabled = (enabled_law_mask & SCHROEDER_LAW_NEIGHBOR_REACTION_MASK) != 0u
+    && law_queue_rows[queue_offset + 13u] > 0.5;
+  let contact_enabled = (enabled_law_mask & SCHROEDER_LAW_NEIGHBOR_CONTACT_MASK) != 0u
+    && law_queue_rows[queue_offset + 14u] > 0.5;
+  let interface_enabled = (enabled_law_mask & SCHROEDER_LAW_NEIGHBOR_INTERFACE_MASK) != 0u
+    && law_queue_rows[queue_offset + 15u] > 0.5;
+  let local_law_enabled = reaction_enabled || contact_enabled || interface_enabled;
+  if (!queue_enabled || !local_law_enabled) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+
+  let neighbor_index = (source_index + candidate_slot + 1u) % params.particle_count;
+  if (neighbor_index == source_index) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+  let source_state = ss_neighbor_state_pos_mass(source_index, state_stride);
+  let neighbor_state = ss_neighbor_state_pos_mass(neighbor_index, state_stride);
+  let support_radius = max(law_queue_rows[queue_offset + 11u], 0.000001);
+  let delta = neighbor_state.xyz - source_state.xyz;
+  let distance_m = length(delta);
+  let within_support = distance_m <= support_radius;
+  let masses_ready = source_state.w > 0.0 && neighbor_state.w > 0.0;
+  if (!within_support || !masses_ready) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+
+  neighbor_candidate_rows[row_offset + 0u] = f32(source_index);
+  neighbor_candidate_rows[row_offset + 1u] = f32(neighbor_index);
+  neighbor_candidate_rows[row_offset + 2u] = f32(enabled_law_mask);
+  neighbor_candidate_rows[row_offset + 3u] = SCHROEDER_LAW_NEIGHBOR_STATUS_READY;
+  neighbor_candidate_rows[row_offset + 4u] = law_queue_rows[queue_offset + 1u];
+  neighbor_candidate_rows[row_offset + 5u] = law_queue_rows[queue_offset + 1u];
+  neighbor_candidate_rows[row_offset + 6u] = law_queue_rows[queue_offset + 2u];
+  neighbor_candidate_rows[row_offset + 7u] = law_queue_rows[queue_offset + 2u];
+  neighbor_candidate_rows[row_offset + 8u] = distance_m;
+  neighbor_candidate_rows[row_offset + 9u] = support_radius;
+  neighbor_candidate_rows[row_offset + 10u] = 1.0 / (1.0 + distance_m);
+  neighbor_candidate_rows[row_offset + 11u] = f32(queue_row_index);
+  neighbor_candidate_rows[row_offset + 12u] = law_queue_rows[queue_offset + 16u];
+  neighbor_candidate_rows[row_offset + 13u] = 0.0;
+  neighbor_candidate_rows[row_offset + 14u] = select(0.0, 1.0, reaction_enabled)
+    + select(0.0, 2.0, contact_enabled)
+    + select(0.0, 4.0, interface_enabled);
+  neighbor_candidate_rows[row_offset + 15u] = queue_epoch;
+}
+`;
+
 export const schroederCrossLevelCouplingWgsl = `
 struct SchroederCrossLevelParams {
   particle_count: u32,

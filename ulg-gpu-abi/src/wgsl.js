@@ -945,6 +945,17 @@ struct SchroederReactionLawQueueParams {
   reaction_mask: u32,
 };
 
+struct SchroederReactionLawNeighborParams {
+  enabled: u32,
+  candidate_count: u32,
+  candidate_stride: u32,
+  candidate_budget: u32,
+  reaction_mask: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
 struct ThermalRows {
   row0: vec4<f32>,
   row1: vec4<f32>,
@@ -999,12 +1010,20 @@ struct ProductTerm {
 @group(0) @binding(19) var<uniform> reaction_particle_bin_params: ReactionParticleBinParams;
 @group(0) @binding(20) var<storage, read> schroeder_reaction_law_queue_rows: array<f32>;
 @group(0) @binding(21) var<uniform> schroeder_reaction_law_queue_params: SchroederReactionLawQueueParams;
+@group(0) @binding(22) var<storage, read> schroeder_reaction_neighbor_candidate_rows: array<f32>;
+@group(0) @binding(23) var<uniform> schroeder_reaction_neighbor_candidate_params: SchroederReactionLawNeighborParams;
 
 const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
 const SCHROEDER_REACTION_LAW_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_REACTION_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
 const SCHROEDER_REACTION_LAW_QUEUE_LAW_MASK_OFFSET: u32 = 12u;
 const SCHROEDER_REACTION_LAW_QUEUE_REACTION_ELIGIBLE_OFFSET: u32 = 13u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_STRIDE: u32 = 16u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_OFFSET: u32 = 0u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_NEIGHBOR_OFFSET: u32 = 1u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_LAW_MASK_OFFSET: u32 = 2u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_OFFSET: u32 = 3u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
@@ -1439,6 +1458,46 @@ fn schroeder_reaction_law_queue_allows_particle(particle_index: u32) -> bool {
     && ((law_mask & schroeder_reaction_law_queue_params.reaction_mask) != 0u);
 }
 
+fn schroeder_reaction_neighbor_candidates_enabled() -> bool {
+  return schroeder_reaction_neighbor_candidate_params.enabled != 0u
+    && schroeder_reaction_neighbor_candidate_params.candidate_count > 0u
+    && schroeder_reaction_neighbor_candidate_params.candidate_stride > 0u
+    && schroeder_reaction_neighbor_candidate_params.reaction_mask != 0u;
+}
+
+fn schroeder_reaction_neighbor_candidate_partner(particle_index: u32, candidate_index: u32) -> u32 {
+  if (!schroeder_reaction_neighbor_candidates_enabled()
+      || candidate_index >= schroeder_reaction_neighbor_candidate_params.candidate_count) {
+    return 4294967295u;
+  }
+  let candidate_stride = max(
+    schroeder_reaction_neighbor_candidate_params.candidate_stride,
+    SCHROEDER_REACTION_LAW_NEIGHBOR_STRIDE
+  );
+  let candidate_offset = candidate_index * candidate_stride;
+  let status = schroeder_reaction_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_OFFSET
+  ];
+  if (abs(status - SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_READY) > 0.5) {
+    return 4294967295u;
+  }
+  let row_source = u32(max(round(schroeder_reaction_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_OFFSET
+  ]), 0.0));
+  if (row_source != particle_index) {
+    return 4294967295u;
+  }
+  let law_mask = u32(max(round(schroeder_reaction_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_LAW_MASK_OFFSET
+  ]), 0.0));
+  if ((law_mask & schroeder_reaction_neighbor_candidate_params.reaction_mask) == 0u) {
+    return 4294967295u;
+  }
+  return u32(max(round(schroeder_reaction_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_NEIGHBOR_OFFSET
+  ]), 0.0));
+}
+
 fn reaction_particle_bin_coord(value: f32, axis_count: u32) -> u32 {
   if (axis_count <= 1u) {
     return 0u;
@@ -1578,7 +1637,27 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
     let contact_radius2 = rx1.y * rx1.y;
-    if (reaction_particle_bin_ready()) {
+    if (schroeder_reaction_neighbor_candidates_enabled()) {
+      for (var candidate_index = 0u; candidate_index < schroeder_reaction_neighbor_candidate_params.candidate_count; candidate_index = candidate_index + 1u) {
+        let other = schroeder_reaction_neighbor_candidate_partner(particle_index, candidate_index);
+        if (other >= params.particle_count) {
+          continue;
+        }
+        best = reaction_partner_candidate(
+          particle_index,
+          other,
+          reaction_index,
+          partner_material,
+          partner_phase_mask,
+          role,
+          activation_k,
+          contact_radius2,
+          self_temperature,
+          self_pos,
+          best
+        );
+      }
+    } else if (reaction_particle_bin_ready()) {
       let relative_self = self_pos - vec3<f32>(
         reaction_particle_bin_params.origin_x_m,
         reaction_particle_bin_params.origin_y_m,
@@ -5662,6 +5741,17 @@ struct SchroederContactLawQueueParams {
   law_mask: u32,
 };
 
+struct SchroederContactLawNeighborParams {
+  enabled: u32,
+  candidate_count: u32,
+  candidate_stride: u32,
+  law_mask: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> particle_state_rows: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> particle_thermo_rows: array<vec4<f32>>;
@@ -5672,12 +5762,20 @@ struct SchroederContactLawQueueParams {
 @group(0) @binding(7) var<storage, read> particle_bin_indices: array<u32>;
 @group(0) @binding(8) var<storage, read> schroeder_contact_law_queue_rows: array<f32>;
 @group(0) @binding(9) var<uniform> schroeder_contact_law_queue_params: SchroederContactLawQueueParams;
+@group(0) @binding(10) var<storage, read> schroeder_contact_neighbor_candidate_rows: array<f32>;
+@group(0) @binding(11) var<uniform> schroeder_contact_neighbor_candidate_params: SchroederContactLawNeighborParams;
 
 const SCHROEDER_CONTACT_LAW_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_CONTACT_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
 const SCHROEDER_CONTACT_LAW_QUEUE_LAW_MASK_OFFSET: u32 = 12u;
 const SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET: u32 = 14u;
 const SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET: u32 = 15u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_STRIDE: u32 = 16u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_SOURCE_OFFSET: u32 = 0u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_NEIGHBOR_OFFSET: u32 = 1u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_LAW_MASK_OFFSET: u32 = 2u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_OFFSET: u32 = 3u;
+const SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
 
 struct CkParticleCandidate {
   source_match: u32,
@@ -5743,6 +5841,42 @@ fn ck_schroeder_law_queue_allows_particle(particle_index: u32) -> bool {
   return row_enabled
     && (contact_eligible || interface_eligible)
     && ((law_mask & schroeder_contact_law_queue_params.law_mask) != 0u);
+}
+
+fn ck_schroeder_neighbor_candidates_enabled() -> bool {
+  return schroeder_contact_neighbor_candidate_params.enabled != 0u
+    && schroeder_contact_neighbor_candidate_params.candidate_count > 0u
+    && schroeder_contact_neighbor_candidate_params.candidate_stride > 0u
+    && schroeder_contact_neighbor_candidate_params.law_mask != 0u;
+}
+
+fn ck_schroeder_candidate_particle(candidate_index: u32, endpoint: u32) -> u32 {
+  if (!ck_schroeder_neighbor_candidates_enabled() || candidate_index >= schroeder_contact_neighbor_candidate_params.candidate_count) {
+    return 4294967295u;
+  }
+  let candidate_stride = max(
+    schroeder_contact_neighbor_candidate_params.candidate_stride,
+    SCHROEDER_CONTACT_LAW_NEIGHBOR_STRIDE
+  );
+  let candidate_offset = candidate_index * candidate_stride;
+  let status = schroeder_contact_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_OFFSET
+  ];
+  if (abs(status - SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_READY) > 0.5) {
+    return 4294967295u;
+  }
+  let law_mask = u32(max(round(schroeder_contact_neighbor_candidate_rows[
+    candidate_offset + SCHROEDER_CONTACT_LAW_NEIGHBOR_LAW_MASK_OFFSET
+  ]), 0.0));
+  if ((law_mask & schroeder_contact_neighbor_candidate_params.law_mask) == 0u) {
+    return 4294967295u;
+  }
+  let offset = select(
+    SCHROEDER_CONTACT_LAW_NEIGHBOR_SOURCE_OFFSET,
+    SCHROEDER_CONTACT_LAW_NEIGHBOR_NEIGHBOR_OFFSET,
+    endpoint != 0u
+  );
+  return u32(max(round(schroeder_contact_neighbor_candidate_rows[candidate_offset + offset]), 0.0));
 }
 
 fn ck_policy_matches_element(row0: vec4<f32>, row2: vec4<f32>, material_id: f32, phase_id: f32) -> bool {
@@ -5897,7 +6031,50 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var source_mass_kg = 0.0;
   var target_mass_kg = 0.0;
 
-  if (ck_particle_bin_ready()) {
+  if (ck_schroeder_neighbor_candidates_enabled()) {
+    for (var candidate_index = 0u; candidate_index < schroeder_contact_neighbor_candidate_params.candidate_count; candidate_index = candidate_index + 1u) {
+      for (var endpoint = 0u; endpoint < 2u; endpoint = endpoint + 1u) {
+        let candidate_particle_index = ck_schroeder_candidate_particle(candidate_index, endpoint);
+        if (candidate_particle_index >= params.particle_count) {
+          continue;
+        }
+        let candidate = ck_candidate_for_particle(
+          candidate_particle_index,
+          centroid,
+          normal,
+          search_radius_m,
+          search_radius2,
+          element_material_id,
+          element_phase_id,
+          target_material_id,
+          target_phase_id
+        );
+        let signed2 = candidate.signed_m * candidate.signed_m;
+        if (candidate.source_match != 0u) {
+          let source_side_penalty = select(0.0, search_radius2, candidate.signed_m > support_radius_m * 0.25);
+          let score = candidate.lateral2 + signed2 + source_side_penalty;
+          if (score < source_score) {
+            source_score = score;
+            source_index = candidate_particle_index;
+            source_signed_m = candidate.signed_m;
+            source_velocity = candidate.velocity;
+            source_mass_kg = candidate.mass_kg;
+          }
+        }
+        if (candidate.target_match != 0u) {
+          let target_side_penalty = select(0.0, search_radius2, candidate.signed_m < -support_radius_m * 0.25);
+          let score = candidate.lateral2 + signed2 + target_side_penalty;
+          if (score < target_score) {
+            target_score = score;
+            target_index = candidate_particle_index;
+            target_signed_m = candidate.signed_m;
+            target_velocity = candidate.velocity;
+            target_mass_kg = candidate.mass_kg;
+          }
+        }
+      }
+    }
+  } else if (ck_particle_bin_ready()) {
     let relative_centroid = centroid - vec3<f32>(
       params.particle_bin_origin_x_m,
       params.particle_bin_origin_y_m,

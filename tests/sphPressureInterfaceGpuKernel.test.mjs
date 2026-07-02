@@ -322,11 +322,18 @@ test('pressure/interface WebGPU producer packs material interface element rows',
 
 test('pressure/interface contact-kinematics WGSL can gate candidates from a Schroeder law queue', () => {
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /struct\s+SchroederContactLawQueueParams/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /struct\s+SchroederContactLawNeighborParams/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(8\)\s+var<storage,\s*read>\s+schroeder_contact_law_queue_rows/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(9\)\s+var<uniform>\s+schroeder_contact_law_queue_params/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(10\)\s+var<storage,\s*read>\s+schroeder_contact_neighbor_candidate_rows/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(11\)\s+var<uniform>\s+schroeder_contact_neighbor_candidate_params/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_law_queue_allows_particle/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_neighbor_candidates_enabled/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_candidate_particle/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*ck_schroeder_neighbor_candidates_enabled\(\)\s*\)/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /else\s+if\s*\(\s*ck_particle_bin_ready\(\)\s*\)/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*!ck_schroeder_law_queue_allows_particle\(particle_index\)\s*\)/);
 });
 
@@ -528,8 +535,8 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
       candidateBudget: 4,
       lawQueueCount: 2,
       enabledLawMask: 6,
-      enumerationMode: 'schroeder-law-queue-bounded-window-neighbor-enumeration',
-      treeTraversalStatus: 'placeholder-window-traversal-before-sorted-schroeder-tree-neighbor-walk'
+      enumerationMode: 'schroeder-active-node-tile-traversal-neighbor-enumeration',
+      treeTraversalStatus: 'active-node-tile-traversal-before-sorted-schroeder-tree-index'
     },
     boxDimsM: [4, 4, 4],
     contactKinematicsParticleBinMetadataReadback: true,
@@ -564,13 +571,17 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   );
   assert.equal(
     result.pressureInterfaceForceSolver.schroederLawNeighborCandidateConsumerStatus,
-    'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative'
+    'schroeder-pressure-interface-law-neighbor-candidates-consumed-authoritative'
   );
   assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateAvailable, true);
-  assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateAuthoritative, false);
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateAuthoritative, true);
   assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateCount, 8);
   assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateBufferObserved, true);
-  assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateBufferConsumed, false);
+  assert.equal(result.pressureInterfaceForceSolver.schroederLawNeighborCandidateBufferConsumed, true);
+  assert.equal(
+    result.pressureInterfaceForceSolver.interfaceContactKinematicsDerivation,
+    'schroeder-law-neighbor-candidates-authoritative-gpu-interface-element-candidate-contact-kinematics'
+  );
   assert.equal(result.schroederLawQueueStatus, 'schroeder-pressure-interface-law-queue-ready');
   assert.equal(result.schroederLawQueueConsumerStatus, 'schroeder-pressure-interface-law-queue-consumed');
   assert.equal(result.schroederLawQueueBufferConsumed, true);
@@ -580,21 +591,23 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   );
   assert.equal(
     result.schroederLawNeighborCandidateConsumerStatus,
-    'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative'
+    'schroeder-pressure-interface-law-neighbor-candidates-consumed-authoritative'
   );
   assert.equal(result.schroederLawNeighborCandidateBufferObserved, true);
-  assert.equal(result.schroederLawNeighborCandidateBufferConsumed, false);
+  assert.equal(result.schroederLawNeighborCandidateBufferConsumed, true);
   assert.equal(result.interfaceContactKinematicsGpuDerived, true);
   assert.equal(device.bindGroups.length, 3);
   assert.equal(device.bindGroups[0].entries.length, 5);
   assert.equal(device.bindGroups[0].entries[0].resource.buffer, stateBuffer);
-  assert.equal(device.bindGroups[1].entries.length, 10);
+  assert.equal(device.bindGroups[1].entries.length, 12);
   assert.equal(device.bindGroups[1].entries[1].resource.buffer, stateBuffer);
   assert.equal(device.bindGroups[1].entries[2].resource.buffer, thermoBuffer);
   assert.equal(device.bindGroups[1].entries[6].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-counts');
   assert.equal(device.bindGroups[1].entries[7].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-indices');
   assert.equal(device.bindGroups[1].entries[8].resource.buffer, schroederLawQueueBuffer);
   assert.equal(device.bindGroups[1].entries[9].resource.buffer.label, 'ulg-sph-pressure-interface-schroeder-law-queue-params');
+  assert.equal(device.bindGroups[1].entries[10].resource.buffer, schroederLawNeighborCandidateBuffer);
+  assert.equal(device.bindGroups[1].entries[11].resource.buffer.label, 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params');
   assert.equal(device.bindGroups[2].entries[5].resource.buffer.label, 'ulg-sph-pressure-interface-contact-kinematics-derived');
   const lawQueueParamsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-schroeder-law-queue-params');
   const lawQueueParamsView = new DataView(lawQueueParamsWrite.snapshot);
@@ -602,6 +615,12 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(lawQueueParamsView.getUint32(4, true), 2);
   assert.equal(lawQueueParamsView.getUint32(8, true), 32);
   assert.equal(lawQueueParamsView.getUint32(12, true), 6);
+  const lawNeighborParamsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params');
+  const lawNeighborParamsView = new DataView(lawNeighborParamsWrite.snapshot);
+  assert.equal(lawNeighborParamsView.getUint32(0, true), 1);
+  assert.equal(lawNeighborParamsView.getUint32(4, true), 8);
+  assert.equal(lawNeighborParamsView.getUint32(8, true), 16);
+  assert.equal(lawNeighborParamsView.getUint32(12, true), 6);
   assert.deepEqual(device.dispatches, [1, 1, 1]);
   assert.equal(device.copies.length, 1);
   assert.equal(device.copies[0].source.label, 'ulg-sph-pressure-interface-particle-bin-metadata');

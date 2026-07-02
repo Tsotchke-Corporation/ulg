@@ -1951,6 +1951,32 @@ function createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue) {
   return buffer;
 }
 
+function createSchroederReactionLawNeighborCandidateParamsArray(schroederReactionLawNeighborCandidates) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, schroederReactionLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.neighborCandidateCount,
+    0
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.neighborCandidateStrideFloats,
+    SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.candidateBudget,
+    1
+  ))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.reactionMask,
+    SCHROEDER_REACTION_LAW_MASK
+  ))), true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
 function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandidates = null) {
   const base = {
     sourceSchema: schroederLawNeighborCandidates?.schema ?? null,
@@ -2044,15 +2070,17 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
   return {
     ...base,
     status: 'schroeder-reaction-law-neighbor-candidates-ready',
-    consumerStatus: 'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative',
+    consumerStatus: traversalBacked
+      ? 'schroeder-reaction-law-neighbor-candidates-consumed-authoritative'
+      : 'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative',
     reason: traversalBacked
-      ? 'Traversal-backed law-neighbor candidate rows are validated but not authoritative until the reaction stage binds them as direct proposal input'
+      ? 'Traversal-backed law-neighbor candidate rows are consumed as direct reaction proposal input'
       : 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
     available: true,
-    authoritative: false,
+    authoritative: traversalBacked,
     neighborCandidateBuffer,
     neighborCandidateBufferObserved: true,
-    neighborCandidateBufferConsumed: false,
+    neighborCandidateBufferConsumed: traversalBacked,
     neighborCandidateCount,
     neighborCandidateStrideFloats,
     candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
@@ -2325,6 +2353,28 @@ export async function runSphReactionStepWebGpu({
     0,
     createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue)
   );
+  const borrowedSchroederLawNeighborCandidateBuffer = schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+    ? schroederReactionLawNeighborCandidates.neighborCandidateBuffer
+    : null;
+  const localSchroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-reaction-schroeder-law-neighbor-candidates-disabled',
+      new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS)
+    );
+  const schroederReactionLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
+    || localSchroederLawNeighborCandidateBuffer;
+  const schroederReactionLawNeighborCandidateParamsBuffer = device.createBuffer({
+    label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(
+    schroederReactionLawNeighborCandidateParamsBuffer,
+    0,
+    createSchroederReactionLawNeighborCandidateParamsArray(schroederReactionLawNeighborCandidates)
+  );
   const proposalBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-proposals',
@@ -2373,7 +2423,9 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(17, 'storage'),
     computeBufferBinding(19, 'uniform'),
     computeBufferBinding(20, 'read-only-storage'),
-    computeBufferBinding(21, 'uniform')
+    computeBufferBinding(21, 'uniform'),
+    computeBufferBinding(22, 'read-only-storage'),
+    computeBufferBinding(23, 'uniform')
   ];
   const reactionParticleBinBindings = [
     computeBufferBinding(0, 'read-only-storage'),
@@ -2451,7 +2503,9 @@ export async function runSphReactionStepWebGpu({
       { binding: 17, resource: { buffer: reactionParticleBins.indicesBuffer } },
       { binding: 19, resource: { buffer: reactionParticleBins.paramsBuffer } },
       { binding: 20, resource: { buffer: schroederReactionLawQueueBuffer } },
-      { binding: 21, resource: { buffer: schroederReactionLawQueueParamsBuffer } }
+      { binding: 21, resource: { buffer: schroederReactionLawQueueParamsBuffer } },
+      { binding: 22, resource: { buffer: schroederReactionLawNeighborCandidateBuffer } },
+      { binding: 23, resource: { buffer: schroederReactionLawNeighborCandidateParamsBuffer } }
     ]
   });
   const resolveBindEntries = (layout) => ({
@@ -2622,6 +2676,8 @@ export async function runSphReactionStepWebGpu({
     paramsBuffer,
     localSchroederLawQueueBuffer,
     schroederReactionLawQueueParamsBuffer,
+    localSchroederLawNeighborCandidateBuffer,
+    schroederReactionLawNeighborCandidateParamsBuffer,
     ...reactionParticleBins.cleanupBuffers,
     localSourceStateBuffer,
     localSourceThermoBuffer,
@@ -2704,8 +2760,12 @@ export async function runSphReactionStepWebGpu({
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
     reactionProposalNeighborMode: [
       schroederReactionLawQueue.enabled ? 'schroeder-law-queue-gated' : null,
-      schroederReactionLawNeighborCandidates.available ? 'schroeder-law-neighbor-candidates-observed' : null,
-      reactionParticleBins.enabled ? 'fixed-capacity-particle-bin-grid' : 'all-particle-scan-fallback'
+      schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+        ? 'schroeder-law-neighbor-candidates-authoritative'
+        : (schroederReactionLawNeighborCandidates.available ? 'schroeder-law-neighbor-candidates-observed' : null),
+      schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
+        ? null
+        : (reactionParticleBins.enabled ? 'fixed-capacity-particle-bin-grid' : 'all-particle-scan-fallback')
     ].filter(Boolean).join('-'),
     reactionParticleBinGrid: reactionParticleBins.particleBinGrid,
     reactionParticleBins,

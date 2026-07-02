@@ -353,11 +353,20 @@ test('SPH reaction WGSL can propose reactions from a GPU particle-bin grid', () 
 
 test('SPH reaction WGSL can gate reaction proposals from a Schroeder law queue', () => {
   assert.match(sphReactionStepWgsl, /struct\s+SchroederReactionLawQueueParams/);
+  assert.match(sphReactionStepWgsl, /struct\s+SchroederReactionLawNeighborParams/);
   assert.match(sphReactionStepWgsl, /@binding\(20\)\s+var<storage,\s*read>\s+schroeder_reaction_law_queue_rows/);
   assert.match(sphReactionStepWgsl, /@binding\(21\)\s+var<uniform>\s+schroeder_reaction_law_queue_params/);
+  assert.match(sphReactionStepWgsl, /@binding\(22\)\s+var<storage,\s*read>\s+schroeder_reaction_neighbor_candidate_rows/);
+  assert.match(sphReactionStepWgsl, /@binding\(23\)\s+var<uniform>\s+schroeder_reaction_neighbor_candidate_params/);
   assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_law_queue_allows_particle/);
+  assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_neighbor_candidates_enabled/);
+  assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_neighbor_candidate_partner/);
   assert.match(sphReactionStepWgsl, /SCHROEDER_REACTION_LAW_QUEUE_REACTION_ELIGIBLE_OFFSET/);
   assert.match(sphReactionStepWgsl, /if\s*\(\s*!schroeder_reaction_law_queue_allows_particle\(particle_index\)\s*\)/);
+  assert.match(sphReactionStepWgsl, /if\s*\(\s*schroeder_reaction_neighbor_candidates_enabled\(\)\s*\)/);
+  assert.match(sphReactionStepWgsl, /for\s*\(\s*var\s+candidate_index\s*=\s*0u;\s*candidate_index\s*<\s*schroeder_reaction_neighbor_candidate_params\.candidate_count/);
+  assert.match(sphReactionStepWgsl, /else\s+if\s*\(\s*reaction_particle_bin_ready\(\)\s*\)/);
+  assert.doesNotMatch(sphReactionStepWgsl, /particle_index\s*\*\s*candidate_budget/);
   assert.match(sphReactionStepWgsl, /proposals\[particle_index\]\s*=\s*vec4<f32>\(-1\.0,\s*-1\.0,\s*0\.0,\s*0\.0\)/);
 });
 

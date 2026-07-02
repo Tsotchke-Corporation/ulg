@@ -798,6 +798,29 @@ function createSchroederPressureInterfaceLawQueueParamsArray(schroederLawQueue) 
   return buffer;
 }
 
+function createSchroederPressureInterfaceLawNeighborCandidateParamsArray(schroederLawNeighborCandidates) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, schroederLawNeighborCandidates?.neighborCandidateBufferConsumed ? 1 : 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates?.neighborCandidateCount,
+    0
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    schroederLawNeighborCandidates?.neighborCandidateStrideFloats,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates?.contactInterfaceMask,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK
+  ))), true);
+  view.setUint32(16, 0, true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
 function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeighborCandidates = null, {
   device = null
 } = {}) {
@@ -911,15 +934,17 @@ function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeig
   return {
     ...base,
     status: 'schroeder-pressure-interface-law-neighbor-candidates-ready',
-    consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative',
+    consumerStatus: traversalBacked
+      ? 'schroeder-pressure-interface-law-neighbor-candidates-consumed-authoritative'
+      : 'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative',
     reason: traversalBacked
-      ? 'Traversal-backed law-neighbor candidate rows are validated but not authoritative until pressure/interface binds them as direct contact input'
+      ? 'Traversal-backed law-neighbor candidate rows are consumed as direct pressure/interface contact input'
       : 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
     available: true,
-    authoritative: false,
+    authoritative: traversalBacked,
     neighborCandidateBuffer,
     neighborCandidateBufferObserved: true,
-    neighborCandidateBufferConsumed: false,
+    neighborCandidateBufferConsumed: traversalBacked,
     neighborCandidateCount,
     neighborCandidateStrideFloats,
     candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
@@ -1335,7 +1360,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   particleBins = null,
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
-  schroederLawQueue = null
+  schroederLawQueue = null,
+  schroederLawNeighborCandidates = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1390,6 +1416,31 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     0,
     createSchroederPressureInterfaceLawQueueParamsArray(consumedSchroederLawQueue)
   );
+  const consumedSchroederLawNeighborCandidates = schroederLawNeighborCandidates?.neighborCandidateBufferConsumed
+    ? schroederLawNeighborCandidates
+    : (schroederLawNeighborCandidates || null);
+  const borrowedSchroederLawNeighborCandidateBuffer = consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
+    ? consumedSchroederLawNeighborCandidates.neighborCandidateBuffer
+    : null;
+  const localSchroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-disabled',
+      new Float32Array(SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS)
+    );
+  const schroederLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
+    || localSchroederLawNeighborCandidateBuffer;
+  const schroederLawNeighborCandidateParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  device.queue.writeBuffer(
+    schroederLawNeighborCandidateParamsBuffer,
+    0,
+    createSchroederPressureInterfaceLawNeighborCandidateParamsArray(consumedSchroederLawNeighborCandidates)
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
@@ -1414,7 +1465,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(6, 'read-only-storage'),
       computeBufferBinding(7, 'read-only-storage'),
       computeBufferBinding(8, 'read-only-storage'),
-      computeBufferBinding(9, 'uniform')
+      computeBufferBinding(9, 'uniform'),
+      computeBufferBinding(10, 'read-only-storage'),
+      computeBufferBinding(11, 'uniform')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1429,7 +1482,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 6, resource: { buffer: resolvedParticleBins.countsBuffer } },
       { binding: 7, resource: { buffer: resolvedParticleBins.indicesBuffer } },
       { binding: 8, resource: { buffer: schroederLawQueueBuffer } },
-      { binding: 9, resource: { buffer: schroederLawQueueParamsBuffer } }
+      { binding: 9, resource: { buffer: schroederLawQueueParamsBuffer } },
+      { binding: 10, resource: { buffer: schroederLawNeighborCandidateBuffer } },
+      { binding: 11, resource: { buffer: schroederLawNeighborCandidateParamsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1469,16 +1524,41 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     schroederLawQueueBufferConsumed: consumedSchroederLawQueue.lawQueueBufferConsumed === true,
     schroederLawQueueSourceDeviceId: consumedSchroederLawQueue.sourceDeviceId,
     schroederLawQueueConsumerDeviceId: consumedSchroederLawQueue.consumerDeviceId,
+    schroederLawNeighborCandidateSchema: consumedSchroederLawNeighborCandidates?.sourceSchema ?? null,
+    schroederLawNeighborCandidateSourceStatus: consumedSchroederLawNeighborCandidates?.sourceStatus ?? null,
+    schroederLawNeighborCandidateStatus: consumedSchroederLawNeighborCandidates?.status ?? null,
+    schroederLawNeighborCandidateConsumerStatus: consumedSchroederLawNeighborCandidates?.consumerStatus ?? null,
+    schroederLawNeighborCandidateReason: consumedSchroederLawNeighborCandidates?.reason ?? null,
+    schroederLawNeighborCandidateAvailable: consumedSchroederLawNeighborCandidates?.available === true,
+    schroederLawNeighborCandidateAuthoritative: consumedSchroederLawNeighborCandidates?.authoritative === true,
+    schroederLawNeighborCandidateCount: consumedSchroederLawNeighborCandidates?.neighborCandidateCount ?? 0,
+    schroederLawNeighborCandidateStrideFloats: consumedSchroederLawNeighborCandidates?.neighborCandidateStrideFloats ?? null,
+    schroederLawNeighborCandidateBudget: consumedSchroederLawNeighborCandidates?.candidateBudget ?? null,
+    schroederLawNeighborCandidateLawQueueCount: consumedSchroederLawNeighborCandidates?.lawQueueCount ?? null,
+    schroederLawNeighborCandidateEnabledLawMask: consumedSchroederLawNeighborCandidates?.enabledLawMask ?? null,
+    schroederLawNeighborCandidateContactInterfaceMask: consumedSchroederLawNeighborCandidates?.contactInterfaceMask ?? null,
+    schroederLawNeighborCandidateEnumerationMode: consumedSchroederLawNeighborCandidates?.enumerationMode ?? null,
+    schroederLawNeighborCandidateTreeTraversalStatus: consumedSchroederLawNeighborCandidates?.treeTraversalStatus ?? null,
+    schroederLawNeighborCandidateBufferObserved:
+      consumedSchroederLawNeighborCandidates?.neighborCandidateBufferObserved === true,
+    schroederLawNeighborCandidateBufferConsumed:
+      consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed === true,
+    schroederLawNeighborCandidateSourceDeviceId: consumedSchroederLawNeighborCandidates?.sourceDeviceId ?? null,
+    schroederLawNeighborCandidateConsumerDeviceId: consumedSchroederLawNeighborCandidates?.consumerDeviceId ?? null,
     queueCompletionStatus: 'queue-submitted',
     queueCompletionMethod: 'queue.submit',
-    derivation: resolvedParticleBins.enabled
-      ? `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-neighbor-bin-contact-kinematics`
-      : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`,
+    derivation: consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed
+      ? 'schroeder-law-neighbor-candidates-authoritative-gpu-interface-element-candidate-contact-kinematics'
+      : (resolvedParticleBins.enabled
+          ? `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-neighbor-bin-contact-kinematics`
+          : `${consumedSchroederLawQueue.enabled ? 'schroeder-law-queue-gated-' : ''}gpu-interface-element-nearest-particle-contact-kinematics`),
     source: 'resident-sph-particle-state-and-thermo-buffers',
     cleanupBuffers: [
       paramsBuffer,
       localSchroederLawQueueBuffer,
       schroederLawQueueParamsBuffer,
+      localSchroederLawNeighborCandidateBuffer,
+      schroederLawNeighborCandidateParamsBuffer,
       ...(resolvedParticleBins.cleanupBuffers || [])
     ],
     destroyContactKinematicsBuffer() {
@@ -1823,7 +1903,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       particleBins: contactKinematicsParticleBins,
       maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
       gapFloorM: contactKinematicsGapFloorM,
-      schroederLawQueue: schroederPressureInterfaceLawQueue
+      schroederLawQueue: schroederPressureInterfaceLawQueue,
+      schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates
     });
     contactKinematicsBuffer = contactKinematicsGpuDerivation.buffer;
     contactKinematicsGpuDerived = true;

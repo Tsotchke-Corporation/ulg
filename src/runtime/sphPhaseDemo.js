@@ -1897,16 +1897,34 @@ export function gasPressureCellFieldSummary({
     spatialField?.localPressureGradientReady === true ? spatialField : suppliedField
   );
   const localCells = normalizeLocalGasPressureCells(effectiveField);
+  const retainedGasPressureRowCount = Math.max(0, Math.trunc(Number(
+    effectiveField?.pressureInterfaceGasPressureCellRowCount
+      ?? effectiveField?.gasPressureCellRowCount
+      ?? 0
+  ) || 0));
+  const retainedGasPressureRowsReady = effectiveField?.localPressureGradientReady === true
+    && retainedGasPressureRowCount > 0
+    && (
+      effectiveField?.retainedGasPressureCellsBufferAvailable === true
+      || effectiveField?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+      || effectiveField?.gasPressureCellRowsBufferRetained === true
+    );
   const dims = pressureBoxDimensionsM(boxDimsM || pressureSummary?.boxDimsM, pressureSummary?.boxVolumeM3);
   const usable = Number.isFinite(totalPressurePa) && dims.every((value) => value > 0);
   const localGradientReady = usable
-    && localCells.length > 0
-    && effectiveField?.localPressureGradientReady === true;
+    && effectiveField?.localPressureGradientReady === true
+    && (localCells.length > 0 || retainedGasPressureRowsReady);
   const retainedSpatialGasSourceBufferRefs = localGradientReady
     ? uniqueStringsFrom(effectiveField?.retainedSpatialGasSourceBufferRefs)
     : [];
   const workerRetainedSpatialGasSourceBufferRefs = localGradientReady
     ? uniqueStringsFrom(effectiveField?.workerRetainedSpatialGasSourceBufferRefs)
+    : [];
+  const retainedGasPressureBufferRefs = localGradientReady
+    ? uniqueStringsFrom(effectiveField?.retainedGasPressureBufferRefs)
+    : [];
+  const workerRetainedGasPressureBufferRefs = localGradientReady
+    ? uniqueStringsFrom(effectiveField?.workerRetainedGasPressureBufferRefs)
     : [];
   const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
   const spatialLedger = spatialGasSpeciesLedgerFromPressureSummary(pressureSummary);
@@ -1920,13 +1938,13 @@ export function gasPressureCellFieldSummary({
     cellDims: localGradientReady && Array.isArray(effectiveField?.cellDims)
       ? effectiveField.cellDims.map((value) => Math.max(0, Math.round(Number(value) || 0))).slice(0, 3)
       : (usable ? [1, 1, 1] : [0, 0, 0]),
-    cellCount: localGradientReady ? localCells.length : (usable ? 1 : 0),
+    cellCount: localGradientReady ? (localCells.length || retainedGasPressureRowCount) : (usable ? 1 : 0),
     cells: localGradientReady ? localCells : [],
     pressureFieldMode: localGradientReady
-      ? LOCAL_GAS_CELL_PRESSURE_FIELD_MODE
+      ? (effectiveField?.pressureFieldMode || LOCAL_GAS_CELL_PRESSURE_FIELD_MODE)
       : (usable ? UNIFORM_GAS_PRESSURE_FIELD_MODE : 'pressure-field-unavailable'),
     pressureFieldResolution: localGradientReady
-      ? LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION
+      ? (effectiveField?.pressureFieldResolution || LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION)
       : (usable ? UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION : 'pressure-field-unavailable'),
     pressureFieldCellFamily: 'resident-gas-pressure',
     uniformPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
@@ -1935,12 +1953,12 @@ export function gasPressureCellFieldSummary({
       ? vector3From(effectiveField?.pressureGradientPaPerM)
       : [0, 0, 0],
     gradientStatus: localGradientReady
-      ? 'local-pressure-gradient-field-ready'
+      ? (effectiveField?.gradientStatus || 'local-pressure-gradient-field-ready')
       : (usable ? 'uniform-sealed-gas-pressure-zero-gradient' : 'pressure-field-unavailable'),
     localPressureGradientSchema: ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
     localPressureGradientReady: localGradientReady,
     localPressureGradientStatus: localGradientReady
-      ? 'local-pressure-gradient-field-ready'
+      ? (effectiveField?.localPressureGradientStatus || 'local-pressure-gradient-field-ready')
       : (usable
           ? 'blocked-uniform-single-cell-field-has-no-local-gradient'
           : 'blocked-pressure-field-unavailable'),
@@ -1948,7 +1966,7 @@ export function gasPressureCellFieldSummary({
       ? []
       : (usable ? [...LOCAL_PRESSURE_GRADIENT_BLOCKERS] : ['pressure-field-unavailable']),
     localPressureGradientForceCouplingStatus: localGradientReady
-      ? 'local-pressure-gradient-force-coupling-ready'
+      ? (effectiveField?.localPressureGradientForceCouplingStatus || 'local-pressure-gradient-force-coupling-ready')
       : 'blocked-local-pressure-gradient-field-required',
     gasCellForceCouplingPolicy: localGradientReady
       ? 'local-pressure-gradient-interface-traction'
@@ -1956,7 +1974,8 @@ export function gasPressureCellFieldSummary({
     materialSurfaceCouplingStatus: usable
       ? 'blocked-material-surface-normals-not-resolved'
       : 'blocked-gas-pressure-field-unavailable',
-    localPressureGradientValidation: localGradientReady,
+    localPressureGradientValidation: localGradientReady
+      && effectiveField?.localPressureGradientValidation === true,
     spatialGasSpeciesLedgerSchema: spatialLedger?.schema ?? null,
     spatialGasSpeciesLedgerStatus: spatialLedger?.status ?? null,
     residentSpatialGasSpeciesLedgerStatus: localGradientReady
@@ -1975,12 +1994,26 @@ export function gasPressureCellFieldSummary({
       : null,
     retainedSpatialGasSourceBufferRefs,
     workerRetainedSpatialGasSourceBufferRefs,
+    retainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefs,
+    retainedGasPressureCellsBufferAvailable: localGradientReady
+      && effectiveField?.retainedGasPressureCellsBufferAvailable === true,
+    pressureInterfaceGasPressureCellRowCount: localGradientReady ? retainedGasPressureRowCount : 0,
+    pressureInterfaceGasPressureCellRowStrideFloats: localGradientReady
+      ? Math.max(0, Math.trunc(Number(effectiveField?.pressureInterfaceGasPressureCellRowStrideFloats) || 0))
+      : 0,
+    pressureInterfaceGasPressureCellRowByteLength: localGradientReady
+      ? Math.max(0, Math.trunc(Number(effectiveField?.pressureInterfaceGasPressureCellRowByteLength) || 0))
+      : 0,
+    pressureInterfaceGasPressureCellRowsBufferRetained: localGradientReady
+      && effectiveField?.pressureInterfaceGasPressureCellRowsBufferRetained === true,
     spatialGasSourceBufferRetained: localGradientReady
       && (effectiveField?.spatialGasSourceBufferRetained === true
         || retainedSpatialGasSourceBufferRefs.length > 0
         || workerRetainedSpatialGasSourceBufferRefs.length > 0),
     residentGasCellGradientCouplingValidation: false,
-    pressureFieldValidation: localGradientReady,
+    pressureFieldValidation: localGradientReady
+      && effectiveField?.pressureFieldValidation === true,
     forceCouplingValidation: false,
     scientificValidation: false,
     gasValidation: false,

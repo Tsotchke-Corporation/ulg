@@ -334,7 +334,7 @@ function isPressureInterfaceGasCellFieldAdmissionApproved(admission = null) {
     && admission?.gasCellFieldConsumptionApproved === true;
 }
 
-function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
+export function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
   const source = importValue && typeof importValue === 'object' ? importValue : null;
   const retainedGasCellFieldSource = source?.retainedGasCellFieldSource
     || source?.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
@@ -712,11 +712,59 @@ function pressureInterfaceStageRetainedBufferRefs(retainedBufferRefs = [], stage
   ]);
 }
 
+export function retainedGasCellFieldMetadataFromImport(importResult = null) {
+  if (importResult?.importReady !== true || importResult?.retainedLocalPressureGradientReady !== true) return null;
+  const rowCount = Math.max(0, Math.trunc(finiteNumber(
+    importResult.pressureInterfaceGasPressureCellRowCount,
+    0
+  )));
+  if (rowCount <= 0) return null;
+  return {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+    status: 'gas-cell-pressure-field-ready',
+    source: 'pressure-interface-retained-gas-cell-field-import',
+    sourceSchema: importResult.sourceSchema || null,
+    sourceHotBufferKey: importResult.sourceHotBufferKey || null,
+    eosPressureClosure: 'retained-gpu-gas-pressure-cell-rows',
+    pressureFieldMode: importResult.pressureFieldMode || 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: importResult.pressureFieldResolution || 'structured-gas-cell-grid',
+    pressureFieldCellFamily: 'resident-gas-pressure',
+    cellCount: rowCount,
+    cells: [],
+    retainedGasPressureBufferRefs: [...(importResult.retainedGasPressureBufferRefs || [])],
+    workerRetainedGasPressureBufferRefs: [...(importResult.workerRetainedGasPressureBufferRefs || [])],
+    retainedGasPressureCellsBufferAvailable: Boolean(importResult.retainedGasPressureCellsBuffer),
+    pressureInterfaceGasPressureCellRowCount: rowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats:
+      importResult.pressureInterfaceGasPressureCellRowStrideFloats || SPH_GAS_PRESSURE_CELL_FLOATS,
+    pressureInterfaceGasPressureCellRowByteLength:
+      importResult.pressureInterfaceGasPressureCellRowByteLength || 0,
+    pressureInterfaceGasPressureCellRowsBufferRetained:
+      importResult.pressureInterfaceGasPressureCellRowsBufferRetained === true,
+    pressureGradientPaPerM: [0, 0, 0],
+    gradientStatus: 'retained-gpu-gas-cell-pressure-rows-ready',
+    localPressureGradientSchema: 'peercompute.ulg.sph-local-pressure-gradient-field.v0',
+    localPressureGradientReady: true,
+    localPressureGradientStatus:
+      importResult.localPressureGradientStatus || 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+    localPressureGradientBlockers: [],
+    localPressureGradientForceCouplingStatus: 'retained-gpu-gas-cell-rows-ready-for-force-coupling',
+    localPressureGradientValidation: false,
+    pressureFieldValidation: false,
+    gasValidation: false,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 function pressureFeedbackWithImportedGasCellField(pressureFeedback = null, importResult = null) {
-  if (!pressureFeedback || importResult?.importReady !== true || !importResult.gasCellField) return pressureFeedback;
-  const gasCellField = importResult.gasCellField;
+  if (!pressureFeedback || importResult?.importReady !== true) return pressureFeedback;
+  const gasCellField = importResult.gasCellField || retainedGasCellFieldMetadataFromImport(importResult);
+  if (!gasCellField) return pressureFeedback;
   return {
     ...pressureFeedback,
+    schema: pressureFeedback.schema || 'peercompute.ulg.sph-gas-pressure-feedback.v0',
+    status: pressureFeedback.status || 'pressure-interface-retained-gas-cell-feedback-ready',
     gasCellField,
     pressureGradientStatus: gasCellField.gradientStatus || pressureFeedback.pressureGradientStatus || null,
     pressureFieldMode: gasCellField.pressureFieldMode || pressureFeedback.pressureFieldMode || null,
@@ -8974,10 +9022,16 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
       || null
   );
   const pressureSummaryInput = stageOptions.gasPressureSummary || stageOptions.pressureSummary || null;
-  const pressureSummaryForFeedback = pressureInterfaceGasCellFieldImport.importReady && pressureSummaryInput
+  const importedGasCellFieldForFeedback = pressureInterfaceGasCellFieldImport.importReady
+    ? (
+        pressureInterfaceGasCellFieldImport.gasCellField
+        || retainedGasCellFieldMetadataFromImport(pressureInterfaceGasCellFieldImport)
+      )
+    : null;
+  const pressureSummaryForFeedback = importedGasCellFieldForFeedback && pressureSummaryInput
     ? {
         ...pressureSummaryInput,
-        gasCellField: pressureInterfaceGasCellFieldImport.gasCellField
+        gasCellField: importedGasCellFieldForFeedback
       }
     : pressureSummaryInput;
   const pressureFeedback = stageOptions.pressureFeedback

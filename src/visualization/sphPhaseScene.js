@@ -63,9 +63,11 @@ import {
   cloneSphParticleStateForNext,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  normalizePressureInterfaceGasCellFieldImport,
   normalizeMlsMpmActiveGridPlanRefreshMode,
   normalizeMlsMpmResidentCompactSummaryMode,
   retainedContinuationBuffersFromUploads,
+  retainedGasCellFieldMetadataFromImport,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   submitMlsMpmResidentStepsComputeTask
@@ -12115,14 +12117,24 @@ export function createSphPhaseScene(container, {
       ?.pressureInterfaceGasCellFieldImportReady
       ? pressureInterfaceGasCellFieldImportPublication.pressureInterfaceGasCellFieldImport
       : null;
-    const effectiveGasPressureSummary = effectivePressureInterfaceGasCellFieldImport?.gasCellFieldSnapshot && effectiveGasPressureSummaryForProducer
+    const normalizedPressureInterfaceGasCellFieldImport = normalizePressureInterfaceGasCellFieldImport(
+      effectivePressureInterfaceGasCellFieldImport
+    );
+    const retainedPressureInterfaceGasCellField =
+      retainedGasCellFieldMetadataFromImport(normalizedPressureInterfaceGasCellFieldImport);
+    const effectivePressureInterfaceGasCellField =
+      effectivePressureInterfaceGasCellFieldImport?.gasCellFieldSnapshot
+      || effectivePressureInterfaceGasCellFieldImport?.gasCellField
+      || retainedPressureInterfaceGasCellField
+      || null;
+    const effectiveGasPressureSummary = effectivePressureInterfaceGasCellField && effectiveGasPressureSummaryForProducer
       ? {
           ...effectiveGasPressureSummaryForProducer,
-          gasCellField: effectivePressureInterfaceGasCellFieldImport.gasCellFieldSnapshot,
+          gasCellField: effectivePressureInterfaceGasCellField,
           pressureFeedback: effectiveGasPressureSummaryForProducer.pressureFeedback
             ? {
                 ...effectiveGasPressureSummaryForProducer.pressureFeedback,
-                gasCellField: effectivePressureInterfaceGasCellFieldImport.gasCellFieldSnapshot
+                gasCellField: effectivePressureInterfaceGasCellField
               }
             : effectiveGasPressureSummaryForProducer.pressureFeedback
         }

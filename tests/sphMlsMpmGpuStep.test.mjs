@@ -4254,6 +4254,9 @@ test('SPH pressure interface stage consumes retained Schroeder gas-cell rows wit
   assert.equal(result.pressureInterfaceGasCellFieldConsumerStatus, 'admitted-local-gas-cell-field-consumer-ready');
   assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
   assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, true);
+  assert.equal(result.pressureFeedback.gasCellField.eosPressureClosure, 'retained-gpu-gas-pressure-cell-rows');
+  assert.equal(result.pressureFeedback.gasCellField.localPressureGradientReady, true);
+  assert.equal(result.pressureFeedback.gasCellField.retainedGasPressureCellsBufferAvailable, true);
   assert.equal(
     result.pressureInterfaceForceSolver.localPressureGradientForceCouplingStatus,
     'retained-gpu-gas-cell-rows-ready-for-force-coupling'

@@ -1,6 +1,7 @@
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
@@ -17,6 +18,8 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -125,6 +128,8 @@ export const ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA =
   'peercompute.ulg.mls-mpm-schroeder-far-force-delta-fusion-execution.v0';
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS =
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS =
+  SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_FORCE_DELTA_FUSION_WORKGROUP_SIZE = 64;
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -919,6 +924,49 @@ function assertSchroederFarAggregateForceApplicationInput(schroederFarAggregateF
   )));
   if (stride !== SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS) {
     throw new RangeError('Schroeder far-force delta fusion requires the current force-application row layout');
+  }
+}
+
+function assertSchroederFarAggregateGasStateDeltaInput(schroederFarAggregateGasStateDelta) {
+  if (
+    schroederFarAggregateGasStateDelta?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA
+    && schroederFarAggregateGasStateDelta?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA
+  ) {
+    throw new TypeError('Schroeder resident gas-pressure bridge requires a Schroeder far-aggregate gas state-delta artifact');
+  }
+  if (schroederFarAggregateGasStateDelta.farAggregateGasStateDeltaAdmissionApproved !== true) {
+    throw new Error('Schroeder resident gas-pressure bridge requires admitted gas state-delta rows');
+  }
+  if (schroederFarAggregateGasStateDelta.stateMutationRequired !== true) {
+    throw new Error('Schroeder resident gas-pressure bridge requires mutation-ready gas state-delta rows');
+  }
+  if (schroederFarAggregateGasStateDelta.fullParticleReadbackRequired === true) {
+    throw new Error('Schroeder resident gas-pressure bridge forbids full particle readback gas state deltas');
+  }
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    schroederFarAggregateGasStateDelta.gasStateDeltaRowCount
+      ?? schroederFarAggregateGasStateDelta.stateDeltaRowCount,
+    0
+  )));
+  if (rowCount <= 0) {
+    throw new RangeError('Schroeder resident gas-pressure bridge requires at least one gas state-delta row');
+  }
+  const stride = Math.max(1, Math.round(finiteNumber(
+    schroederFarAggregateGasStateDelta.gasStateDeltaStrideFloats
+      ?? schroederFarAggregateGasStateDelta.stateDeltaStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS
+  )));
+  if (stride !== SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS) {
+    throw new RangeError('Schroeder resident gas-pressure bridge requires the current gas state-delta row layout');
+  }
+  const retainedBuffer = Boolean(
+    schroederFarAggregateGasStateDelta.gasStateDeltaBuffer
+    || schroederFarAggregateGasStateDelta.stateDeltaBuffer
+  );
+  const explicitRows = schroederFarAggregateGasStateDelta.gasStateDeltaRows instanceof Float32Array
+    || schroederFarAggregateGasStateDelta.stateDeltaRows instanceof Float32Array;
+  if (!retainedBuffer && !explicitRows) {
+    throw new TypeError('Schroeder resident gas-pressure bridge requires retained gas state-delta rows or explicit rows');
   }
 }
 
@@ -4652,6 +4700,28 @@ function retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDelt
     stateBuffer: source?.stateBuffer || source?.outputStateBuffer || null,
     stateBufferByteLength: source?.stateBufferByteLength || 0,
     destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null
+  };
+}
+
+function retainedSchroederFarAggregateGasStateDeltaBuffers(schroederFarAggregateGasStateDelta) {
+  const source = schroederFarAggregateGasStateDelta?.result || schroederFarAggregateGasStateDelta;
+  return {
+    gasStateDeltaBuffer: source?.gasStateDeltaBuffer || source?.stateDeltaBuffer || null,
+    gasStateDeltaBufferByteLength: source?.gasStateDeltaBufferByteLength
+      ?? source?.stateDeltaBufferByteLength
+      ?? source?.gasStateDeltaByteLength
+      ?? 0,
+    gasStateDeltaRowCount: Math.max(0, Math.round(finiteNumber(
+      source?.gasStateDeltaRowCount ?? source?.stateDeltaRowCount,
+      0
+    ))),
+    gasStateDeltaStrideFloats: Math.max(0, Math.round(finiteNumber(
+      source?.gasStateDeltaStrideFloats ?? source?.stateDeltaStrideFloats,
+      SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS
+    ))),
+    targetStateFamily: source?.targetStateFamily ?? null,
+    pressureInterfaceImportRequired: source?.pressureInterfaceImportRequired === true,
+    destroyGasStateDeltaBuffer: source?.destroyGasStateDeltaBuffer || source?.destroyStateDeltaBuffer || null
   };
 }
 
@@ -13325,6 +13395,7 @@ async function residentStepEnvelope({
   gridUpdate,
   g2pReconstruction,
   schroederFarForceDeltaFusion = null,
+  schroederFarAggregateGasStateDelta = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -13342,7 +13413,13 @@ async function residentStepEnvelope({
   sidecarFusionPlan = null,
   stageTiming = null
 }) {
-  const optionalStages = [schroederFarForceDeltaFusion, thermalStep, reactionStep, mechanicsRefreshStep]
+  const optionalStages = [
+    schroederFarForceDeltaFusion,
+    schroederFarAggregateGasStateDelta,
+    thermalStep,
+    reactionStep,
+    mechanicsRefreshStep
+  ]
     .filter(Boolean)
     .map((stage) => stage?.result || stage);
   const stages = [p2gGridProjection, gridUpdate, g2pReconstruction, ...optionalStages];
@@ -13350,6 +13427,8 @@ async function residentStepEnvelope({
   const stageBuffersRetained = hasRetainedStageBuffers({ p2gGridProjection, gridUpdate });
   const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
   const schroederFarForceOutput = retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
+  const schroederGasStateDeltaOutput =
+    retainedSchroederFarAggregateGasStateDeltaBuffers(schroederFarAggregateGasStateDelta);
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
   const thermalPhaseTransition = thermalPhaseTransitionDiagnostics(thermalStep);
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
@@ -13391,6 +13470,7 @@ async function residentStepEnvelope({
   });
   const g2pOutputBuffersRetained = Boolean(g2pOutput.stateBuffer && g2pOutput.mechanicsBuffer);
   const schroederFarForceOutputRequired = Boolean(schroederFarForceDeltaFusion);
+  const schroederGasStateDeltaRequired = Boolean(schroederFarAggregateGasStateDelta);
   const thermalOutputRequired = Boolean(thermalStep);
   const reactionOutputRequired = Boolean(reactionStep);
   const mechanicsRefreshOutputRequired = Boolean(mechanicsRefreshStep);
@@ -13398,12 +13478,15 @@ async function residentStepEnvelope({
   const reactionOutputBuffersRetained = reactionOutputRequired && Boolean(reactionOutput.stateBuffer && reactionOutput.thermoBuffer && reactionOutput.mechanicsBuffer);
   const mechanicsRefreshOutputBuffersRetained = mechanicsRefreshOutputRequired && Boolean(mechanicsRefreshOutput.mechanicsBuffer);
   const schroederFarForceOutputSatisfied = !schroederFarForceOutputRequired || Boolean(schroederFarForceOutput.stateBuffer);
+  const schroederGasStateDeltaSatisfied =
+    !schroederGasStateDeltaRequired || Boolean(schroederGasStateDeltaOutput.gasStateDeltaBuffer);
   const thermalOutputSatisfied = !thermalOutputRequired || thermalOutputBuffersRetained;
   const reactionOutputSatisfied = !reactionOutputRequired || reactionOutputBuffersRetained;
   const mechanicsRefreshOutputSatisfied = !mechanicsRefreshOutputRequired || mechanicsRefreshOutputBuffersRetained;
   const residentBuffersRetained = stageBuffersRetained
     && g2pOutputBuffersRetained
     && schroederFarForceOutputSatisfied
+    && schroederGasStateDeltaSatisfied
     && thermalOutputSatisfied
     && reactionOutputSatisfied
     && mechanicsRefreshOutputSatisfied;
@@ -13462,6 +13545,8 @@ async function residentStepEnvelope({
     gridUpdate: stageStatus(gridUpdate),
     g2p: stageStatus(g2pReconstruction),
     schroederFarForceDeltaFusion: stageStatus(schroederFarForceDeltaFusion?.result || schroederFarForceDeltaFusion),
+    schroederFarAggregateGasStateDelta:
+      stageStatus(schroederFarAggregateGasStateDelta?.result || schroederFarAggregateGasStateDelta),
     thermal: stageStatus(thermalStep?.result || thermalStep),
     reaction: stageStatus(reactionStep?.result || reactionStep),
     mechanicsRefresh: stageStatus(mechanicsRefreshStep?.result || mechanicsRefreshStep)
@@ -13472,6 +13557,10 @@ async function residentStepEnvelope({
     g2p: g2pReconstruction?.backend || null,
     schroederFarForceDeltaFusion:
       schroederFarForceDeltaFusion?.backend || schroederFarForceDeltaFusion?.result?.backend || null,
+    schroederFarAggregateGasStateDelta:
+      schroederFarAggregateGasStateDelta?.backend
+      || schroederFarAggregateGasStateDelta?.result?.backend
+      || null,
     thermal: thermalStep?.backend || thermalStep?.result?.backend || null,
     reaction: reactionStep?.backend || reactionStep?.result?.backend || null,
     mechanicsRefresh: mechanicsRefreshStep?.backend || mechanicsRefreshStep?.result?.backend || null
@@ -13538,6 +13627,21 @@ async function residentStepEnvelope({
     residentAuthorityParticleOwner: residentAuthoritySummary.familyOwners['particle-kinematics']?.ownerStage ?? null,
     residentAuthorityMechanicsOwner: residentAuthoritySummary.familyOwners.mechanics?.ownerStage ?? null,
     residentAuthorityThermoOwner: residentAuthoritySummary.familyOwners['thermo-phase']?.ownerStage ?? null,
+    schroederFarAggregateGasStateDeltaStatus: schroederFarAggregateGasStateDelta?.status ?? null,
+    schroederFarAggregateGasStateDeltaStateMutationStatus:
+      schroederFarAggregateGasStateDelta?.stateMutationStatus ?? null,
+    schroederFarAggregateGasStateDeltaStateAuthorityStatus:
+      schroederFarAggregateGasStateDelta?.stateAuthorityStatus ?? null,
+    schroederFarAggregateGasStateDeltaTargetStateFamily:
+      schroederGasStateDeltaOutput.targetStateFamily,
+    schroederFarAggregateGasStateDeltaPressureInterfaceImportRequired:
+      schroederGasStateDeltaOutput.pressureInterfaceImportRequired,
+    schroederFarAggregateGasStateDeltaRowCount:
+      schroederGasStateDeltaOutput.gasStateDeltaRowCount,
+    schroederFarAggregateGasStateDeltaBufferRetained:
+      Boolean(schroederGasStateDeltaOutput.gasStateDeltaBuffer),
+    schroederFarAggregateGasStateDeltaBufferByteLength:
+      schroederGasStateDeltaOutput.gasStateDeltaBufferByteLength,
     thermalMechanicsRefreshStatus,
     ...thermalPhaseTransition,
     thermalPhaseTransitionCouplingStatus,
@@ -13581,6 +13685,7 @@ async function residentStepEnvelope({
     gridUpdate,
     g2pReconstruction,
     schroederFarForceDeltaFusion,
+    schroederFarAggregateGasStateDelta,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
       schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
@@ -13594,6 +13699,21 @@ async function residentStepEnvelope({
       Boolean(schroederFarForceDeltaFusion?.stateBuffer || schroederFarForceDeltaFusion?.outputStateBuffer),
     schroederFarForceDeltaFusionStateBufferByteLength:
       schroederFarForceDeltaFusion?.stateBufferByteLength ?? 0,
+    schroederFarAggregateGasStateDeltaStatus: schroederFarAggregateGasStateDelta?.status ?? null,
+    schroederFarAggregateGasStateDeltaStateMutationStatus:
+      schroederFarAggregateGasStateDelta?.stateMutationStatus ?? null,
+    schroederFarAggregateGasStateDeltaStateAuthorityStatus:
+      schroederFarAggregateGasStateDelta?.stateAuthorityStatus ?? null,
+    schroederFarAggregateGasStateDeltaTargetStateFamily:
+      schroederGasStateDeltaOutput.targetStateFamily,
+    schroederFarAggregateGasStateDeltaPressureInterfaceImportRequired:
+      schroederGasStateDeltaOutput.pressureInterfaceImportRequired,
+    schroederFarAggregateGasStateDeltaRowCount:
+      schroederGasStateDeltaOutput.gasStateDeltaRowCount,
+    schroederFarAggregateGasStateDeltaBufferRetained:
+      Boolean(schroederGasStateDeltaOutput.gasStateDeltaBuffer),
+    schroederFarAggregateGasStateDeltaBufferByteLength:
+      schroederGasStateDeltaOutput.gasStateDeltaBufferByteLength,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -13785,6 +13905,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederActiveNodeList = null,
   schroederLawQueue = null,
   schroederLawNeighborCandidates = null,
+  schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateForceApplication = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -13850,6 +13971,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     preferWebGpu,
     readbackMode
   });
+  if (schroederFarAggregateGasStateDelta) {
+    assertSchroederFarAggregateGasStateDeltaInput(schroederFarAggregateGasStateDelta);
+  }
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
@@ -14360,6 +14484,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     gridUpdate,
     g2pReconstruction,
     schroederFarForceDeltaFusion,
+    schroederFarAggregateGasStateDelta,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
       schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,

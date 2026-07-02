@@ -93,6 +93,9 @@ export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA = 'peerco
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-diagnostic-summary.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-diagnostic-summary-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_AUTHORITY_POLICY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-authority-policy.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta-admission.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-admission.v0';
@@ -995,6 +998,40 @@ export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_ROW_LAYOUT 
   'status:f32',
   'fullParticleReadbackRequired:f32',
   'stateMutationRequired:f32',
+  'pad0:f32',
+  'pad1:f32'
+]);
+export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'sourceChartId:f32',
+  'emittedConsumerLawMask:f32',
+  'aggregateMassKg:f32',
+  'gasDensityProxyKgPerM3:f32',
+  'gasPressureProxyPa:f32',
+  'referencePressurePa:f32',
+  'densityDeltaKgPerM3:f32',
+  'pressureDeltaPa:f32',
+  'representedGasVolumeM3:f32',
+  'pressureWorkProxyJ:f32',
+  'activeCandidateCount:f32',
+  'acceptedCandidateCount:f32',
+  'maxOpeningRatio:f32',
+  'maxFarFieldErrorBound:f32',
+  'sourceLawConsumerStatus:f32',
+  'sourceDiagnosticStatus:f32',
+  'admissionApproved:f32',
+  'stateMutationRequired:f32',
+  'fullParticleReadbackRequired:f32',
+  'queueEpoch:f32',
+  'stateFamilyId:f32',
+  'targetFamilyId:f32',
+  'consumerRowIndex:f32',
+  'stateDeltaRowIndex:f32',
+  'gasStateDeltaModeId:f32',
+  'status:f32',
+  'pressureInterfaceImportRequired:f32',
+  'conservationModeId:f32',
   'pad0:f32',
   'pad1:f32'
 ]);

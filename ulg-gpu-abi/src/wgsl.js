@@ -9903,8 +9903,8 @@ fn ss_far_candidate_admissible(active_offset: u32, node_offset: u32, source_m: v
   let same_chart = abs(source_chart - aggregate_chart) < 0.5;
   let far_enough = distance_m > near_field_radius_m;
   let opened = opening_ratio <= params.opening_theta;
-  let active = ss_far_aggregate_node_active(node_offset);
-  let accepted = select(0.0, 1.0, same_chart && far_enough && opened && active);
+  let is_live_node = ss_far_aggregate_node_active(node_offset);
+  let accepted = select(0.0, 1.0, same_chart && far_enough && opened && is_live_node);
   return vec4<f32>(accepted, distance_m, node_size_m, opening_ratio);
 }
 
@@ -10711,6 +10711,155 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   diagnostic_summary_rows[diagnostic_offset + 29u] = 0.0;
   diagnostic_summary_rows[diagnostic_offset + 30u] = 0.0;
   diagnostic_summary_rows[diagnostic_offset + 31u] = 0.0;
+}
+`;
+
+export const schroederFarAggregateGasStateDeltaWgsl = `
+struct SchroederFarAggregateGasStateDeltaParams {
+  law_consumer_row_count: u32,
+  law_consumer_stride: u32,
+  gas_state_delta_stride: u32,
+  admission_approved: u32,
+  enabled_consumer_law_mask: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  reference_pressure_pa: f32,
+  pressure_delta_scale: f32,
+  density_delta_scale: f32,
+  gas_gamma: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  target_family_id: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> law_consumer_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> gas_state_delta_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederFarAggregateGasStateDeltaParams;
+
+const SCHROEDER_DEFAULT_GAS_STATE_DELTA_LAW_CONSUMER_STRIDE: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_GAS_STATE_DELTA_STRIDE: u32 = 32u;
+const SCHROEDER_FAR_LAW_GAS_STATE_DELTA_MASK_WGSL: u32 = 64u;
+
+fn ss_gas_delta_mask_enabled(mask: u32, bit: u32) -> bool {
+  return (mask & bit) != 0u;
+}
+
+fn ss_gas_state_delta_write_blocked(row_offset: u32, consumer_offset: u32, row_index: u32, status: f32) {
+  gas_state_delta_rows[row_offset + 0u] = law_consumer_rows[consumer_offset + 0u];
+  gas_state_delta_rows[row_offset + 1u] = law_consumer_rows[consumer_offset + 1u];
+  gas_state_delta_rows[row_offset + 2u] = law_consumer_rows[consumer_offset + 2u];
+  gas_state_delta_rows[row_offset + 3u] = law_consumer_rows[consumer_offset + 5u];
+  gas_state_delta_rows[row_offset + 4u] = 0.0;
+  gas_state_delta_rows[row_offset + 5u] = 0.0;
+  gas_state_delta_rows[row_offset + 6u] = 0.0;
+  gas_state_delta_rows[row_offset + 7u] = max(params.reference_pressure_pa, 0.0);
+  gas_state_delta_rows[row_offset + 8u] = 0.0;
+  gas_state_delta_rows[row_offset + 9u] = 0.0;
+  gas_state_delta_rows[row_offset + 10u] = 0.0;
+  gas_state_delta_rows[row_offset + 11u] = 0.0;
+  gas_state_delta_rows[row_offset + 12u] = law_consumer_rows[consumer_offset + 8u];
+  gas_state_delta_rows[row_offset + 13u] = law_consumer_rows[consumer_offset + 9u];
+  gas_state_delta_rows[row_offset + 14u] = law_consumer_rows[consumer_offset + 12u];
+  gas_state_delta_rows[row_offset + 15u] = law_consumer_rows[consumer_offset + 13u];
+  gas_state_delta_rows[row_offset + 16u] = law_consumer_rows[consumer_offset + 6u];
+  gas_state_delta_rows[row_offset + 17u] = law_consumer_rows[consumer_offset + 23u];
+  gas_state_delta_rows[row_offset + 18u] = f32(params.admission_approved);
+  gas_state_delta_rows[row_offset + 19u] = 0.0;
+  gas_state_delta_rows[row_offset + 20u] = 0.0;
+  gas_state_delta_rows[row_offset + 21u] = params.queue_epoch;
+  gas_state_delta_rows[row_offset + 22u] = params.state_family_id;
+  gas_state_delta_rows[row_offset + 23u] = params.target_family_id;
+  gas_state_delta_rows[row_offset + 24u] = law_consumer_rows[consumer_offset + 30u];
+  gas_state_delta_rows[row_offset + 25u] = f32(row_index);
+  gas_state_delta_rows[row_offset + 26u] = 1.0;
+  gas_state_delta_rows[row_offset + 27u] = status;
+  gas_state_delta_rows[row_offset + 28u] = 1.0;
+  gas_state_delta_rows[row_offset + 29u] = 1.0;
+  gas_state_delta_rows[row_offset + 30u] = 0.0;
+  gas_state_delta_rows[row_offset + 31u] = 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.law_consumer_row_count) {
+    return;
+  }
+
+  let consumer_stride = max(
+    params.law_consumer_stride,
+    SCHROEDER_DEFAULT_GAS_STATE_DELTA_LAW_CONSUMER_STRIDE
+  );
+  let delta_stride = max(
+    params.gas_state_delta_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_GAS_STATE_DELTA_STRIDE
+  );
+  let consumer_offset = row_index * consumer_stride;
+  let delta_offset = row_index * delta_stride;
+
+  let emitted_consumer_mask = u32(max(law_consumer_rows[consumer_offset + 5u], 0.0));
+  let enabled_mask = params.enabled_consumer_law_mask & SCHROEDER_FAR_LAW_GAS_STATE_DELTA_MASK_WGSL;
+  let gas_enabled = ss_gas_delta_mask_enabled(emitted_consumer_mask & enabled_mask, SCHROEDER_FAR_LAW_GAS_STATE_DELTA_MASK_WGSL);
+  let source_status = law_consumer_rows[consumer_offset + 6u];
+  let gas_density = max(law_consumer_rows[consumer_offset + 18u], 0.0);
+  let gas_pressure = max(law_consumer_rows[consumer_offset + 19u], 0.0);
+  let aggregate_mass = max(law_consumer_rows[consumer_offset + 10u], 0.0);
+  let active_candidate_count = max(law_consumer_rows[consumer_offset + 8u], 0.0);
+
+  if (params.admission_approved == 0u) {
+    ss_gas_state_delta_write_blocked(delta_offset, consumer_offset, row_index, 128.0);
+    return;
+  }
+  if (!gas_enabled || source_status >= 96.0 || source_status <= 0.0 || gas_pressure <= 0.0 || gas_density <= 0.0) {
+    ss_gas_state_delta_write_blocked(delta_offset, consumer_offset, row_index, 96.0);
+    return;
+  }
+
+  let reference_pressure = max(params.reference_pressure_pa, 0.0);
+  let pressure_delta = max(gas_pressure - reference_pressure, 0.0) * max(params.pressure_delta_scale, 0.0);
+  let density_delta = gas_density * max(params.density_delta_scale, 0.0);
+  let represented_volume = select(0.0, aggregate_mass / max(gas_density, 0.000001), aggregate_mass > 0.0);
+  let gamma_minus_one = max(params.gas_gamma - 1.0, 0.1);
+  let pressure_work_proxy = pressure_delta * represented_volume / gamma_minus_one;
+  var status = select(32.0, 1.0, active_candidate_count > 0.0 && pressure_delta > 0.0);
+  if (source_status >= 64.0 && source_status < 96.0) {
+    status = 64.0;
+  }
+
+  gas_state_delta_rows[delta_offset + 0u] = law_consumer_rows[consumer_offset + 0u];
+  gas_state_delta_rows[delta_offset + 1u] = law_consumer_rows[consumer_offset + 1u];
+  gas_state_delta_rows[delta_offset + 2u] = law_consumer_rows[consumer_offset + 2u];
+  gas_state_delta_rows[delta_offset + 3u] = f32(emitted_consumer_mask);
+  gas_state_delta_rows[delta_offset + 4u] = aggregate_mass;
+  gas_state_delta_rows[delta_offset + 5u] = gas_density;
+  gas_state_delta_rows[delta_offset + 6u] = gas_pressure;
+  gas_state_delta_rows[delta_offset + 7u] = reference_pressure;
+  gas_state_delta_rows[delta_offset + 8u] = density_delta;
+  gas_state_delta_rows[delta_offset + 9u] = pressure_delta;
+  gas_state_delta_rows[delta_offset + 10u] = represented_volume;
+  gas_state_delta_rows[delta_offset + 11u] = pressure_work_proxy;
+  gas_state_delta_rows[delta_offset + 12u] = active_candidate_count;
+  gas_state_delta_rows[delta_offset + 13u] = law_consumer_rows[consumer_offset + 9u];
+  gas_state_delta_rows[delta_offset + 14u] = law_consumer_rows[consumer_offset + 12u];
+  gas_state_delta_rows[delta_offset + 15u] = law_consumer_rows[consumer_offset + 13u];
+  gas_state_delta_rows[delta_offset + 16u] = source_status;
+  gas_state_delta_rows[delta_offset + 17u] = law_consumer_rows[consumer_offset + 23u];
+  gas_state_delta_rows[delta_offset + 18u] = f32(params.admission_approved);
+  gas_state_delta_rows[delta_offset + 19u] = 1.0;
+  gas_state_delta_rows[delta_offset + 20u] = 0.0;
+  gas_state_delta_rows[delta_offset + 21u] = params.queue_epoch;
+  gas_state_delta_rows[delta_offset + 22u] = params.state_family_id;
+  gas_state_delta_rows[delta_offset + 23u] = params.target_family_id;
+  gas_state_delta_rows[delta_offset + 24u] = law_consumer_rows[consumer_offset + 30u];
+  gas_state_delta_rows[delta_offset + 25u] = f32(row_index);
+  gas_state_delta_rows[delta_offset + 26u] = 1.0;
+  gas_state_delta_rows[delta_offset + 27u] = status;
+  gas_state_delta_rows[delta_offset + 28u] = 1.0;
+  gas_state_delta_rows[delta_offset + 29u] = 1.0;
+  gas_state_delta_rows[delta_offset + 30u] = 0.0;
+  gas_state_delta_rows[delta_offset + 31u] = 0.0;
 }
 `;
 

@@ -182,6 +182,7 @@ export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task-result.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.pressure-interface-stage-task-evidence.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0';
+export const ULG_SPH_PRESSURE_INTERFACE_SOURCE_KEY_REPLAY_DESCRIPTOR_SCHEMA = 'peercompute.ulg.sph-pressure-interface-source-key-replay-descriptor.v0';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-spatial-gas-ledger-producer-stage-compute-task.v0';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-spatial-gas-ledger-producer-stage-compute-task-result.v0';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.spatial-gas-ledger-producer-stage-task-evidence.v0';
@@ -728,6 +729,79 @@ function pressureInterfaceStageRetainedBufferRefs(retainedBufferRefs = [], stage
       ? ['resident-gas-pressure-cells-buffer']
       : [])
   ]);
+}
+
+export function createPressureInterfaceSourceKeyReplayDescriptor({
+  materialInterfaceField = null,
+  retainedBufferRefs = [],
+  source = 'pressure-interface-stage-compute-task',
+  sourceTaskId = null
+} = {}) {
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.interfaceSourceKeyRowCount ?? materialInterfaceField?.sourceKeyRowCount,
+    0
+  )));
+  const readyCount = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.interfaceSourceKeyReadyCount ?? materialInterfaceField?.sourceKeyReadyCount,
+    rowCount
+  )));
+  const rowStrideFloats = Math.max(0, Math.round(finiteNumber(
+    materialInterfaceField?.interfaceSourceKeyStrideFloats ?? materialInterfaceField?.sourceKeyStrideFloats,
+    0
+  )));
+  const sourceKeyRefs = uniqueNonEmptyStrings(retainedBufferRefs)
+    .filter(isPressureInterfaceSourceKeyRef);
+  const retainedBufferObserved = Boolean(
+    materialInterfaceField?.interfaceSourceKeyBuffer
+    || materialInterfaceField?.sourceKeyBuffer
+    || materialInterfaceField?.interfaceSourceKeyBufferRetained === true
+    || materialInterfaceField?.sourceKeyBufferRetained === true
+    || sourceKeyRefs.length > 0
+  );
+  const descriptorReady = retainedBufferObserved && rowCount > 0;
+  if (
+    !descriptorReady
+    && !materialInterfaceField?.interfaceSourceKeyStatus
+    && !materialInterfaceField?.sourceKeyStatus
+  ) {
+    return null;
+  }
+  return {
+    schema: ULG_SPH_PRESSURE_INTERFACE_SOURCE_KEY_REPLAY_DESCRIPTOR_SCHEMA,
+    status: descriptorReady
+      ? 'pressure-interface-source-key-replay-descriptor-ready'
+      : 'pressure-interface-source-key-replay-descriptor-blocked',
+    source,
+    sourceTaskId,
+    sourceSchema: materialInterfaceField?.schema ?? null,
+    sourceStatus: materialInterfaceField?.status ?? null,
+    interfaceSourceKeySchema: materialInterfaceField?.interfaceSourceKeySchema
+      ?? materialInterfaceField?.sourceKeySchema
+      ?? null,
+    interfaceSourceKeyStatus: materialInterfaceField?.interfaceSourceKeyStatus
+      ?? materialInterfaceField?.sourceKeyStatus
+      ?? null,
+    interfaceSourceKeyReason: materialInterfaceField?.interfaceSourceKeyReason
+      ?? materialInterfaceField?.sourceKeyReason
+      ?? null,
+    interfaceSourceKeyRowCount: rowCount,
+    interfaceSourceKeyReadyCount: readyCount,
+    interfaceSourceKeyStrideFloats: rowStrideFloats,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      materialInterfaceField?.interfaceSourceKeySurfaceIndexFallbackEnabled !== false,
+    retainedBufferRefs: sourceKeyRefs,
+    retainedBufferRefCount: sourceKeyRefs.length,
+    retainedRefObserved: sourceKeyRefs.length > 0,
+    sameDeviceHotBufferObserved: retainedBufferObserved,
+    portablePayloadMode: 'descriptor-only-no-raw-gpubuffer',
+    rawGpuBufferSerialized: false,
+    rawGpuBufferTransferable: false,
+    replayConsumerStage: PRESSURE_INTERFACE_STAGE_ID,
+    replayInputFamily: 'sph-material-interface-field',
+    replayInputRef: PRESSURE_INTERFACE_SOURCE_KEY_BUFFER_REF,
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false
+  };
 }
 
 export function retainedGasCellFieldMetadataFromImport(importResult = null) {
@@ -8997,6 +9071,14 @@ export function createSphPressureInterfaceStageComputeTask({
       })
     : null;
   const id = taskId || `ulg-sph-pressure-interface-stage:${finiteNumber(taskStageOptions.sphParticleState?.step, 0)}`;
+  const pressureInterfaceSourceKeyReplayDescriptor = createPressureInterfaceSourceKeyReplayDescriptor({
+    materialInterfaceField: taskStageOptions.materialInterfaceField || null,
+    retainedBufferRefs: resolvedRetainedBufferRefs,
+    sourceTaskId: id
+  });
+  const portableReplayInputDescriptors = [
+    pressureInterfaceSourceKeyReplayDescriptor
+  ].filter(Boolean);
   return {
     schema: ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
     id,
@@ -9012,6 +9094,8 @@ export function createSphPressureInterfaceStageComputeTask({
     readFamilies: [...readFamilies],
     writeFamilies: [...writeFamilies],
     expectedOutputFamilies: [...writeFamilies],
+    portableReplayInputDescriptors,
+    portableReplayDescriptorOnly: portableReplayInputDescriptors.length > 0,
     ...(requiresGpuLane ? {
       webgpu: {
         residency: 'gpu-lane',
@@ -9032,6 +9116,8 @@ export function createSphPressureInterfaceStageComputeTask({
       gpuFenceRequirement: gpuFence,
       gpuResidentLane,
       lawGraphNode,
+      pressureInterfaceSourceKeyReplayDescriptor,
+      portableReplayInputDescriptors,
       computeTaskSchema: ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
       computeTaskId: id,
       expectedOutputFamilies: [...writeFamilies],

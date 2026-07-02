@@ -60,6 +60,7 @@ import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_SOURCE_KEY_REPLAY_DESCRIPTOR_SCHEMA,
   createSphThermalPhaseStageComputeTask,
   createSphSpatialGasLedgerProducerStageComputeTask,
   createSphGasCellEosProducerStageComputeTask,
@@ -3929,6 +3930,25 @@ test('SPH pressure interface stage retains interface source-key descriptors', ()
     'pressure-interface-force-rows-buffer',
     'sph-interface-source-key-buffer'
   ]);
+  assert.equal(task.portableReplayDescriptorOnly, true);
+  assert.equal(task.portableReplayInputDescriptors.length, 1);
+  assert.equal(
+    task.portableReplayInputDescriptors[0].schema,
+    ULG_SPH_PRESSURE_INTERFACE_SOURCE_KEY_REPLAY_DESCRIPTOR_SCHEMA
+  );
+  assert.equal(
+    task.portableReplayInputDescriptors[0].status,
+    'pressure-interface-source-key-replay-descriptor-ready'
+  );
+  assert.deepEqual(task.portableReplayInputDescriptors[0].retainedBufferRefs, [
+    'sph-interface-source-key-buffer'
+  ]);
+  assert.equal(task.portableReplayInputDescriptors[0].rawGpuBufferSerialized, false);
+  assert.equal(task.data.pressureInterfaceSourceKeyReplayDescriptor.rawGpuBufferSerialized, false);
+  const portableReplayPayload = JSON.stringify(task.portableReplayInputDescriptors);
+  assert.match(portableReplayPayload, /sph-interface-source-key-buffer/);
+  assert.doesNotMatch(portableReplayPayload, /retained-interface-source-key-buffer/);
+  assert.equal(Object.hasOwn(task.portableReplayInputDescriptors[0], 'interfaceSourceKeyBuffer'), false);
 });
 
 test('SPH pressure interface stage records admitted local gas-cell pressure field consumption', async () => {

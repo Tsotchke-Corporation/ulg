@@ -16,7 +16,8 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
-  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import {
   createBufferVolumeDescriptor as createWebGpuMarchingCubesBufferVolumeDescriptor,
@@ -177,6 +178,8 @@ export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-backend-selection.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-native-executor.v0';
+export const ULG_SPH_SCENE_SCHROEDER_SOURCE_KEY_REPLAY_DIAGNOSTICS_SCHEMA =
+  'peercompute.ulg.schroeder-source-key-replay-diagnostics.v0';
 export const SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS =
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 export const SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS =
@@ -3853,6 +3856,170 @@ function uniqueSceneStringList(values = []) {
   return [...new Set(sceneStringList(values))];
 }
 
+function scenePressureInterfaceSourceKeyRef(value) {
+  const text = String(value || '').toLowerCase();
+  const squashed = text.replace(/[^a-z0-9]/g, '');
+  return text.includes('sph-interface-source-key')
+    || text.includes('interface-source-key')
+    || text.includes('source-key-buffer')
+    || squashed.includes('interfacesourcekey')
+    || squashed.includes('sourcekeybuffer');
+}
+
+function sceneSourceKeyCount(value, fallback = 0) {
+  const number = finiteNumberOrNull(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : fallback;
+}
+
+function sourceKeyRefsFromSceneSources(...sources) {
+  return uniqueSceneStringList(sources.flatMap((source) => [
+    ...sceneStringList(source?.retainedSourceKeyBufferRefs),
+    ...sceneStringList(source?.workerRetainedSourceKeyBufferRefs),
+    ...sceneStringList(source?.retainedBufferRefs),
+    ...sceneStringList(source?.workerRetainedBufferRefs),
+    ...sceneStringList(source?.pressureInterfaceSourceKeyRetainedBufferRefs),
+    ...sceneStringList(source?.pressureInterfaceSourceKeyWorkerRetainedBufferRefs)
+  ])).filter(scenePressureInterfaceSourceKeyRef);
+}
+
+export function buildSchroederSourceKeyReplayDiagnostics({
+  materialInterfaceField = null,
+  pressureInterfaceState = null,
+  pressureInterfaceForceSolver = null,
+  pressureInterfaceWorkerCompactPublicationCandidate = null,
+  pressureInterfaceWorkerCompactPublication = null,
+  pressureInterfaceStageSummary = null
+} = {}) {
+  const materialField = materialInterfaceField
+    || pressureInterfaceState?.materialInterfaceField
+    || null;
+  const solver = pressureInterfaceForceSolver
+    || pressureInterfaceState?.pressureInterfaceForceSolver
+    || null;
+  const publicationCandidate = pressureInterfaceWorkerCompactPublicationCandidate
+    || pressureInterfaceState?.pressureInterfaceWorkerCompactPublicationCandidate
+    || null;
+  const publication = pressureInterfaceWorkerCompactPublication
+    || pressureInterfaceState?.pressureInterfaceWorkerCompactPublication
+    || null;
+  const stageSummary = pressureInterfaceStageSummary
+    || pressureInterfaceState?.pressureInterfaceStageSummary
+    || null;
+  const sourceKeyRefs = sourceKeyRefsFromSceneSources(
+    publicationCandidate,
+    publication,
+    stageSummary,
+    pressureInterfaceState
+  );
+  const productionRowCount = sceneSourceKeyCount(
+    materialField?.interfaceSourceKeyRowCount ?? materialField?.sourceKeyRowCount,
+    0
+  );
+  const productionReadyCount = sceneSourceKeyCount(
+    materialField?.interfaceSourceKeyReadyCount ?? materialField?.sourceKeyReadyCount,
+    productionRowCount
+  );
+  const productionBufferRetained = Boolean(
+    materialField?.interfaceSourceKeyBufferRetained
+    || materialField?.sourceKeyBufferRetained
+    || materialField?.interfaceSourceKeyBuffer
+    || materialField?.sourceKeyBuffer
+  );
+  const productionStatus = materialField?.interfaceSourceKeyStatus
+    ?? materialField?.sourceKeyStatus
+    ?? null;
+  const productionReady = productionReadyCount > 0
+    && (productionBufferRetained || productionStatus === 'interface-source-key-retained');
+  const solverRowCount = sceneSourceKeyCount(
+    solver?.interfaceSourceKeyRowCount
+      ?? pressureInterfaceState?.pressureInterfaceSourceKeyRowCount
+      ?? stageSummary?.pressureInterfaceSourceKeyRowCount,
+    0
+  );
+  const solverReadyCount = sceneSourceKeyCount(
+    solver?.interfaceSourceKeyReadyCount
+      ?? pressureInterfaceState?.pressureInterfaceSourceKeyReadyCount
+      ?? stageSummary?.pressureInterfaceSourceKeyReadyCount,
+    solverRowCount
+  );
+  const consumerObserved = Boolean(
+    solver?.interfaceSourceKeyBufferObserved
+    || pressureInterfaceState?.pressureInterfaceSourceKeyBufferObserved
+    || stageSummary?.pressureInterfaceSourceKeyBufferObserved
+  );
+  const consumerConsumed = Boolean(
+    solver?.interfaceSourceKeyBufferConsumed
+    || pressureInterfaceState?.pressureInterfaceSourceKeyBufferConsumed
+    || stageSummary?.pressureInterfaceSourceKeyBufferConsumed
+  );
+  const publicationReady = Boolean(
+    publicationCandidate?.retainedSourceKeySourceReady
+    || publication?.retainedSourceKeySourceReady
+    || sourceKeyRefs.length > 0
+  );
+  const rowCountMatch = productionRowCount > 0 && solverRowCount > 0
+    ? productionRowCount === solverRowCount
+    : null;
+  const replayReady = productionReady && (publicationReady || consumerObserved || consumerConsumed);
+  const status = consumerConsumed
+    ? 'schroeder-source-key-replay-consumed'
+    : (consumerObserved
+        ? 'schroeder-source-key-replay-consumer-observed'
+        : (publicationReady
+            ? 'schroeder-source-key-replay-retained-ref-published'
+            : (productionReady
+                ? 'schroeder-source-key-replay-produced'
+                : 'schroeder-source-key-replay-unavailable')));
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_SOURCE_KEY_REPLAY_DIAGNOSTICS_SCHEMA,
+    status,
+    replayReady,
+    sourceKeySchema: materialField?.interfaceSourceKeySchema
+      ?? solver?.interfaceSourceKeySchema
+      ?? pressureInterfaceState?.pressureInterfaceSourceKeySchema
+      ?? ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA,
+    productionStatus,
+    productionSourceFieldStatus: materialField?.interfaceSourceFieldSourceIndexStatus ?? null,
+    productionSourceFieldBufferRetained:
+      Boolean(materialField?.interfaceSourceFieldSourceIndexBufferRetained),
+    productionBufferRetained,
+    productionBufferByteLength: sceneSourceKeyCount(materialField?.interfaceSourceKeyBufferByteLength, 0),
+    productionRowCount,
+    productionReadyCount,
+    productionStrideFloats: sceneSourceKeyCount(materialField?.interfaceSourceKeyStrideFloats, 0) || null,
+    retainedRefPublicationStatus: publicationReady
+      ? 'schroeder-source-key-retained-ref-published'
+      : (productionReady
+          ? 'blocked-source-key-retained-ref-publication-not-observed'
+          : 'blocked-source-key-production-not-ready'),
+    retainedRefPublicationReady: publicationReady,
+    retainedSourceKeySourceStatus: publicationCandidate?.retainedSourceKeySourceStatus
+      ?? publication?.retainedSourceKeySourceStatus
+      ?? null,
+    retainedBufferRefs: sourceKeyRefs,
+    retainedBufferRefCount: sourceKeyRefs.length,
+    pressureConsumerStatus: solver?.interfaceSourceKeyConsumerStatus
+      ?? pressureInterfaceState?.pressureInterfaceSourceKeyConsumerStatus
+      ?? stageSummary?.pressureInterfaceSourceKeyConsumerStatus
+      ?? null,
+    pressureConsumerObserved: consumerObserved,
+    pressureConsumerConsumed: consumerConsumed,
+    pressureConsumerRowCount: solverRowCount,
+    pressureConsumerReadyCount: solverReadyCount,
+    pressureConsumerSurfaceIndexFallbackEnabled:
+      solver?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? pressureInterfaceState?.pressureInterfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? materialField?.interfaceSourceKeySurfaceIndexFallbackEnabled
+      ?? null,
+    productionConsumerRowCountMatch: rowCountMatch,
+    portablePayloadMode: 'descriptor-only-no-raw-gpubuffer',
+    rawGpuBufferSerialized: false,
+    hotPath: 'source-local-source-index-buffer-to-compact-source-key-sidecar-to-pressure-contact-kinematics',
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false
+  };
+}
+
 function pressureInterfaceGasCellFieldImportBuffer(importDescriptor = null) {
   return importDescriptor?.gasPressureCellsBuffer
     || importDescriptor?.pressureInterfaceGasPressureCellsBuffer
@@ -4730,6 +4897,10 @@ export function buildSphResidentPressureInterfaceStateSummary({
   const rowsReady = solverReady
     && uploadFields.pressureInterfaceForceRowsBufferRetained
     && uploadFields.pressureInterfaceGridForceAdmissionApproved;
+  const schroederSourceKeyReplayDiagnostics = buildSchroederSourceKeyReplayDiagnostics({
+    materialInterfaceField,
+    pressureInterfaceForceSolver: solver
+  });
   return {
     schema: 'peercompute.ulg.sph-resident-pressure-interface-state.v0',
     status: rowsReady
@@ -4769,6 +4940,14 @@ export function buildSphResidentPressureInterfaceStateSummary({
     pressureInterfaceForceSolver: solver,
     pressureInterfaceForceSolverSchema: solver.schema,
     pressureInterfaceForceSolverStatus: solver.status,
+    schroederSourceKeyReplayDiagnostics,
+    schroederSourceKeyReplayDiagnosticsSchema: schroederSourceKeyReplayDiagnostics.schema,
+    schroederSourceKeyReplayDiagnosticsStatus: schroederSourceKeyReplayDiagnostics.status,
+    schroederSourceKeyReplayReady: schroederSourceKeyReplayDiagnostics.replayReady,
+    schroederSourceKeyReplayRetainedRefPublicationReady:
+      schroederSourceKeyReplayDiagnostics.retainedRefPublicationReady,
+    schroederSourceKeyReplayPressureConsumerConsumed:
+      schroederSourceKeyReplayDiagnostics.pressureConsumerConsumed,
     pressureInterfaceSolverApplicationStatus: solver.forceApplicationStatus,
     pressureInterfaceSolverForceRowCount: solver.forceRowCount,
     pressureInterfaceSolverConservationStatus: solver.conservationStatus,
@@ -4977,6 +5156,8 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
   const forceRowsUploadFields = compactPressureInterfaceForceRowsUploadFields(
     pressureInterfaceForceRowsUploadFields(pressureState)
   );
+  const schroederSourceKeyReplayDiagnostics = pressureState?.schroederSourceKeyReplayDiagnostics
+    || buildSchroederSourceKeyReplayDiagnostics({ pressureInterfaceState: pressureState });
   return {
     residentPressureInterfaceStateSchema: pressureState?.schema ?? null,
     residentPressureInterfaceStateStatus: pressureState?.status ?? null,
@@ -5026,10 +5207,48 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
       'localPressureGradientForceCouplingStatus',
       'gasPressureCellRowCount',
       'gasPressureCellRowsBufferRetained',
+      'interfaceSourceKeySchema',
+      'interfaceSourceKeyStatus',
+      'interfaceSourceKeyConsumerStatus',
+      'interfaceSourceKeyRowCount',
+      'interfaceSourceKeyReadyCount',
+      'interfaceSourceKeyBufferObserved',
+      'interfaceSourceKeyBufferConsumed',
+      'interfaceSourceKeySurfaceIndexFallbackEnabled',
       'gridForceApplicationApproved'
     ]),
     pressureInterfaceForceSolverSchema: pressureState?.pressureInterfaceForceSolverSchema ?? null,
     pressureInterfaceForceSolverStatus: pressureState?.pressureInterfaceForceSolverStatus ?? null,
+    schroederSourceKeyReplayDiagnostics,
+    schroederSourceKeyReplayDiagnosticsSchema: schroederSourceKeyReplayDiagnostics?.schema ?? null,
+    schroederSourceKeyReplayDiagnosticsStatus: schroederSourceKeyReplayDiagnostics?.status ?? null,
+    schroederSourceKeyReplayReady: schroederSourceKeyReplayDiagnostics?.replayReady ?? false,
+    schroederSourceKeyReplayProductionStatus:
+      schroederSourceKeyReplayDiagnostics?.productionStatus ?? null,
+    schroederSourceKeyReplayProductionRowCount:
+      schroederSourceKeyReplayDiagnostics?.productionRowCount ?? 0,
+    schroederSourceKeyReplayProductionReadyCount:
+      schroederSourceKeyReplayDiagnostics?.productionReadyCount ?? 0,
+    schroederSourceKeyReplayRetainedRefPublicationStatus:
+      schroederSourceKeyReplayDiagnostics?.retainedRefPublicationStatus ?? null,
+    schroederSourceKeyReplayRetainedRefPublicationReady:
+      schroederSourceKeyReplayDiagnostics?.retainedRefPublicationReady ?? false,
+    schroederSourceKeyReplayRetainedBufferRefCount:
+      schroederSourceKeyReplayDiagnostics?.retainedBufferRefCount ?? 0,
+    schroederSourceKeyReplayPressureConsumerStatus:
+      schroederSourceKeyReplayDiagnostics?.pressureConsumerStatus ?? null,
+    schroederSourceKeyReplayPressureConsumerObserved:
+      schroederSourceKeyReplayDiagnostics?.pressureConsumerObserved ?? false,
+    schroederSourceKeyReplayPressureConsumerConsumed:
+      schroederSourceKeyReplayDiagnostics?.pressureConsumerConsumed ?? false,
+    schroederSourceKeyReplayPressureConsumerRowCount:
+      schroederSourceKeyReplayDiagnostics?.pressureConsumerRowCount ?? 0,
+    schroederSourceKeyReplayPressureConsumerReadyCount:
+      schroederSourceKeyReplayDiagnostics?.pressureConsumerReadyCount ?? 0,
+    schroederSourceKeyReplayRawGpuBufferSerialized:
+      schroederSourceKeyReplayDiagnostics?.rawGpuBufferSerialized ?? false,
+    schroederSourceKeyReplayPortablePayloadMode:
+      schroederSourceKeyReplayDiagnostics?.portablePayloadMode ?? null,
     pressureInterfaceSolverApplicationStatus: pressureState?.pressureInterfaceSolverApplicationStatus ?? null,
     pressureInterfaceSolverForceRowCount: pressureState?.pressureInterfaceSolverForceRowCount ?? 0,
     pressureInterfaceSolverConservationStatus: pressureState?.pressureInterfaceSolverConservationStatus ?? null,

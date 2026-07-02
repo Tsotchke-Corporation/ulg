@@ -24,6 +24,7 @@ import {
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DRAW_SOURCE_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_SOURCE_KEY_REPLAY_DIAGNOSTICS_SCHEMA,
   SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL,
   SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
   SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
@@ -56,6 +57,7 @@ import {
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
+  buildSchroederSourceKeyReplayDiagnostics,
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
@@ -4599,6 +4601,80 @@ test('SPH resident pressure interface state owns retained force rows outside ren
   assert.equal(state.pressureInterfaceForceRowsLeaseStatus, 'active');
   assert.equal(state.pressureInterfaceForceRowsLeaseActiveCount, 1);
   assert.equal(state.gpuAuthoritativeState, true);
+});
+
+test('SPH scene builds SS source-key replay diagnostics from production through pressure consumption', () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    interfaceSourceFieldSourceIndexStatus: 'interface-source-index-field-retained',
+    interfaceSourceFieldSourceIndexBufferRetained: true,
+    interfaceSourceKeySchema: 'peercompute.ulg.sph-interface-source-key.v0',
+    interfaceSourceKeyStatus: 'interface-source-key-retained',
+    interfaceSourceKeyRowCount: 2,
+    interfaceSourceKeyReadyCount: 2,
+    interfaceSourceKeyStrideFloats: 4,
+    interfaceSourceKeyBufferRetained: true,
+    interfaceSourceKeyBufferByteLength: 32,
+    interfaceSourceKeySurfaceIndexFallbackEnabled: false
+  };
+  const pressureInterfaceForceSolver = {
+    schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
+    status: 'pressure-interface-force-solver-ready',
+    forceApplicationStatus: 'solver-ready-not-applied',
+    forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
+    forceRowCount: 2,
+    forceRowStrideFloats: 16,
+    conservationStatus: 'pairwise-equal-opposite-force-conservative',
+    conservationResidualMagnitudeN: 0,
+    interfaceSourceKeySchema: 'peercompute.ulg.sph-interface-source-key.v0',
+    interfaceSourceKeyStatus: 'interface-source-key-ready',
+    interfaceSourceKeyConsumerStatus: 'pressure-interface-source-key-buffer-consumed',
+    interfaceSourceKeyRowCount: 2,
+    interfaceSourceKeyReadyCount: 2,
+    interfaceSourceKeyBufferObserved: true,
+    interfaceSourceKeyBufferConsumed: true,
+    interfaceSourceKeySurfaceIndexFallbackEnabled: false
+  };
+  const diagnostics = buildSchroederSourceKeyReplayDiagnostics({
+    materialInterfaceField,
+    pressureInterfaceForceSolver,
+    pressureInterfaceWorkerCompactPublicationCandidate: {
+      retainedSourceKeySourceReady: true,
+      retainedSourceKeySourceStatus: 'pressure-interface-retained-source-key-source-ready',
+      retainedSourceKeyBufferRefs: ['sph-interface-source-key-buffer']
+    }
+  });
+
+  assert.equal(diagnostics.schema, ULG_SPH_SCENE_SCHROEDER_SOURCE_KEY_REPLAY_DIAGNOSTICS_SCHEMA);
+  assert.equal(diagnostics.status, 'schroeder-source-key-replay-consumed');
+  assert.equal(diagnostics.replayReady, true);
+  assert.equal(diagnostics.productionRowCount, 2);
+  assert.equal(diagnostics.retainedRefPublicationReady, true);
+  assert.deepEqual(diagnostics.retainedBufferRefs, ['sph-interface-source-key-buffer']);
+  assert.equal(diagnostics.pressureConsumerConsumed, true);
+  assert.equal(diagnostics.productionConsumerRowCountMatch, true);
+  assert.equal(diagnostics.rawGpuBufferSerialized, false);
+  assert.equal(diagnostics.portablePayloadMode, 'descriptor-only-no-raw-gpubuffer');
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField,
+    pressureInterfaceForceSolver,
+    pressureInterfaceForceRowsUpload: {
+      status: 'webgpu-pressure-interface-force-rows-uploaded',
+      bufferRetained: true,
+      forceRowByteLength: 128,
+      pressureInterfaceGridForceAdmissionApproved: true
+    }
+  });
+
+  assert.equal(state.schroederSourceKeyReplayDiagnosticsSchema, ULG_SPH_SCENE_SCHROEDER_SOURCE_KEY_REPLAY_DIAGNOSTICS_SCHEMA);
+  assert.equal(state.schroederSourceKeyReplayDiagnosticsStatus, 'schroeder-source-key-replay-consumed');
+  assert.equal(state.schroederSourceKeyReplayReady, true);
+  assert.equal(state.schroederSourceKeyReplayPressureConsumerConsumed, true);
+  assert.equal(state.schroederSourceKeyReplayDiagnostics.rawGpuBufferSerialized, false);
 });
 
 test('SPH scene requests resident authority publication for admitted gas-cell field imports', () => {

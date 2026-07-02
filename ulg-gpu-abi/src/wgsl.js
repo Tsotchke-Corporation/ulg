@@ -12382,6 +12382,270 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederParticleStorageMaterializationWgsl = `
+struct SchroederParticleStorageMaterializationParams {
+  assignment_row_count: u32,
+  assignment_stride: u32,
+  source_particle_count: u32,
+  output_particle_capacity: u32,
+  state_vec4_stride: u32,
+  thermo_vec4_stride: u32,
+  mechanics_vec4_stride: u32,
+  materialization_stride: u32,
+  admission_approved: u32,
+  flags: u32,
+  materialization_epoch: f32,
+  state_family_id: f32,
+  target_state_family_mask: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> assignment_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> source_sph_state: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> out_sph_state: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> materialization_rows: array<f32>;
+@group(0) @binding(8) var<uniform> params: SchroederParticleStorageMaterializationParams;
+
+const SCHROEDER_PSM_ASSIGNMENT_STRIDE: u32 = 32u;
+const SCHROEDER_PSM_MATERIALIZATION_STRIDE: u32 = 32u;
+const SCHROEDER_PSM_STATE_VEC4_STRIDE: u32 = 2u;
+const SCHROEDER_PSM_THERMO_VEC4_STRIDE: u32 = 3u;
+const SCHROEDER_PSM_MECHANICS_VEC4_STRIDE: u32 = 8u;
+
+fn ss_psm_stride(value: u32, fallback: u32) -> u32 {
+  return max(value, fallback);
+}
+
+fn ss_psm_index(value: f32) -> u32 {
+  return u32(max(floor(value), 0.0));
+}
+
+fn ss_psm_target_mass(assignment_offset: u32, source_mass: f32) -> f32 {
+  let target_mass = assignment_rows[assignment_offset + 19u];
+  return select(source_mass, max(target_mass, 0.0), target_mass > 0.0);
+}
+
+fn ss_psm_source_represented_volume(source_index: u32, mechanics_stride: u32) -> f32 {
+  if (source_index >= params.source_particle_count) {
+    return 0.0;
+  }
+  let mechanics_base = source_index * mechanics_stride;
+  let row4 = source_mls_mechanics[mechanics_base + 4u];
+  return max(row4.z, 0.0) * max(row4.w, 0.0);
+}
+
+fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset: u32) -> f32 {
+  if (source_index >= params.source_particle_count || target_index >= params.output_particle_capacity) {
+    return 0.0;
+  }
+  let state_stride = ss_psm_stride(params.state_vec4_stride, SCHROEDER_PSM_STATE_VEC4_STRIDE);
+  let thermo_stride = ss_psm_stride(params.thermo_vec4_stride, SCHROEDER_PSM_THERMO_VEC4_STRIDE);
+  let mechanics_stride = ss_psm_stride(params.mechanics_vec4_stride, SCHROEDER_PSM_MECHANICS_VEC4_STRIDE);
+  let source_state_base = source_index * state_stride;
+  let target_state_base = target_index * state_stride;
+  let source_thermo_base = source_index * thermo_stride;
+  let target_thermo_base = target_index * thermo_stride;
+  let source_mechanics_base = source_index * mechanics_stride;
+  let target_mechanics_base = target_index * mechanics_stride;
+
+  let state0 = source_sph_state[source_state_base];
+  let state1 = source_sph_state[source_state_base + 1u];
+  out_sph_state[target_state_base] = vec4<f32>(
+    state0.x,
+    state0.y,
+    state0.z,
+    ss_psm_target_mass(assignment_offset, state0.w)
+  );
+  out_sph_state[target_state_base + 1u] = state1;
+
+  let thermo0 = source_sph_thermo[source_thermo_base];
+  let thermo1 = source_sph_thermo[source_thermo_base + 1u];
+  let thermo2 = source_sph_thermo[source_thermo_base + 2u];
+  out_sph_thermo[target_thermo_base] = thermo0;
+  out_sph_thermo[target_thermo_base + 1u] = thermo1;
+  out_sph_thermo[target_thermo_base + 2u] = vec4<f32>(
+    thermo2.x,
+    thermo2.y,
+    max(thermo2.z, 1.0),
+    thermo2.w
+  );
+
+  out_mls_mechanics[target_mechanics_base] = source_mls_mechanics[source_mechanics_base];
+  out_mls_mechanics[target_mechanics_base + 1u] = source_mls_mechanics[source_mechanics_base + 1u];
+  out_mls_mechanics[target_mechanics_base + 2u] = source_mls_mechanics[source_mechanics_base + 2u];
+  out_mls_mechanics[target_mechanics_base + 3u] = source_mls_mechanics[source_mechanics_base + 3u];
+  var row4 = source_mls_mechanics[source_mechanics_base + 4u];
+  let target_volume = assignment_rows[assignment_offset + 22u];
+  if (target_volume > 0.0 && row4.w > 0.0) {
+    row4 = vec4<f32>(row4.x, row4.y, max(target_volume / row4.w, 1.0e-9), row4.w);
+  }
+  out_mls_mechanics[target_mechanics_base + 4u] = row4;
+  out_mls_mechanics[target_mechanics_base + 5u] = source_mls_mechanics[source_mechanics_base + 5u];
+  out_mls_mechanics[target_mechanics_base + 6u] = source_mls_mechanics[source_mechanics_base + 6u];
+  out_mls_mechanics[target_mechanics_base + 7u] = source_mls_mechanics[source_mechanics_base + 7u];
+  return 1.0;
+}
+
+fn ss_psm_free_particle(source_index: u32) -> f32 {
+  if (source_index >= params.source_particle_count) {
+    return 0.0;
+  }
+  let state_stride = ss_psm_stride(params.state_vec4_stride, SCHROEDER_PSM_STATE_VEC4_STRIDE);
+  let thermo_stride = ss_psm_stride(params.thermo_vec4_stride, SCHROEDER_PSM_THERMO_VEC4_STRIDE);
+  let mechanics_stride = ss_psm_stride(params.mechanics_vec4_stride, SCHROEDER_PSM_MECHANICS_VEC4_STRIDE);
+  let state_base = source_index * state_stride;
+  let thermo_base = source_index * thermo_stride;
+  let mechanics_base = source_index * mechanics_stride;
+  let state0 = out_sph_state[state_base];
+  out_sph_state[state_base] = vec4<f32>(state0.x, state0.y, state0.z, 0.0);
+  out_sph_state[state_base + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  let thermo2 = out_sph_thermo[thermo_base + 2u];
+  out_sph_thermo[thermo_base + 2u] = vec4<f32>(thermo2.x, thermo2.y, 0.0, thermo2.w);
+  let row4 = out_mls_mechanics[mechanics_base + 4u];
+  out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+  let row5 = out_mls_mechanics[mechanics_base + 5u];
+  out_mls_mechanics[mechanics_base + 5u] = vec4<f32>(row5.x, 0.0, row5.z, row5.w);
+  return 1.0;
+}
+
+fn ss_psm_write_empty(materialization_offset: u32, assignment_offset: u32, status: f32) {
+  materialization_rows[materialization_offset + 0u] = assignment_rows[assignment_offset + 0u];
+  materialization_rows[materialization_offset + 1u] = assignment_rows[assignment_offset + 1u];
+  materialization_rows[materialization_offset + 2u] = assignment_rows[assignment_offset + 2u];
+  materialization_rows[materialization_offset + 3u] = status;
+  for (var column = 4u; column < SCHROEDER_PSM_MATERIALIZATION_STRIDE; column = column + 1u) {
+    materialization_rows[materialization_offset + column] = 0.0;
+  }
+  materialization_rows[materialization_offset + 6u] = f32(params.admission_approved);
+  materialization_rows[materialization_offset + 8u] = assignment_rows[assignment_offset + 9u];
+  materialization_rows[materialization_offset + 10u] = assignment_rows[assignment_offset + 11u];
+  materialization_rows[materialization_offset + 25u] = params.target_state_family_mask;
+  materialization_rows[materialization_offset + 26u] = assignment_rows[assignment_offset + 28u];
+  materialization_rows[materialization_offset + 27u] = params.materialization_epoch;
+  materialization_rows[materialization_offset + 28u] = params.state_family_id;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.assignment_row_count) {
+    return;
+  }
+
+  let assignment_stride = ss_psm_stride(params.assignment_stride, SCHROEDER_PSM_ASSIGNMENT_STRIDE);
+  let materialization_stride = ss_psm_stride(
+    params.materialization_stride,
+    SCHROEDER_PSM_MATERIALIZATION_STRIDE
+  );
+  let assignment_offset = row_index * assignment_stride;
+  let materialization_offset = row_index * materialization_stride;
+  let assignment_status = assignment_rows[assignment_offset + 3u];
+  let assignment_admission = assignment_rows[assignment_offset + 6u];
+
+  if (assignment_status <= 0.0 || assignment_status >= 32.0 || assignment_admission <= 0.0 || params.admission_approved == 0u) {
+    ss_psm_write_empty(materialization_offset, assignment_offset, 32.0);
+    return;
+  }
+
+  let source_index = ss_psm_index(assignment_rows[assignment_offset + 0u]);
+  let target_start_value = assignment_rows[assignment_offset + 9u];
+  let target_count = ss_psm_index(assignment_rows[assignment_offset + 10u]);
+  let free_start_value = assignment_rows[assignment_offset + 11u];
+  let free_count = ss_psm_index(assignment_rows[assignment_offset + 12u]);
+  let target_start = ss_psm_index(target_start_value);
+  let free_start = ss_psm_index(free_start_value);
+
+  var written_target_count = 0.0;
+  if (target_start_value >= 0.0 && target_count > 0u) {
+    for (var slot = 0u; slot < target_count; slot = slot + 1u) {
+      written_target_count = written_target_count + ss_psm_copy_particle(
+        source_index,
+        target_start + slot,
+        assignment_offset
+      );
+    }
+  }
+
+  var freed_source_count = 0.0;
+  if (free_start_value >= 0.0 && free_count > 0u) {
+    for (var slot = 0u; slot < free_count; slot = slot + 1u) {
+      freed_source_count = freed_source_count + ss_psm_free_particle(free_start + slot);
+    }
+  }
+
+  var status = 1.0 + 8.0;
+  if (written_target_count > 0.0) {
+    status = status + 2.0;
+  }
+  if (freed_source_count > 0.0) {
+    status = status + 4.0;
+  }
+  if (assignment_rows[assignment_offset + 16u] > 0.0 || assignment_rows[assignment_offset + 17u] > 0.0) {
+    status = status + 16.0;
+  }
+
+  let state_stride = ss_psm_stride(params.state_vec4_stride, SCHROEDER_PSM_STATE_VEC4_STRIDE);
+  let thermo_stride = ss_psm_stride(params.thermo_vec4_stride, SCHROEDER_PSM_THERMO_VEC4_STRIDE);
+  let mechanics_stride = ss_psm_stride(params.mechanics_vec4_stride, SCHROEDER_PSM_MECHANICS_VEC4_STRIDE);
+  var source_mass = 0.0;
+  var source_status = 0.0;
+  if (source_index < params.source_particle_count) {
+    source_mass = source_sph_state[source_index * state_stride].w;
+    source_status = source_sph_thermo[source_index * thermo_stride + 2u].z;
+  }
+  let source_volume = ss_psm_source_represented_volume(source_index, mechanics_stride);
+  let target_volume = assignment_rows[assignment_offset + 22u];
+  var target_volume_ratio = 0.0;
+  if (source_index < params.source_particle_count) {
+    let row4 = source_mls_mechanics[source_index * mechanics_stride + 4u];
+    if (target_volume > 0.0 && row4.w > 0.0) {
+      target_volume_ratio = target_volume / row4.w;
+    } else {
+      target_volume_ratio = row4.z;
+    }
+  }
+
+  materialization_rows[materialization_offset + 0u] = assignment_rows[assignment_offset + 0u];
+  materialization_rows[materialization_offset + 1u] = assignment_rows[assignment_offset + 1u];
+  materialization_rows[materialization_offset + 2u] = assignment_rows[assignment_offset + 2u];
+  materialization_rows[materialization_offset + 3u] = status;
+  materialization_rows[materialization_offset + 4u] = 1.0;
+  materialization_rows[materialization_offset + 5u] = assignment_rows[assignment_offset + 4u];
+  materialization_rows[materialization_offset + 6u] = f32(params.admission_approved);
+  materialization_rows[materialization_offset + 7u] = assignment_rows[assignment_offset + 7u];
+  materialization_rows[materialization_offset + 8u] = assignment_rows[assignment_offset + 9u];
+  materialization_rows[materialization_offset + 9u] = assignment_rows[assignment_offset + 10u];
+  materialization_rows[materialization_offset + 10u] = assignment_rows[assignment_offset + 11u];
+  materialization_rows[materialization_offset + 11u] = assignment_rows[assignment_offset + 12u];
+  materialization_rows[materialization_offset + 12u] = select(-1.0, f32(target_start), written_target_count > 0.0);
+  materialization_rows[materialization_offset + 13u] = written_target_count;
+  materialization_rows[materialization_offset + 14u] = select(-1.0, f32(free_start), freed_source_count > 0.0);
+  materialization_rows[materialization_offset + 15u] = freed_source_count;
+  materialization_rows[materialization_offset + 16u] = source_mass;
+  materialization_rows[materialization_offset + 17u] = assignment_rows[assignment_offset + 19u];
+  materialization_rows[materialization_offset + 18u] = assignment_rows[assignment_offset + 20u];
+  materialization_rows[materialization_offset + 19u] = source_volume;
+  materialization_rows[materialization_offset + 20u] = target_volume;
+  materialization_rows[materialization_offset + 21u] = assignment_rows[assignment_offset + 23u];
+  materialization_rows[materialization_offset + 22u] = target_volume_ratio;
+  materialization_rows[materialization_offset + 23u] = assignment_rows[assignment_offset + 16u];
+  materialization_rows[materialization_offset + 24u] = assignment_rows[assignment_offset + 17u];
+  materialization_rows[materialization_offset + 25u] = params.target_state_family_mask;
+  materialization_rows[materialization_offset + 26u] = assignment_rows[assignment_offset + 28u];
+  materialization_rows[materialization_offset + 27u] = params.materialization_epoch;
+  materialization_rows[materialization_offset + 28u] = params.state_family_id;
+  materialization_rows[materialization_offset + 29u] = source_status;
+  materialization_rows[materialization_offset + 30u] = select(0.0, 1.0, written_target_count > 0.0);
+  materialization_rows[materialization_offset + 31u] = select(0.0, 1.0, freed_source_count > 0.0);
+}
+`;
+
 export const schroederPhaseVolumeLevelUpdateWgsl = `
 struct SchroederPhaseVolumeLevelUpdateParams {
   migration_row_count: u32,

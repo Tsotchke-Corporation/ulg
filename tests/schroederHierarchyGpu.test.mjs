@@ -24,6 +24,7 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_FREE_LIST_ROW_LAYOUT,
+  SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
@@ -79,6 +80,9 @@ import {
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_FREE_LIST_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA,
@@ -168,6 +172,7 @@ import {
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_TARGET_FAMILY,
   SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS,
   SCHROEDER_PARTICLE_STORAGE_FREE_LIST_FLOATS,
+  SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS,
   SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
   SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
   SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
@@ -229,6 +234,8 @@ import {
   createSchroederParticleStorageAllocationPlan,
   createSchroederParticleStorageFreeListPlan,
   createSchroederParticleStorageFreeListRows,
+  createSchroederParticleStorageMaterializationParamsArray,
+  createSchroederParticleStorageMaterializationPlan,
   createSchroederParticleStorageSlotAssignmentParamsArray,
   createSchroederParticleStorageSlotAssignmentPlan,
   createSchroederPhaseVolumeDiagnosticSummaryParamsArray,
@@ -272,6 +279,7 @@ import {
   runSchroederLawQueueWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederParticleStorageAllocationWebGpu,
+  runSchroederParticleStorageMaterializationWebGpu,
   runSchroederParticleStorageSlotAssignmentWebGpu,
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   runSchroederPhaseVolumeSplitMergeApplyWebGpu,
@@ -281,6 +289,7 @@ import {
   runSchroederPhaseVolumeTargetAggregateWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederParticleStorageAllocatorAdmissionAllowsApplication,
+  schroederParticleStorageMaterializationAdmissionAllowsApplication,
   schroederParticleStorageSlotAssignmentAdmissionAllowsApplication,
   schroederFarAggregateGasStateDeltaAdmissionAllowsApplication,
   schroederFarAggregateLawConsumerAdmissionAllowsConsumption,
@@ -509,6 +518,26 @@ function approvedParticleStorageSlotAssignmentAdmission({
     outputFamilies: ['schroeder-particle-storage-slot-assignment'],
     targetStateFamilies: [...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES],
     schroederParticleStorageSlotAssignmentRowCount: rowCount,
+    hotBufferKey,
+    sourceHotBufferKey: hotBufferKey,
+    committed: true
+  };
+}
+
+function approvedParticleStorageMaterializationAdmission({
+  rowCount = 130,
+  requiredParticleCapacity = rowCount,
+  hotBufferKey = 'ulg:test:schroeder-particle-storage-materialization-admission-hot-buffer'
+} = {}) {
+  return {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+    status: 'schroeder-particle-storage-materialization-admission-admitted',
+    particleStorageMaterializationApproved: true,
+    slotAssignmentDescriptorApproved: true,
+    outputFamilies: ['schroeder-particle-storage-materialization'],
+    targetStateFamilies: [...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES],
+    schroederParticleStorageMaterializationRowCount: rowCount,
+    requiredParticleCapacity,
     hotBufferKey,
     sourceHotBufferKey: hotBufferKey,
     committed: true
@@ -929,6 +958,31 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(
     SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT[17],
     'targetSlotCapacityResidual:f32'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-materialization-admission.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-materialization.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0'
+  );
+  assert.equal(SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT.length,
+    SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS
+  );
+  assert.equal(
+    SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT[12],
+    'writtenTargetSlotStartIndex:f32'
+  );
+  assert.equal(
+    SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT[22],
+    'targetVolumeRatioJ:f32'
   );
   assert.equal(
     ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
@@ -2950,6 +3004,108 @@ test('Schroeder particle-storage slot-assignment plan requires assignment admiss
   assert.equal(view.getFloat32(24, true), 12);
   assert.equal(view.getFloat32(28, true), 3);
   assert.equal(view.getFloat32(36, true), 2);
+});
+
+test('Schroeder particle-storage materialization admission gates particle-buffer writes', () => {
+  const particleStorageSlotAssignment = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-particle-storage-slot-assignment-submitted',
+    allocationRowCount: 5,
+    slotAssignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+    slotAssignmentBuffer: { label: 'fake-particle-storage-slot-assignment-buffer' }
+  };
+  const blocked = schroederParticleStorageMaterializationAdmissionAllowsApplication({
+    particleStorageMaterializationAdmission: {
+      status: 'schroeder-particle-storage-materialization-admission-admitted',
+      outputFamilies: ['schroeder-particle-storage-materialization'],
+      targetStateFamilies: ['sph-particle-state'],
+      particleStorageMaterializationApproved: true,
+      slotAssignmentDescriptorApproved: true,
+      schroederParticleStorageMaterializationRowCount: 5,
+      committed: true
+    },
+    particleStorageSlotAssignment,
+    assignmentRowCount: 5
+  });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-particle-storage-materialization-admission-blocked');
+  assert.equal(blocked.approved, false);
+  assert.equal(blocked.targetFamiliesAccepted, false);
+
+  const approved = schroederParticleStorageMaterializationAdmissionAllowsApplication({
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({ rowCount: 5 }),
+    particleStorageSlotAssignment,
+    assignmentRowCount: 5
+  });
+  assert.equal(approved.status, 'schroeder-particle-storage-materialization-admission-approved');
+  assert.equal(approved.approved, true);
+  assert.equal(approved.familyAccepted, true);
+  assert.equal(approved.rowCountAccepted, true);
+  assert.equal(approved.targetFamiliesAccepted, true);
+  assert.equal(approved.slotAssignmentAccepted, true);
+});
+
+test('Schroeder particle-storage materialization plan requires StateManager admission', () => {
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const particleStorageSlotAssignment = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-particle-storage-slot-assignment-submitted',
+    allocationRowCount: 5,
+    slotAssignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+    assignmentEpoch: 21,
+    stateFamilyId: 3,
+    slotAssignmentBuffer: { label: 'fake-particle-storage-slot-assignment-buffer' }
+  };
+  const blocked = createSchroederParticleStorageMaterializationPlan({
+    ...buffers,
+    particleStorageSlotAssignment
+  });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-particle-storage-materialization-plan-blocked-admission-required');
+  assert.equal(blocked.particleStorageMaterializationAdmissionApproved, false);
+  assert.equal(blocked.stateMutationRequired, false);
+
+  const approved = createSchroederParticleStorageMaterializationPlan({
+    ...buffers,
+    particleStorageSlotAssignment,
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({
+      rowCount: 5,
+      requiredParticleCapacity: 8
+    }),
+    outputParticleCapacity: 8,
+    materializationEpoch: 22,
+    stateFamilyId: 4
+  });
+  assert.equal(approved.status, 'schroeder-particle-storage-materialization-plan-ready');
+  assert.equal(approved.particleStorageMaterializationAdmissionApproved, true);
+  assert.equal(approved.outputCompaction, 'one-admitted-particle-storage-materialization-row-per-assignment-row');
+  assert.equal(approved.materializationMode, 'state-manager-admitted-particle-buffer-materialization');
+  assert.equal(approved.replacementPolicy, 'retained-output-buffers-await-state-manager-swap');
+  assert.equal(approved.sourceParticleCount, 3);
+  assert.equal(approved.outputParticleCapacity, 8);
+  assert.equal(approved.stateMutationStatus, 'particle-storage-materialization-planned');
+  assert.equal(approved.stateByteLength, 8 * 8 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(approved.thermoByteLength, 8 * 12 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(approved.mechanicsByteLength, 8 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(approved.materializationByteLength, 5 * 32 * Float32Array.BYTES_PER_ELEMENT);
+
+  const params = createSchroederParticleStorageMaterializationParamsArray({
+    ...approved,
+    admissionApproved: approved.particleStorageMaterializationAdmissionApproved
+  });
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 64);
+  assert.equal(view.getUint32(0, true), 5);
+  assert.equal(view.getUint32(4, true), SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS);
+  assert.equal(view.getUint32(8, true), 3);
+  assert.equal(view.getUint32(12, true), 8);
+  assert.equal(view.getUint32(16, true), 2);
+  assert.equal(view.getUint32(20, true), 3);
+  assert.equal(view.getUint32(24, true), 8);
+  assert.equal(view.getUint32(28, true), SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS);
+  assert.equal(view.getUint32(32, true), 1);
+  assert.equal(view.getFloat32(40, true), 22);
+  assert.equal(view.getFloat32(44, true), 4);
 });
 
 test('Schroeder phase-volume level update plan requires StateManager admission', () => {
@@ -6083,6 +6239,116 @@ test('Schroeder particle-storage slot assignment consumes allocation rows and fr
   );
 });
 
+test('Schroeder particle-storage materialization blocks without admission and dispatches no work', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const particleStorageSlotAssignment = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-particle-storage-slot-assignment-submitted',
+    allocationRowCount: 130,
+    slotAssignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+    slotAssignmentBuffer: { label: 'retained-particle-storage-slot-assignment-buffer' }
+  };
+  const materialization = await runSchroederParticleStorageMaterializationWebGpu({
+    device,
+    ...buffers,
+    particleStorageSlotAssignment
+  });
+
+  assert.equal(materialization.schema, ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA);
+  assert.equal(
+    materialization.particleStorageMaterializationSchema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA
+  );
+  assert.equal(materialization.status, 'schroeder-particle-storage-materialization-blocked-admission-required');
+  assert.equal(materialization.particleStorageMaterializationAdmissionApproved, false);
+  assert.equal(materialization.retainedParticleBuffers, false);
+  assert.equal(materialization.retainedMaterializationBuffer, false);
+  assert.equal(materialization.materializationBufferByteLength, 0);
+  assert.equal(materialization.materializationRows.length, 0);
+  assert.equal(materialization.stateMutationRequired, false);
+  assert.equal(
+    materialization.stateMutationStatus,
+    'blocked-particle-storage-materialization-admission-required'
+  );
+  assert.deepEqual(device.dispatches, []);
+});
+
+test('Schroeder particle-storage materialization writes retained particle buffers without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const particleStorageSlotAssignment = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-particle-storage-slot-assignment-submitted',
+    allocationRowCount: 130,
+    slotAssignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+    assignmentEpoch: 12,
+    stateFamilyId: 4,
+    slotAssignmentBuffer: { label: 'retained-particle-storage-slot-assignment-buffer' }
+  };
+  const materialization = await runSchroederParticleStorageMaterializationWebGpu({
+    device,
+    ...buffers,
+    particleStorageSlotAssignment,
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({
+      rowCount: 130,
+      requiredParticleCapacity: 8
+    }),
+    outputParticleCapacity: 8,
+    materializationEpoch: 13,
+    stateFamilyId: 4
+  });
+
+  assert.equal(materialization.schema, ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA);
+  assert.equal(
+    materialization.particleStorageMaterializationSchema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA
+  );
+  assert.equal(materialization.status, 'schroeder-particle-storage-materialization-submitted');
+  assert.equal(
+    materialization.sourceParticleStorageSlotAssignmentSchema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA
+  );
+  assert.equal(materialization.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(materialization.fullReadbackPerformed, false);
+  assert.equal(materialization.fullParticleReadbackPerformed, false);
+  assert.equal(materialization.normalHotLoopReadbackFree, true);
+  assert.equal(materialization.particleStorageMaterializationAdmissionApproved, true);
+  assert.equal(materialization.retainedParticleBuffers, true);
+  assert.equal(materialization.retainedMaterializationBuffer, true);
+  assert.ok(materialization.particleStateBuffer);
+  assert.ok(materialization.particleThermoBuffer);
+  assert.ok(materialization.particleMechanicsBuffer);
+  assert.ok(materialization.materializationBuffer);
+  assert.equal(materialization.particleStateBuffer.destroyed, false);
+  assert.equal(materialization.particleThermoBuffer.destroyed, false);
+  assert.equal(materialization.particleMechanicsBuffer.destroyed, false);
+  assert.equal(materialization.materializationBuffer.destroyed, false);
+  assert.equal(materialization.stateBufferByteLength, 8 * 8 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(materialization.thermoBufferByteLength, 8 * 12 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(materialization.mechanicsBufferByteLength, 8 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(materialization.materializationBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(materialization.materializationRows.length, 0);
+  assert.equal(materialization.materializationMode, 'state-manager-admitted-particle-buffer-materialization');
+  assert.equal(materialization.replacementPolicy, 'retained-output-buffers-await-state-manager-swap');
+  assert.equal(
+    materialization.stateMutationStatus,
+    'particle-storage-materialization-buffer-submitted'
+  );
+  assert.equal(
+    materialization.stateAuthorityStatus,
+    'state-manager-admitted-particle-storage-materialization-materialized'
+  );
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => (
+    module.code.includes('SchroederParticleStorageMaterializationParams')
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('materialization-readback')),
+    false
+  );
+});
+
 test('Schroeder phase-volume level update consumes retained migration rows after admission without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const phaseVolumeMigration = {
@@ -7477,6 +7743,7 @@ test('Schroeder same-level mechanics forwards admitted particle-storage slot ass
         status: 'resident-step-stubbed',
         hasParticleStorageAllocation: Boolean(options.schroederParticleStorageAllocation),
         hasParticleStorageSlotAssignment: Boolean(options.schroederParticleStorageSlotAssignment),
+        hasParticleStorageMaterialization: Boolean(options.schroederParticleStorageMaterialization),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
       };
     }
@@ -7504,27 +7771,150 @@ test('Schroeder same-level mechanics forwards admitted particle-storage slot ass
     result.particleStorageSlotAssignment.stateAuthorityStatus,
     'state-manager-admitted-particle-storage-slot-assignment-materialized'
   );
+  assert.equal(result.particleStorageMaterialization, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.particleStorageSlotAssignmentStatus, 'schroeder-particle-storage-slot-assignment-submitted');
   assert.equal(
     result.particleStorageSlotAssignmentConsumerStatus,
     'particle-storage-slot-assignment-forwarded-to-resident-backend'
   );
+  assert.equal(
+    result.particleStorageMaterializationStatus,
+    'disabled-particle-storage-materialization-admission-not-provided'
+  );
   assert.equal(result.conservativeTransferStatus, 'particle-storage-slot-assignment-submitted');
   assert.equal(result.stateMutationStatus, 'particle-storage-slot-assignment-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-particle-storage-slot-assignment-materialized');
   assert.equal(result.residentStep.hasParticleStorageAllocation, true);
   assert.equal(result.residentStep.hasParticleStorageSlotAssignment, true);
+  assert.equal(result.residentStep.hasParticleStorageMaterialization, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederParticleStorageSlotAssignment.schema,
     ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA
   );
+  assert.equal(calls[0].schroederParticleStorageMaterialization, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(device.dispatches.length, 21);
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('slot-assignment-readback')),
+    false
+  );
+});
+
+test('Schroeder same-level mechanics forwards admitted particle-storage materialization buffers', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const particleStorageFreeList = createSchroederParticleStorageFreeListPlan({
+    baseSlotIndex: 32,
+    slotCapacity: 96,
+    availableSlotCount: 64,
+    maxSlotsPerRow: 2
+  });
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 3 }),
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 3,
+      currentParticleCapacity: 8,
+      requiredParticleCapacity: 6
+    }),
+    particleStorageFreeList,
+    particleStorageSlotAssignmentAdmission: approvedParticleStorageSlotAssignmentAdmission({ rowCount: 3 }),
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({
+      rowCount: 3,
+      requiredParticleCapacity: 8
+    }),
+    mergeEpoch: 16,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasParticleStorageAllocation: Boolean(options.schroederParticleStorageAllocation),
+        hasParticleStorageSlotAssignment: Boolean(options.schroederParticleStorageSlotAssignment),
+        hasParticleStorageMaterialization: Boolean(options.schroederParticleStorageMaterialization),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+      };
+    }
+  });
+
+  assert.equal(result.particleStorageAllocation.retainedAllocationBuffer, true);
+  assert.equal(result.particleStorageSlotAssignment.retainedSlotAssignmentBuffer, true);
+  assert.equal(result.particleStorageMaterialization.retainedParticleBuffers, true);
+  assert.equal(result.particleStorageMaterialization.retainedMaterializationBuffer, true);
+  assert.equal(result.particleStorageMaterialization.assignmentRowCount, 3);
+  assert.equal(result.particleStorageMaterialization.sourceParticleCount, 3);
+  assert.equal(result.particleStorageMaterialization.outputParticleCapacity, 8);
+  assert.equal(
+    result.particleStorageMaterialization.outputCompaction,
+    'one-admitted-particle-storage-materialization-row-per-assignment-row'
+  );
+  assert.equal(
+    result.particleStorageMaterialization.materializationMode,
+    'state-manager-admitted-particle-buffer-materialization'
+  );
+  assert.equal(
+    result.particleStorageMaterialization.replacementPolicy,
+    'retained-output-buffers-await-state-manager-swap'
+  );
+  assert.equal(result.particleStorageMaterialization.particleStorageMaterializationAdmissionApproved, true);
+  assert.equal(
+    result.particleStorageMaterialization.particleStorageMutationStatus,
+    'particle-buffers-materialization-ready'
+  );
+  assert.equal(result.particleStorageMaterialization.stateMutationRequired, true);
+  assert.equal(
+    result.particleStorageMaterialization.stateMutationStatus,
+    'particle-storage-materialization-buffer-submitted'
+  );
+  assert.equal(
+    result.particleStorageMaterialization.stateAuthorityStatus,
+    'state-manager-admitted-particle-storage-materialization-materialized'
+  );
+  assert.equal(result.particleStorageMaterialization.stateBufferByteLength, 8 * 8 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.particleStorageMaterialization.thermoBufferByteLength, 8 * 12 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(
+    result.particleStorageMaterialization.mechanicsBufferByteLength,
+    8 * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    result.particleStorageMaterialization.materializationBufferByteLength,
+    3 * 32 * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    result.particleStorageMaterializationStatus,
+    'schroeder-particle-storage-materialization-submitted'
+  );
+  assert.equal(
+    result.particleStorageMaterializationConsumerStatus,
+    'particle-storage-materialization-forwarded-to-resident-backend'
+  );
+  assert.equal(result.conservativeTransferStatus, 'particle-storage-materialization-submitted');
+  assert.equal(result.stateMutationStatus, 'particle-storage-materialization-buffer-submitted');
+  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-particle-storage-materialization-materialized');
+  assert.equal(result.residentStep.hasParticleStorageAllocation, true);
+  assert.equal(result.residentStep.hasParticleStorageSlotAssignment, true);
+  assert.equal(result.residentStep.hasParticleStorageMaterialization, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederParticleStorageMaterialization.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
+  );
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(device.dispatches.length, 22);
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('materialization-readback')),
     false
   );
 });

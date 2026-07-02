@@ -144,6 +144,12 @@ export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA =
   'peercompute.ulg.schroeder-particle-storage-slot-assignment.v0';
 export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA =
   'peercompute.ulg.schroeder-particle-storage-slot-assignment-execution.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-materialization-admission.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-materialization.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA =
@@ -1533,6 +1539,40 @@ export const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT = Object.free
   'assignmentEpoch:f32',
   'targetStateFamilyMask:f32',
   'stateFamilyId:f32'
+]);
+export const SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'targetLevelId:f32',
+  'status:f32',
+  'materializationModeId:f32',
+  'assignmentModeId:f32',
+  'admissionApproved:f32',
+  'particleCountDelta:f32',
+  'assignedTargetSlotStartIndex:f32',
+  'assignedTargetSlotCount:f32',
+  'assignedFreeSlotStartIndex:f32',
+  'assignedFreeSlotCount:f32',
+  'writtenTargetSlotStartIndex:f32',
+  'writtenTargetSlotCount:f32',
+  'freedSourceSlotStartIndex:f32',
+  'freedSourceSlotCount:f32',
+  'sourceMassBeforeKg:f32',
+  'targetMassKg:f32',
+  'massResidualKg:f32',
+  'sourceRepresentedVolumeM3:f32',
+  'targetRepresentedVolumeM3:f32',
+  'volumeResidualM3:f32',
+  'targetVolumeRatioJ:f32',
+  'capacityResidual:f32',
+  'targetSlotCapacityResidual:f32',
+  'targetStateFamilyMask:f32',
+  'chartId:f32',
+  'materializationEpoch:f32',
+  'stateFamilyId:f32',
+  'sourceStatusBefore:f32',
+  'targetStatusAfter:f32',
+  'freeStatusAfter:f32'
 ]);
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freeze([
   'migrationRowCount:f32',

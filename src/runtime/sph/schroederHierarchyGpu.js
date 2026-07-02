@@ -22,6 +22,7 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_FREE_LIST_ROW_LAYOUT,
+  SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT,
   SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
@@ -77,6 +78,9 @@ import {
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_FREE_LIST_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA,
@@ -129,6 +133,7 @@ import {
   schroederLawNeighborCandidateWgsl,
   schroederLawQueueWgsl,
   schroederParticleStorageAllocationWgsl,
+  schroederParticleStorageMaterializationWgsl,
   schroederParticleStorageSlotAssignmentWgsl,
   schroederPhaseVolumeAssignmentOverlayIndexWgsl,
   schroederPhaseVolumeDiagnosticSummaryWgsl,
@@ -195,6 +200,9 @@ export {
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_FREE_LIST_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA,
@@ -253,6 +261,8 @@ export const SCHROEDER_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS = SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT.length;
 export const SCHROEDER_PARTICLE_STORAGE_FREE_LIST_FLOATS = SCHROEDER_PARTICLE_STORAGE_FREE_LIST_ROW_LAYOUT.length;
+export const SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS =
+  SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT.length;
 export const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS =
   SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
@@ -285,6 +295,7 @@ export const SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT = 8;
 export const SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PARTICLE_STORAGE_ALLOCATION_WORKGROUP_SIZE = 64;
+export const SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_WORKGROUP_SIZE = 64;
@@ -338,6 +349,8 @@ export const SCHROEDER_FULL_PHASE_VOLUME_SPLIT_MERGE_APPLY_READBACK_MODE =
   'full-schroeder-phase-volume-split-merge-apply-readback';
 export const SCHROEDER_FULL_PARTICLE_STORAGE_ALLOCATION_READBACK_MODE =
   'full-schroeder-particle-storage-allocation-readback';
+export const SCHROEDER_FULL_PARTICLE_STORAGE_MATERIALIZATION_READBACK_MODE =
+  'full-schroeder-particle-storage-materialization-readback';
 export const SCHROEDER_FULL_PARTICLE_STORAGE_SLOT_ASSIGNMENT_READBACK_MODE =
   'full-schroeder-particle-storage-slot-assignment-readback';
 export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE = 'auto';
@@ -461,6 +474,8 @@ const SCHROEDER_PARTICLE_STORAGE_ALLOCATION_OUTPUT_FAMILY =
   'schroeder-particle-storage-allocation';
 const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_OUTPUT_FAMILY =
   'schroeder-particle-storage-slot-assignment';
+const SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_OUTPUT_FAMILY =
+  'schroeder-particle-storage-materialization';
 const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_OUTPUT_FAMILY =
   'schroeder-far-aggregate-force-application';
 const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_OUTPUT_FAMILY =
@@ -499,6 +514,13 @@ const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMITTED_STATUSES = new Set([
   'schroeder-particle-storage-slot-assignment-admission-published',
   'schroeder-particle-storage-slot-assignment-admission-admitted',
   'worker-retained-schroeder-particle-storage-slot-assignment-output-admitted',
+  'accepted',
+  'admitted'
+]);
+const SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMITTED_STATUSES = new Set([
+  'schroeder-particle-storage-materialization-admission-published',
+  'schroeder-particle-storage-materialization-admission-admitted',
+  'worker-retained-schroeder-particle-storage-materialization-output-admitted',
   'accepted',
   'admitted'
 ]);
@@ -1933,6 +1955,60 @@ export function createSchroederParticleStorageSlotAssignmentParamsArray({
   return buffer;
 }
 
+export function createSchroederParticleStorageMaterializationParamsArray({
+  assignmentRowCount = 0,
+  assignmentStrideFloats = SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+  sourceParticleCount = 0,
+  outputParticleCapacity = sourceParticleCount,
+  stateStrideVec4s = SPH_GPU_PARTICLE_STATE_FLOATS / 4,
+  thermoStrideVec4s = SPH_GPU_PARTICLE_THERMO_FLOATS / 4,
+  mechanicsStrideVec4s = MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS / 4,
+  materializationStrideFloats = SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS,
+  admissionApproved = false,
+  flags = 0,
+  materializationEpoch = 0,
+  stateFamilyId = 1,
+  targetStateFamilyMask = SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK
+} = {}) {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(assignmentRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    assignmentStrideFloats,
+    SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(sourceParticleCount, 0))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(outputParticleCapacity, sourceParticleCount))), true);
+  view.setUint32(16, Math.max(1, Math.round(finiteNumber(
+    stateStrideVec4s,
+    SPH_GPU_PARTICLE_STATE_FLOATS / 4
+  ))), true);
+  view.setUint32(20, Math.max(1, Math.round(finiteNumber(
+    thermoStrideVec4s,
+    SPH_GPU_PARTICLE_THERMO_FLOATS / 4
+  ))), true);
+  view.setUint32(24, Math.max(1, Math.round(finiteNumber(
+    mechanicsStrideVec4s,
+    MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS / 4
+  ))), true);
+  view.setUint32(28, Math.max(1, Math.round(finiteNumber(
+    materializationStrideFloats,
+    SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS
+  ))), true);
+  view.setUint32(32, admissionApproved ? 1 : 0, true);
+  view.setUint32(36, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(40, finiteNumber(materializationEpoch, 0), true);
+  view.setFloat32(44, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(48, Math.max(0, finiteNumber(
+    targetStateFamilyMask,
+    SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK
+  )), true);
+  view.setFloat32(52, 0, true);
+  view.setFloat32(56, 0, true);
+  view.setFloat32(60, 0, true);
+  return buffer;
+}
+
 export function createSchroederPhaseVolumeDiagnosticSummaryParamsArray({
   levelUpdateRowCount = 0,
   levelUpdateStrideFloats = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
@@ -2919,6 +2995,98 @@ export function schroederParticleStorageSlotAssignmentAdmissionAllowsApplication
   };
 }
 
+function schroederParticleStorageMaterializationAdmissionDescriptor(admission = null) {
+  if (!admission || typeof admission !== 'object') return null;
+  return admission.schroederParticleStorageMaterializationPublication
+    || admission.admittedSchroederParticleStorageMaterializationPublication
+    || admission.publication
+    || admission.descriptor
+    || admission;
+}
+
+export function schroederParticleStorageMaterializationAdmissionAllowsApplication({
+  particleStorageMaterializationAdmission = null,
+  particleStorageSlotAssignment = null,
+  assignmentRowCount = 0
+} = {}) {
+  const descriptor = schroederParticleStorageMaterializationAdmissionDescriptor(
+    particleStorageMaterializationAdmission
+  );
+  const status = particleStorageMaterializationAdmission?.status || descriptor?.status || null;
+  const descriptorStatus = descriptor?.status
+    || particleStorageMaterializationAdmission?.publicationStatus
+    || particleStorageMaterializationAdmission?.admittedStatus
+    || status;
+  const outputFamilies = Array.isArray(particleStorageMaterializationAdmission?.outputFamilies)
+    ? particleStorageMaterializationAdmission.outputFamilies
+    : (Array.isArray(descriptor?.outputFamilies) ? descriptor.outputFamilies : []);
+  const targetStateFamilies = Array.isArray(particleStorageMaterializationAdmission?.targetStateFamilies)
+    ? particleStorageMaterializationAdmission.targetStateFamilies
+    : (Array.isArray(descriptor?.targetStateFamilies) ? descriptor.targetStateFamilies : []);
+  const admittedRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      particleStorageMaterializationAdmission?.schroederParticleStorageMaterializationRowCount
+        ?? descriptor?.schroederParticleStorageMaterializationRowCount
+        ?? particleStorageMaterializationAdmission?.assignmentRowCount
+        ?? descriptor?.assignmentRowCount,
+      assignmentRowCount
+    ))
+  );
+  const requiredRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      particleStorageSlotAssignment?.allocationRowCount,
+      assignmentRowCount
+    ))
+  );
+  const materializationApproved =
+    particleStorageMaterializationAdmission?.particleStorageMaterializationApproved === true;
+  const descriptorAdmitted = SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMITTED_STATUSES.has(descriptorStatus)
+    || descriptor?.committed === true
+    || particleStorageMaterializationAdmission?.committed === true;
+  const familyAccepted = outputFamilies.includes(SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_OUTPUT_FAMILY);
+  const rowCountAccepted = admittedRowCount >= requiredRowCount || requiredRowCount === 0;
+  const targetFamiliesAccepted = SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES.every((family) => (
+    targetStateFamilies.includes(family)
+  ));
+  const slotAssignmentAccepted =
+    particleStorageMaterializationAdmission?.slotAssignmentDescriptorApproved === true
+    || descriptor?.slotAssignmentDescriptorApproved === true
+    || particleStorageSlotAssignment?.status === 'schroeder-particle-storage-slot-assignment-submitted'
+    || particleStorageSlotAssignment?.committed === true;
+  const approved =
+    materializationApproved
+    && descriptorAdmitted
+    && familyAccepted
+    && rowCountAccepted
+    && targetFamiliesAccepted
+    && slotAssignmentAccepted;
+  return {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+    status: approved
+      ? 'schroeder-particle-storage-materialization-admission-approved'
+      : 'schroeder-particle-storage-materialization-admission-blocked',
+    approved,
+    materializationApproved,
+    descriptorAdmitted,
+    descriptorStatus,
+    familyAccepted,
+    rowCountAccepted,
+    targetFamiliesAccepted,
+    slotAssignmentAccepted,
+    materializationRowCount: admittedRowCount,
+    requiredMaterializationRowCount: requiredRowCount,
+    targetStateFamilies: [...targetStateFamilies],
+    sourceHotBufferKey: particleStorageMaterializationAdmission?.sourceHotBufferKey
+      || particleStorageMaterializationAdmission?.hotBufferKey
+      || descriptor?.sourceHotBufferKey
+      || descriptor?.hotBufferKey
+      || null,
+    outputFamilies: [...outputFamilies]
+  };
+}
+
 function schroederFarAggregateForceApplicationAdmissionDescriptor(admission = null) {
   if (!admission || typeof admission !== 'object') return null;
   return admission.schroederFarAggregateForceApplicationPublication
@@ -3595,6 +3763,31 @@ function assertParticleStorageFreeListInput(particleStorageFreeList) {
   const slotCapacity = Math.max(0, finiteNumber(particleStorageFreeList.slotCapacity, 0));
   if (slotCapacity <= 0) {
     throw new RangeError('Schroeder particle storage free-list descriptor requires positive slot capacity');
+  }
+}
+
+function assertParticleStorageSlotAssignmentInput(particleStorageSlotAssignment) {
+  if (
+    particleStorageSlotAssignment?.schema !== ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA
+    && particleStorageSlotAssignment?.schema !== ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA
+  ) {
+    throw new TypeError(
+      'Schroeder particle storage materialization requires a Schroeder slot-assignment input'
+    );
+  }
+  const assignmentRowCount = Math.max(0, Math.round(finiteNumber(
+    particleStorageSlotAssignment.allocationRowCount,
+    0
+  )));
+  if (assignmentRowCount <= 0) {
+    throw new RangeError('Schroeder particle storage materialization requires at least one assignment row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    particleStorageSlotAssignment.slotAssignmentStrideFloats,
+    SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS
+  )));
+  if (stride !== SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS) {
+    throw new RangeError('Schroeder particle storage materialization requires the current slot-assignment row layout');
   }
 }
 
@@ -5768,6 +5961,129 @@ export function createSchroederParticleStorageSlotAssignmentPlan({
     stateAuthorityStatus: admission.approved
       ? 'state-manager-admission-present'
       : 'requires-state-manager-admission-before-particle-storage-slot-assignment',
+    conservedQuantities: ['mass', 'represented-volume', 'momentum-delta', 'internal-energy-delta'],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederParticleStorageMaterializationPlan({
+  sphParticleState,
+  mlsMpmParticleState,
+  particleStorageSlotAssignment,
+  particleStorageMaterializationAdmission = null,
+  outputParticleCapacity = null,
+  materializationEpoch = particleStorageSlotAssignment?.assignmentEpoch ?? 0,
+  stateFamilyId = particleStorageSlotAssignment?.stateFamilyId ?? 1,
+  targetStateFamilyMask = particleStorageSlotAssignment?.targetStateFamilyMask
+    ?? SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK
+} = {}) {
+  assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  assertParticleStorageSlotAssignmentInput(particleStorageSlotAssignment);
+  const assignmentRowCount = Math.max(0, Math.round(finiteNumber(
+    particleStorageSlotAssignment.allocationRowCount,
+    0
+  )));
+  const sourceParticleCount = Math.max(0, Math.round(finiteNumber(
+    sphParticleState.particleCount,
+    0
+  )));
+  const admittedCapacity = Math.max(
+    sourceParticleCount,
+    Math.round(finiteNumber(
+      outputParticleCapacity
+        ?? particleStorageMaterializationAdmission?.requiredParticleCapacity
+        ?? particleStorageMaterializationAdmission?.particleCapacity
+        ?? particleStorageSlotAssignment.freeListCapacity
+        ?? sourceParticleCount,
+      sourceParticleCount
+    ))
+  );
+  const admission = schroederParticleStorageMaterializationAdmissionAllowsApplication({
+    particleStorageMaterializationAdmission,
+    particleStorageSlotAssignment,
+    assignmentRowCount
+  });
+  const stateByteLength = Math.max(
+    4,
+    admittedCapacity * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const thermoByteLength = Math.max(
+    4,
+    admittedCapacity * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const mechanicsByteLength = Math.max(
+    4,
+    admittedCapacity * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const materializationByteLength = Math.max(
+    4,
+    assignmentRowCount * SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_SCHEMA,
+    status: admission.approved
+      ? 'schroeder-particle-storage-materialization-plan-ready'
+      : 'schroeder-particle-storage-materialization-plan-blocked-admission-required',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-particle-storage-materialization',
+    sourceParticleStorageSlotAssignmentSchema: particleStorageSlotAssignment.schema,
+    sourceParticleStorageSlotAssignmentStatus: particleStorageSlotAssignment.status ?? null,
+    assignmentRowCount,
+    assignmentStrideFloats: SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_FLOATS,
+    materializationRowLayout: [...SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ROW_LAYOUT],
+    materializationStrideFloats: SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS,
+    materializationStrideBytes: SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    materializationByteLength,
+    outputCompaction: 'one-admitted-particle-storage-materialization-row-per-assignment-row',
+    admission,
+    particleStorageMaterializationAdmissionSchema: admission.schema,
+    particleStorageMaterializationAdmissionStatus: admission.status,
+    particleStorageMaterializationAdmissionApproved: admission.approved,
+    particleStorageMaterializationAdmissionSourceHotBufferKey: admission.sourceHotBufferKey,
+    targetStateFamilies: [...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES],
+    targetStateFamilyMask: Math.max(0, finiteNumber(
+      targetStateFamilyMask,
+      SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK
+    )),
+    stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    materializationEpoch: finiteNumber(materializationEpoch, 0),
+    sourceParticleCount,
+    outputParticleCapacity: admittedCapacity,
+    stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+    thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
+    mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+    stateStrideVec4s: SPH_GPU_PARTICLE_STATE_FLOATS / 4,
+    thermoStrideVec4s: SPH_GPU_PARTICLE_THERMO_FLOATS / 4,
+    mechanicsStrideVec4s: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS / 4,
+    stateByteLength,
+    thermoByteLength,
+    mechanicsByteLength,
+    materializationMode: 'state-manager-admitted-particle-buffer-materialization',
+    replacementPolicy: 'retained-output-buffers-await-state-manager-swap',
+    particleStorageMutationStatus: admission.approved
+      ? 'particle-buffers-materialization-ready'
+      : 'blocked-particle-storage-materialization-admission-required',
+    outputFamilies: [
+      SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_OUTPUT_FAMILY,
+      SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_OUTPUT_FAMILY,
+      ...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
+    ],
+    stateMutationTarget: 'schroeder-retained-particle-state-mechanics-thermo-buffers',
+    conservativeTransferStatus: admission.approved
+      ? 'particle-storage-materialization-ready'
+      : 'particle-storage-materialization-blocked-admission-required',
+    stateMutationRequired: admission.approved,
+    stateMutationStatus: admission.approved
+      ? 'particle-storage-materialization-planned'
+      : 'blocked-particle-storage-materialization-admission-required',
+    stateAuthorityStatus: admission.approved
+      ? 'state-manager-admission-present'
+      : 'requires-state-manager-admission-before-particle-buffer-materialization',
     conservedQuantities: ['mass', 'represented-volume', 'momentum-delta', 'internal-energy-delta'],
     gpuFirst: true,
     cpuReferenceRequired: false,
@@ -11807,6 +12123,267 @@ export async function runSchroederParticleStorageSlotAssignmentWebGpu({
   }
 }
 
+export async function runSchroederParticleStorageMaterializationWebGpu({
+  device,
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  particleStorageSlotAssignment,
+  particleStorageMaterializationAdmission = null,
+  outputParticleCapacity = null,
+  materializationEpoch = particleStorageSlotAssignment?.assignmentEpoch ?? 0,
+  stateFamilyId = particleStorageSlotAssignment?.stateFamilyId ?? 1,
+  targetStateFamilyMask = particleStorageSlotAssignment?.targetStateFamilyMask
+    ?? SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
+  retainParticleBuffers = true,
+  retainMaterializationBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError(
+      'runSchroederParticleStorageMaterializationWebGpu requires a WebGPU-like device with queue.writeBuffer'
+    );
+  }
+  const plan = createSchroederParticleStorageMaterializationPlan({
+    sphParticleState,
+    mlsMpmParticleState,
+    particleStorageSlotAssignment,
+    particleStorageMaterializationAdmission,
+    outputParticleCapacity,
+    materializationEpoch,
+    stateFamilyId,
+    targetStateFamilyMask
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  if (!plan.particleStorageMaterializationAdmissionApproved) {
+    return {
+      ...plan,
+      schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+      particleStorageMaterializationSchema: plan.schema,
+      status: 'schroeder-particle-storage-materialization-blocked-admission-required',
+      backend: 'webgpu',
+      readbackMode,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedParticleBuffers: false,
+      retainedMaterializationBuffer: false,
+      materializationBufferByteLength: 0,
+      materializationRows: new Float32Array(),
+      conservativeTransferStatus: 'particle-storage-materialization-blocked-admission-required',
+      stateMutationRequired: false,
+      stateMutationStatus: 'blocked-particle-storage-materialization-admission-required',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+
+  const borrowedSlotAssignmentBuffer = particleStorageSlotAssignment?.slotAssignmentBuffer || null;
+  const slotAssignmentRows = particleStorageSlotAssignment?.slotAssignmentRows instanceof Float32Array
+    ? particleStorageSlotAssignment.slotAssignmentRows
+    : null;
+  if (!borrowedSlotAssignmentBuffer && !(slotAssignmentRows instanceof Float32Array)) {
+    throw new TypeError(
+      'Schroeder particle storage materialization requires retained slot-assignment rows or explicit rows'
+    );
+  }
+  const borrowedStateBuffer = optionalSourceStateBuffer(sphParticleUpload);
+  const borrowedThermoBuffer = optionalSourceThermoBuffer(sphParticleUpload);
+  const borrowedMechanicsBuffer = optionalSourceMechanicsBuffer(mlsMpmParticleUpload);
+  const slotAssignmentBuffer = borrowedSlotAssignmentBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-particle-storage-materialization-slot-assignment-in',
+      slotAssignmentRows
+    );
+  const sourceStateBuffer = borrowedStateBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-particle-storage-materialization-state-in', sphParticleState.state);
+  const sourceThermoBuffer = borrowedThermoBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-particle-storage-materialization-thermo-in', sphParticleState.thermo);
+  const sourceMechanicsBuffer = borrowedMechanicsBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-particle-storage-materialization-mechanics-in',
+      mlsMpmParticleState.mechanics
+    );
+  const outputStateBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-materialization-state-out',
+    size: plan.stateByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const outputThermoBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-materialization-thermo-out',
+    size: plan.thermoByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const outputMechanicsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-materialization-mechanics-out',
+    size: plan.mechanicsByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const materializationBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-materialization-rows-out',
+    size: plan.materializationByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-particle-storage-materialization-params',
+    size: 64,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-particle-storage-materialization-readback',
+      size: plan.materializationByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedParticleBuffers = false;
+  let returnedRetainedMaterializationBuffer = false;
+
+  try {
+    if (sphParticleState.state.byteLength > 0) {
+      device.queue.writeBuffer(outputStateBuffer, 0, sphParticleState.state);
+    }
+    if (sphParticleState.thermo.byteLength > 0) {
+      device.queue.writeBuffer(outputThermoBuffer, 0, sphParticleState.thermo);
+    }
+    if (mlsMpmParticleState.mechanics.byteLength > 0) {
+      device.queue.writeBuffer(outputMechanicsBuffer, 0, mlsMpmParticleState.mechanics);
+    }
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederParticleStorageMaterializationParamsArray({
+      ...plan,
+      admissionApproved: plan.particleStorageMaterializationAdmissionApproved
+    }));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'storage'),
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'storage'),
+      computeBufferBinding(8, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-particle-storage-materialization.v0',
+      label: 'ulg-schroeder-particle-storage-materialization',
+      code: schroederParticleStorageMaterializationWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: slotAssignmentBuffer } },
+        { binding: 1, resource: { buffer: sourceStateBuffer } },
+        { binding: 2, resource: { buffer: sourceThermoBuffer } },
+        { binding: 3, resource: { buffer: sourceMechanicsBuffer } },
+        { binding: 4, resource: { buffer: outputStateBuffer } },
+        { binding: 5, resource: { buffer: outputThermoBuffer } },
+        { binding: 6, resource: { buffer: outputMechanicsBuffer } },
+        { binding: 7, resource: { buffer: materializationBuffer } },
+        { binding: 8, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.assignmentRowCount / SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(materializationBuffer, 0, readBuffer, 0, plan.materializationByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let materializationRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      materializationRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.assignmentRowCount * SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+      particleStorageMaterializationSchema: plan.schema,
+      status: 'schroeder-particle-storage-materialization-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_PARTICLE_STORAGE_MATERIALIZATION_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedParticleBuffers: Boolean(retainParticleBuffers),
+      retainedMaterializationBuffer: Boolean(retainMaterializationBuffer),
+      stateBufferByteLength: plan.stateByteLength,
+      thermoBufferByteLength: plan.thermoByteLength,
+      mechanicsBufferByteLength: plan.mechanicsByteLength,
+      materializationBufferByteLength: plan.materializationByteLength,
+      materializationRows,
+      conservativeTransferStatus: 'particle-storage-materialization-submitted',
+      stateMutationStatus: 'particle-storage-materialization-buffer-submitted',
+      stateAuthorityStatus: 'state-manager-admitted-particle-storage-materialization-materialized',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainParticleBuffers) {
+      result.particleStateBuffer = outputStateBuffer;
+      result.particleThermoBuffer = outputThermoBuffer;
+      result.particleMechanicsBuffer = outputMechanicsBuffer;
+      result.destroyParticleBuffers = () => {
+        outputStateBuffer.destroy?.();
+        outputThermoBuffer.destroy?.();
+        outputMechanicsBuffer.destroy?.();
+      };
+      returnedRetainedParticleBuffers = true;
+    }
+    if (retainMaterializationBuffer) {
+      result.materializationBuffer = materializationBuffer;
+      result.destroyMaterializationBuffer = () => materializationBuffer.destroy?.();
+      returnedRetainedMaterializationBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedSlotAssignmentBuffer) slotAssignmentBuffer.destroy?.();
+      if (!borrowedStateBuffer) sourceStateBuffer.destroy?.();
+      if (!borrowedThermoBuffer) sourceThermoBuffer.destroy?.();
+      if (!borrowedMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
+      if (!retainParticleBuffers || !returnedRetainedParticleBuffers) {
+        outputStateBuffer.destroy?.();
+        outputThermoBuffer.destroy?.();
+        outputMechanicsBuffer.destroy?.();
+      }
+      if (!retainMaterializationBuffer || !returnedRetainedMaterializationBuffer) {
+        materializationBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederPhaseVolumeLevelUpdateWebGpu({
   device,
   phaseVolumeMigration,
@@ -12147,6 +12724,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   particleStorageAllocation = null,
   particleStorageFreeList = null,
   particleStorageSlotAssignment = null,
+  particleStorageMaterialization = null,
   phaseVolumeAssignmentOverlay = null,
   phaseVolumeAssignmentOverlayIndex = null,
   phaseVolumeLevelUpdate = null,
@@ -12157,6 +12735,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeSplitMergeAdmission = null,
   particleStorageAllocatorAdmission = null,
   particleStorageSlotAssignmentAdmission = null,
+  particleStorageMaterializationAdmission = null,
   farAggregateLawConsumerAdmission = null,
   farAggregateGasStateDeltaAdmission = null,
   farAggregateForceApplicationAdmission = null,
@@ -12208,6 +12787,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enablePhaseVolumeSplitMergeApply = Boolean(phaseVolumeSplitMergeAdmission),
   enableParticleStorageAllocation = Boolean(particleStorageAllocatorAdmission),
   enableParticleStorageSlotAssignment = Boolean(particleStorageSlotAssignmentAdmission),
+  enableParticleStorageMaterialization = Boolean(particleStorageMaterializationAdmission),
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
   enablePortableSummary = false,
@@ -12308,6 +12888,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeSplitMergeApplyRunner = runSchroederPhaseVolumeSplitMergeApplyWebGpu,
   particleStorageAllocationRunner = runSchroederParticleStorageAllocationWebGpu,
   particleStorageSlotAssignmentRunner = runSchroederParticleStorageSlotAssignmentWebGpu,
+  particleStorageMaterializationRunner = runSchroederParticleStorageMaterializationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   portableSummaryRunner = createSchroederPortableSummaryPlan,
@@ -12572,6 +13153,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   ) {
     throw new TypeError(
       'runSchroederSameLevelMechanicsWebGpu requires a particleStorageSlotAssignmentRunner function'
+    );
+  }
+  if (
+    enablePhaseVolumeMigration
+    && enablePhaseVolumeSplitMergeProposal
+    && enablePhaseVolumeSplitMergeApply
+    && enableParticleStorageAllocation
+    && enableParticleStorageSlotAssignment
+    && enableParticleStorageMaterialization
+    && typeof particleStorageMaterializationRunner !== 'function'
+  ) {
+    throw new TypeError(
+      'runSchroederSameLevelMechanicsWebGpu requires a particleStorageMaterializationRunner function'
     );
   }
   if (
@@ -13039,6 +13633,31 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         readbackMode
       })
   );
+  const resolvedParticleStorageMaterialization = particleStorageMaterialization || (
+    !resolvedParticleStorageSlotAssignment
+    || !enableParticleStorageMaterialization
+      ? null
+      : await particleStorageMaterializationRunner({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        particleStorageSlotAssignment: resolvedParticleStorageSlotAssignment,
+        particleStorageMaterializationAdmission,
+        outputParticleCapacity:
+          particleStorageMaterializationAdmission?.requiredParticleCapacity
+          ?? particleStorageMaterializationAdmission?.particleCapacity
+          ?? particleStorageFreeList?.slotCapacity
+          ?? sphParticleState?.particleCount,
+        materializationEpoch: mergeEpoch,
+        stateFamilyId: 1,
+        targetStateFamilyMask: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
+        retainParticleBuffers: true,
+        retainMaterializationBuffer: true,
+        readbackMode
+      })
+  );
   const resolvedPhaseVolumeLevelUpdate = phaseVolumeLevelUpdate || (
     !resolvedPhaseVolumeMigration || !enablePhaseVolumeLevelUpdate
       ? null
@@ -13140,6 +13759,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederPhaseVolumeSplitMergeApply: resolvedPhaseVolumeSplitMergeApply,
     schroederParticleStorageAllocation: resolvedParticleStorageAllocation,
     schroederParticleStorageSlotAssignment: resolvedParticleStorageSlotAssignment,
+    schroederParticleStorageMaterialization: resolvedParticleStorageMaterialization,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
     schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
@@ -13745,6 +14365,40 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedParticleStorageSlotAssignment.slotAssignmentByteLength
         ?? 0
     } : null,
+    particleStorageMaterialization: resolvedParticleStorageMaterialization ? {
+      schema: resolvedParticleStorageMaterialization.schema,
+      status: resolvedParticleStorageMaterialization.status,
+      assignmentRowCount: resolvedParticleStorageMaterialization.assignmentRowCount,
+      outputCompaction: resolvedParticleStorageMaterialization.outputCompaction,
+      materializationMode: resolvedParticleStorageMaterialization.materializationMode,
+      replacementPolicy: resolvedParticleStorageMaterialization.replacementPolicy,
+      particleStorageMaterializationAdmissionApproved:
+        resolvedParticleStorageMaterialization.particleStorageMaterializationAdmissionApproved,
+      targetStateFamilies: resolvedParticleStorageMaterialization.targetStateFamilies,
+      targetStateFamilyMask: resolvedParticleStorageMaterialization.targetStateFamilyMask,
+      sourceParticleCount: resolvedParticleStorageMaterialization.sourceParticleCount,
+      outputParticleCapacity: resolvedParticleStorageMaterialization.outputParticleCapacity,
+      particleStorageMutationStatus: resolvedParticleStorageMaterialization.particleStorageMutationStatus,
+      conservativeTransferStatus: resolvedParticleStorageMaterialization.conservativeTransferStatus,
+      stateMutationRequired: resolvedParticleStorageMaterialization.stateMutationRequired === true,
+      stateMutationStatus: resolvedParticleStorageMaterialization.stateMutationStatus,
+      stateAuthorityStatus: resolvedParticleStorageMaterialization.stateAuthorityStatus,
+      retainedParticleBuffers: Boolean(resolvedParticleStorageMaterialization.particleStateBuffer),
+      retainedMaterializationBuffer: Boolean(resolvedParticleStorageMaterialization.materializationBuffer),
+      stateBufferByteLength: resolvedParticleStorageMaterialization.stateBufferByteLength
+        ?? resolvedParticleStorageMaterialization.stateByteLength
+        ?? 0,
+      thermoBufferByteLength: resolvedParticleStorageMaterialization.thermoBufferByteLength
+        ?? resolvedParticleStorageMaterialization.thermoByteLength
+        ?? 0,
+      mechanicsBufferByteLength: resolvedParticleStorageMaterialization.mechanicsBufferByteLength
+        ?? resolvedParticleStorageMaterialization.mechanicsByteLength
+        ?? 0,
+      materializationBufferByteLength:
+        resolvedParticleStorageMaterialization.materializationBufferByteLength
+        ?? resolvedParticleStorageMaterialization.materializationByteLength
+        ?? 0
+    } : null,
     phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate ? {
       schema: resolvedPhaseVolumeLevelUpdate.schema,
       status: resolvedPhaseVolumeLevelUpdate.status,
@@ -14140,6 +14794,36 @@ export async function runSchroederSameLevelMechanicsWebGpu({
               : (resolvedPhaseVolumeMigration
                 ? 'disabled-phase-volume-split-merge-proposal'
                 : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics'))))),
+    particleStorageMaterializationStatus: resolvedParticleStorageMaterialization?.status ?? (
+      resolvedParticleStorageSlotAssignment
+        ? 'disabled-particle-storage-materialization-admission-not-provided'
+        : (resolvedParticleStorageAllocation
+          ? (particleStorageFreeList
+            ? 'disabled-particle-storage-slot-assignment-admission-not-provided'
+            : 'disabled-particle-storage-free-list-not-provided')
+          : (resolvedPhaseVolumeSplitMergeApply
+            ? 'disabled-particle-storage-allocator-admission-not-provided'
+            : (resolvedPhaseVolumeSplitMergeProposal
+              ? 'disabled-phase-volume-split-merge-admission-not-provided'
+              : (resolvedPhaseVolumeMigration
+                ? 'disabled-phase-volume-split-merge-proposal'
+                : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')))))
+    ),
+    particleStorageMaterializationConsumerStatus: resolvedParticleStorageMaterialization
+      ? 'particle-storage-materialization-forwarded-to-resident-backend'
+      : (resolvedParticleStorageSlotAssignment
+          ? 'disabled-particle-storage-materialization-admission-not-provided'
+          : (resolvedParticleStorageAllocation
+            ? (particleStorageFreeList
+              ? 'disabled-particle-storage-slot-assignment-admission-not-provided'
+              : 'disabled-particle-storage-free-list-not-provided')
+            : (resolvedPhaseVolumeSplitMergeApply
+              ? 'disabled-particle-storage-allocator-admission-not-provided'
+              : (resolvedPhaseVolumeSplitMergeProposal
+                ? 'disabled-phase-volume-split-merge-admission-not-provided'
+                : (resolvedPhaseVolumeMigration
+                  ? 'disabled-phase-volume-split-merge-proposal'
+                  : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')))))),
     phaseVolumeLevelUpdateStatus: resolvedPhaseVolumeLevelUpdate?.status ?? (
       resolvedPhaseVolumeMigration
         ? 'disabled-phase-volume-level-update-admission-not-provided'
@@ -14184,6 +14868,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     renderLodStatus: resolvedPortableSummary?.renderLodStatus ?? 'disabled-schroeder-render-lod-summary',
     portableSummaryTransferMode: resolvedPortableSummary?.transferMode ?? null,
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
+      ?? resolvedParticleStorageMaterialization?.conservativeTransferStatus
       ?? resolvedParticleStorageSlotAssignment?.conservativeTransferStatus
       ?? resolvedParticleStorageAllocation?.conservativeTransferStatus
       ?? resolvedPhaseVolumeSplitMergeApply?.conservativeTransferStatus
@@ -14201,6 +14886,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ?? resolvedConservationSummary?.conservativeTransferStatus
       ?? 'not-run',
     stateMutationStatus: resolvedPhaseVolumeLevelUpdate?.stateMutationStatus
+      ?? resolvedParticleStorageMaterialization?.stateMutationStatus
       ?? resolvedParticleStorageSlotAssignment?.stateMutationStatus
       ?? resolvedParticleStorageAllocation?.stateMutationStatus
       ?? resolvedPhaseVolumeSplitMergeApply?.stateMutationStatus
@@ -14216,6 +14902,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ?? resolvedCrossLevelTransfer?.stateMutationStatus
       ?? 'not-run',
     stateAuthorityStatus: resolvedPhaseVolumeLevelUpdate?.stateAuthorityStatus
+      ?? resolvedParticleStorageMaterialization?.stateAuthorityStatus
       ?? resolvedParticleStorageSlotAssignment?.stateAuthorityStatus
       ?? resolvedParticleStorageAllocation?.stateAuthorityStatus
       ?? resolvedPhaseVolumeSplitMergeApply?.stateAuthorityStatus

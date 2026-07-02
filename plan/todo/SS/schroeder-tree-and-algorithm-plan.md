@@ -571,12 +571,27 @@ Completed in this slice:
 3. Threaded slot-assignment execution through same-level SS mechanics and
    resident-step forwarding while keeping particle buffer writes deferred.
 
-The next code slice on `SS` is **SS admitted particle-buffer materialization**:
+Completed in this slice:
 
-1. Consume admitted slot-assignment rows and write target particle-state,
-   mechanics, and thermo rows into retained GPU buffers.
-2. Preserve fail-closed StateManager admission and conservation metadata before
-   replacing or freeing source slots.
+1. Added
+   `peercompute.ulg.schroeder-particle-storage-materialization-admission.v0`,
+   `peercompute.ulg.schroeder-particle-storage-materialization.v0`, and
+   retained GPU `schroeder-particle-storage-materialization` rows.
+2. Added a StateManager-admitted GPU materialization pass that consumes
+   slot-assignment rows, initializes retained output SPH state, SPH thermo, and
+   MLS-MPM mechanics buffers, writes assigned target slots, and marks freed
+   source slots without default particle readback.
+3. Threaded the retained materialized particle buffers and compact
+   materialization metadata through same-level SS mechanics and resident-step
+   forwarding while leaving the authoritative state swap as a separate owner
+   decision.
+
+The next code slice on `SS` is **SS authoritative particle-storage swap**:
+
+1. Teach the resident/state-manager authority path to adopt admitted retained
+   materialized particle buffers as the next authoritative particle storage.
+2. Preserve fail-closed StateManager admission, cleanup/lease ownership, and
+   rollback semantics before replacing source particle buffers.
 3. Preserve the URL-scheduled H2O steam proof: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent

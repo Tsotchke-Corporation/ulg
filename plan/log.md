@@ -36036,3 +36036,58 @@ Next:
   cross-peer adopted-storage replay, or leave cross-peer continuation
   fail-closed with a concrete implementation TODO if that expands beyond a
   slice.
+
+## 2026-07-02 AKDT - SS Adopted-Storage Browser Materialization Proof
+
+Status:
+
+- Browser scene resident-step refresh now accepts explicit SS phase-volume
+  split/merge, particle-storage allocator, free-list, slot-assignment, and
+  materialization admissions and threads them into
+  `runSchroederSameLevelMechanicsWebGpu`.
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0`
+  plus descriptor-only seed creation/validation for cross-peer replay planning.
+  The seed can satisfy cross-peer continuation planning only when it matches the
+  adopted-storage descriptor, count, retained refs, source hot-buffer key, and
+  raw-transfer=false contract.
+- Fixed no-full-readback P2G/G2P mechanics stage fence reports so
+  WebGPU-executed no-full stages can feed the adopted-storage continuation lane
+  without demanding stale full particle mirrors.
+- Added a mounted Playwright proof that drives real SS particle-storage
+  materialization through the scene, publishes the adopted-storage descriptor,
+  verifies host-local resolver readiness, feeds the same-device mechanics stage
+  chain from retained refs, and asserts raw GPUBuffer PeerCompute transfer is
+  false.
+- Long-horizon probe telemetry now exposes adopted-storage publication,
+  descriptor, local-resolver, stage-schedule, source hot-buffer, and
+  raw-transfer fields.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `15/15`
+  passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `85/85`
+  passing.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted Schroeder materialized storage"`
+  with `1/1` passing.
+- PASS: `npm test` with `947/950` passing and `3` skipped.
+
+Next:
+
+- Promote explicit SS particle-storage materialization admissions from
+  browser-test injection into URL/host runtime policy.
+- Implement the peer-local portable rematerializer that consumes descriptor
+  seeds and rebuilds equivalent retained GPU particle storage without raw
+  GPUBuffer transfer.
+- Add an automatic mounted `residentStageWorkers=1` proof that the scheduled
+  worker lane consumes real adopted storage after SS materialization.

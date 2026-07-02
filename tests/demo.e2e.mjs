@@ -8829,6 +8829,335 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   });
 });
 
+test('SPH phase mounted Schroeder materialized storage publishes adopted descriptor and feeds same-device stage chain', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|Compute pass/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=500&baset=500&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 90_000 });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    return Boolean(
+      scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getMlsMpmGpuParticleState?.()?.schema
+      && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+      && typeof scene?.requestOpticalGpuDevice === 'function'
+    );
+  }, null, { timeout: 90_000 });
+
+  const result = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
+    const schroederModule = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const host = await hostModule.createPeerComputeResidentAuthorityHost({
+      computeTaskModulePath: '/src/runtime/sph/sphMlsMpmGpuStep.js',
+      enableWorkers: false,
+      enablePersistence: false,
+      disableNetworkProvider: true,
+      disableBroadcast: true
+    });
+    window.__ulgResidentAuthorityHost = host;
+
+    const containsRawGpuBuffer = (value, seen = new Set()) => {
+      if (!value || typeof value !== 'object') return false;
+      if (seen.has(value)) return false;
+      seen.add(value);
+      const ctor = value.constructor?.name || '';
+      if (ctor === 'GPUBuffer') return true;
+      if (typeof value.mapAsync === 'function' && typeof value.destroy === 'function') return true;
+      for (const entry of Object.values(value)) {
+        if (containsRawGpuBuffer(entry, seen)) return true;
+      }
+      return false;
+    };
+
+    try {
+      const sourceParticleCount = Math.max(1, Math.round(Number(
+        scene.getSphGpuParticleState?.()?.particleCount
+        ?? scene.getMlsMpmGpuParticleState?.()?.particleCount
+        ?? 1
+      ) || 1));
+      const rowBudget = Math.max(sourceParticleCount, 4);
+      const requiredParticleCapacity = rowBudget + 4;
+      const targetStateFamilies = [
+        'sph-particle-state',
+        'mls-mpm-particle-mechanics',
+        'sph-particle-thermo'
+      ];
+      const phaseVolumeSplitMergeAdmission = {
+        schema: schroederModule.ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+        status: 'schroeder-phase-volume-split-merge-admission-admitted',
+        phaseVolumeSplitMergeApproved: true,
+        outputFamilies: ['schroeder-phase-volume-split-merge-apply'],
+        schroederPhaseVolumeSplitMergeProposalRowCount: rowBudget,
+        hotBufferKey: 'ulg:browser:ss-adopted-storage-phase-volume-split-merge-admission',
+        sourceHotBufferKey: 'ulg:browser:ss-adopted-storage-phase-volume-split-merge-admission',
+        committed: true
+      };
+      const particleStorageAllocatorAdmission = {
+        schema: schroederModule.ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+        status: 'schroeder-particle-storage-allocator-admission-admitted',
+        particleStorageAllocationApproved: true,
+        particleCapacityApproved: true,
+        outputFamilies: ['schroeder-particle-storage-allocation'],
+        targetStateFamilies,
+        schroederParticleStorageAllocationRowCount: rowBudget,
+        currentParticleCapacity: sourceParticleCount,
+        requiredParticleCapacity,
+        hotBufferKey: 'ulg:browser:ss-adopted-storage-allocator-admission',
+        sourceHotBufferKey: 'ulg:browser:ss-adopted-storage-allocator-admission',
+        committed: true
+      };
+      const particleStorageFreeList = schroederModule.createSchroederParticleStorageFreeListPlan({
+        baseSlotIndex: sourceParticleCount,
+        slotCapacity: requiredParticleCapacity + rowBudget,
+        availableSlotCount: requiredParticleCapacity,
+        maxSlotsPerRow: 2
+      });
+      const particleStorageSlotAssignmentAdmission = {
+        schema: schroederModule.ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
+        status: 'schroeder-particle-storage-slot-assignment-admission-admitted',
+        particleStorageSlotAssignmentApproved: true,
+        freeListDescriptorApproved: true,
+        outputFamilies: ['schroeder-particle-storage-slot-assignment'],
+        targetStateFamilies,
+        schroederParticleStorageSlotAssignmentRowCount: rowBudget,
+        hotBufferKey: 'ulg:browser:ss-adopted-storage-slot-assignment-admission',
+        sourceHotBufferKey: 'ulg:browser:ss-adopted-storage-slot-assignment-admission',
+        committed: true
+      };
+      const particleStorageMaterializationAdmission = {
+        schema: schroederModule.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+        status: 'schroeder-particle-storage-materialization-admission-admitted',
+        particleStorageMaterializationApproved: true,
+        slotAssignmentDescriptorApproved: true,
+        outputFamilies: ['schroeder-particle-storage-materialization'],
+        targetStateFamilies,
+        schroederParticleStorageMaterializationRowCount: rowBudget,
+        requiredParticleCapacity,
+        hotBufferKey: 'ulg:browser:ss-adopted-storage-materialization-admission',
+        sourceHotBufferKey: 'ulg:browser:ss-adopted-storage-materialization-admission',
+        committed: true
+      };
+
+      const execution = await scene.refreshMlsMpmResidentSteps({
+        computeManager: host.computeManager,
+        residentStateManager: host.stateManager,
+        residentAuthorityHost: host,
+        computeTaskModulePath: host.computeTaskModulePath,
+        computeTaskLaneId: 'ulg:browser:ss-adopted-storage-resident-lane',
+        computeTaskStateKey: 'ulg:browser:ss-adopted-storage-resident-state',
+        computeTaskDomainKey: 'ulg:browser:ss-adopted-storage',
+        preferWebGpu: true,
+        stepCount: 1,
+        readbackMode: 'no-full-readback',
+        compactSummaryMode: 'none',
+        compactSummaryScope: 'particle-visual',
+        force: true,
+        schroederSimulation: true,
+        schroederSelectedLevel: 0,
+        schroederBaseGridSpacingM: scene.getSphGpuParticleState?.()?.smoothingLengthM,
+        schroederEnablePortableSummary: true,
+        schroederEnableCrossLevelCoupling: true,
+        schroederPhaseVolumeSplitMergeAdmission: phaseVolumeSplitMergeAdmission,
+        schroederParticleStorageAllocatorAdmission: particleStorageAllocatorAdmission,
+        schroederParticleStorageFreeList: particleStorageFreeList,
+        schroederParticleStorageSlotAssignmentAdmission: particleStorageSlotAssignmentAdmission,
+        schroederParticleStorageMaterializationAdmission: particleStorageMaterializationAdmission
+      });
+
+      const publication = execution?.schroederAdoptedParticleStoragePublication || null;
+      const hotRecord = publication?.hotBufferKey
+        ? host.stateManager.getHotBuffer(publication.hotBufferKey)
+        : null;
+      const warmDeltas = host.stateManager.getWarmDeltas(
+        hostModule.ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE
+      ) || {};
+      const warmPayload = Object.values(warmDeltas)
+        .find((entry) => entry?.payload?.hotBufferKey === publication?.hotBufferKey)
+        ?.payload || null;
+      const sameDevicePlan = host.planSchroederAdoptedParticleStorageContinuation({
+        hotBufferKey: publication?.hotBufferKey,
+        consumerMode: 'same-device'
+      });
+      const portableSeed = hostModule.createSchroederAdoptedParticleStoragePortableMaterializationSeed({
+        descriptor: publication?.schroederAdoptedParticleStorageDescriptor,
+        hotBufferKey: publication?.hotBufferKey,
+        cacheKey: publication?.cacheKey,
+        stateKey: publication?.stateKey,
+        sourceTaskId: 'ulg:browser:ss-adopted-storage-portable-seed'
+      });
+      const crossPeerSeededPlan = host.planSchroederAdoptedParticleStorageContinuation({
+        hotBufferKey: publication?.hotBufferKey,
+        consumerMode: 'cross-peer',
+        portableMaterializationSeed: portableSeed
+      });
+
+      const deviceResult = await scene.requestOpticalGpuDevice();
+      const stageChain = await host.runMechanicsStageTaskChain({
+        sphParticleState: execution.nextSphParticleState,
+        mlsMpmParticleState: execution.nextMlsMpmParticleState,
+        stageTaskIdPrefix: 'ulg:browser:ss-adopted-storage-stage-chain',
+        preferWebGpu: true,
+        useNativeTaskGraph: false,
+        deviceResult,
+        readbackMode: 'no-full-readback',
+        compactSummaryScope: 'particle-visual',
+        gpuResidentLaneId: 'ulg:browser:ss-adopted-storage-stage-chain-lane',
+        gpuResidentLaneStateKey: 'ulg:browser:ss-adopted-storage-stage-chain-state',
+        schroederAdoptedParticleStorageContinuationHotBufferKey: publication?.hotBufferKey,
+        schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'
+      });
+      const chain = stageChain?.mechanicsStageTaskChain || null;
+
+      const summary = {
+        executionStatus: execution?.status ?? null,
+        residentComputeManagerMode: execution?.residentComputeManagerMode ?? null,
+        schroederSimulation: execution?.schroederSimulation === true,
+        finalStepBackend: execution?.finalStep?.backend ?? null,
+        finalStepReadbackMode: execution?.finalStep?.readbackMode ?? null,
+        particleStorageMaterializationStatus:
+          execution?.finalStep?.schroederParticleStorageMaterializationStatus ?? null,
+        particleStorageAdoptionStatus:
+          execution?.finalStep?.schroederParticleStorageAdoptionStatus ?? null,
+        particleStorageAdopted:
+          execution?.finalStep?.schroederParticleStorageAdopted === true,
+        nextParticleBufferMode: execution?.nextParticleBufferMode ?? null,
+        descriptorSchema: execution?.schroederAdoptedParticleStorageDescriptor?.schema ?? null,
+        descriptorStatus: execution?.schroederAdoptedParticleStorageDescriptor?.status ?? null,
+        descriptorReady: execution?.schroederAdoptedParticleStorageDescriptor?.ready === true,
+        descriptorCopyMode: execution?.schroederAdoptedParticleStorageDescriptor?.copyMode ?? null,
+        descriptorRawGpuBufferTransferDetected:
+          execution?.schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true,
+        descriptorSameDeviceReplayReady:
+          execution?.schroederAdoptedParticleStorageDescriptor?.sameDeviceReplayReady === true,
+        descriptorCrossPeerReplayReady:
+          execution?.schroederAdoptedParticleStorageDescriptor?.crossPeerReplayReady === true,
+        publicationSchema: publication?.schema ?? null,
+        publicationStatus: publication?.status ?? null,
+        publicationAccepted: publication?.accepted === true,
+        publicationHotBufferKey: publication?.hotBufferKey ?? null,
+        publicationRawGpuBufferTransferDetected:
+          publication?.rawGpuBufferTransferDetected === true,
+        publicationLocalResolverReady:
+          publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady === true,
+        publicationLocalResolverStatus:
+          publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus ?? null,
+        publicationLocalResolverResolvedRefCount:
+          publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount ?? null,
+        hotRecordStatus: hotRecord?.status ?? null,
+        hotRecordCopyMode: hotRecord?.copyMode ?? null,
+        warmPayloadStatus: warmPayload?.status ?? null,
+        sameDevicePlanStatus: sameDevicePlan?.status ?? null,
+        sameDevicePlanReady: sameDevicePlan?.ready === true,
+        sameDevicePlanPrivateLaneRefs: sameDevicePlan?.sameDevicePrivateLaneRefs ?? [],
+        portableSeedSchema: portableSeed?.schema ?? null,
+        portableSeedStatus: portableSeed?.status ?? null,
+        crossPeerSeededPlanStatus: crossPeerSeededPlan?.status ?? null,
+        crossPeerSeededPlanReady: crossPeerSeededPlan?.ready === true,
+        crossPeerSeededPlanPortableSeedStatus:
+          crossPeerSeededPlan?.portableMaterializationSeedStatus ?? null,
+        stageChainStatus: chain?.status ?? null,
+        stageChainSchedulerStatus: chain?.schedulerStatus ?? null,
+        stageChainScheduleStatus:
+          chain?.schroederAdoptedParticleStorageContinuationScheduleStatus ?? null,
+        stageChainSourceHotBufferKey:
+          chain?.schroederAdoptedParticleStorageContinuationSourceHotBufferKey ?? null,
+        stageChainLocalResolverStatus:
+          chain?.schroederAdoptedParticleStorageLocalResolverStatus ?? null,
+        stageChainLocalResolverReady:
+          chain?.schroederAdoptedParticleStorageLocalResolverReady === true,
+        stageChainRawGpuBufferPeerComputeTransfer:
+          chain?.schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer === true,
+        stageChainSubmittedStageCount: chain?.submittedStageTasks?.length ?? 0,
+        localResolverCount:
+          host.getSchroederAdoptedParticleStorageLocalRetainedBufferResolverCount?.() ?? null,
+        publicationHasRawGpuBuffer: containsRawGpuBuffer(publication),
+        hotRecordHasRawGpuBuffer: containsRawGpuBuffer(hotRecord),
+        warmPayloadHasRawGpuBuffer: containsRawGpuBuffer(warmPayload)
+      };
+
+      scene.dispose?.();
+      overlay.__sphScene = null;
+      await host.destroy();
+      window.__ulgResidentAuthorityHost = null;
+      return summary;
+    } catch (error) {
+      scene.dispose?.();
+      overlay.__sphScene = null;
+      await host.destroy?.();
+      window.__ulgResidentAuthorityHost = null;
+      throw error;
+    }
+  });
+
+  expect(result.executionStatus).toBe('resident-steps-executed');
+  expect(result.residentComputeManagerMode).toBe('direct-schroeder-scene');
+  expect(result.schroederSimulation).toBe(true);
+  expect(result.finalStepBackend).toBe('webgpu');
+  expect(result.finalStepReadbackMode).toBe('no-full-readback');
+  expect(result.particleStorageMaterializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+  expect(result.particleStorageAdoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.particleStorageAdopted).toBe(true);
+  expect(result.nextParticleBufferMode).toBe('retained-schroeder-particle-storage-materialized-buffers');
+  expect(result.descriptorSchema).toBe('peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0');
+  expect(result.descriptorStatus).toBe('schroeder-adopted-particle-storage-descriptor-ready');
+  expect(result.descriptorReady).toBe(true);
+  expect(result.descriptorCopyMode).toBe('descriptor-only-no-raw-gpubuffer-transfer');
+  expect(result.descriptorRawGpuBufferTransferDetected).toBe(false);
+  expect(result.descriptorSameDeviceReplayReady).toBe(true);
+  expect(result.descriptorCrossPeerReplayReady).toBe(false);
+  expect(result.publicationSchema).toBe('peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0');
+  expect(result.publicationStatus).toBe('schroeder-adopted-particle-storage-descriptor-published');
+  expect(result.publicationAccepted).toBe(true);
+  expect(result.publicationHotBufferKey).toContain('ulg:sph-resident-schroeder-adopted-storage');
+  expect(result.publicationRawGpuBufferTransferDetected).toBe(false);
+  expect(result.publicationLocalResolverReady).toBe(true);
+  expect(result.publicationLocalResolverStatus)
+    .toBe('schroeder-adopted-particle-storage-local-retained-buffer-resolver-ready');
+  expect(result.publicationLocalResolverResolvedRefCount).toBe(3);
+  expect(result.hotRecordStatus).toBe('schroeder-adopted-particle-storage-hot-buffer-source-stored');
+  expect(result.hotRecordCopyMode).toBe('descriptor-only-no-raw-gpubuffer-transfer');
+  expect(result.warmPayloadStatus).toBe('schroeder-adopted-particle-storage-descriptor-admitted');
+  expect(result.sameDevicePlanStatus).toBe('schroeder-adopted-particle-storage-same-device-continuation-ready');
+  expect(result.sameDevicePlanReady).toBe(true);
+  expect(result.sameDevicePlanPrivateLaneRefs).toEqual([
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  expect(result.portableSeedSchema)
+    .toBe('peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0');
+  expect(result.portableSeedStatus)
+    .toBe('schroeder-adopted-particle-storage-portable-materialization-seed-ready');
+  expect(result.crossPeerSeededPlanStatus)
+    .toBe('schroeder-adopted-particle-storage-cross-peer-continuation-ready');
+  expect(result.crossPeerSeededPlanReady).toBe(true);
+  expect(result.crossPeerSeededPlanPortableSeedStatus)
+    .toBe('schroeder-adopted-particle-storage-portable-materialization-seed-accepted');
+  expect(result.stageChainStatus).toBe('compute-manager-stage-task-chain-executed');
+  expect(result.stageChainSchedulerStatus).toBe('ulg-helper-stage-runners-used-awaiting-gpu-graph-semantics');
+  expect(result.stageChainScheduleStatus).toBe('schroeder-adopted-particle-storage-same-device-scheduled');
+  expect(result.stageChainSourceHotBufferKey).toBe(result.publicationHotBufferKey);
+  expect(result.stageChainLocalResolverStatus).toBe('schroeder-adopted-particle-storage-local-resolver-ready');
+  expect(result.stageChainLocalResolverReady).toBe(true);
+  expect(result.stageChainRawGpuBufferPeerComputeTransfer).toBe(false);
+  expect(result.stageChainSubmittedStageCount).toBe(3);
+  expect(result.localResolverCount).toBe(1);
+  expect(result.publicationHasRawGpuBuffer).toBe(false);
+  expect(result.hotRecordHasRawGpuBuffer).toBe(false);
+  expect(result.warmPayloadHasRawGpuBuffer).toBe(false);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase resident steps can use the real browser PeerCompute resident authority host', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');

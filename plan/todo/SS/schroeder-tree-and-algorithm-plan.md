@@ -687,16 +687,35 @@ Completed in this slice:
    readiness, continuation schedule status, stage resolver status, and explicit
    raw-transfer=false telemetry.
 
-The next code slice on `SS` is **SS adopted storage browser runtime proof and
-portable replay seed**:
+Completed in this slice:
 
-1. Add a browser/probe proof that drives a real SS materialized particle-storage
-   execution through the mounted scene, then asserts descriptor publication,
-   local resolver readiness, same-device stage-chain consumption, and no raw
-   GPUBuffer PeerCompute transfer.
-2. Add the first portable materialization/snapshot seed contract for cross-peer
-   adopted-storage consumers, or keep the cross-peer block explicit with a
-   concrete seed TODO if implementation proves larger than a slice.
-3. Surface the adopted-storage publication and stage-consumption telemetry in
-   the long-horizon/performance probes so progress is visible outside the
-   source-level harness.
+1. Mounted browser scenes can now pass explicit SS phase-volume split/merge,
+   particle-storage allocator, free-list, slot-assignment, and materialization
+   admissions into the direct Schroeder same-level path, so a real scene can
+   produce retained materialized particle storage instead of relying on a unit
+   harness.
+2. Added
+   `peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0`
+   with descriptor-only validation for cross-peer replay planning. The seed
+   carries authoritative counts, retained-ref identities, source hot-buffer
+   metadata, and no raw GPUBuffer transfer.
+3. Added a mounted Playwright proof that executes the scene materialization,
+   publishes the adopted-storage descriptor, verifies host-local resolver
+   readiness, feeds the same-device mechanics stage chain from retained refs,
+   and asserts raw-transfer=false diagnostics.
+4. Long-horizon probe telemetry now reports adopted-storage publication,
+   local-resolver, stage-schedule, source hot-buffer, and raw-transfer fields.
+
+The next code slice on `SS` is **SS adopted storage runtime policy and portable
+rematerializer**:
+
+1. Promote the explicit scene materialization admissions from browser-test
+   injection into normal URL/host policy so configured SS scenes can request
+   particle-storage materialization and adoption without `page.evaluate`
+   scaffolding.
+2. Implement the peer-local portable rematerializer that consumes the descriptor
+   seed and rebuilds equivalent retained GPU particle storage on the target
+   peer, preserving the raw-GPUBuffer transfer ban.
+3. Add an automatic mounted `residentStageWorkers=1` proof showing the scheduled
+   stage-worker lane consumes real SS adopted storage after materialization,
+   not a manually invoked stage chain.

@@ -93,6 +93,8 @@ import {
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA,
+  createSchroederAdoptedParticleStoragePortableMaterializationSeed,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3851,13 +3853,25 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     'materialized-gpu-buffers-remain-device-local'
   );
 
+  const adoptedStoragePortableSeed = createSchroederAdoptedParticleStoragePortableMaterializationSeed({
+    descriptor: adoptedParticleStorageDescriptor,
+    hotBufferKey: adoptedStoragePublication.hotBufferKey,
+    cacheKey: adoptedStoragePublication.cacheKey,
+    stateKey: adoptedStoragePublication.stateKey,
+    sourceTaskId: 'ulg:test:schroeder-adopted-storage-portable-seed'
+  });
+  assert.equal(
+    adoptedStoragePortableSeed.schema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA
+  );
+  assert.equal(
+    adoptedStoragePortableSeed.status,
+    'schroeder-adopted-particle-storage-portable-materialization-seed-ready'
+  );
   const crossPeerSeededPlan = host.planSchroederAdoptedParticleStorageContinuation({
     hotBufferKey: adoptedStoragePublication.hotBufferKey,
     consumerMode: 'cross-peer',
-    portableMaterializationSeed: {
-      schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
-      status: 'portable-materialization-seed-ready'
-    }
+    portableMaterializationSeed: adoptedStoragePortableSeed
   });
   assert.equal(
     crossPeerSeededPlan.status,
@@ -3866,6 +3880,15 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(crossPeerSeededPlan.ready, true);
   assert.equal(crossPeerSeededPlan.crossPeerContinuationReady, true);
   assert.equal(crossPeerSeededPlan.portableMaterializationSeedAvailable, true);
+  assert.equal(
+    crossPeerSeededPlan.portableMaterializationSeedSchema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA
+  );
+  assert.equal(
+    crossPeerSeededPlan.portableMaterializationSeedStatus,
+    'schroeder-adopted-particle-storage-portable-materialization-seed-accepted'
+  );
+  assert.equal(crossPeerSeededPlan.portableMaterializationSeedReady, true);
   assert.equal(crossPeerSeededPlan.crossPeerReplayBlocker, null);
 
   const missingLocalAdoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({

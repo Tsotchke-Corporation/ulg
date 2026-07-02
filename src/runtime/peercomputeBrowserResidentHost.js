@@ -107,6 +107,8 @@ export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-local-retained-buffer-resolver.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
@@ -3463,6 +3465,140 @@ function validateSchroederAdoptedParticleStorageDescriptor(descriptor = null) {
   };
 }
 
+function validateSchroederAdoptedParticleStoragePortableMaterializationSeed({
+  seed = null,
+  descriptor = null,
+  validation = null,
+  hotBufferKey = null
+} = {}) {
+  const descriptorValidation =
+    validation || validateSchroederAdoptedParticleStorageDescriptor(descriptor);
+  const issues = [];
+  if (!seed || typeof seed !== 'object') {
+    issues.push('schroeder-adopted-particle-storage-portable-materialization-seed-missing');
+  } else {
+    if (seed.schema !== ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA) {
+      issues.push('unexpected-schroeder-adopted-particle-storage-portable-materialization-seed-schema');
+    }
+    if (
+      ![
+        'schroeder-adopted-particle-storage-portable-materialization-seed-ready',
+        'portable-materialization-seed-ready'
+      ].includes(seed.status)
+    ) {
+      issues.push('schroeder-adopted-particle-storage-portable-materialization-seed-not-ready');
+    }
+    if (
+      seed.rawGpuBufferTransferAllowed === true
+      || seed.rawGpuBufferTransferDetected === true
+      || descriptorContainsRawGpuBufferHandle(seed)
+    ) {
+      issues.push('schroeder-adopted-particle-storage-portable-seed-raw-gpubuffer-transfer-detected');
+    }
+    const seedHotBufferKey = normalizeString(
+      seed.sourceHotBufferKey || seed.hotBufferKey || seed.adoptedStorageHotBufferKey,
+      null
+    );
+    if (hotBufferKey && seedHotBufferKey && seedHotBufferKey !== hotBufferKey) {
+      issues.push('schroeder-adopted-particle-storage-portable-seed-hot-buffer-mismatch');
+    }
+    const seedParticleCount = Math.max(0, Math.round(finiteSeedNumber(
+      seed.authoritativeParticleCount ?? seed.particleCount,
+      descriptorValidation.authoritativeParticleCount
+    )));
+    if (
+      descriptorValidation.authoritativeParticleCount > 0
+      && seedParticleCount < descriptorValidation.authoritativeParticleCount
+    ) {
+      issues.push('schroeder-adopted-particle-storage-portable-seed-particle-count-too-small');
+    }
+    const seedRefs = uniqueStringList(seed.retainedBufferRefs || seed.materializationRefs || []);
+    const missingRefs = descriptorValidation.retainedBufferRefs
+      .filter((ref) => !seedRefs.includes(ref));
+    if (missingRefs.length > 0) {
+      issues.push('schroeder-adopted-particle-storage-portable-seed-retained-refs-incomplete');
+    }
+  }
+  const accepted = issues.length === 0 && descriptorValidation.accepted === true;
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA,
+    accepted,
+    ready: accepted,
+    status: accepted
+      ? 'schroeder-adopted-particle-storage-portable-materialization-seed-accepted'
+      : 'blocked-schroeder-adopted-particle-storage-portable-materialization-seed',
+    reason: descriptorValidation.reason || issues[0] || null,
+    issues: descriptorValidation.accepted ? issues : [...descriptorValidation.issues, ...issues],
+    seedSchema: seed?.schema || null,
+    seedStatus: seed?.status || null,
+    sourceHotBufferKey:
+      seed?.sourceHotBufferKey
+      || seed?.hotBufferKey
+      || seed?.adoptedStorageHotBufferKey
+      || null,
+    authoritativeParticleCount: Math.max(0, Math.round(finiteSeedNumber(
+      seed?.authoritativeParticleCount ?? seed?.particleCount,
+      descriptorValidation.authoritativeParticleCount
+    ))),
+    retainedBufferRefs: uniqueStringList(
+      seed?.retainedBufferRefs
+      || seed?.materializationRefs
+      || descriptorValidation.retainedBufferRefs
+    ),
+    outputFamilies: uniqueStringList(seed?.outputFamilies || descriptorValidation.outputFamilies),
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected:
+      seed?.rawGpuBufferTransferDetected === true
+      || descriptorContainsRawGpuBufferHandle(seed)
+  };
+}
+
+export function createSchroederAdoptedParticleStoragePortableMaterializationSeed({
+  descriptor = null,
+  hotBufferKey = null,
+  cacheKey = null,
+  stateKey = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-particle-storage-materialization',
+  sourceStage = 'schroeder-particle-storage-materialization',
+  source = 'state-manager-schroeder-adopted-particle-storage-portable-seed'
+} = {}) {
+  const validation = validateSchroederAdoptedParticleStorageDescriptor(descriptor);
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PORTABLE_MATERIALIZATION_SEED_SCHEMA,
+    status: validation.accepted
+      ? 'schroeder-adopted-particle-storage-portable-materialization-seed-ready'
+      : 'blocked-schroeder-adopted-particle-storage-portable-materialization-seed',
+    ready: validation.accepted,
+    source,
+    sourceMode: 'descriptor-seed-no-raw-gpubuffer-transfer',
+    hotBufferKey,
+    sourceHotBufferKey: hotBufferKey,
+    cacheKey: cacheKey || descriptor?.cacheKey || null,
+    stateKey: stateKey || descriptor?.stateKey || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    adoptedStorageDescriptorSchema: descriptor?.schema || null,
+    adoptedStorageDescriptorStatus: descriptor?.status || null,
+    authoritativeParticleCount: validation.authoritativeParticleCount,
+    retainedBufferRefs: [...validation.retainedBufferRefs],
+    outputFamilies: [...validation.outputFamilies],
+    materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed',
+    peerLocalMaterializationRequired: true,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    fullParticleReadbackRequired: false,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false,
+    issues: [...validation.issues],
+    reason: validation.reason
+  };
+}
+
 function adoptedStorageLocalBufferEntry({
   ref = null,
   role = null,
@@ -3848,7 +3984,15 @@ export function planSchroederAdoptedParticleStorageContinuation({
   const mode = String(consumerMode || 'same-device').trim().toLowerCase();
   const crossPeerRequested = ['cross-peer', 'remote-peer', 'distributed-peer'].includes(mode);
   const portableSnapshotAvailable = Boolean(portableSnapshot);
-  const portableMaterializationSeedAvailable = Boolean(portableMaterializationSeed);
+  const portableMaterializationSeedValidation =
+    validateSchroederAdoptedParticleStoragePortableMaterializationSeed({
+      seed: portableMaterializationSeed,
+      descriptor: source.descriptor,
+      validation,
+      hotBufferKey: source.hotBufferKey
+    });
+  const portableMaterializationSeedAvailable =
+    portableMaterializationSeedValidation.accepted === true;
   const portableReplayAvailable = portableSnapshotAvailable || portableMaterializationSeedAvailable;
   const rawGpuBufferTransferDetected =
     source.descriptor?.rawGpuBufferTransferDetected === true
@@ -3917,6 +4061,19 @@ export function planSchroederAdoptedParticleStorageContinuation({
     portableSnapshotRequired: crossPeerRequested && !crossPeerContinuationReady,
     portableSnapshotAvailable,
     portableMaterializationSeedAvailable,
+    portableMaterializationSeedSchema: portableMaterializationSeed?.schema || null,
+    portableMaterializationSeedStatus:
+      portableMaterializationSeedValidation.status,
+    portableMaterializationSeedReady:
+      portableMaterializationSeedValidation.ready === true,
+    portableMaterializationSeedReason:
+      portableMaterializationSeedValidation.accepted
+        ? null
+        : portableMaterializationSeedValidation.reason,
+    portableMaterializationSeedIssues:
+      portableMaterializationSeedValidation.accepted
+        ? []
+        : [...portableMaterializationSeedValidation.issues],
     portableReplayAvailable,
     rawGpuBufferTransferAllowed: false,
     rawGpuBufferTransferDetected,

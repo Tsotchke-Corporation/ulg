@@ -2561,9 +2561,23 @@ async function runBrowserProbe({
         const localRetained = steps?.schroederLocalRetainedRenderBuffers
           || steps?.localRetainedRenderBuffers
           || null;
+        const adoptedStoragePublication =
+          steps?.schroederAdoptedParticleStoragePublication
+          || residentStep?.schroederAdoptedParticleStoragePublication
+          || sceneUserData.mlsMpmResidentSchroederAdoptedParticleStoragePublication
+          || sceneUserData.schroederAdoptedParticleStoragePublication
+          || null;
+        const stageWorkerLane = overlayRef?.__sphMountedMechanicsStageWorkerLane || null;
         const requested = Boolean(config?.enabled || options?.schroederSimulation);
         const active = Boolean(steps?.schroederSimulation || residentStep?.schroederSimulation);
-        if (!requested && !active && !renderSource && !drawSource && !backendSelection) return null;
+        if (
+          !requested
+          && !active
+          && !renderSource
+          && !drawSource
+          && !backendSelection
+          && !adoptedStoragePublication
+        ) return null;
         return {
           schema: 'peercompute.ulg.sph-probe-schroeder-telemetry.v0',
           requested,
@@ -2618,6 +2632,33 @@ async function runBrowserProbe({
             ?? renderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
             ?? surfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
           ),
+          adoptedStoragePublicationStatus: adoptedStoragePublication?.status ?? null,
+          adoptedStoragePublicationHotBufferKey: adoptedStoragePublication?.hotBufferKey ?? null,
+          adoptedStorageDescriptorStatus:
+            adoptedStoragePublication?.descriptorStatus
+            ?? adoptedStoragePublication?.schroederAdoptedParticleStorageDescriptor?.status
+            ?? null,
+          adoptedStorageDescriptorReady:
+            adoptedStoragePublication?.descriptorReady === true
+            || adoptedStoragePublication?.schroederAdoptedParticleStorageDescriptor?.ready === true,
+          adoptedStorageLocalResolverStatus:
+            adoptedStoragePublication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus ?? null,
+          adoptedStorageLocalResolverReady:
+            adoptedStoragePublication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady === true,
+          adoptedStorageLocalResolverResolvedRefCount: finiteOrNull(
+            adoptedStoragePublication?.schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount
+          ),
+          adoptedStorageStageScheduleStatus:
+            stageWorkerLane?.schroederAdoptedParticleStorageContinuationScheduleStatus ?? null,
+          adoptedStorageStageSourceHotBufferKey:
+            stageWorkerLane?.schroederAdoptedParticleStorageContinuationSourceHotBufferKey ?? null,
+          adoptedStorageStageLocalResolverStatus:
+            stageWorkerLane?.schroederAdoptedParticleStorageStageLocalResolverStatus ?? null,
+          adoptedStorageStageLocalResolverReady:
+            stageWorkerLane?.schroederAdoptedParticleStorageStageLocalResolverReady === true,
+          adoptedStorageRawGpuBufferPeerComputeTransfer:
+            adoptedStoragePublication?.rawGpuBufferTransferDetected === true
+            || stageWorkerLane?.schroederAdoptedParticleStorageRawGpuBufferPeerComputeTransfer === true,
           backendSelectionStatus: backendSelection?.status ?? null,
           backendSelected: backendSelection?.selectedBackend ?? null,
           backendNativeSubmitReady: backendSelection?.nativeSubmitReady ?? null,

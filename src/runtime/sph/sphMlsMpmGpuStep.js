@@ -7706,9 +7706,11 @@ function createMlsMpmMechanicsP2gStageTaskEvidence(projection = {}, {
 
 function createMlsMpmMechanicsP2gStageGpuFenceReport(projection = {}, requirement = {}) {
   const required = requirement?.required === true;
+  const webgpuStatus = projection?.webgpuStatus?.status || null;
   const webgpuCompleted = projection?.backend !== 'webgpu'
     || projection?.fullReadbackPerformed === true
-    || projection?.webgpuStatus?.status === 'webgpu-executed';
+    || webgpuStatus === 'webgpu-executed'
+    || webgpuStatus === 'webgpu-executed-no-full-readback';
   const fenceSatisfied = !required || webgpuCompleted;
   return {
     schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
@@ -7722,6 +7724,7 @@ function createMlsMpmMechanicsP2gStageGpuFenceReport(projection = {}, requiremen
     stateKey: requirement?.stateKey || null,
     source: 'ulg-mls-mpm-mechanics-p2g-stage-compute-task',
     backend: projection?.backend || null,
+    webgpuStatus,
     readbackMode: projection?.readbackMode || null,
     fullReadbackPerformed: projection?.fullReadbackPerformed === true
   };
@@ -8279,9 +8282,11 @@ function createMlsMpmMechanicsG2pStageTaskEvidence(reconstruction = {}, {
 
 function createMlsMpmMechanicsG2pStageGpuFenceReport(reconstruction = {}, requirement = {}) {
   const required = requirement?.required === true;
+  const webgpuStatus = reconstruction?.webgpuStatus?.status || null;
   const webgpuCompleted = reconstruction?.backend !== 'webgpu'
     || reconstruction?.fullReadbackPerformed === true
-    || reconstruction?.webgpuStatus?.status === 'webgpu-executed';
+    || webgpuStatus === 'webgpu-executed'
+    || webgpuStatus === 'webgpu-executed-no-full-readback';
   const fenceSatisfied = !required || webgpuCompleted;
   return {
     schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
@@ -8295,6 +8300,7 @@ function createMlsMpmMechanicsG2pStageGpuFenceReport(reconstruction = {}, requir
     stateKey: requirement?.stateKey || null,
     source: 'ulg-mls-mpm-mechanics-g2p-stage-compute-task',
     backend: reconstruction?.backend || null,
+    webgpuStatus,
     readbackMode: reconstruction?.readbackMode || null,
     fullReadbackPerformed: reconstruction?.fullReadbackPerformed === true
   };

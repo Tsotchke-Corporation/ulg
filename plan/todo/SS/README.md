@@ -49,10 +49,12 @@ Landed checkpoints:
    Schroeder level assignment.
 9. `b9d35de` adds GPU-resident cross-level conservation summary rows for mass
    and represented volume residuals.
+10. `38fd33b` adds GPU-resident cross-level transfer rows for mass,
+    represented volume, momentum, and internal energy.
 
 Next implementation queue:
 
 1. Add adjacent-level conservative restriction/prolongation state mutation that
-   consumes the cross-level summary/candidate rows.
+   consumes the cross-level transfer rows.
 2. Promote water-to-steam phase-volume migration into a visible SS stress case.
 3. Route reaction/contact/interface work queues through SS active nodes.

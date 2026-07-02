@@ -170,6 +170,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-law-query-plan.v0`
 - `peercompute.ulg.schroeder-cross-level-coupling.v0`
 - `peercompute.ulg.schroeder-conservation-summary.v0`
+- `peercompute.ulg.schroeder-cross-level-transfer.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -220,7 +221,8 @@ Suggested schemas:
 
 - Status: candidate row planning and orchestration landed in `82044fd` and
   `9d3ea80`; GPU-resident conservation summary rows landed in `b9d35de`;
-  conservative state mutation is next.
+  GPU-resident transfer rows landed in `38fd33b`; conservative state mutation
+  is next.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -257,9 +259,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Conservative cross-level state mutation:
-   - consume adjacent-level candidate rows and conservation summary rows;
+   - consume adjacent-level transfer rows;
    - write restriction/prolongation effects into retained mechanics/grid state;
-   - extend residual counters from mass/volume into momentum and energy drift;
+   - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
    - drive level changes from closure-derived density/pressure/temperature;
@@ -307,15 +309,19 @@ Suggested schemas:
 - Reaction energetics and sedenion reaction scoping.
 - Visual sequence sanity checks after major physics changes.
 
-## First Work Target
+## Current Work Target
 
-The first code slice on `SS` is **GPU level assignment**:
+The next code slice on `SS` is **conservative transfer application**:
 
-1. ABI schema constants and row layouts.
-2. `src/runtime/sph/schroederHierarchyGpu.js`.
-3. A WGSL level assignment shader that writes one row per particle.
-4. Optional compact summary counters, with no full particle readback by default.
-5. Focused tests for schema/layout/planning and no-full-readback contract.
+1. Keep transfer-row generation GPU-resident and no-full-readback by default.
+2. Add a retained applier pass that consumes transfer rows and writes a compact
+   pending state-delta or directly mutates an SS-owned mechanics buffer.
+3. Preserve PeerCompute StateManager admission boundaries for authoritative
+   state-family mutation.
+4. Emit compact residual summaries for mass, represented volume, momentum, and
+   internal energy.
+5. Fail closed if the target parent/child level metadata is missing or if a law
+   attempts to mutate state it does not own.
 
-That gives the new algorithm a concrete GPU resident entry point before we touch
-the hot P2G/G2P kernels.
+That moves Slice 4 from diagnostics and prepared rows into actual conservative
+restriction/prolongation behavior.

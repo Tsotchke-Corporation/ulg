@@ -2,6 +2,11 @@
 
 Date: 2026-07-02
 Branch: `SS`
+Status: Phase 0 landed in `a1e5378`. Phase 1 landed in `320917c` (coupling
+operator), `91da8cf` (two-level co-simulation), and `9048d4d` (admitted split
+count mutation). Remaining follow-ups: orchestration wiring for the count
+summary, free-slot compaction for merges, then the deferred distribution
+work.
 Author: Claude (Fable), taking over from the codex handoff
 (`fable-handoff-2026-07-02.md`).
 

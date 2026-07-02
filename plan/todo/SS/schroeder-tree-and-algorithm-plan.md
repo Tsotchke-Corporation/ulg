@@ -259,7 +259,10 @@ Suggested schemas:
   consumption, local-only summary diagnostics, and retained overlay preservation
   landed in `f06ed2d`; browser-mounted admission threading, following-tick
   feedback consumption proof, status-line telemetry, and a browser WGSL
-  reserved-identifier fix landed in `fa9aed0`.
+  reserved-identifier fix landed in `fa9aed0`; resident-authority publication
+  for state-delta merge and phase-volume migration admissions, scene
+  auto-publication, and browser proof without test-local admission descriptors
+  landed in `2aa8da6`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -451,8 +454,8 @@ Suggested schemas:
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 4. Phase-volume migration:
-   - replace test-local phase-volume/state-delta admission descriptors with
-     resident authority publication and PeerCompute-configured admission policy;
+   - use resident-authority-published phase-volume/state-delta admissions as
+     the default scene/demo path;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
@@ -496,16 +499,14 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS resident-authority phase-volume admission
-publisher**:
+The next code slice on `SS` is **SS visible phase-volume level migration under
+authority admissions**:
 
-1. Publish phase-volume migration and state-delta merge admissions from the
-   resident authority host instead of constructing browser/test-local admission
-   descriptors at the scene call site.
-2. Make the admission policy configurable by PeerCompute use case while keeping
-   raw `GPUBuffer` handles same-device/local-only and publishing only compact
-   descriptor summaries across StateManager boundaries.
-3. Keep the browser feedback gate as the live regression proof: the first
-   admitted tick retains the next-tick overlay, and the following resident tick
-   consumes that cached overlay for active-node level selection with
-   no-full-readback hot-loop telemetry.
+1. Drive a mounted water-to-steam case through URL/demo scheduling using the
+   resident-authority-published admissions, not page-evaluate fixtures.
+2. Verify compact diagnostics report expected positive level deltas,
+   stable/reduced particle count, and no full particle readback while the
+   following tick consumes the retained phase-volume overlay.
+3. Surface enough status-line/browser telemetry to distinguish real level
+   migration from an admitted-but-noop phase-volume update, while keeping raw
+   `GPUBuffer` handles same-device/local-only.

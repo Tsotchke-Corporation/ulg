@@ -73,6 +73,9 @@ import {
   SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_FULL_ACTIVE_NODE_SORTED_INDEX_READBACK_MODE,
+  SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_AUTO_MODE,
+  SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_DISABLED_MODE,
+  SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_FORCE_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE,
@@ -96,6 +99,7 @@ import {
   createSchroederActiveNodeParamsArray,
   createSchroederActiveNodeSortedIndexParamsArray,
   createSchroederActiveNodeSortedIndexPlan,
+  createSchroederActiveNodeSortedIndexSelection,
   createSchroederCrossLevelCouplingParamsArray,
   createSchroederCrossLevelCouplingPlan,
   createSchroederConservationSummaryParamsArray,
@@ -1040,6 +1044,75 @@ test('Schroeder law-neighbor traversal policy keeps forced bucket mode explicit'
   assert.equal(policy.status, 'traversal-policy-forced-bucketed-active-node-index');
   assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(policy.sortedRadixIndexRequired, false);
+});
+
+test('Schroeder active-node sorted index selection waits for compact diagnostics in auto mode', () => {
+  const selection = createSchroederActiveNodeSortedIndexSelection({
+    activeNodeIndexEnabled: true,
+    activeNodeIndexBucketCount: 4,
+    lawQueueCount: 4,
+    candidateBudget: 8,
+    activeNodeSortedIndexPolicyMode: SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_AUTO_MODE
+  });
+
+  assert.equal(selection.policyMode, SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_AUTO_MODE);
+  assert.equal(selection.status, 'active-node-sorted-index-policy-pending-compact-diagnostics');
+  assert.equal(selection.selected, false);
+  assert.equal(selection.shouldBuild, false);
+  assert.equal(selection.diagnosticReadbackRecommended, true);
+  assert.equal(selection.sortedRadixTraversalAvailable, false);
+  assert.equal(selection.fullParticleReadbackRequired, false);
+});
+
+test('Schroeder active-node sorted index selection uses diagnostics to escalate', () => {
+  const selection = createSchroederActiveNodeSortedIndexSelection({
+    activeNodeIndexEnabled: true,
+    activeNodeIndexBucketCount: 4,
+    lawQueueCount: 4,
+    candidateBudget: 8,
+    lawNeighborTraversalDiagnosticCounters: new Uint32Array([
+      32,
+      32,
+      4,
+      28,
+      8,
+      20,
+      8,
+      4
+    ])
+  });
+
+  assert.equal(selection.status, 'active-node-sorted-index-policy-selected-by-traversal-diagnostics');
+  assert.equal(selection.selected, true);
+  assert.equal(selection.shouldBuild, true);
+  assert.equal(selection.diagnosticDrivenBuild, true);
+  assert.equal(selection.sortedRadixIndexRequired, true);
+  assert.equal(selection.sortedRadixIndexStatus, 'sorted-radix-active-node-index-selected-for-construction');
+  assert.equal(selection.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(selection.peerComputeConfigStatus, 'peercompute-use-case-config-allows-sorted-radix-index');
+});
+
+test('Schroeder active-node sorted index selection honors PeerCompute force and disable modes', () => {
+  const forced = createSchroederActiveNodeSortedIndexSelection({
+    activeNodeSortedIndexPolicyMode: SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_FORCE_MODE,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
+    activeNodeIndexEnabled: true
+  });
+  assert.equal(forced.status, 'active-node-sorted-index-policy-forced-by-use-case-config');
+  assert.equal(forced.selected, true);
+  assert.equal(forced.shouldBuild, true);
+  assert.equal(forced.forcedByUseCaseConfig, true);
+
+  const disabled = createSchroederActiveNodeSortedIndexSelection({
+    activeNodeSortedIndexPolicyMode: SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_DISABLED_MODE,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+    activeNodeIndexEnabled: true
+  });
+  assert.equal(disabled.status, 'active-node-sorted-index-policy-disabled-by-use-case-config');
+  assert.equal(disabled.selected, false);
+  assert.equal(disabled.shouldBuild, false);
+  assert.equal(disabled.forcedByTraversalPolicy, true);
+  assert.equal(disabled.peerComputeConfigStatus, 'peercompute-use-case-config-disables-sorted-radix-index');
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -3044,6 +3117,9 @@ test('Schroeder same-level mechanics can build an opt-in sorted active-node inde
   assert.equal(result.activeNodeSortedIndex.outputCompaction, 'contiguous-active-node-index-ranges-by-radix-bucket');
   assert.equal(result.activeNodeSortedIndex.capacityStatus, 'unbounded-per-bucket-range-no-fixed-slot-overflow');
   assert.equal(result.activeNodeSortedIndex.retainedIndexBuffers, true);
+  assert.equal(result.activeNodeSortedIndexPolicyStatus, 'active-node-sorted-index-policy-forced-by-enable-flag');
+  assert.equal(result.activeNodeSortedIndexSelection.forcedByLegacyFlag, true);
+  assert.equal(result.activeNodeSortedIndexSelection.shouldBuild, true);
   assert.equal(result.activeNodeSortedIndexStatus, 'schroeder-active-node-sorted-index-submitted');
   assert.equal(result.activeNodeSortedIndexConsumerStatus, 'active-node-sorted-radix-index-available-not-yet-consumed');
   assert.equal(result.activeNodeIndex, null);
@@ -3081,7 +3157,7 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
     activeNodeIndexBucketSlotCapacity: 4,
     enableCrossLevelCoupling: false,
     lawNeighborCandidateReadbackMode: SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
-    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
     lawNeighborTraversalPolicyFallbackScanRatioThreshold: 0.125,
     lawNeighborTraversalPolicyBucketPressureRatioThreshold: 0.03125,
     lawNeighborCandidateRunner: async (options) => {
@@ -3098,13 +3174,13 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
         activeNodeIndexEnabled: Boolean(options.activeNodeIndex),
         activeNodeIndexConsumerStatus: 'active-node-bucket-index-consumed-with-exact-scan-fallback',
         traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
-        traversalPolicyStatus: 'traversal-policy-forced-sorted-radix-index',
+        traversalPolicyStatus: 'traversal-policy-forced-bucketed-active-node-index',
         traversalPolicyMode: options.traversalPolicyMode,
         appliedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
-        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
         selectedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
-        sortedRadixIndexRequired: true,
-        sortedRadixIndexStatus: 'sorted-radix-active-node-index-required-pending-implementation',
+        sortedRadixIndexRequired: false,
+        sortedRadixIndexStatus: 'sorted-radix-active-node-index-not-required',
         diagnosticCountersAvailable: true,
         diagnosticReadbackRecommended: false,
         diagnosticCounterBuffer: { label: 'stub-traversal-diagnostics' },
@@ -3124,7 +3200,7 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
   assert.equal(lawNeighborCalls[0].activeNodeIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
   assert.equal(lawNeighborCalls[0].activeNodeIndex.bucketSlotCapacity, 4);
   assert.equal(lawNeighborCalls[0].readbackMode, SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE);
-  assert.equal(lawNeighborCalls[0].traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(lawNeighborCalls[0].traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(lawNeighborCalls[0].traversalPolicyFallbackScanRatioThreshold, 0.125);
   assert.equal(lawNeighborCalls[0].traversalPolicyBucketPressureRatioThreshold, 0.03125);
   assert.equal(result.lawNeighborCandidates.activeNodeIndexEnabled, true);
@@ -3133,16 +3209,16 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
     'active-node-bucket-index-consumed-with-exact-scan-fallback'
   );
   assert.equal(result.lawNeighborCandidates.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
-  assert.equal(result.lawNeighborCandidates.traversalPolicyStatus, 'traversal-policy-forced-sorted-radix-index');
+  assert.equal(result.lawNeighborCandidates.traversalPolicyStatus, 'traversal-policy-forced-bucketed-active-node-index');
   assert.equal(
     result.lawNeighborCandidates.recommendedTraversalIndexMode,
-    SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+    SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
   );
   assert.equal(result.lawNeighborCandidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
-  assert.equal(result.lawNeighborCandidates.sortedRadixIndexRequired, true);
+  assert.equal(result.lawNeighborCandidates.sortedRadixIndexRequired, false);
   assert.equal(
     result.lawNeighborCandidates.sortedRadixIndexStatus,
-    'sorted-radix-active-node-index-required-pending-implementation'
+    'sorted-radix-active-node-index-not-required'
   );
   assert.equal(result.lawNeighborCandidates.diagnosticCountersAvailable, true);
   assert.equal(result.lawNeighborCandidates.retainedDiagnosticCounterBuffer, true);
@@ -3225,6 +3301,154 @@ test('Schroeder same-level mechanics forwards opt-in sorted active-node index to
   assert.equal(result.activeNodeSortedIndexConsumerStatus, 'active-node-sorted-radix-index-consumed-by-law-neighbor-traversal');
   assert.equal(result.residentStep.hasActiveNodeSortedIndex, true);
   assert.equal(result.residentStep.hasLawNeighborCandidates, true);
+});
+
+test('Schroeder same-level mechanics builds sorted active-node index from traversal policy', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const lawNeighborCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeIndex: true,
+    activeNodeIndexBucketSlotCapacity: 4,
+    enableCrossLevelCoupling: false,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+    activeNodeSortedIndexBucketCount: 4,
+    lawNeighborCandidateRunner: async (options) => {
+      lawNeighborCalls.push(options);
+      return {
+        schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+        status: 'schroeder-law-neighbor-candidates-submitted',
+        lawQueueCount: options.lawQueue.activeNodeCount,
+        neighborCandidateCount: options.lawQueue.activeNodeCount * options.candidateBudget,
+        candidateBudget: options.candidateBudget,
+        enumerationMode: 'schroeder-active-node-sorted-radix-range-traversal-neighbor-enumeration',
+        outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
+        treeTraversalStatus: 'active-node-sorted-radix-range-traversal-with-exact-scan-fallback',
+        activeNodeIndexEnabled: Boolean(options.activeNodeIndex),
+        activeNodeSortedIndexEnabled: Boolean(options.activeNodeSortedIndex),
+        activeNodeIndexConsumerStatus: 'active-node-sorted-radix-index-consumed-with-exact-scan-fallback',
+        traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
+        traversalPolicyStatus: 'traversal-policy-forced-sorted-radix-index',
+        traversalPolicyMode: options.traversalPolicyMode,
+        appliedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        selectedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        sortedRadixIndexRequired: true,
+        sortedRadixIndexStatus: 'sorted-radix-active-node-index-selected',
+        diagnosticCountersAvailable: false,
+        diagnosticReadbackRecommended: true,
+        diagnosticCounterBuffer: { label: 'stub-policy-sorted-traversal-diagnostics' },
+        diagnosticCounterBufferByteLength: 8 * Uint32Array.BYTES_PER_ELEMENT,
+        neighborCandidateBuffer: { label: 'stub-policy-sorted-law-neighbor-candidates' },
+        neighborCandidateBufferByteLength: 4 * Float32Array.BYTES_PER_ELEMENT
+      };
+    },
+    residentStepRunner: async (options) => ({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      hasActiveNodeIndex: Boolean(options.schroederActiveNodeList),
+      hasActiveNodeSortedIndex: Boolean(options.schroederActiveNodeSortedIndex),
+      hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates)
+    })
+  });
+
+  assert.equal(lawNeighborCalls.length, 1);
+  assert.equal(lawNeighborCalls[0].activeNodeIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(
+    lawNeighborCalls[0].activeNodeSortedIndex.schema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA
+  );
+  assert.equal(lawNeighborCalls[0].activeNodeSortedIndex.bucketCount, 4);
+  assert.equal(result.activeNodeSortedIndexPolicyStatus, 'active-node-sorted-index-policy-forced-by-traversal-policy');
+  assert.equal(result.activeNodeSortedIndexSelection.forcedByTraversalPolicy, true);
+  assert.equal(result.activeNodeSortedIndexSelection.shouldBuild, true);
+  assert.equal(result.activeNodeSortedIndexStatus, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(result.lawNeighborCandidates.activeNodeSortedIndexEnabled, true);
+  assert.equal(result.lawNeighborCandidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(result.activeNodeSortedIndexConsumerStatus, 'active-node-sorted-radix-index-consumed-by-law-neighbor-traversal');
+  assert.equal(result.residentStep.hasActiveNodeSortedIndex, true);
+  assert.equal(result.residentStep.hasLawNeighborCandidates, true);
+});
+
+test('Schroeder same-level mechanics builds sorted active-node index from traversal diagnostics', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const lawNeighborCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeIndex: true,
+    activeNodeIndexBucketSlotCapacity: 4,
+    enableCrossLevelCoupling: false,
+    lawNeighborTraversalDiagnosticCounters: new Uint32Array([
+      32,
+      32,
+      4,
+      28,
+      8,
+      20,
+      8,
+      4
+    ]),
+    activeNodeSortedIndexBucketCount: 8,
+    lawNeighborCandidateRunner: async (options) => {
+      lawNeighborCalls.push(options);
+      return {
+        schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+        status: 'schroeder-law-neighbor-candidates-submitted',
+        lawQueueCount: options.lawQueue.activeNodeCount,
+        neighborCandidateCount: options.lawQueue.activeNodeCount * options.candidateBudget,
+        candidateBudget: options.candidateBudget,
+        enumerationMode: 'schroeder-active-node-sorted-radix-range-traversal-neighbor-enumeration',
+        outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
+        treeTraversalStatus: 'active-node-sorted-radix-range-traversal-with-exact-scan-fallback',
+        activeNodeIndexEnabled: Boolean(options.activeNodeIndex),
+        activeNodeSortedIndexEnabled: Boolean(options.activeNodeSortedIndex),
+        activeNodeIndexConsumerStatus: 'active-node-sorted-radix-index-consumed-with-exact-scan-fallback',
+        traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
+        traversalPolicyStatus: 'traversal-policy-diagnostics-require-sorted-radix-index',
+        traversalPolicyMode: options.traversalPolicyMode,
+        appliedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        selectedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        sortedRadixIndexRequired: true,
+        sortedRadixIndexStatus: 'sorted-radix-active-node-index-selected',
+        diagnosticCountersAvailable: true,
+        diagnosticReadbackRecommended: false,
+        diagnosticCounterBuffer: { label: 'stub-diagnostic-sorted-traversal-diagnostics' },
+        diagnosticCounterBufferByteLength: 8 * Uint32Array.BYTES_PER_ELEMENT,
+        neighborCandidateBuffer: { label: 'stub-diagnostic-sorted-law-neighbor-candidates' },
+        neighborCandidateBufferByteLength: 4 * Float32Array.BYTES_PER_ELEMENT
+      };
+    },
+    residentStepRunner: async (options) => ({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      hasActiveNodeSortedIndex: Boolean(options.schroederActiveNodeSortedIndex),
+      hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates)
+    })
+  });
+
+  assert.equal(lawNeighborCalls.length, 1);
+  assert.equal(
+    lawNeighborCalls[0].activeNodeSortedIndex.schema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA
+  );
+  assert.equal(lawNeighborCalls[0].activeNodeSortedIndex.bucketCount, 8);
+  assert.equal(result.activeNodeSortedIndexPolicyStatus, 'active-node-sorted-index-policy-selected-by-traversal-diagnostics');
+  assert.equal(result.activeNodeSortedIndexSelection.diagnosticDrivenBuild, true);
+  assert.equal(result.activeNodeSortedIndexSelection.diagnosticCountersAvailable, true);
+  assert.equal(result.activeNodeSortedIndexSelection.shouldBuild, true);
+  assert.equal(result.activeNodeSortedIndexStatus, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(result.lawNeighborCandidates.activeNodeSortedIndexEnabled, true);
+  assert.equal(result.lawNeighborCandidates.sortedRadixIndexRequired, true);
+  assert.equal(result.residentStep.hasActiveNodeSortedIndex, true);
 });
 
 test('Schroeder same-level mechanics can run admitted state-delta merge before resident backend', async () => {

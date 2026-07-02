@@ -311,7 +311,8 @@ Suggested schemas:
   in `35779c2`; explicit far-field consumer authority policy landed in
   `794e4aa`; admitted gas-pressure state-delta rows landed in `b3f62cf`;
   retained pressure-interface gas-cell row materialization landed in
-  `8d87b5b`.
+  `8d87b5b`; direct pressure-interface WebGPU consumption of retained SS
+  gas-cell rows landed in `bbd4bdf`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -340,6 +341,11 @@ Suggested schemas:
   forwards the retained gas-pressure-cell descriptor through same-level,
   resident, and portable summary paths, and leaves CPU gas-cell snapshots as
   explicit diagnostic/import materialization rather than the hot-path bridge.
+  `bbd4bdf` connects that retained row artifact to the pressure-interface
+  WebGPU force-row producer: the stage normalizes SS gas-cell import artifacts
+  as retained local pressure-gradient inputs, binds the borrowed
+  gas-pressure-cell buffer at the existing gas-cell storage binding, and skips
+  CPU gas-cell snapshot/upload plumbing on the no-full-readback path.
 
 ### Slice 8: Render And Distribution
 
@@ -373,8 +379,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - consume or publish retained SS gas-cell rows through the pressure-interface
-     gas-cell import path without making CPU snapshots the default bridge;
+   - thread retained SS gas-cell import artifacts from same-level/scene
+     execution into mounted pressure-interface stage scheduling;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -433,12 +439,10 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **retained SS gas-cell pressure-interface
-consumption**:
+The next code slice on `SS` is **SS gas-cell pressure-interface orchestration**:
 
-1. Consume or publish admitted `schroeder-far-aggregate-gas-cell-import` rows as
-   retained pressure-interface gas-cell input for the `gas-pressure` state
-   family.
+1. Thread admitted `schroeder-far-aggregate-gas-cell-import` artifacts from
+   same-level/scene execution into mounted pressure-interface stage scheduling.
 2. Preserve the boundary between far aggregate gas pressure summaries and
    exact-near-field pressure/interface contact work.
 3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;

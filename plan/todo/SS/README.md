@@ -258,12 +258,17 @@ Landed checkpoints:
     force-summary centers, forwards descriptor-only refs through same-level,
     resident, and portable summary paths, and keeps CPU gas-cell snapshots out
     of the default hot path.
+65. `bbd4bdf` lets the pressure-interface WebGPU force-row producer consume
+    retained SS gas-cell rows directly. The stage normalizes
+    `schroeder-far-aggregate-gas-cell-import` artifacts as retained local
+    pressure-gradient imports, binds the borrowed gas-pressure-cell buffer at
+    the existing pressure-interface gas-cell binding, and avoids the CPU
+    gas-cell snapshot/upload bridge on the default path.
 
 Next implementation queue:
 
-1. Continue Slice 7 by consuming or publishing retained SS gas-cell rows through
-   the pressure-interface gas-cell import path without making CPU snapshots the
-   default bridge.
+1. Continue Slice 7 by threading retained SS gas-cell import artifacts from
+   same-level/scene execution into mounted pressure-interface stage scheduling.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

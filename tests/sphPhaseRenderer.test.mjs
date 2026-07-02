@@ -341,9 +341,18 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
     finalStep: {
       schema: 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0',
       status: 'schroeder-same-level-mechanics-submitted',
+      selectedLevel: 2,
+      particleCount: 12,
       phaseVolumeMigrationStatus: 'schroeder-phase-volume-migration-submitted',
       phaseVolumeLevelUpdateStatus: 'schroeder-phase-volume-level-update-submitted',
       phaseVolumeDiagnosticSummaryStatus: 'schroeder-phase-volume-diagnostic-summary-submitted',
+      phaseVolumeMigration: {
+        particleCount: 12
+      },
+      phaseVolumeLevelUpdate: {
+        status: 'schroeder-phase-volume-level-update-submitted',
+        retainedLevelUpdateBuffer: true
+      },
       phaseVolumeDiagnosticSummary: {
         schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
         status: 'schroeder-phase-volume-diagnostic-summary-submitted',
@@ -363,8 +372,14 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
   assert.equal(status.phaseVolumeDiagnosticSummaryStatus, 'schroeder-phase-volume-diagnostic-summary-submitted');
   assert.equal(status.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(status.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(status.selectedLevel, 2);
+  assert.equal(status.nativeLevelSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(status.phaseVolumeLevelUpdateConsumed, true);
+  assert.equal(status.phaseVolumeLevelUpdateRetainedBuffer, true);
   assert.equal(status.noFullParticleReadback, true);
   assert.equal(status.migrationRowCount, 12);
+  assert.equal(status.sourceParticleCount, 12);
+  assert.equal(status.particleCountGrowthFactor, 1);
   assert.equal(status.activeUpdateCount, 3);
   assert.equal(status.coarsenEligibleCount, 2);
   assert.equal(status.refineRequiredCount, 1);
@@ -375,12 +390,18 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
   assert.equal(status.minSourceLevelId, 1);
   assert.equal(status.maxTargetLevelId, 5);
   assert.equal(status.totalRepresentedVolumeM3, 700);
+  assert.equal(status.representedToRestVolumeRatio, 700);
+  assert.ok(Math.abs(status.representedRadiusScale - Math.cbrt(700)) < 1e-12);
+  assert.ok(Math.abs(status.expectedLevelDeltaFromVolume - Math.log2(Math.cbrt(700))) < 1e-12);
+  assert.equal(status.observedPositiveLevelDelta, 3);
+  assert.ok(status.expectedObservedLevelDeltaAgreement < 0.2);
   assert.equal(status.waterToSteamScaleMigrationObserved, true);
   assert.equal(status.waterToSteamStressCaseStatus, 'water-to-steam-level-migration-observable');
   assert.equal(
     status.particleExplosionAvoidanceStatus,
     'phase-volume-level-migration-represented-without-particle-count-growth'
   );
+  assert.equal(status.particleCountGrowthStatus, 'particle-count-stable-or-reduced');
   assert.equal(status.fullPhysicsValidation, false);
 });
 

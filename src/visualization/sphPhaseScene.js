@@ -248,10 +248,49 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
   const steamExpansionCandidateCount = schroederPhaseVolumeDiagnosticCount(row, 'steamExpansionCandidateCount');
   const visibleMigrationCount = schroederPhaseVolumeDiagnosticCount(row, 'visibleMigrationCount');
   const levelChangedCount = schroederPhaseVolumeDiagnosticCount(row, 'levelChangedCount');
+  const migrationRowCount = schroederPhaseVolumeDiagnosticCount(row, 'migrationRowCount');
+  const maxPositiveLevelDelta = schroederPhaseVolumeDiagnosticField(row, 'maxPositiveLevelDelta');
+  const totalRestVolumeM3 = schroederPhaseVolumeDiagnosticField(row, 'totalRestVolumeM3');
+  const totalRepresentedVolumeM3 = schroederPhaseVolumeDiagnosticField(row, 'totalRepresentedVolumeM3');
+  const selectedLevel = finiteNumberOrNull(
+    sourceStep?.selectedLevel
+      ?? sourceStep?.schroederSelectedLevel
+      ?? residentExecution?.selectedLevel
+      ?? residentExecution?.schroederSelectedLevel
+      ?? sourceStep?.portableSummary?.renderLod?.selectedLevel
+      ?? residentExecution?.portableSummary?.renderLod?.selectedLevel
+  );
+  const sourceParticleCount = finiteNumberOrNull(
+    sourceStep?.phaseVolumeMigration?.particleCount
+      ?? residentExecution?.phaseVolumeMigration?.particleCount
+      ?? sourceStep?.particleCount
+      ?? residentExecution?.particleCount
+  );
+  const particleCountGrowthFactor = sourceParticleCount > 0 && migrationRowCount != null
+    ? migrationRowCount / sourceParticleCount
+    : null;
+  const volumeExpansionRatio = totalRestVolumeM3 > 0 && totalRepresentedVolumeM3 != null
+    ? totalRepresentedVolumeM3 / totalRestVolumeM3
+    : null;
+  const representedRadiusScale = volumeExpansionRatio != null && volumeExpansionRatio > 0
+    ? Math.cbrt(volumeExpansionRatio)
+    : null;
+  const expectedLevelDelta = representedRadiusScale != null && representedRadiusScale > 0
+    ? Math.log2(representedRadiusScale)
+    : null;
   const migrationObserved = Boolean(
     (steamExpansionCandidateCount ?? 0) > 0
       || (visibleMigrationCount ?? 0) > 0
       || (levelChangedCount ?? 0) > 0
+  );
+  const levelUpdateConsumed = sourceStep?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted'
+    || sourceStep?.phaseVolumeLevelUpdate?.status === 'schroeder-phase-volume-level-update-submitted'
+    || residentExecution?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted';
+  const retainedLevelUpdateBuffer = Boolean(
+    sourceStep?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
+      ?? sourceStep?.phaseVolumeLevelUpdate?.levelUpdateBuffer
+      ?? residentExecution?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
+      ?? residentExecution?.phaseVolumeLevelUpdate?.levelUpdateBuffer
   );
   const noFullParticleReadback = sourceSummary
     ? sourceSummary.fullParticleReadbackPerformed !== true && sourceSummary.fullReadbackPerformed !== true
@@ -277,9 +316,17 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     fullReadbackPerformed: sourceSummary?.fullReadbackPerformed ?? null,
     fullParticleReadbackPerformed: sourceSummary?.fullParticleReadbackPerformed ?? null,
     noFullParticleReadback,
+    selectedLevel,
+    nativeLevelSource: levelUpdateConsumed
+      ? 'state-manager-admitted-phase-volume-level-update'
+      : (selectedLevel != null ? 'configured-or-portable-selected-level' : null),
+    phaseVolumeLevelUpdateConsumed: levelUpdateConsumed,
+    phaseVolumeLevelUpdateRetainedBuffer: retainedLevelUpdateBuffer,
     summaryRowCount: sourceSummary?.summaryRowCount ?? (row ? 1 : 0),
     summaryStrideFloats: sourceSummary?.summaryStrideFloats ?? row?.length ?? null,
-    migrationRowCount: schroederPhaseVolumeDiagnosticCount(row, 'migrationRowCount'),
+    migrationRowCount,
+    sourceParticleCount,
+    particleCountGrowthFactor,
     activeUpdateCount,
     coarsenEligibleCount: schroederPhaseVolumeDiagnosticCount(row, 'coarsenEligibleCount'),
     refineRequiredCount: schroederPhaseVolumeDiagnosticCount(row, 'refineRequiredCount'),
@@ -298,10 +345,19 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     maxTargetLevelId: activeUpdateCount > 0
       ? schroederPhaseVolumeDiagnosticField(row, 'maxTargetLevelId')
       : null,
-    maxPositiveLevelDelta: schroederPhaseVolumeDiagnosticField(row, 'maxPositiveLevelDelta'),
+    maxPositiveLevelDelta,
     maxNegativeLevelDelta: schroederPhaseVolumeDiagnosticField(row, 'maxNegativeLevelDelta'),
-    totalRestVolumeM3: schroederPhaseVolumeDiagnosticField(row, 'totalRestVolumeM3'),
-    totalRepresentedVolumeM3: schroederPhaseVolumeDiagnosticField(row, 'totalRepresentedVolumeM3'),
+    totalRestVolumeM3,
+    totalRepresentedVolumeM3,
+    representedToRestVolumeRatio: volumeExpansionRatio,
+    representedRadiusScale,
+    expectedLevelDeltaFromVolume: expectedLevelDelta,
+    expectedWaterToSteamLevelDelta: Math.log2(Math.cbrt(700)),
+    observedPositiveLevelDelta: maxPositiveLevelDelta,
+    expectedObservedLevelDeltaAgreement:
+      expectedLevelDelta != null && maxPositiveLevelDelta != null
+        ? Math.abs(maxPositiveLevelDelta - expectedLevelDelta)
+        : null,
     totalAggregateMassKg: schroederPhaseVolumeDiagnosticField(row, 'totalAggregateMassKg'),
     totalAggregateRepresentedVolumeM3:
       schroederPhaseVolumeDiagnosticField(row, 'totalAggregateRepresentedVolumeM3'),
@@ -327,6 +383,11 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     particleExplosionAvoidanceStatus: migrationObserved
       ? 'phase-volume-level-migration-represented-without-particle-count-growth'
       : 'phase-volume-level-migration-not-observed',
+    particleCountGrowthStatus: particleCountGrowthFactor == null
+      ? 'particle-count-growth-not-measured'
+      : (particleCountGrowthFactor <= 1
+          ? 'particle-count-stable-or-reduced'
+          : 'particle-count-growth-observed'),
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

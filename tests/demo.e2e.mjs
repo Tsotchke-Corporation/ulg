@@ -4283,6 +4283,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmG2pReconstruction = scene?.getMlsMpmG2pReconstruction?.();
     const mlsMpmResidentStep = scene?.getMlsMpmResidentStep?.();
     const mlsMpmResidentSteps = scene?.getMlsMpmResidentSteps?.();
+    const schroederPhaseVolumeDiagnostics = scene?.getSchroederPhaseVolumeDiagnostics?.();
     const sphResidentRenderState = scene?.getSphResidentRenderState?.();
     const sphResidentSurfaceDraw = scene?.getSphResidentSurfaceDraw?.();
     const sphResidentSurfaceDrawRenderBridge = scene?.getSphResidentSurfaceDrawRenderBridge?.();
@@ -4663,6 +4664,34 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sphValidation: mlsMpmResidentSteps?.sphValidation,
         phaseChangeValidation: mlsMpmResidentSteps?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmResidentSteps?.fullPhysicsValidation
+      },
+      schroederPhaseVolumeDiagnostics: {
+        schema: schroederPhaseVolumeDiagnostics?.schema,
+        status: schroederPhaseVolumeDiagnostics?.status,
+        phaseVolumeDiagnosticSummaryStatus:
+          schroederPhaseVolumeDiagnostics?.phaseVolumeDiagnosticSummaryStatus,
+        phaseVolumeMigrationStatus: schroederPhaseVolumeDiagnostics?.phaseVolumeMigrationStatus,
+        phaseVolumeLevelUpdateStatus: schroederPhaseVolumeDiagnostics?.phaseVolumeLevelUpdateStatus,
+        selectedLevel: schroederPhaseVolumeDiagnostics?.selectedLevel,
+        nativeLevelSource: schroederPhaseVolumeDiagnostics?.nativeLevelSource,
+        phaseVolumeLevelUpdateConsumed:
+          schroederPhaseVolumeDiagnostics?.phaseVolumeLevelUpdateConsumed,
+        representedToRestVolumeRatio:
+          schroederPhaseVolumeDiagnostics?.representedToRestVolumeRatio,
+        representedRadiusScale: schroederPhaseVolumeDiagnostics?.representedRadiusScale,
+        expectedLevelDeltaFromVolume:
+          schroederPhaseVolumeDiagnostics?.expectedLevelDeltaFromVolume,
+        observedPositiveLevelDelta:
+          schroederPhaseVolumeDiagnostics?.observedPositiveLevelDelta,
+        particleCountGrowthFactor:
+          schroederPhaseVolumeDiagnostics?.particleCountGrowthFactor,
+        particleCountGrowthStatus:
+          schroederPhaseVolumeDiagnostics?.particleCountGrowthStatus,
+        waterToSteamScaleMigrationObserved:
+          schroederPhaseVolumeDiagnostics?.waterToSteamScaleMigrationObserved,
+        particleExplosionAvoidanceStatus:
+          schroederPhaseVolumeDiagnostics?.particleExplosionAvoidanceStatus,
+        noFullParticleReadback: schroederPhaseVolumeDiagnostics?.noFullParticleReadback
       },
       sphResidentRenderState: {
         schema: sphResidentRenderState?.schema,

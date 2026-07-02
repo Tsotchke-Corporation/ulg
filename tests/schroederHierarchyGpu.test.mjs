@@ -6149,7 +6149,13 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   assert.equal(result.phaseVolumeDiagnosticSummary.summaryRows.length, 32);
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(result.phaseVolumeLevelUpdateConsumerStatus, 'phase-volume-level-update-forwarded-to-resident-backend');
+  assert.equal(result.phaseVolumeNativeLevelSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(result.phaseVolumeSelectedLevel, 2);
+  assert.equal(result.phaseVolumeLevelUpdateRetainedBuffer, true);
+  assert.equal(result.phaseVolumeLevelUpdateRowCount, 3);
   assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'schroeder-phase-volume-diagnostic-summary-submitted');
+  assert.equal(result.phaseVolumeDiagnosticSummaryConsumerStatus, 'phase-volume-diagnostic-summary-forwarded-to-resident-backend');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-level-update-submitted');
   assert.equal(result.stateMutationStatus, 'phase-volume-level-update-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');

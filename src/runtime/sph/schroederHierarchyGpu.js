@@ -11162,11 +11162,27 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? 'disabled-phase-volume-level-update-admission-not-provided'
         : (resolvedHierarchyAggregateNode ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')
     ),
+    phaseVolumeLevelUpdateConsumerStatus: resolvedPhaseVolumeLevelUpdate
+      ? 'phase-volume-level-update-forwarded-to-resident-backend'
+      : (resolvedPhaseVolumeMigration
+          ? 'disabled-phase-volume-level-update-admission-not-provided'
+          : (resolvedHierarchyAggregateNode ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')),
+    phaseVolumeNativeLevelSource: resolvedPhaseVolumeLevelUpdate
+      ? 'state-manager-admitted-phase-volume-level-update'
+      : 'configured-selected-schroeder-level',
+    phaseVolumeSelectedLevel: plan.selectedLevel,
+    phaseVolumeLevelUpdateRetainedBuffer: Boolean(resolvedPhaseVolumeLevelUpdate?.levelUpdateBuffer),
+    phaseVolumeLevelUpdateRowCount: resolvedPhaseVolumeLevelUpdate?.migrationRowCount ?? 0,
     phaseVolumeDiagnosticSummaryStatus: resolvedPhaseVolumeDiagnosticSummary?.status ?? (
       resolvedPhaseVolumeLevelUpdate
         ? 'disabled-phase-volume-diagnostic-summary'
         : (resolvedPhaseVolumeMigration ? 'disabled-phase-volume-level-update-admission-not-provided' : 'disabled-same-level-only-mechanics')
     ),
+    phaseVolumeDiagnosticSummaryConsumerStatus: resolvedPhaseVolumeDiagnosticSummary
+      ? 'phase-volume-diagnostic-summary-forwarded-to-resident-backend'
+      : (resolvedPhaseVolumeLevelUpdate
+          ? 'disabled-phase-volume-diagnostic-summary'
+          : (resolvedPhaseVolumeMigration ? 'disabled-phase-volume-level-update-admission-not-provided' : 'disabled-same-level-only-mechanics')),
     portableSummaryStatus: resolvedPortableSummary?.status ?? 'disabled-schroeder-portable-summary',
     renderLodStatus: resolvedPortableSummary?.renderLodStatus ?? 'disabled-schroeder-render-lod-summary',
     portableSummaryTransferMode: resolvedPortableSummary?.transferMode ?? null,

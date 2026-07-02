@@ -252,7 +252,8 @@ Suggested schemas:
   `dd3e928`; same-level/render phase-volume visibility diagnostics, admitted
   level-update consumer status, selected-level source, represented/rest volume
   ratio, expected level delta, and particle-count growth status landed in
-  `f74c836`.
+  `f74c836`; row-aligned retained phase-volume level-update assignment overlays
+  for active-node level selection landed in `3257cf4`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -444,7 +445,10 @@ Suggested schemas:
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 4. Phase-volume migration:
-   - consume/report admitted retained level-update rows from the SS path;
+   - extend row-aligned admitted retained level-update overlays to sparse
+     source-particle indexed overlays;
+   - feed admitted current-step level-update overlays into the next resident
+     tick through same-lane StateManager/authority handoff;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
@@ -488,15 +492,17 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume level-update assignment
-overlay**:
+The next code slice on `SS` is **SS sparse phase-volume overlay indexing and
+next-tick feedback**:
 
-1. Treat StateManager-admitted retained phase-volume level-update rows as a
-   GPU-resident assignment overlay for active-node/law-queue selection, instead
-   of only forwarding them as diagnostics.
-2. Keep the overlay descriptor-only across PeerCompute boundaries and same-lane
-   retained on the hot path; no full particle readback and no raw `GPUBuffer`
-   transfer.
-3. Add focused fixtures proving water-to-steam target levels can drive active
-   node selection without particle-count growth, while fallback paths remain
-   explicit when the admitted level-update rows are absent.
+1. Build a retained GPU source-particle index for admitted phase-volume
+   level-update rows so active-node selection can consume sparse migration
+   overlays without assuming one row per particle.
+2. Promote the current-step retained level-update overlay through the
+   same-lane StateManager/authority handoff as the next resident tick's
+   active-node assignment overlay; do not retroactively rebuild active nodes in
+   the same tick unless a later explicit two-pass policy opts in.
+3. Add focused fixtures for both expansion/coarsening and
+   condensation/refinement so target support/level rows can grow or shrink
+   active-node coverage without full particle readback or raw `GPUBuffer`
+   transfer across PeerCompute boundaries.

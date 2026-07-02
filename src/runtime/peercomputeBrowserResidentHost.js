@@ -37,8 +37,10 @@ import {
   uploadSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
 import {
+  ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   hashPayload
 } from '../../ulg-gpu-abi/src/index.js';
 import {
@@ -88,6 +90,14 @@ export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-admission.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE =
   'ulg-schroeder-portable-summary-admissions';
+export const ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-state-delta-merge-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE =
+  'ulg-schroeder-state-delta-merge-admissions';
+export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-migration-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE =
+  'ulg-schroeder-phase-volume-migration-admissions';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
@@ -3068,6 +3078,289 @@ export function admitSchroederPortableSummary({
   return {
     ...payload,
     status: 'schroeder-portable-summary-admission-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgSchroederStateDeltaMergeAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  source = null,
+  stateDeltaRowCount = null,
+  schroederStateDeltaRowCount = null,
+  outputFamilies = [],
+  peerComputeUseCase = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-cross-level-state-delta',
+  sourceStage = 'schroederCrossLevelStateDelta',
+  scope = ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE,
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgSchroederStateDeltaMergeAdmission requires StateManager hot storage and commitDelta');
+  }
+  const sourceObject = source && typeof source === 'object' ? source : {};
+  const resolvedRowCount = Math.max(0, Math.trunc(finiteSeedNumber(
+    schroederStateDeltaRowCount
+      ?? stateDeltaRowCount
+      ?? sourceObject.schroederStateDeltaRowCount
+      ?? sourceObject.stateDeltaRowCount
+      ?? sourceObject.crossLevelCandidateCount
+      ?? sourceObject.particleCount,
+    0
+  )));
+  if (resolvedRowCount <= 0) {
+    throw new TypeError('Schroeder state-delta merge admission requires a positive row budget');
+  }
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    sourceObject.cacheKey || sourceObject.peerComputeUseCase || peerComputeUseCase || null
+  );
+  const resolvedStateKey = normalizeString(stateKey, sourceObject.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:schroeder-state-delta-merge-admission',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const resolvedOutputFamilies = uniqueStringList([
+    ...normalizeStringList(outputFamilies),
+    ...normalizeStringList(sourceObject.outputFamilies),
+    'schroeder-hierarchy-state-delta'
+  ]);
+  const committedAt = Date.now();
+  const admission = {
+    schema: ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
+    status: 'schroeder-state-delta-merge-admission-admitted',
+    stateDeltaMergeApproved: true,
+    stateManagerAdmitted: true,
+    committed: true,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    peerComputeUseCase: peerComputeUseCase || sourceObject.peerComputeUseCase || null,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    schroederStateDeltaRowCount: resolvedRowCount,
+    stateDeltaRowCount: resolvedRowCount,
+    outputFamilies: resolvedOutputFamilies,
+    admissionMode: 'state-manager-warm-delta-plus-hot-buffer-ref',
+    publicationMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    authoritativeStateMutation: true,
+    stateMutationFamily: 'schroeder-hierarchy',
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  const hotBufferRecord = {
+    schema: ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'schroeder-state-delta-merge-admission-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: 'state-manager-schroeder-state-delta-merge-admission',
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    schroederStateDeltaMergeAdmission: cloneSerializableValue(admission)
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-schroeder-state-delta-merge-admission:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'schroeder-state-delta-merge-admission-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sourceMode: 'state-manager-schroeder-state-delta-merge-admission',
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    schroederStateDeltaMergeAdmission: cloneSerializableValue(admission)
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'schroeder-state-delta-merge-admission-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgSchroederPhaseVolumeMigrationAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  source = null,
+  migrationRowCount = null,
+  schroederPhaseVolumeMigrationRowCount = null,
+  outputFamilies = [],
+  peerComputeUseCase = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-phase-volume-migration',
+  sourceStage = 'schroederPhaseVolumeMigration',
+  scope = ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE,
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgSchroederPhaseVolumeMigrationAdmission requires StateManager hot storage and commitDelta');
+  }
+  const sourceObject = source && typeof source === 'object' ? source : {};
+  const resolvedRowCount = Math.max(0, Math.trunc(finiteSeedNumber(
+    schroederPhaseVolumeMigrationRowCount
+      ?? migrationRowCount
+      ?? sourceObject.schroederPhaseVolumeMigrationRowCount
+      ?? sourceObject.migrationRowCount
+      ?? sourceObject.particleCount,
+    0
+  )));
+  if (resolvedRowCount <= 0) {
+    throw new TypeError('Schroeder phase-volume migration admission requires a positive row budget');
+  }
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    sourceObject.cacheKey || sourceObject.peerComputeUseCase || peerComputeUseCase || null
+  );
+  const resolvedStateKey = normalizeString(stateKey, sourceObject.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:schroeder-phase-volume-migration-admission',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const resolvedOutputFamilies = uniqueStringList([
+    ...normalizeStringList(outputFamilies),
+    ...normalizeStringList(sourceObject.outputFamilies),
+    'schroeder-phase-volume-migration'
+  ]);
+  const committedAt = Date.now();
+  const admission = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-admission-admitted',
+    phaseVolumeMigrationApproved: true,
+    stateManagerAdmitted: true,
+    committed: true,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    peerComputeUseCase: peerComputeUseCase || sourceObject.peerComputeUseCase || null,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    schroederPhaseVolumeMigrationRowCount: resolvedRowCount,
+    migrationRowCount: resolvedRowCount,
+    outputFamilies: resolvedOutputFamilies,
+    admissionMode: 'state-manager-warm-delta-plus-hot-buffer-ref',
+    publicationMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    authoritativeStateMutation: true,
+    stateMutationFamily: 'schroeder-hierarchy',
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  const hotBufferRecord = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-admission-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: 'state-manager-schroeder-phase-volume-migration-admission',
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    schroederPhaseVolumeMigrationAdmission: cloneSerializableValue(admission)
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-schroeder-phase-volume-migration-admission:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-admission-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sourceMode: 'state-manager-schroeder-phase-volume-migration-admission',
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    schroederPhaseVolumeMigrationAdmission: cloneSerializableValue(admission)
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'schroeder-phase-volume-migration-admission-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
@@ -6475,6 +6768,20 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishSchroederStateDeltaMergeAdmission(options = {}) {
+      return publishUlgSchroederStateDeltaMergeAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
+    publishSchroederPhaseVolumeMigrationAdmission(options = {}) {
+      return publishUlgSchroederPhaseVolumeMigrationAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     createSchroederPortableSummaryReplayDescriptor(options = {}) {
       return createSchroederPortableSummaryReplayDescriptor({
         stateManager,
@@ -7287,6 +7594,10 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.admitPresentationWorkerRetainedStatePromotionCandidate === 'function',
     residentSchroederPortableSummaryAdmissionReady:
       typeof host?.admitSchroederPortableSummary === 'function',
+    residentSchroederStateDeltaMergeAdmissionPublicationReady:
+      typeof host?.publishSchroederStateDeltaMergeAdmission === 'function',
+    residentSchroederPhaseVolumeMigrationAdmissionPublicationReady:
+      typeof host?.publishSchroederPhaseVolumeMigrationAdmission === 'function',
     residentSchroederPortableSummaryReplayDescriptorReady:
       typeof host?.createSchroederPortableSummaryReplayDescriptor === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:

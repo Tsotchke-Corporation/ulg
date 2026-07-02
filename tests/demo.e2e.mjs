@@ -7725,34 +7725,19 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
       && scene?.getMlsMpmGpuParticleState?.()?.schema
       && typeof scene?.refreshMlsMpmResidentSteps === 'function'
       && typeof scene?.getSchroederPhaseVolumeAssignmentOverlayFeedback === 'function'
+      && overlay?.__sphPeerComputeResidentAuthorityHost?.status === 'ready'
+      && typeof globalThis.__ulgResidentAuthorityHost?.publishSchroederStateDeltaMergeAdmission === 'function'
+      && typeof globalThis.__ulgResidentAuthorityHost?.publishSchroederPhaseVolumeMigrationAdmission === 'function'
     );
   }, null, { timeout: 180_000 });
 
   const result = await page.evaluate(async () => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay.__sphScene;
-    const stateDeltaMergeAdmission = {
-      schema: 'peercompute.ulg.schroeder-state-delta-merge-admission.v0',
-      status: 'schroeder-state-delta-merge-admission-admitted',
-      stateDeltaMergeApproved: true,
-      outputFamilies: ['schroeder-hierarchy-state-delta'],
-      schroederStateDeltaRowCount: 1_000_000,
-      hotBufferKey: 'ulg:browser:state-delta-merge-admission',
-      sourceHotBufferKey: 'ulg:browser:state-delta-merge-admission',
-      committed: true
-    };
-    const admission = {
-      schema: 'peercompute.ulg.schroeder-phase-volume-migration-admission.v0',
-      status: 'schroeder-phase-volume-migration-admission-admitted',
-      phaseVolumeMigrationApproved: true,
-      outputFamilies: ['schroeder-phase-volume-migration'],
-      schroederPhaseVolumeMigrationRowCount: 1_000_000,
-      hotBufferKey: 'ulg:browser:phase-volume-admission',
-      sourceHotBufferKey: 'ulg:browser:phase-volume-admission',
-      committed: true
-    };
+    const host = globalThis.__ulgResidentAuthorityHost;
     const commonOptions = {
       preferWebGpu: true,
+      residentAuthorityHost: host,
       stepCount: 1,
       readbackMode: 'no-full-readback',
       compactSummaryScope: 'particle-visual',
@@ -7760,9 +7745,7 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
       schroederSimulation: true,
       schroederSelectedLevel: 0,
       schroederEnablePortableSummary: true,
-      schroederEnableActiveNodeIndex: true,
-      schroederStateDeltaMergeAdmission: stateDeltaMergeAdmission,
-      schroederPhaseVolumeMigrationAdmission: admission
+      schroederEnableActiveNodeIndex: true
     };
     const first = await scene.refreshMlsMpmResidentSteps({
       ...commonOptions,
@@ -7787,6 +7770,18 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
         first?.schroederSameLevelMechanics?.phaseVolumeLevelUpdateStatus ?? null,
       firstPhaseVolumeLevelUpdateRetainedBuffer:
         first?.schroederSameLevelMechanics?.phaseVolumeLevelUpdateRetainedBuffer ?? null,
+      firstStateDeltaAdmissionStatus:
+        first?.residentExecutionPolicy?.schroederStateDeltaMergeAdmissionStatus ?? null,
+      firstStateDeltaAdmissionPublicationStatus:
+        first?.residentExecutionPolicy?.schroederStateDeltaMergeAdmissionPublicationStatus ?? null,
+      firstStateDeltaAdmissionSourceHotBufferKey:
+        first?.residentExecutionPolicy?.schroederStateDeltaMergeAdmissionSourceHotBufferKey ?? null,
+      firstPhaseVolumeAdmissionStatus:
+        first?.residentExecutionPolicy?.schroederPhaseVolumeMigrationAdmissionStatus ?? null,
+      firstPhaseVolumeAdmissionPublicationStatus:
+        first?.residentExecutionPolicy?.schroederPhaseVolumeMigrationAdmissionPublicationStatus ?? null,
+      firstPhaseVolumeAdmissionSourceHotBufferKey:
+        first?.residentExecutionPolicy?.schroederPhaseVolumeMigrationAdmissionSourceHotBufferKey ?? null,
       firstFeedbackStatus: firstFeedback?.status ?? null,
       firstFeedbackReady: firstFeedback?.ready ?? null,
       firstFeedbackRows: firstFeedback?.levelUpdateRowCount ?? null,
@@ -7835,6 +7830,18 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
   expect(result.firstPhaseVolumeLevelUpdateStatus)
     .toBe('schroeder-phase-volume-level-update-submitted');
   expect(result.firstPhaseVolumeLevelUpdateRetainedBuffer).toBe(true);
+  expect(result.firstStateDeltaAdmissionStatus)
+    .toBe('schroeder-state-delta-merge-admission-admitted');
+  expect(result.firstStateDeltaAdmissionPublicationStatus)
+    .toBe('schroeder-state-delta-merge-admission-published');
+  expect(result.firstStateDeltaAdmissionSourceHotBufferKey)
+    .toContain('ulg:schroeder-state-delta-merge-admission');
+  expect(result.firstPhaseVolumeAdmissionStatus)
+    .toBe('schroeder-phase-volume-migration-admission-admitted');
+  expect(result.firstPhaseVolumeAdmissionPublicationStatus)
+    .toBe('schroeder-phase-volume-migration-admission-published');
+  expect(result.firstPhaseVolumeAdmissionSourceHotBufferKey)
+    .toContain('ulg:schroeder-phase-volume-migration-admission');
   expect(result.firstFeedbackStatus)
     .toBe('schroeder-phase-volume-assignment-overlay-feedback-ready');
   expect(result.firstFeedbackReady).toBe(true);

@@ -19213,12 +19213,95 @@ export function createSphPhaseScene(container, {
     const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
-    const requestedSchroederStateDeltaMergeAdmission =
+    const schroederAdmissionResidentAuthorityHost =
+      requestedSchroederSimulation
+        ? resolveSceneResidentAuthorityHost(residentAuthorityHost)
+        : null;
+    const schroederAdmissionPolicy =
+      schroederAdmissionResidentAuthorityHost?.schroederSimulationPolicy
+      || schroederAdmissionResidentAuthorityHost?.schroederPolicy
+      || null;
+    const schroederPackedParticleCount = (() => {
+      const explicitCount = Math.max(0, Math.round(Number(
+        sphGpuParticleState?.particleCount
+          ?? mlsMpmGpuParticleState?.particleCount
+          ?? 0
+      ) || 0));
+      if (explicitCount > 0) return explicitCount;
+      const stateStrideFloats = Math.max(0, Math.floor(Number(sphGpuParticleState?.stateStrideFloats) || 0));
+      const stateLength = Math.max(0, Math.floor(Number(sphGpuParticleState?.state?.length) || 0));
+      return stateStrideFloats > 0 ? Math.floor(stateLength / stateStrideFloats) : 0;
+    })();
+    const schroederDefaultAdmissionRowBudget = Math.max(1, schroederPackedParticleCount);
+    const schroederAdmissionPolicyNumber = (keys = [], fallback = schroederDefaultAdmissionRowBudget) => {
+      if (!schroederAdmissionPolicy || typeof schroederAdmissionPolicy !== 'object') return fallback;
+      for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(schroederAdmissionPolicy, key)) continue;
+        const number = Number(schroederAdmissionPolicy[key]);
+        if (Number.isFinite(number) && number > 0) return Math.max(1, Math.round(number));
+      }
+      return fallback;
+    };
+    const schroederStateDeltaMergeAdmissionRowBudget = schroederAdmissionPolicyNumber([
+      'stateDeltaMergeAdmissionRowBudget',
+      'schroederStateDeltaMergeAdmissionRowBudget',
+      'stateDeltaRowBudget',
+      'admissionRowBudget'
+    ]);
+    const schroederPhaseVolumeMigrationAdmissionRowBudget = schroederAdmissionPolicyNumber([
+      'phaseVolumeMigrationAdmissionRowBudget',
+      'schroederPhaseVolumeMigrationAdmissionRowBudget',
+      'phaseVolumeMigrationRowBudget',
+      'admissionRowBudget'
+    ]);
+    const schroederAdmissionCacheKey = [
+      'ulg:scene:schroeder-admission',
+      schroederPortableSummaryPeerComputeUseCase || 'default-use-case',
+      computeTaskDomainKey || 'scene'
+    ].join(':');
+    const schroederAdmissionStateKey = computeTaskStateKey || computeTaskDomainKey || 'sph-phase-scene';
+    let schroederStateDeltaMergeAdmissionPublication = null;
+    let schroederPhaseVolumeMigrationAdmissionPublication = null;
+    let requestedSchroederStateDeltaMergeAdmission =
       requestedSchroederSimulation
       && schroederStateDeltaMergeAdmission
       && typeof schroederStateDeltaMergeAdmission === 'object'
         ? schroederStateDeltaMergeAdmission
         : null;
+    if (
+      requestedSchroederSimulation
+      && !requestedSchroederStateDeltaMergeAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederStateDeltaMergeAdmission === 'function'
+    ) {
+      try {
+        schroederStateDeltaMergeAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederStateDeltaMergeAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:state-delta-merge`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            stateDeltaRowCount: schroederStateDeltaMergeAdmissionRowBudget,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederCrossLevelStateDelta',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-state-delta-merge-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              stateDeltaRowCount: schroederStateDeltaMergeAdmissionRowBudget,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-hierarchy-state-delta']
+            }
+          });
+        requestedSchroederStateDeltaMergeAdmission =
+          schroederStateDeltaMergeAdmissionPublication?.schroederStateDeltaMergeAdmission || null;
+      } catch (error) {
+        schroederStateDeltaMergeAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-state-delta-merge-admission-publication-error.v0',
+          status: 'schroeder-state-delta-merge-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederStateDeltaMergeAdmissionRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19227,12 +19310,46 @@ export function createSphPhaseScene(container, {
           ?? 0
       ) || 0)
     );
-    const requestedSchroederPhaseVolumeMigrationAdmission =
+    let requestedSchroederPhaseVolumeMigrationAdmission =
       requestedSchroederSimulation
       && schroederPhaseVolumeMigrationAdmission
       && typeof schroederPhaseVolumeMigrationAdmission === 'object'
         ? schroederPhaseVolumeMigrationAdmission
         : null;
+    if (
+      requestedSchroederSimulation
+      && !requestedSchroederPhaseVolumeMigrationAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederPhaseVolumeMigrationAdmission === 'function'
+    ) {
+      try {
+        schroederPhaseVolumeMigrationAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederPhaseVolumeMigrationAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:phase-volume-migration`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            migrationRowCount: schroederPhaseVolumeMigrationAdmissionRowBudget,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederPhaseVolumeMigration',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-phase-volume-migration-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              migrationRowCount: schroederPhaseVolumeMigrationAdmissionRowBudget,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-phase-volume-migration']
+            }
+          });
+        requestedSchroederPhaseVolumeMigrationAdmission =
+          schroederPhaseVolumeMigrationAdmissionPublication?.schroederPhaseVolumeMigrationAdmission || null;
+      } catch (error) {
+        schroederPhaseVolumeMigrationAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-phase-volume-migration-admission-publication-error.v0',
+          status: 'schroeder-phase-volume-migration-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederPhaseVolumeMigrationAdmissionRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19330,10 +19447,26 @@ export function createSphPhaseScene(container, {
         requestedSchroederStateDeltaMergeAdmission?.status ?? null,
       schroederStateDeltaMergeAdmissionRows:
         requestedSchroederStateDeltaMergeAdmissionRowCount,
+      schroederStateDeltaMergeAdmissionPublicationStatus:
+        schroederStateDeltaMergeAdmissionPublication?.status ?? (
+          requestedSchroederStateDeltaMergeAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederStateDeltaMergeAdmissionSourceHotBufferKey:
+        requestedSchroederStateDeltaMergeAdmission?.sourceHotBufferKey
+        || requestedSchroederStateDeltaMergeAdmission?.hotBufferKey
+        || null,
       schroederPhaseVolumeMigrationAdmissionStatus:
         requestedSchroederPhaseVolumeMigrationAdmission?.status ?? null,
       schroederPhaseVolumeMigrationAdmissionRows:
-        requestedSchroederPhaseVolumeMigrationAdmissionRowCount
+        requestedSchroederPhaseVolumeMigrationAdmissionRowCount,
+      schroederPhaseVolumeMigrationAdmissionPublicationStatus:
+        schroederPhaseVolumeMigrationAdmissionPublication?.status ?? (
+          requestedSchroederPhaseVolumeMigrationAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederPhaseVolumeMigrationAdmissionSourceHotBufferKey:
+        requestedSchroederPhaseVolumeMigrationAdmission?.sourceHotBufferKey
+        || requestedSchroederPhaseVolumeMigrationAdmission?.hotBufferKey
+        || null
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;

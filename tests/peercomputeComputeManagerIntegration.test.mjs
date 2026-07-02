@@ -36,8 +36,10 @@ import {
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -82,6 +84,10 @@ import {
   ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
   ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA,
+  ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3455,6 +3461,8 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationRefreshReady, true);
   assert.equal(summary.residentWorkerRetainedContinuationPlannerReady, true);
   assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, true);
+  assert.equal(summary.residentSchroederStateDeltaMergeAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederPhaseVolumeMigrationAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, true);
 
   const schroederPortableSummary = {
@@ -3539,6 +3547,97 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(schroederReplayDescriptor.replaySeed.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA);
   assert.equal(schroederReplayDescriptor.replaySeed.renderLod.activeLeafProxyCount, 8);
   assert.equal(schroederReplayDescriptor.replaySeed.authoritativeStateMutation, false);
+  const stateDeltaAdmissionPublication = host.publishSchroederStateDeltaMergeAdmission({
+    cacheKey: 'ulg:test:schroeder-state-delta-merge-admission-cache',
+    stateKey: 'ulg:test:schroeder-state-delta-merge-admission-state',
+    hotBufferKey: 'ulg:test:schroeder-state-delta-merge-admission-hot-buffer',
+    peerComputeUseCase: 'integration-schroeder-phase-volume',
+    stateDeltaRowCount: 128,
+    sourceTaskId: 'ulg:test:schroeder-state-delta-source'
+  });
+  assert.equal(
+    stateDeltaAdmissionPublication.schema,
+    ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    stateDeltaAdmissionPublication.status,
+    'schroeder-state-delta-merge-admission-published'
+  );
+  assert.equal(stateDeltaAdmissionPublication.committed, true);
+  assert.equal(
+    stateDeltaAdmissionPublication.schroederStateDeltaMergeAdmission.schema,
+    ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    stateDeltaAdmissionPublication.schroederStateDeltaMergeAdmission.status,
+    'schroeder-state-delta-merge-admission-admitted'
+  );
+  assert.equal(
+    stateDeltaAdmissionPublication.schroederStateDeltaMergeAdmission.sourceHotBufferKey,
+    stateDeltaAdmissionPublication.hotBufferKey
+  );
+  assert.equal(
+    stateDeltaAdmissionPublication.schroederStateDeltaMergeAdmission.schroederStateDeltaRowCount,
+    128
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE)
+      [stateDeltaAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-state-delta-merge-admission-admitted'
+  );
+  assert.equal(
+    host.stateManager.getHotBuffer(stateDeltaAdmissionPublication.hotBufferKey).copyMode,
+    'descriptor-only-no-raw-gpubuffer-transfer'
+  );
+
+  const phaseVolumeAdmissionPublication = host.publishSchroederPhaseVolumeMigrationAdmission({
+    cacheKey: 'ulg:test:schroeder-phase-volume-admission-cache',
+    stateKey: 'ulg:test:schroeder-phase-volume-admission-state',
+    hotBufferKey: 'ulg:test:schroeder-phase-volume-admission-hot-buffer',
+    peerComputeUseCase: 'integration-schroeder-phase-volume',
+    migrationRowCount: 128,
+    sourceTaskId: 'ulg:test:schroeder-phase-volume-source'
+  });
+  assert.equal(
+    phaseVolumeAdmissionPublication.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    phaseVolumeAdmissionPublication.status,
+    'schroeder-phase-volume-migration-admission-published'
+  );
+  assert.equal(phaseVolumeAdmissionPublication.committed, true);
+  assert.equal(
+    phaseVolumeAdmissionPublication.schroederPhaseVolumeMigrationAdmission.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    phaseVolumeAdmissionPublication.schroederPhaseVolumeMigrationAdmission.status,
+    'schroeder-phase-volume-migration-admission-admitted'
+  );
+  assert.equal(
+    phaseVolumeAdmissionPublication.schroederPhaseVolumeMigrationAdmission.sourceHotBufferKey,
+    phaseVolumeAdmissionPublication.hotBufferKey
+  );
+  assert.equal(
+    phaseVolumeAdmissionPublication.schroederPhaseVolumeMigrationAdmission.schroederPhaseVolumeMigrationRowCount,
+    128
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE)
+      [phaseVolumeAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-phase-volume-migration-admission-admitted'
+  );
+  assert.equal(
+    host.stateManager.getHotBuffer(phaseVolumeAdmissionPublication.hotBufferKey).copyMode,
+    'descriptor-only-no-raw-gpubuffer-transfer'
+  );
 
   const candidate = {
     schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',

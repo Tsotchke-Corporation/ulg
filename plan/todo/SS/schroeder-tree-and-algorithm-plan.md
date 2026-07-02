@@ -173,6 +173,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-cross-level-transfer.v0`
 - `peercompute.ulg.schroeder-cross-level-state-delta.v0`
 - `peercompute.ulg.schroeder-cross-level-state-delta-merge.v0`
+- `peercompute.ulg.schroeder-hierarchy-aggregate.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -226,7 +227,8 @@ Suggested schemas:
   GPU-resident transfer rows landed in `38fd33b`; pending conservative
   source/target state-delta rows landed in `c0b980f`; StateManager-admitted
   retained merge buffers landed in `60a63c2`; SS-owned aggregate state
-  materialization is next.
+  contribution materialization landed in `258d7c2`; keyed aggregate-node
+  reduction is next.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -263,8 +265,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Conservative cross-level state mutation:
-   - consume adjacent-level admitted state-delta merge rows;
-   - materialize deltas into SS-owned authoritative hierarchy aggregate state;
+   - consume adjacent-level admitted state-delta merge rows and aggregate
+     contribution rows;
+   - reduce/sort contributions into SS-owned authoritative hierarchy aggregate
+     nodes;
    - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
@@ -315,16 +319,17 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS hierarchy aggregate materialization**:
+The next code slice on `SS` is **SS keyed aggregate-node reduction**:
 
-1. Keep admitted merge rows GPU-resident and no-full-readback by default.
-2. Define the first SS hierarchy aggregate row layout for parent cells/nodes.
-3. Materialize admitted deltas into a retained SS-owned aggregate buffer with
-   explicit state-family ownership metadata.
-4. Emit compact residual summaries for mass, represented volume, momentum, and
-   internal energy after aggregate materialization.
-5. Fail closed if target parent/child metadata is missing or a law attempts to
-   mutate state it does not own.
+1. Keep aggregate contribution rows GPU-resident and no-full-readback by
+   default.
+2. Pick a GPU reduction strategy for duplicate parent keys: sort/radix,
+   hash-bucket accumulation, or a bounded workgroup-local first pass.
+3. Emit retained aggregate-node rows with summed mass, represented volume,
+   momentum, internal energy, and residual counters.
+4. Preserve explicit state-family ownership metadata for the aggregate-node
+   buffer.
+5. Fail closed when duplicate-key reduction capacity is exceeded.
 
-That moves Slice 4 from admitted retained deltas into actual SS hierarchy state
-updates.
+That moves Slice 4 from unsorted aggregate contributions into actual SS
+hierarchy nodes.

@@ -55,9 +55,12 @@ Landed checkpoints:
     conservative source/target transfer application.
 12. `60a63c2` adds StateManager-admission gating and retained merge buffers for
     cross-level state deltas.
+13. `258d7c2` materializes admitted merge rows into retained SS hierarchy
+    aggregate contribution rows.
 
 Next implementation queue:
 
-1. Materialize admitted merge rows into SS-owned hierarchy aggregate state.
+1. Reduce/sort SS hierarchy aggregate contribution rows into keyed aggregate
+   nodes.
 2. Promote water-to-steam phase-volume migration into a visible SS stress case.
 3. Route reaction/contact/interface work queues through SS active nodes.

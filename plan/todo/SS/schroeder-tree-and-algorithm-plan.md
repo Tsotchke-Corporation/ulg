@@ -549,12 +549,22 @@ Completed in this slice:
 3. Kept actual particle storage resizing deferred to a future StateManager
    allocator so proposal/apply rows cannot silently mutate particle buffers.
 
-The next code slice on `SS` is **SS particle-storage allocator admission**:
+Completed in this slice:
 
-1. Add a retained allocator plan that consumes admitted split/merge apply rows
-   and produces same-device particle-slot allocation/free-list intents.
-2. Keep storage mutation fail-closed until the StateManager admits target
-   particle-state/mechanics/thermo families and buffer capacity.
+1. Added `peercompute.ulg.schroeder-particle-storage-allocator-admission.v0`
+   and retained GPU `schroeder-particle-storage-allocation` rows.
+2. Added allocator admission checks for output family, row count, target
+   particle-state/mechanics/thermo families, and capacity approval.
+3. Added allocation-intent plans, params, WGSL, WebGPU execution, same-level
+   forwarding, and status telemetry. Slot indices intentionally remain
+   sentinel values until a concrete free-list/compaction pass assigns them.
+
+The next code slice on `SS` is **SS particle-storage free-list assignment**:
+
+1. Consume admitted particle-storage allocation rows and a retained free-list
+   descriptor to assign concrete target/free slot ranges on GPU.
+2. Preserve fail-closed StateManager admission before writing any
+   particle-state, mechanics, or thermo buffer contents.
 3. Preserve the URL-scheduled H2O steam proof: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent

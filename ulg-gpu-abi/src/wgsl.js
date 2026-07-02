@@ -12129,6 +12129,130 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederParticleStorageAllocationWgsl = `
+struct SchroederParticleStorageAllocationParams {
+  apply_row_count: u32,
+  apply_stride: u32,
+  allocation_stride: u32,
+  admission_approved: u32,
+  allocator_epoch: f32,
+  state_family_id: f32,
+  current_particle_capacity: f32,
+  required_particle_capacity: f32,
+  target_state_family_mask: f32,
+  flags: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> apply_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> allocation_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederParticleStorageAllocationParams;
+
+const SCHROEDER_PSAL_APPLY_STRIDE: u32 = 32u;
+const SCHROEDER_PSAL_ALLOCATION_STRIDE: u32 = 32u;
+
+fn ss_psal_active_apply(apply_offset: u32) -> bool {
+  let status = apply_rows[apply_offset + 3u];
+  let apply_admission = apply_rows[apply_offset + 6u];
+  return status > 0.0 && status < 32.0 && apply_admission > 0.0 && params.admission_approved > 0u;
+}
+
+fn ss_psal_write_empty(allocation_offset: u32, apply_offset: u32, status: f32) {
+  allocation_rows[allocation_offset + 0u] = apply_rows[apply_offset + 0u];
+  allocation_rows[allocation_offset + 1u] = apply_rows[apply_offset + 1u];
+  allocation_rows[allocation_offset + 2u] = apply_rows[apply_offset + 2u];
+  allocation_rows[allocation_offset + 3u] = status;
+  for (var column = 4u; column < SCHROEDER_PSAL_ALLOCATION_STRIDE; column = column + 1u) {
+    allocation_rows[allocation_offset + column] = 0.0;
+  }
+  allocation_rows[allocation_offset + 6u] = f32(params.admission_approved);
+  allocation_rows[allocation_offset + 9u] = -1.0;
+  allocation_rows[allocation_offset + 11u] = -1.0;
+  allocation_rows[allocation_offset + 13u] = params.required_particle_capacity;
+  allocation_rows[allocation_offset + 14u] = params.current_particle_capacity;
+  allocation_rows[allocation_offset + 29u] = params.allocator_epoch;
+  allocation_rows[allocation_offset + 30u] = params.target_state_family_mask;
+  allocation_rows[allocation_offset + 31u] = params.state_family_id;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.apply_row_count) {
+    return;
+  }
+
+  let apply_stride = max(params.apply_stride, SCHROEDER_PSAL_APPLY_STRIDE);
+  let allocation_stride = max(params.allocation_stride, SCHROEDER_PSAL_ALLOCATION_STRIDE);
+  let apply_offset = row_index * apply_stride;
+  let allocation_offset = row_index * allocation_stride;
+
+  if (!ss_psal_active_apply(apply_offset)) {
+    ss_psal_write_empty(allocation_offset, apply_offset, 32.0);
+    return;
+  }
+
+  let particle_delta = apply_rows[apply_offset + 7u];
+  let allocation_count = max(particle_delta, 0.0);
+  let free_count = max(-particle_delta, 0.0);
+  let capacity_required_by_row = params.current_particle_capacity + allocation_count;
+  let capacity_residual = max(capacity_required_by_row - params.required_particle_capacity, 0.0);
+  let allocation_required = allocation_count > 0.0;
+  let free_required = free_count > 0.0;
+
+  var status = 1.0 + 8.0;
+  if (allocation_required) {
+    status = status + 2.0;
+  }
+  if (free_required) {
+    status = status + 4.0;
+  }
+  if (capacity_residual > 0.0) {
+    status = status + 16.0;
+  }
+
+  let slot_action_id = select(
+    select(1.0, 3.0, allocation_required),
+    2.0,
+    free_required
+  );
+
+  allocation_rows[allocation_offset + 0u] = apply_rows[apply_offset + 0u];
+  allocation_rows[allocation_offset + 1u] = apply_rows[apply_offset + 1u];
+  allocation_rows[allocation_offset + 2u] = apply_rows[apply_offset + 2u];
+  allocation_rows[allocation_offset + 3u] = status;
+  allocation_rows[allocation_offset + 4u] = 1.0;
+  allocation_rows[allocation_offset + 5u] = apply_rows[apply_offset + 4u];
+  allocation_rows[allocation_offset + 6u] = f32(params.admission_approved);
+  allocation_rows[allocation_offset + 7u] = particle_delta;
+  allocation_rows[allocation_offset + 8u] = slot_action_id;
+  allocation_rows[allocation_offset + 9u] = -1.0;
+  allocation_rows[allocation_offset + 10u] = allocation_count;
+  allocation_rows[allocation_offset + 11u] = -1.0;
+  allocation_rows[allocation_offset + 12u] = free_count;
+  allocation_rows[allocation_offset + 13u] = params.required_particle_capacity;
+  allocation_rows[allocation_offset + 14u] = params.current_particle_capacity;
+  allocation_rows[allocation_offset + 15u] = capacity_residual;
+  allocation_rows[allocation_offset + 16u] = apply_rows[apply_offset + 8u];
+  allocation_rows[allocation_offset + 17u] = apply_rows[apply_offset + 9u];
+  allocation_rows[allocation_offset + 18u] = apply_rows[apply_offset + 10u];
+  allocation_rows[allocation_offset + 19u] = apply_rows[apply_offset + 11u];
+  allocation_rows[allocation_offset + 20u] = apply_rows[apply_offset + 12u];
+  allocation_rows[allocation_offset + 21u] = apply_rows[apply_offset + 13u];
+  allocation_rows[allocation_offset + 22u] = apply_rows[apply_offset + 14u];
+  allocation_rows[allocation_offset + 23u] = apply_rows[apply_offset + 15u];
+  allocation_rows[allocation_offset + 24u] = apply_rows[apply_offset + 16u];
+  allocation_rows[allocation_offset + 25u] = apply_rows[apply_offset + 17u];
+  allocation_rows[allocation_offset + 26u] = apply_rows[apply_offset + 21u];
+  allocation_rows[allocation_offset + 27u] = apply_rows[apply_offset + 22u];
+  allocation_rows[allocation_offset + 28u] = apply_rows[apply_offset + 29u];
+  allocation_rows[allocation_offset + 29u] = params.allocator_epoch;
+  allocation_rows[allocation_offset + 30u] = params.target_state_family_mask;
+  allocation_rows[allocation_offset + 31u] = params.state_family_id;
+}
+`;
+
 export const schroederPhaseVolumeLevelUpdateWgsl = `
 struct SchroederPhaseVolumeLevelUpdateParams {
   migration_row_count: u32,

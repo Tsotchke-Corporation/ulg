@@ -22,6 +22,7 @@ import {
   SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
@@ -72,6 +73,9 @@ import {
   ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_EXECUTION_SCHEMA,
@@ -156,6 +160,9 @@ import {
   SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_OUTPUT_FAMILY,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_TARGET_FAMILY,
+  SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS,
+  SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+  SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
@@ -210,6 +217,8 @@ import {
   createSchroederLevelAssignmentPlan,
   createSchroederPhaseVolumeAssignmentOverlayIndexParamsArray,
   createSchroederPhaseVolumeAssignmentOverlayIndexPlan,
+  createSchroederParticleStorageAllocationParamsArray,
+  createSchroederParticleStorageAllocationPlan,
   createSchroederPhaseVolumeDiagnosticSummaryParamsArray,
   createSchroederPhaseVolumeDiagnosticSummaryPlan,
   createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan,
@@ -250,6 +259,7 @@ import {
   runSchroederLawNeighborCandidateWebGpu,
   runSchroederLawQueueWebGpu,
   runSchroederLevelAssignmentWebGpu,
+  runSchroederParticleStorageAllocationWebGpu,
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   runSchroederPhaseVolumeSplitMergeApplyWebGpu,
   runSchroederPhaseVolumeLevelUpdateWebGpu,
@@ -257,6 +267,7 @@ import {
   runSchroederPhaseVolumeSplitMergeProposalWebGpu,
   runSchroederPhaseVolumeTargetAggregateWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
+  schroederParticleStorageAllocatorAdmissionAllowsApplication,
   schroederFarAggregateGasStateDeltaAdmissionAllowsApplication,
   schroederFarAggregateLawConsumerAdmissionAllowsConsumption,
   schroederFarAggregateForceApplicationAdmissionAllowsApplication,
@@ -444,6 +455,28 @@ function approvedPhaseVolumeSplitMergeAdmission({
     phaseVolumeSplitMergeApproved: true,
     outputFamilies: ['schroeder-phase-volume-split-merge-apply'],
     schroederPhaseVolumeSplitMergeProposalRowCount: rowCount,
+    hotBufferKey,
+    sourceHotBufferKey: hotBufferKey,
+    committed: true
+  };
+}
+
+function approvedParticleStorageAllocatorAdmission({
+  rowCount = 130,
+  currentParticleCapacity = rowCount,
+  requiredParticleCapacity = currentParticleCapacity,
+  hotBufferKey = 'ulg:test:schroeder-particle-storage-allocator-admission-hot-buffer'
+} = {}) {
+  return {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+    status: 'schroeder-particle-storage-allocator-admission-admitted',
+    particleStorageAllocationApproved: true,
+    particleCapacityApproved: true,
+    outputFamilies: ['schroeder-particle-storage-allocation'],
+    targetStateFamilies: [...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES],
+    schroederParticleStorageAllocationRowCount: rowCount,
+    currentParticleCapacity,
+    requiredParticleCapacity,
     hotBufferKey,
     sourceHotBufferKey: hotBufferKey,
     committed: true
@@ -810,6 +843,26 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT[7], 'particleCountDelta:f32');
   assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT[31], 'stateFamilyId:f32');
   assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-allocator-admission.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-allocation.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-particle-storage-allocation-execution.v0'
+  );
+  assert.equal(SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT.length,
+    SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS
+  );
+  assert.equal(SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT[8], 'sourceSlotActionId:f32');
+  assert.equal(SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT[30], 'targetStateFamilyMask:f32');
+  assert.equal(SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
     'peercompute.ulg.schroeder-phase-volume-level-update.v0'
@@ -2598,6 +2651,112 @@ test('Schroeder phase-volume split/merge apply plan requires StateManager admiss
   assert.equal(view.getUint32(12, true), 1);
   assert.equal(view.getFloat32(16, true), 11);
   assert.equal(view.getFloat32(20, true), 3);
+});
+
+test('Schroeder particle-storage allocator admission gates allocation rows', () => {
+  const phaseVolumeSplitMergeApply = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-apply-submitted',
+    proposalRowCount: 5,
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+    applyBuffer: { label: 'fake-phase-volume-split-merge-apply-buffer' }
+  };
+  const blocked = schroederParticleStorageAllocatorAdmissionAllowsApplication({
+    particleStorageAllocatorAdmission: {
+      status: 'schroeder-particle-storage-allocator-admission-admitted',
+      outputFamilies: ['schroeder-particle-storage-allocation'],
+      targetStateFamilies: ['sph-particle-state'],
+      particleStorageAllocationApproved: true,
+      particleCapacityApproved: true,
+      schroederParticleStorageAllocationRowCount: 5,
+      currentParticleCapacity: 5,
+      requiredParticleCapacity: 5,
+      committed: true
+    },
+    phaseVolumeSplitMergeApply,
+    applyRowCount: 5,
+    requiredParticleCapacity: 5
+  });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-particle-storage-allocator-admission-blocked');
+  assert.equal(blocked.approved, false);
+  assert.equal(blocked.targetFamiliesAccepted, false);
+
+  const approved = schroederParticleStorageAllocatorAdmissionAllowsApplication({
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 5,
+      currentParticleCapacity: 8,
+      requiredParticleCapacity: 6
+    }),
+    phaseVolumeSplitMergeApply,
+    applyRowCount: 5,
+    requiredParticleCapacity: 6
+  });
+  assert.equal(approved.status, 'schroeder-particle-storage-allocator-admission-approved');
+  assert.equal(approved.approved, true);
+  assert.equal(approved.familyAccepted, true);
+  assert.equal(approved.rowCountAccepted, true);
+  assert.equal(approved.capacityAccepted, true);
+  assert.equal(approved.targetFamiliesAccepted, true);
+});
+
+test('Schroeder particle-storage allocation plan requires allocator admission', () => {
+  const phaseVolumeSplitMergeApply = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-apply-submitted',
+    proposalRowCount: 130,
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+    applyEpoch: 11,
+    stateFamilyId: 3,
+    applyBuffer: { label: 'fake-phase-volume-split-merge-apply-buffer' }
+  };
+  const blocked = createSchroederParticleStorageAllocationPlan({ phaseVolumeSplitMergeApply });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-particle-storage-allocation-plan-blocked-admission-required');
+  assert.equal(blocked.particleStorageAllocatorAdmissionApproved, false);
+  assert.equal(blocked.stateMutationRequired, false);
+  assert.equal(blocked.stateMutationStatus, 'blocked-particle-storage-allocator-admission-required');
+
+  const approved = createSchroederParticleStorageAllocationPlan({
+    phaseVolumeSplitMergeApply,
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 130,
+      currentParticleCapacity: 192,
+      requiredParticleCapacity: 160
+    }),
+    allocatorEpoch: 12,
+    currentParticleCapacity: 192,
+    requiredParticleCapacity: 160
+  });
+  assert.equal(approved.status, 'schroeder-particle-storage-allocation-plan-ready');
+  assert.equal(approved.particleStorageAllocatorAdmissionApproved, true);
+  assert.equal(approved.outputCompaction, 'one-admitted-particle-storage-allocation-row-per-apply-row');
+  assert.equal(approved.allocationMode, 'state-manager-admitted-slot-allocation-intents');
+  assert.equal(approved.slotAssignmentStatus, 'sentinel-slot-indices-await-free-list-compaction');
+  assert.equal(approved.targetStateFamilyMask, SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK);
+  assert.deepEqual(approved.targetStateFamilies, SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES);
+  assert.equal(approved.currentParticleCapacity, 192);
+  assert.equal(approved.requiredParticleCapacity, 160);
+  assert.equal(approved.stateMutationRequired, true);
+  assert.equal(approved.stateMutationStatus, 'particle-storage-allocation-planned');
+  assert.equal(approved.stateAuthorityStatus, 'state-manager-admission-present');
+  assert.equal(approved.allocationByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+
+  const params = createSchroederParticleStorageAllocationParamsArray({
+    ...approved,
+    admissionApproved: approved.particleStorageAllocatorAdmissionApproved
+  });
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 48);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_PARTICLE_STORAGE_ALLOCATION_FLOATS);
+  assert.equal(view.getUint32(12, true), 1);
+  assert.equal(view.getFloat32(16, true), 12);
+  assert.equal(view.getFloat32(20, true), 3);
+  assert.equal(view.getFloat32(24, true), 192);
+  assert.equal(view.getFloat32(28, true), 160);
+  assert.equal(view.getFloat32(32, true), SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK);
 });
 
 test('Schroeder phase-volume level update plan requires StateManager admission', () => {
@@ -5557,6 +5716,94 @@ test('Schroeder phase-volume split/merge apply consumes retained proposals after
   );
 });
 
+test('Schroeder particle-storage allocation blocks without admission and dispatches no work', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeSplitMergeApply = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-apply-submitted',
+    proposalRowCount: 130,
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+    applyBuffer: { label: 'retained-phase-volume-split-merge-apply-buffer' }
+  };
+  const allocation = await runSchroederParticleStorageAllocationWebGpu({
+    device,
+    phaseVolumeSplitMergeApply
+  });
+
+  assert.equal(allocation.schema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA);
+  assert.equal(allocation.particleStorageAllocationSchema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA);
+  assert.equal(allocation.status, 'schroeder-particle-storage-allocation-blocked-admission-required');
+  assert.equal(allocation.particleStorageAllocatorAdmissionApproved, false);
+  assert.equal(allocation.retainedAllocationBuffer, false);
+  assert.equal(allocation.allocationBufferByteLength, 0);
+  assert.equal(allocation.allocationRows.length, 0);
+  assert.equal(allocation.stateMutationRequired, false);
+  assert.equal(allocation.stateMutationStatus, 'blocked-particle-storage-allocator-admission-required');
+  assert.deepEqual(device.dispatches, []);
+});
+
+test('Schroeder particle-storage allocation consumes admitted apply rows without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeSplitMergeApply = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-apply-submitted',
+    proposalRowCount: 130,
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+    applyEpoch: 11,
+    stateFamilyId: 4,
+    applyBuffer: { label: 'retained-phase-volume-split-merge-apply-buffer' }
+  };
+  const allocation = await runSchroederParticleStorageAllocationWebGpu({
+    device,
+    phaseVolumeSplitMergeApply,
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 130,
+      currentParticleCapacity: 192,
+      requiredParticleCapacity: 160
+    }),
+    allocatorEpoch: 12,
+    stateFamilyId: 4,
+    currentParticleCapacity: 192,
+    requiredParticleCapacity: 160
+  });
+
+  assert.equal(allocation.schema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA);
+  assert.equal(allocation.particleStorageAllocationSchema, ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA);
+  assert.equal(allocation.status, 'schroeder-particle-storage-allocation-submitted');
+  assert.equal(
+    allocation.sourcePhaseVolumeSplitMergeApplySchema,
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA
+  );
+  assert.equal(allocation.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(allocation.fullReadbackPerformed, false);
+  assert.equal(allocation.fullParticleReadbackPerformed, false);
+  assert.equal(allocation.normalHotLoopReadbackFree, true);
+  assert.equal(allocation.particleStorageAllocatorAdmissionApproved, true);
+  assert.equal(allocation.retainedAllocationBuffer, true);
+  assert.ok(allocation.allocationBuffer);
+  assert.equal(allocation.allocationBuffer.destroyed, false);
+  assert.equal(allocation.allocationBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(allocation.allocationRows.length, 0);
+  assert.equal(allocation.allocationMode, 'state-manager-admitted-slot-allocation-intents');
+  assert.equal(allocation.slotAssignmentStatus, 'sentinel-slot-indices-await-free-list-compaction');
+  assert.equal(allocation.currentParticleCapacity, 192);
+  assert.equal(allocation.requiredParticleCapacity, 160);
+  assert.equal(allocation.stateMutationRequired, true);
+  assert.equal(allocation.stateMutationStatus, 'particle-storage-allocation-buffer-submitted');
+  assert.equal(
+    allocation.stateAuthorityStatus,
+    'state-manager-admitted-particle-storage-allocation-materialized'
+  );
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => (
+    module.code.includes('SchroederParticleStorageAllocationParams')
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('allocation-readback')),
+    false
+  );
+});
+
 test('Schroeder phase-volume level update consumes retained migration rows after admission without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const phaseVolumeMigration = {
@@ -6775,6 +7022,7 @@ test('Schroeder same-level mechanics forwards admitted phase-volume split/merge 
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
         hasPhaseVolumeSplitMergeProposal: Boolean(options.schroederPhaseVolumeSplitMergeProposal),
         hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
+        hasParticleStorageAllocation: Boolean(options.schroederParticleStorageAllocation),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
       };
     }
@@ -6797,11 +7045,16 @@ test('Schroeder same-level mechanics forwards admitted phase-volume split/merge 
     result.phaseVolumeSplitMergeApply.stateAuthorityStatus,
     'state-manager-admitted-phase-volume-split-merge-apply-materialized'
   );
+  assert.equal(result.particleStorageAllocation, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeSplitMergeApplyStatus, 'schroeder-phase-volume-split-merge-apply-submitted');
   assert.equal(
     result.phaseVolumeSplitMergeApplyConsumerStatus,
     'phase-volume-split-merge-apply-forwarded-to-resident-backend'
+  );
+  assert.equal(
+    result.particleStorageAllocationStatus,
+    'disabled-particle-storage-allocator-admission-not-provided'
   );
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-split-merge-apply-submitted');
@@ -6810,16 +7063,97 @@ test('Schroeder same-level mechanics forwards admitted phase-volume split/merge 
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeSplitMergeProposal, true);
   assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, true);
+  assert.equal(result.residentStep.hasParticleStorageAllocation, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederPhaseVolumeSplitMergeApply.schema,
     ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA
   );
+  assert.equal(calls[0].schroederParticleStorageAllocation, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(device.dispatches.length, 19);
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('split-merge-apply-readback')),
+    false
+  );
+});
+
+test('Schroeder same-level mechanics forwards admitted particle-storage allocation intents', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 3 }),
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 3,
+      currentParticleCapacity: 8,
+      requiredParticleCapacity: 6
+    }),
+    mergeEpoch: 14,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
+        hasParticleStorageAllocation: Boolean(options.schroederParticleStorageAllocation),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+      };
+    }
+  });
+
+  assert.equal(result.phaseVolumeSplitMergeApply.retainedApplyBuffer, true);
+  assert.equal(result.particleStorageAllocation.retainedAllocationBuffer, true);
+  assert.equal(result.particleStorageAllocation.applyRowCount, 3);
+  assert.equal(result.particleStorageAllocation.outputCompaction, 'one-admitted-particle-storage-allocation-row-per-apply-row');
+  assert.equal(result.particleStorageAllocation.allocationMode, 'state-manager-admitted-slot-allocation-intents');
+  assert.equal(result.particleStorageAllocation.slotAssignmentStatus, 'sentinel-slot-indices-await-free-list-compaction');
+  assert.equal(result.particleStorageAllocation.particleStorageAllocatorAdmissionApproved, true);
+  assert.deepEqual(result.particleStorageAllocation.targetStateFamilies, SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES);
+  assert.equal(result.particleStorageAllocation.targetStateFamilyMask, SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK);
+  assert.equal(result.particleStorageAllocation.currentParticleCapacity, 3);
+  assert.equal(result.particleStorageAllocation.requiredParticleCapacity, 6);
+  assert.equal(
+    result.particleStorageAllocation.particleStorageMutationStatus,
+    'allocation-intents-ready-no-particle-buffer-resize'
+  );
+  assert.equal(result.particleStorageAllocation.stateMutationRequired, true);
+  assert.equal(result.particleStorageAllocation.stateMutationStatus, 'particle-storage-allocation-buffer-submitted');
+  assert.equal(
+    result.particleStorageAllocation.stateAuthorityStatus,
+    'state-manager-admitted-particle-storage-allocation-materialized'
+  );
+  assert.equal(result.phaseVolumeLevelUpdate, null);
+  assert.equal(result.particleStorageAllocationStatus, 'schroeder-particle-storage-allocation-submitted');
+  assert.equal(
+    result.particleStorageAllocationConsumerStatus,
+    'particle-storage-allocation-forwarded-to-resident-backend'
+  );
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
+  assert.equal(result.conservativeTransferStatus, 'particle-storage-allocation-submitted');
+  assert.equal(result.stateMutationStatus, 'particle-storage-allocation-buffer-submitted');
+  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-particle-storage-allocation-materialized');
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, true);
+  assert.equal(result.residentStep.hasParticleStorageAllocation, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederParticleStorageAllocation.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA
+  );
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(device.dispatches.length, 20);
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('particle-storage-allocation-readback')),
     false
   );
 });

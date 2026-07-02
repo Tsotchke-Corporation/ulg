@@ -938,6 +938,13 @@ struct ReactionParticleBinParams {
   box_z_m: f32,
 };
 
+struct SchroederReactionLawQueueParams {
+  enabled: u32,
+  active_node_count: u32,
+  law_queue_stride: u32,
+  reaction_mask: u32,
+};
+
 struct ThermalRows {
   row0: vec4<f32>,
   row1: vec4<f32>,
@@ -990,8 +997,14 @@ struct ProductTerm {
 @group(0) @binding(17) var<storage, read_write> reaction_particle_bin_indices: array<u32>;
 @group(0) @binding(18) var<storage, read_write> reaction_particle_bin_metadata: array<atomic<u32>>;
 @group(0) @binding(19) var<uniform> reaction_particle_bin_params: ReactionParticleBinParams;
+@group(0) @binding(20) var<storage, read> schroeder_reaction_law_queue_rows: array<f32>;
+@group(0) @binding(21) var<uniform> schroeder_reaction_law_queue_params: SchroederReactionLawQueueParams;
 
 const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
+const SCHROEDER_REACTION_LAW_QUEUE_STRIDE: u32 = 32u;
+const SCHROEDER_REACTION_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
+const SCHROEDER_REACTION_LAW_QUEUE_LAW_MASK_OFFSET: u32 = 12u;
+const SCHROEDER_REACTION_LAW_QUEUE_REACTION_ELIGIBLE_OFFSET: u32 = 13u;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
@@ -1392,6 +1405,40 @@ fn reaction_particle_bin_ready() -> bool {
     && reaction_particle_bin_params.cell_size_m > 0.0;
 }
 
+fn schroeder_reaction_law_queue_enabled() -> bool {
+  return schroeder_reaction_law_queue_params.enabled != 0u
+    && schroeder_reaction_law_queue_params.active_node_count > 0u
+    && schroeder_reaction_law_queue_params.law_queue_stride > 0u
+    && schroeder_reaction_law_queue_params.reaction_mask != 0u;
+}
+
+fn schroeder_reaction_law_queue_allows_particle(particle_index: u32) -> bool {
+  if (!schroeder_reaction_law_queue_enabled()) {
+    return true;
+  }
+  if (particle_index >= schroeder_reaction_law_queue_params.active_node_count) {
+    return false;
+  }
+  let queue_stride = max(
+    schroeder_reaction_law_queue_params.law_queue_stride,
+    SCHROEDER_REACTION_LAW_QUEUE_STRIDE
+  );
+  let queue_offset = particle_index * queue_stride;
+  let queue_status = schroeder_reaction_law_queue_rows[
+    queue_offset + SCHROEDER_REACTION_LAW_QUEUE_STATUS_OFFSET
+  ];
+  let row_enabled = queue_status > 0.0 && queue_status < 32.0;
+  let law_mask = u32(max(round(schroeder_reaction_law_queue_rows[
+    queue_offset + SCHROEDER_REACTION_LAW_QUEUE_LAW_MASK_OFFSET
+  ]), 0.0));
+  let reaction_eligible = schroeder_reaction_law_queue_rows[
+    queue_offset + SCHROEDER_REACTION_LAW_QUEUE_REACTION_ELIGIBLE_OFFSET
+  ] > 0.5;
+  return row_enabled
+    && reaction_eligible
+    && ((law_mask & schroeder_reaction_law_queue_params.reaction_mask) != 0u);
+}
+
 fn reaction_particle_bin_coord(value: f32, axis_count: u32) -> u32 {
   if (axis_count <= 1u) {
     return 0u;
@@ -1487,6 +1534,10 @@ fn reaction_partner_candidate(
 fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= params.particle_count) {
+    return;
+  }
+  if (!schroeder_reaction_law_queue_allows_particle(particle_index)) {
+    proposals[particle_index] = vec4<f32>(-1.0, -1.0, 0.0, 0.0);
     return;
   }
 

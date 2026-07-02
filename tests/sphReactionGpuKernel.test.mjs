@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
@@ -349,6 +350,16 @@ test('SPH reaction WGSL can propose reactions from a GPU particle-bin grid', () 
   assert.match(sphReactionStepWgsl, /atomicLoad\(&reaction_particle_bin_counts\[cell_index\]\)/);
 });
 
+test('SPH reaction WGSL can gate reaction proposals from a Schroeder law queue', () => {
+  assert.match(sphReactionStepWgsl, /struct\s+SchroederReactionLawQueueParams/);
+  assert.match(sphReactionStepWgsl, /@binding\(20\)\s+var<storage,\s*read>\s+schroeder_reaction_law_queue_rows/);
+  assert.match(sphReactionStepWgsl, /@binding\(21\)\s+var<uniform>\s+schroeder_reaction_law_queue_params/);
+  assert.match(sphReactionStepWgsl, /fn\s+schroeder_reaction_law_queue_allows_particle/);
+  assert.match(sphReactionStepWgsl, /SCHROEDER_REACTION_LAW_QUEUE_REACTION_ELIGIBLE_OFFSET/);
+  assert.match(sphReactionStepWgsl, /if\s*\(\s*!schroeder_reaction_law_queue_allows_particle\(particle_index\)\s*\)/);
+  assert.match(sphReactionStepWgsl, /proposals\[particle_index\]\s*=\s*vec4<f32>\(-1\.0,\s*-1\.0,\s*0\.0,\s*0\.0\)/);
+});
+
 test('SPH reaction particle-bin grid uses bounded adaptive capacity', () => {
   const packed = packedThreeParticles();
   const grid = resolveReactionParticleBinGrid({
@@ -520,6 +531,60 @@ test('SPH reaction optional WebGPU accepts no-full retained output without CPU p
   assert.equal(execution.result.stateBuffer.label, 'reaction-state-retained');
   assert.equal(execution.result.thermoBuffer.label, 'reaction-thermo-retained');
   assert.equal(execution.result.mechanicsBuffer.label, 'reaction-mechanics-retained');
+});
+
+test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runner', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const table = reactionTable();
+  const schroederLawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    lawQueueBuffer: { label: 'retained-schroeder-law-queue' },
+    activeNodeCount: packed.sphParticleState.particleCount,
+    lawQueueStrideFloats: 32,
+    enabledLawMask: 1,
+    reactionScopeStatus: 'sedenion-scope-preserved-for-reaction-queue'
+  };
+  const execution = await runSphReactionStepWithOptionalWebGpu({
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable,
+    preferWebGpu: true,
+    device: {},
+    readbackMode: 'no-full-readback',
+    schroederLawQueue,
+    webGpuRunner(args) {
+      assert.equal(args.schroederLawQueue, schroederLawQueue);
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-step-executed',
+        particleCount: packed.sphParticleState.particleCount,
+        reactionCount: table.reactionCount,
+        productTermCount: table.productTermCount,
+        gasProductCount: table.gasProductCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        mechanics: new Float32Array(),
+        proposals: new Float32Array(),
+        retainedOutputParticleBuffers: false,
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        readbackMode: 'no-full-readback',
+        schroederLawQueueStatus: 'schroeder-reaction-law-queue-ready',
+        schroederLawQueueConsumerStatus: 'schroeder-reaction-law-queue-consumed',
+        schroederLawQueueBufferConsumed: true,
+        reactionProposalNeighborMode: 'schroeder-law-queue-gated-fixed-capacity-particle-bin-grid'
+      };
+    }
+  });
+
+  assert.equal(execution.status, 'webgpu-accepted-no-full-readback');
+  assert.equal(execution.result.schroederLawQueueStatus, 'schroeder-reaction-law-queue-ready');
+  assert.equal(execution.result.schroederLawQueueConsumerStatus, 'schroeder-reaction-law-queue-consumed');
+  assert.equal(execution.result.schroederLawQueueBufferConsumed, true);
+  assert.equal(execution.result.reactionProposalNeighborMode, 'schroeder-law-queue-gated-fixed-capacity-particle-bin-grid');
 });
 
 test('SPH reaction parity rejects reaction output drift', () => {

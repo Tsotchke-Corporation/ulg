@@ -34864,3 +34864,37 @@ Next:
 
 - Keep sorted/radix escalation diagnostic-driven for small scenes.
 - Start SS render LOD and PeerCompute portable summary work.
+
+## 2026-07-01 AKDT - SS Portable Render LOD Summary
+
+Status:
+
+- Added `schroeder-portable-summary` ABI schemas and a descriptor-only portable
+  summary builder over retained SS level, active-node, index, law, aggregate,
+  conservation, and phase-volume diagnostic artifacts.
+- The portable summary includes a `schroeder-render-lod-summary` payload with
+  active leaf proxy counts, aggregate proxy counts, law queue proxy counts,
+  native hierarchy spacing, geometry policy, and closure-derived optics policy.
+- Same-level mechanics can now opt into `enablePortableSummary`, forward the
+  full descriptor to the resident backend as `schroederPortableSummary`, and
+  return compact render LOD status/counts without raw `GPUBuffer` transfer.
+- The contract is explicitly PeerCompute-safe: descriptor-only by default,
+  presentation consumes render LOD summaries rather than physics state, and
+  StateManager admission is still required before authoritative remote replay.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `66/66` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs` with `94/94` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `858` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Consume SS portable render LOD summaries in the scene/render ownership path
+  without moving presentation into physics ownership.
+- Add PeerCompute/StateManager admission metadata for compact SS summaries,
+  using descriptors, seeds, or explicit snapshots rather than raw GPU handles.

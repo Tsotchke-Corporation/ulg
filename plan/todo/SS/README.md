@@ -127,9 +127,17 @@ Landed checkpoints:
 37. `43b6809` carries retained Schroeder level and active-node filters into
     one-submit fused MLS-MPM resident sequences, including thermal sidecar
     direct-runner mechanics, without borrowing-buffer cleanup regressions.
+38. `ba87e41` adds descriptor-only SS portable summaries and render LOD payloads
+    over retained level, active-node, law, aggregate, conservation, and
+    phase-volume artifacts, then forwards them through same-level mechanics
+    without raw `GPUBuffer` transfer or full particle readback.
 
 Next implementation queue:
 
-1. Keep the bucket index as the small-scene/default first GPU index and use
+1. Consume SS portable render LOD summaries in the presentation/scene path
+   without reintroducing overlay-owned physics cadence or raw `GPUBuffer`
+   handoff.
+2. Publish/admit compact SS portable summaries through PeerCompute/StateManager
+   boundaries as descriptors, seeds, or snapshots depending on use case.
+3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.
-2. Add render LOD and PeerCompute portable SS summaries.

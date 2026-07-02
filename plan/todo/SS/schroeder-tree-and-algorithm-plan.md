@@ -304,22 +304,27 @@ Suggested schemas:
 
 ### Slice 8: Render And Distribution
 
+- Status: descriptor-only portable SS summary planning and same-level mechanics
+  forwarding landed in `ba87e41`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
 
 ## Current Implementation Queue
 
-1. Law work queues:
+1. Render and distribution:
+   - consume portable `schroeder-render-lod-summary` descriptors in the scene
+     and render ownership paths without making presentation the physics owner;
+   - map active-node leaves and coherent aggregate nodes into render sources
+     while keeping optical/PBR data closure-derived;
+   - publish compact SS summaries across PeerCompute/StateManager boundaries as
+     descriptors, seeds, or snapshots rather than raw browser `GPUBuffer`
+     handles.
+2. Law work queues:
    - keep compact traversal diagnostics as the escalation input rather than
      making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
-2. Active-node mechanics consumption:
-   - direct retained active-node filtering is now landed for fused single-step
-     and one-submit fused multi-step P2G/G2P mechanics;
-   - keep fused no-full active-grid behavior readback-free and avoid
-     presentation-owned physics cadence.
 3. Phase-volume migration:
    - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
@@ -365,12 +370,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS sorted/radix active-node indexing**:
+The next code slice on `SS` is **SS portable summary consumption and admission**:
 
-1. Add a retained GPU active-node ordering/index artifact that can serve
-   law-neighbor traversal without bounded bucket overflow.
-2. Keep the first implementation GPU-first and no-full-readback; use compact
-   summaries/counters, not a CPU mirror tree.
-3. Wire policy-selected sorted/radix mode into law-neighbor traversal only when
-   the retained sorted/radix artifact exists and validates its schema/status.
-4. Keep the existing bucket index as the default small-scene path.
+1. Thread `schroederPortableSummary`/`renderLod` into the scene/render ownership
+   path as the presentation-facing SS source contract.
+2. Keep the handoff descriptor-only by default; do not move raw browser
+   `GPUBuffer` handles across PeerCompute or worker ownership boundaries.
+3. Add StateManager/PeerCompute admission metadata for compact SS summaries so
+   remote peers can replay from descriptors, seeds, or explicit snapshots.
+4. Preserve the default no-full-readback hot path and use compact summaries only
+   where an observing or admission boundary actually needs them.

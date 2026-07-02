@@ -271,7 +271,7 @@ Suggested schemas:
   anchor index landed in `6e7f5dc` as an opt-in GPU-resident orchestration
   artifact. Law-neighbor traversal consumes that retained index with exact
   full-scan fallback in `1aa16a4`. Compact retained traversal diagnostics
-  landed in `255a67d`.
+  landed in `255a67d`. Traversal policy/status escalation landed in `1ce29da`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
@@ -284,7 +284,10 @@ Suggested schemas:
   scan, so the index is consumed without becoming a correctness bottleneck.
   Traversal diagnostics now count bucket attempts/hits, exact fallback scans,
   inactive rows, bucket pressure, and source-span writes; compact readback is
-  opt-in and the default hot path remains no-full-readback.
+  opt-in and the default hot path remains no-full-readback. The policy layer
+  now reports the actually applied traversal mode separately from the
+  recommended sorted/radix mode, so sorted/radix remains explicit until the real
+  index kernel exists.
   Pressure/interface contact-kinematics still needs a spatial/interface index
   rather than only a source-particle span.
 
@@ -304,10 +307,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - use compact traversal diagnostics to decide whether the retained bucket
-     index is enough for current law queues;
-   - replace the bucket index with sorted/radix SS tree indexing when
-     diagnostics make it necessary;
+   - implement the sorted/radix active-node index selected by traversal policy;
+   - keep compact traversal diagnostics as the escalation input rather than
+     making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -362,12 +364,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS traversal policy escalation**:
+The next code slice on `SS` is **SS sorted/radix active-node indexing**:
 
-1. Preserve retained bucketed active-node traversal as the first GPU index.
-2. Use compact diagnostic counters to surface bucket pressure and exact
-   fallback pressure without full particle readback.
-3. Add the smallest retained policy/status layer that can choose sorted/radix
-   active-node indexing only when diagnostics or configured use case require it.
-4. Keep all new outputs GPU-resident, no-full-readback by default, and
-   StateManager-admission-aware.
+1. Add a retained GPU active-node ordering/index artifact that can serve
+   law-neighbor traversal without bounded bucket overflow.
+2. Keep the first implementation GPU-first and no-full-readback; use compact
+   summaries/counters, not a CPU mirror tree.
+3. Wire policy-selected sorted/radix mode into law-neighbor traversal only when
+   the retained sorted/radix artifact exists and validates its schema/status.
+4. Keep the existing bucket index as the default small-scene path.

@@ -34735,3 +34735,36 @@ Next:
   indexing should be selected for the use case.
 - Continue active-node mechanics filtering into fused multi-step sequence paths
   once traversal policy is represented.
+
+## 2026-07-01 AKDT - SS Traversal Policy Escalation
+
+Status:
+
+- Added a law-neighbor traversal policy evaluator that decodes compact
+  diagnostic counters and reports bucket hit, exact fallback, and bucket
+  pressure ratios.
+- The policy now separates applied traversal (`exact-active-node-scan` or
+  `bucketed-active-node-index`) from recommended traversal
+  (`sorted-radix-active-node-index`) so the runtime does not pretend sorted/radix
+  exists before the real GPU index lands.
+- Same-level mechanics can configure law-neighbor compact diagnostic readback
+  and traversal-policy thresholds independently of the main mechanics
+  readback mode.
+- Same-level summaries now surface traversal policy status, sorted/radix
+  requirement, diagnostic availability, and retained diagnostic buffer state.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `53/53` passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs` with `118/118` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `844` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Implement the retained sorted/radix active-node index path selected by
+  traversal policy, without adding CPU tree ceremony or full particle readback.
+- Preserve the bucket index as the small-scene/default path until diagnostics or
+  PeerCompute use-case config requires sorted/radix.

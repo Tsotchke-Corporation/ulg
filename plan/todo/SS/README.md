@@ -114,14 +114,17 @@ Landed checkpoints:
 33. `255a67d` adds retained law-neighbor traversal diagnostic counters for
     bucket attempts/hits, exact fallback scans, inactive rows, bucket pressure,
     and source-span writes, plus an optional compact diagnostics readback mode.
+34. `1ce29da` adds a traversal policy/status layer that decodes compact
+    diagnostics, separates applied bucket/exact traversal from recommended
+    sorted/radix traversal, and lets same-level use cases configure compact
+    law-neighbor diagnostics separately from mechanics readback.
 
 Next implementation queue:
 
-1. Use traversal diagnostics to decide whether bucketed active-node indexing is
-   sufficient for the current law queues or whether sorted/radix indexing is
-   required.
-2. Replace the bucket index with sorted/radix SS tree indexing if those counters
-   show it is the next bottleneck.
+1. Implement the actual sorted/radix active-node index path selected by
+   traversal policy; do not leave it as a policy-only placeholder.
+2. Keep the bucket index as the small-scene/default first GPU index and use
+   compact diagnostics to escalate only when configured or justified.
 3. Extend active-node mechanics filtering to the fused multi-step sequence when
    SS schedules multi-level batches through that path.
 4. Add render LOD and PeerCompute portable SS summaries.

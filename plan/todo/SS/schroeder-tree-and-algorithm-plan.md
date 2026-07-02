@@ -309,7 +309,9 @@ Suggested schemas:
   StateManager-admitted read-only radiation/plasma/gas-summary consumer rows
   landed in `4a586fc`; compact diagnostics over those law-consumer rows landed
   in `35779c2`; explicit far-field consumer authority policy landed in
-  `794e4aa`.
+  `794e4aa`; admitted gas-pressure state-delta rows landed in `b3f62cf`;
+  retained pressure-interface gas-cell row materialization landed in
+  `8d87b5b`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -333,8 +335,11 @@ Suggested schemas:
   state-delta path: retained rows carry gas density, pressure, represented
   volume, pressure-work proxy, authority/admission status, and pressure import
   intent through same-level, resident, and portable descriptor paths without
-  full particle readback. These rows are admitted state-delta descriptors; they
-  are not yet materialized into pressure-interface gas-cell rows.
+  full particle readback. `8d87b5b` materializes those admitted rows into
+  retained pressure-interface gas-cell rows using far-force summary centers,
+  forwards the retained gas-pressure-cell descriptor through same-level,
+  resident, and portable summary paths, and leaves CPU gas-cell snapshots as
+  explicit diagnostic/import materialization rather than the hot-path bridge.
 
 ### Slice 8: Render And Distribution
 
@@ -368,8 +373,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - materialize admitted far-aggregate gas state-delta rows into retained
-     pressure-interface gas-cell rows through the existing gas-cell import path;
+   - consume or publish retained SS gas-cell rows through the pressure-interface
+     gas-cell import path without making CPU snapshots the default bridge;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -428,11 +433,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **far-field gas state-delta materialization**:
+The next code slice on `SS` is **retained SS gas-cell pressure-interface
+consumption**:
 
-1. Consume admitted `schroeder-far-aggregate-gas-state-delta` rows and produce
-   retained `SPH_GAS_PRESSURE_CELL_FLOATS`-compatible gas-cell rows for the
-   `gas-pressure` state family.
+1. Consume or publish admitted `schroeder-far-aggregate-gas-cell-import` rows as
+   retained pressure-interface gas-cell input for the `gas-pressure` state
+   family.
 2. Preserve the boundary between far aggregate gas pressure summaries and
    exact-near-field pressure/interface contact work.
 3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;

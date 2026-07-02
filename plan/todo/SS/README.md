@@ -252,12 +252,18 @@ Landed checkpoints:
     policy, emits retained density/pressure/work proxy deltas for the
     `gas-pressure` state family, forwards descriptor-only refs through
     same-level/resident paths, and keeps full particle readback disabled.
+64. `8d87b5b` materializes admitted far-aggregate gas state-delta rows into
+    retained pressure-interface gas-cell rows. The pass writes
+    `SPH_GAS_PRESSURE_CELL_FLOATS`-compatible rows from retained gas deltas and
+    force-summary centers, forwards descriptor-only refs through same-level,
+    resident, and portable summary paths, and keeps CPU gas-cell snapshots out
+    of the default hot path.
 
 Next implementation queue:
 
-1. Continue Slice 7 by materializing admitted far-aggregate gas state-delta
-   rows into retained pressure-interface gas-cell rows, with admission and
-   conservation metadata carried through the existing gas-cell import path.
+1. Continue Slice 7 by consuming or publishing retained SS gas-cell rows through
+   the pressure-interface gas-cell import path without making CPU snapshots the
+   default bridge.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

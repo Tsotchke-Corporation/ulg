@@ -4548,6 +4548,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     readbackMode,
     schroederLevelAssignment: resolvedLevelAssignment,
     schroederSelectedLevel: plan.selectedLevel,
+    schroederActiveNodeList: resolvedActiveNodeList,
     schroederLawQueue: resolvedLawQueue,
     schroederLawNeighborCandidates: resolvedLawNeighborCandidates,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
@@ -4761,7 +4762,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     residentStepSchema: residentStep?.schema ?? null,
     mechanicsGridSpacingM: plan.nativeGridSpacingM,
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
-    activeNodeConsumerStatus: 'planned-not-yet-consumed-by-mls-mpm-kernels',
+    activeNodeConsumerStatus: 'active-node-list-forwarded-to-mls-mpm-p2g-g2p',
     lawQueueStatus: resolvedLawQueue?.status ?? 'disabled-local-law-queue',
     lawQueueConsumerStatus: resolvedLawQueue
       ? (resolvedLawNeighborCandidates

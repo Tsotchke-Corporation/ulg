@@ -1974,6 +1974,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       gridSpacingM: options.gridSpacingM,
       readbackMode: options.readbackMode,
       schroederSelectedLevel: options.schroederSelectedLevel,
+      hasActiveNodeList: Boolean(options.schroederActiveNodeList),
       hasLawQueue: Boolean(options.schroederLawQueue),
       hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates),
       hasCrossLevelCoupling: Boolean(options.schroederCrossLevelCoupling),
@@ -2039,6 +2040,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeMigration, null);
+  assert.equal(result.residentStep.hasActiveNodeList, true);
   assert.equal(result.residentStep.hasLawQueue, true);
   assert.equal(result.residentStep.hasLawNeighborCandidates, true);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
@@ -2051,7 +2053,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.residentStep.hasPhaseVolumeMigration, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
-  assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
+  assert.equal(result.activeNodeConsumerStatus, 'active-node-list-forwarded-to-mls-mpm-p2g-g2p');
   assert.equal(
     result.crossLevelCouplingStatus,
     'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'

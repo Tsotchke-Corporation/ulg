@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Admitted Far-Aggregate Force Application
+
+Status:
+
+- Added `peercompute.ulg.schroeder-far-aggregate-force-application.v0`,
+  execution, and admission schemas with a 32-float retained delta-row layout.
+- Added a GPU-first WebGPU force-application pass that consumes retained
+  far-force summaries plus SPH particle mass state, requires explicit
+  StateManager admission, and emits velocity/momentum/energy delta rows without
+  mutating particle state directly.
+- Same-level SS orchestration now runs the admitted force-application pass after
+  compact far-force diagnostics, forwards the retained delta buffer to resident
+  mechanics, exposes descriptor-only portable refs, and keeps the default
+  application path no-full-readback.
+- The pass stays fail-closed: no admission means no dispatch and no retained
+  mutation buffer.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `77/77`
+  passing.
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `30/30` passing.
+
+Next:
+
+- Fuse admitted far-force delta rows into the resident mechanics/StateManager
+  mutation path, then add law-specific radiation, plasma, and gas-summary
+  consumers behind the same admission/error-bound contract.
+
 ## 2026-07-01 AKDT - SS Far-Aggregate Diagnostic Summaries
 
 Status:

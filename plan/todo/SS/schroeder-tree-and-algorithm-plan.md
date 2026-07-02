@@ -303,20 +303,23 @@ Suggested schemas:
   runner, same-level orchestration forwarding, and descriptor-only portable
   summary propagation landed in `0fee1ef`; retained read-only far-aggregate
   force-summary rows landed in `0773c25`; compact far-aggregate diagnostic
-  summaries over those force rows landed in `70e21ce`.
+  summaries over those force rows landed in `70e21ce`; StateManager-admitted
+  retained far-force application delta rows landed in `f91259b`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
 - Do not use aggregate traversal for local incompressibility or reactions.
 - Current caveat: `0fee1ef` emits read-only aggregate-admissible candidate
-  descriptors from active nodes and retained hierarchy aggregate nodes. It does
-  not yet apply a law-specific force, radiation, plasma, or gas-summary update.
+  descriptors from active nodes and retained hierarchy aggregate nodes.
   `0773c25` adds the first read-only gravity-like acceleration/potential
   summary over those candidate rows with explicit error-bound telemetry.
   `70e21ce` adds a compact diagnostic reducer for active/empty sources,
   overflow, blocked work, opening-ratio pressure, error-bound pressure, max
-  acceleration/potential, and readback-free descriptor propagation. Any future
-  force application remains a separate StateManager-admitted mutation.
+  acceleration/potential, and readback-free descriptor propagation. `f91259b`
+  adds the first admitted application stage, but it still emits retained delta
+  rows for downstream resident/StateManager consumption rather than directly
+  mutating particle buffers. Radiation, plasma/electromagnetic approximation,
+  and gas-summary consumers remain future law-specific adapters.
 
 ### Slice 8: Render And Distribution
 
@@ -350,9 +353,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - define the StateManager-admitted far-force application path using compact
-     diagnostic pressure, explicit conservation/energy policy, and an
-     authoritative retained mutation target;
+   - fuse admitted far-force application delta rows into resident
+     mechanics/StateManager mutation while preserving compact diagnostic
+     pressure, explicit conservation/energy policy, and fail-closed admission;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - later add radiation, plasma/electromagnetic approximation, and gas-summary
@@ -411,10 +414,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS todo rescan and next architecture slice
-selection**:
+The next code slice on `SS` is **admitted far-force delta fusion**:
 
-1. Re-scan `plan/todo/SS` and retained legacy todo sources for the next
-   unlanded slice.
-2. Prefer GPU-first SS work that advances live behavior or PeerCompute
-   boundaries over adding more diagnostic-only scaffolding.
+1. Bind `schroederFarAggregateForceApplication` rows into resident mechanics or
+   the StateManager mutation merge path as an authoritative admitted delta
+   source.
+2. Preserve the current fail-closed behavior: summaries and diagnostics may be
+   read-only, but state mutation requires explicit admission and retained delta
+   rows.
+3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;
+   do not introduce full particle readback as the validation path.

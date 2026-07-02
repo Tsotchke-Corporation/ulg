@@ -223,14 +223,18 @@ Landed checkpoints:
     blocked work, opening-ratio pressure, error-bound pressure, max
     acceleration/potential, and descriptor-only portable refs with compact
     summary readback only and no state mutation.
+58. `f91259b` adds StateManager-admitted retained far-force application rows.
+    The pass consumes retained far-force summaries and SPH particle mass state,
+    emits velocity/momentum/energy delta rows only after admission, forwards the
+    retained delta buffer into same-level resident mechanics, and publishes
+    descriptor-only portable refs without full particle readback.
 
 Next implementation queue:
 
-1. Continue Slice 7 by defining the StateManager-admitted far-force application
-   contract: conservation/energy policy, admission inputs from compact
-   diagnostics, and an explicit mutation target.
+1. Continue Slice 7 by fusing admitted far-force application delta rows into the
+   resident mechanics/StateManager mutation path.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
-3. Keep render/distribution descriptor-only and avoid full particle readback
-   while far-field candidates, force summaries, and diagnostics become
-   replayable PeerCompute artifacts.
+3. Add radiation, plasma/electromagnetic approximation, and gas-summary
+   consumers only behind explicit law admissibility, compact diagnostics, and
+   StateManager admission.

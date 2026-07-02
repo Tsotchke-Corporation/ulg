@@ -559,12 +559,24 @@ Completed in this slice:
    forwarding, and status telemetry. Slot indices intentionally remain
    sentinel values until a concrete free-list/compaction pass assigns them.
 
-The next code slice on `SS` is **SS particle-storage free-list assignment**:
+Completed in this slice:
 
-1. Consume admitted particle-storage allocation rows and a retained free-list
-   descriptor to assign concrete target/free slot ranges on GPU.
-2. Preserve fail-closed StateManager admission before writing any
-   particle-state, mechanics, or thermo buffer contents.
+1. Added `peercompute.ulg.schroeder-particle-storage-free-list.v0`,
+   `peercompute.ulg.schroeder-particle-storage-slot-assignment-admission.v0`,
+   `peercompute.ulg.schroeder-particle-storage-slot-assignment.v0`, and
+   retained GPU `schroeder-particle-storage-slot-assignment` rows.
+2. Added a retained free-list descriptor and a StateManager-admitted
+   slot-assignment producer that consumes allocation-intent rows and assigns
+   concrete target/free slot ranges on GPU without default particle readback.
+3. Threaded slot-assignment execution through same-level SS mechanics and
+   resident-step forwarding while keeping particle buffer writes deferred.
+
+The next code slice on `SS` is **SS admitted particle-buffer materialization**:
+
+1. Consume admitted slot-assignment rows and write target particle-state,
+   mechanics, and thermo rows into retained GPU buffers.
+2. Preserve fail-closed StateManager admission and conservation metadata before
+   replacing or freeing source slots.
 3. Preserve the URL-scheduled H2O steam proof: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent

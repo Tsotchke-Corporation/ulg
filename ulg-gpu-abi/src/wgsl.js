@@ -12253,6 +12253,135 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederParticleStorageSlotAssignmentWgsl = `
+struct SchroederParticleStorageSlotAssignmentParams {
+  allocation_row_count: u32,
+  allocation_stride: u32,
+  free_list_stride: u32,
+  assignment_stride: u32,
+  admission_approved: u32,
+  flags: u32,
+  assignment_epoch: f32,
+  state_family_id: f32,
+  target_state_family_mask: f32,
+  max_slots_per_row: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> allocation_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> free_list_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> assignment_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederParticleStorageSlotAssignmentParams;
+
+const SCHROEDER_PSSA_ALLOCATION_STRIDE: u32 = 32u;
+const SCHROEDER_PSSA_FREE_LIST_STRIDE: u32 = 8u;
+const SCHROEDER_PSSA_ASSIGNMENT_STRIDE: u32 = 32u;
+
+fn ss_pssa_active_allocation(allocation_offset: u32) -> bool {
+  let status = allocation_rows[allocation_offset + 3u];
+  let allocation_admission = allocation_rows[allocation_offset + 6u];
+  return status > 0.0 && status < 32.0 && allocation_admission > 0.0 && params.admission_approved > 0u;
+}
+
+fn ss_pssa_write_empty(assignment_offset: u32, allocation_offset: u32, free_list_offset: u32, status: f32) {
+  assignment_rows[assignment_offset + 0u] = allocation_rows[allocation_offset + 0u];
+  assignment_rows[assignment_offset + 1u] = allocation_rows[allocation_offset + 1u];
+  assignment_rows[assignment_offset + 2u] = allocation_rows[allocation_offset + 2u];
+  assignment_rows[assignment_offset + 3u] = status;
+  for (var column = 4u; column < SCHROEDER_PSSA_ASSIGNMENT_STRIDE; column = column + 1u) {
+    assignment_rows[assignment_offset + column] = 0.0;
+  }
+  assignment_rows[assignment_offset + 6u] = f32(params.admission_approved);
+  assignment_rows[assignment_offset + 9u] = -1.0;
+  assignment_rows[assignment_offset + 11u] = -1.0;
+  assignment_rows[assignment_offset + 13u] = free_list_rows[free_list_offset + 0u];
+  assignment_rows[assignment_offset + 14u] = free_list_rows[free_list_offset + 1u];
+  assignment_rows[assignment_offset + 15u] = free_list_rows[free_list_offset + 2u];
+  assignment_rows[assignment_offset + 29u] = params.assignment_epoch;
+  assignment_rows[assignment_offset + 30u] = params.target_state_family_mask;
+  assignment_rows[assignment_offset + 31u] = params.state_family_id;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.allocation_row_count) {
+    return;
+  }
+
+  let allocation_stride = max(params.allocation_stride, SCHROEDER_PSSA_ALLOCATION_STRIDE);
+  let free_list_stride = max(params.free_list_stride, SCHROEDER_PSSA_FREE_LIST_STRIDE);
+  let assignment_stride = max(params.assignment_stride, SCHROEDER_PSSA_ASSIGNMENT_STRIDE);
+  let allocation_offset = row_index * allocation_stride;
+  let free_list_offset = 0u * free_list_stride;
+  let assignment_offset = row_index * assignment_stride;
+
+  if (!ss_pssa_active_allocation(allocation_offset)) {
+    ss_pssa_write_empty(assignment_offset, allocation_offset, free_list_offset, 32.0);
+    return;
+  }
+
+  let base_slot = free_list_rows[free_list_offset + 0u];
+  let slot_capacity = free_list_rows[free_list_offset + 1u];
+  let available_slot_count = free_list_rows[free_list_offset + 2u];
+  let descriptor_max_slots = max(free_list_rows[free_list_offset + 3u], 1.0);
+  let max_slots_per_row = max(max(params.max_slots_per_row, descriptor_max_slots), 1.0);
+  let target_count = allocation_rows[allocation_offset + 10u];
+  let free_count = allocation_rows[allocation_offset + 12u];
+  let allocation_capacity_residual = allocation_rows[allocation_offset + 15u];
+  let row_slot_start = base_slot + f32(row_index) * max_slots_per_row;
+  let target_slot_residual = max((row_slot_start + target_count) - (base_slot + slot_capacity), 0.0);
+  let available_slot_residual = max(target_count - available_slot_count, 0.0);
+  let target_start = select(-1.0, row_slot_start, target_count > 0.0 && target_slot_residual <= 0.0);
+  let free_start = select(-1.0, allocation_rows[allocation_offset + 0u], free_count > 0.0);
+
+  var status = 1.0 + 8.0;
+  if (target_count > 0.0 && target_start >= 0.0) {
+    status = status + 2.0;
+  }
+  if (free_count > 0.0 && free_start >= 0.0) {
+    status = status + 4.0;
+  }
+  if (target_slot_residual > 0.0 || available_slot_residual > 0.0 || allocation_capacity_residual > 0.0) {
+    status = status + 16.0;
+  }
+
+  assignment_rows[assignment_offset + 0u] = allocation_rows[allocation_offset + 0u];
+  assignment_rows[assignment_offset + 1u] = allocation_rows[allocation_offset + 1u];
+  assignment_rows[assignment_offset + 2u] = allocation_rows[allocation_offset + 2u];
+  assignment_rows[assignment_offset + 3u] = status;
+  assignment_rows[assignment_offset + 4u] = 1.0;
+  assignment_rows[assignment_offset + 5u] = allocation_rows[allocation_offset + 4u];
+  assignment_rows[assignment_offset + 6u] = f32(params.admission_approved);
+  assignment_rows[assignment_offset + 7u] = allocation_rows[allocation_offset + 7u];
+  assignment_rows[assignment_offset + 8u] = allocation_rows[allocation_offset + 8u];
+  assignment_rows[assignment_offset + 9u] = target_start;
+  assignment_rows[assignment_offset + 10u] = target_count;
+  assignment_rows[assignment_offset + 11u] = free_start;
+  assignment_rows[assignment_offset + 12u] = free_count;
+  assignment_rows[assignment_offset + 13u] = base_slot;
+  assignment_rows[assignment_offset + 14u] = slot_capacity;
+  assignment_rows[assignment_offset + 15u] = available_slot_count;
+  assignment_rows[assignment_offset + 16u] = allocation_capacity_residual;
+  assignment_rows[assignment_offset + 17u] = max(target_slot_residual, available_slot_residual);
+  assignment_rows[assignment_offset + 18u] = allocation_rows[allocation_offset + 16u];
+  assignment_rows[assignment_offset + 19u] = allocation_rows[allocation_offset + 17u];
+  assignment_rows[assignment_offset + 20u] = allocation_rows[allocation_offset + 18u];
+  assignment_rows[assignment_offset + 21u] = allocation_rows[allocation_offset + 19u];
+  assignment_rows[assignment_offset + 22u] = allocation_rows[allocation_offset + 20u];
+  assignment_rows[assignment_offset + 23u] = allocation_rows[allocation_offset + 21u];
+  assignment_rows[assignment_offset + 24u] = allocation_rows[allocation_offset + 22u];
+  assignment_rows[assignment_offset + 25u] = allocation_rows[allocation_offset + 23u];
+  assignment_rows[assignment_offset + 26u] = allocation_rows[allocation_offset + 24u];
+  assignment_rows[assignment_offset + 27u] = allocation_rows[allocation_offset + 25u];
+  assignment_rows[assignment_offset + 28u] = allocation_rows[allocation_offset + 28u];
+  assignment_rows[assignment_offset + 29u] = params.assignment_epoch;
+  assignment_rows[assignment_offset + 30u] = params.target_state_family_mask;
+  assignment_rows[assignment_offset + 31u] = params.state_family_id;
+}
+`;
+
 export const schroederPhaseVolumeLevelUpdateWgsl = `
 struct SchroederPhaseVolumeLevelUpdateParams {
   migration_row_count: u32,

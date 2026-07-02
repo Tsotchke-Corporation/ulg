@@ -136,6 +136,14 @@ export const ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_SCHEMA =
   'peercompute.ulg.schroeder-particle-storage-allocation.v0';
 export const ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATION_EXECUTION_SCHEMA =
   'peercompute.ulg.schroeder-particle-storage-allocation-execution.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_FREE_LIST_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-free-list.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-slot-assignment-admission.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-slot-assignment.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-slot-assignment-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA =
@@ -1479,6 +1487,50 @@ export const SCHROEDER_PARTICLE_STORAGE_ALLOCATION_ROW_LAYOUT = Object.freeze([
   'aggregateMatchingContributionCount:f32',
   'chartId:f32',
   'allocatorEpoch:f32',
+  'targetStateFamilyMask:f32',
+  'stateFamilyId:f32'
+]);
+export const SCHROEDER_PARTICLE_STORAGE_FREE_LIST_ROW_LAYOUT = Object.freeze([
+  'baseSlotIndex:f32',
+  'slotCapacity:f32',
+  'availableSlotCount:f32',
+  'maxSlotsPerRow:f32',
+  'committedEpoch:f32',
+  'targetStateFamilyMask:f32',
+  'status:f32',
+  'pad0:f32'
+]);
+export const SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'targetLevelId:f32',
+  'status:f32',
+  'assignmentModeId:f32',
+  'allocationModeId:f32',
+  'admissionApproved:f32',
+  'particleCountDelta:f32',
+  'sourceSlotActionId:f32',
+  'assignedTargetSlotStartIndex:f32',
+  'assignedTargetSlotCount:f32',
+  'assignedFreeSlotStartIndex:f32',
+  'assignedFreeSlotCount:f32',
+  'freeListBaseSlotIndex:f32',
+  'freeListCapacity:f32',
+  'freeListAvailableCount:f32',
+  'allocationCapacityResidual:f32',
+  'targetSlotCapacityResidual:f32',
+  'sourceMassDeltaKg:f32',
+  'targetMassKg:f32',
+  'massResidualKg:f32',
+  'sourceVolumeDeltaM3:f32',
+  'targetRepresentedVolumeM3:f32',
+  'volumeResidualM3:f32',
+  'momentumDeltaXKgMPerS:f32',
+  'momentumDeltaYKgMPerS:f32',
+  'momentumDeltaZKgMPerS:f32',
+  'internalEnergyDeltaJ:f32',
+  'chartId:f32',
+  'assignmentEpoch:f32',
   'targetStateFamilyMask:f32',
   'stateFamilyId:f32'
 ]);

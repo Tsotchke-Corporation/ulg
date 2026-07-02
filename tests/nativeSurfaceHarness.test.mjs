@@ -515,6 +515,53 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.doesNotMatch(workerSource, /ImageBitmap|readPixels|toDataURL|toBlob/);
 });
 
+test('SS adopted particle storage publishes descriptor-only scene records and feeds mounted stage chains', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+  const mountSource = readRepoFile('src/visualization/sphPhaseDemoMount.js');
+  const mlsMpmSource = readRepoFile('src/runtime/sph/sphMlsMpmGpuStep.js');
+
+  assert.match(
+    mlsMpmSource,
+    /export function createSchroederAdoptedParticleStorageDescriptorFromStep/,
+    'scene-local SS executions should reuse the same adopted-storage descriptor builder as ComputeManager tasks'
+  );
+  assert.match(
+    sceneSource,
+    /publishSchroederAdoptedParticleStorageDescriptor/,
+    'scene resident executions should publish adopted particle-storage descriptors through the resident host'
+  );
+  assert.match(
+    sceneSource,
+    /sphParticleUpload: execution\.nextParticleUploads\.sphParticleUpload[\s\S]*mlsMpmParticleUpload: execution\.nextParticleUploads\.mlsMpmParticleUpload/,
+    'scene publication should register local retained particle buffers with the host resolver'
+  );
+  assert.match(
+    sceneSource,
+    /mlsMpmResidentSchroederAdoptedParticleStoragePublication/,
+    'scene diagnostics should expose the sanitized adopted-storage publication'
+  );
+  assert.match(
+    mountSource,
+    /schroederAdoptedParticleStorageContinuationHotBufferKey:[\s\S]*adoptedStorageContinuationHotBufferKey/,
+    'mounted mechanics stage chains should consume the adopted-storage hot-buffer key'
+  );
+  assert.match(
+    mountSource,
+    /schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'/,
+    'mounted mechanics stage chains should request same-device adopted-storage continuation'
+  );
+  assert.match(
+    mountSource,
+    /schroederAdoptedParticleStorageLocalResolverReady/,
+    'mounted diagnostics should report local resolver readiness'
+  );
+  assert.match(
+    mountSource,
+    /raw-transfer=\$\{Boolean\(schroederAdoptedStorage\.rawGpuBufferPeerComputeTransfer\)\}/,
+    'mounted status should prove no raw GPUBuffer PeerCompute transfer is being used'
+  );
+});
+
 test('native WebGPU surface requests retain render-field buffers by default', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 

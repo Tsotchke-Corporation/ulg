@@ -5285,6 +5285,77 @@ export async function mountSphPhaseDemoOverlay({
     };
   }
 
+  function currentSchroederAdoptedParticleStoragePublication(sourceExecution = null) {
+    const sceneUserData = scene?.scene?.userData || scene?.userData || {};
+    return sourceExecution?.schroederAdoptedParticleStoragePublication
+      || sourceExecution?.finalStep?.schroederAdoptedParticleStoragePublication
+      || sceneUserData.mlsMpmResidentSchroederAdoptedParticleStoragePublication
+      || sceneUserData.schroederAdoptedParticleStoragePublication
+      || overlay.__sphSchroederAdoptedParticleStoragePublication
+      || null;
+  }
+
+  function schroederAdoptedParticleStorageTelemetry(sourceExecution = null, chain = null) {
+    const publication = currentSchroederAdoptedParticleStoragePublication(sourceExecution);
+    const hotBufferKey =
+      publication?.hotBufferKey
+      || sourceExecution?.schroederAdoptedParticleStorageContinuationHotBufferKey
+      || sourceExecution?.finalStep?.schroederAdoptedParticleStorageContinuationHotBufferKey
+      || null;
+    const localResolverReady =
+      publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady === true
+      || publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolver?.ready === true;
+    const localResolver =
+      publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolver || null;
+    const telemetry = {
+      schema: 'peercompute.ulg.sph-demo-schroeder-adopted-particle-storage-telemetry.v0',
+      status: publication?.status || 'schroeder-adopted-particle-storage-publication-pending',
+      publicationAvailable: Boolean(publication),
+      publicationStatus: publication?.status || null,
+      publicationReason: publication?.reason || null,
+      publicationHotBufferKey: hotBufferKey,
+      descriptorStatus:
+        publication?.descriptorStatus
+        || publication?.schroederAdoptedParticleStorageDescriptor?.status
+        || null,
+      descriptorReady:
+        publication?.descriptorReady === true
+        || publication?.schroederAdoptedParticleStorageDescriptor?.ready === true,
+      adopted:
+        publication?.adopted === true
+        || publication?.schroederAdoptedParticleStorageDescriptor?.adopted === true,
+      localResolverStatus:
+        publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus
+        || publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolver?.status
+        || null,
+      localResolverReady,
+      localResolverResolvedRefCount:
+        publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount
+        ?? localResolver?.resolvedRetainedBufferRefCount
+        ?? 0,
+      continuationRequested: Boolean(hotBufferKey && localResolverReady),
+      continuationScheduleStatus:
+        chain?.schroederAdoptedParticleStorageContinuationScheduleStatus || null,
+      continuationSourceHotBufferKey:
+        chain?.schroederAdoptedParticleStorageContinuationSourceHotBufferKey || null,
+      stageLocalResolverStatus:
+        chain?.schroederAdoptedParticleStorageLocalResolverStatus || null,
+      stageLocalResolverReady:
+        chain?.schroederAdoptedParticleStorageLocalResolverReady === true,
+      rawGpuBufferPeerComputeTransfer:
+        publication?.rawGpuBufferTransferDetected === true
+        || publication?.rawGpuBufferPeerComputeTransfer === true
+        || chain?.schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer === true,
+      updatedAtMs: performance.now()
+    };
+    overlay.__sphSchroederAdoptedParticleStoragePublication = publication;
+    overlay.__sphSchroederAdoptedParticleStorage = telemetry;
+    if (scene?.scene?.userData) {
+      scene.scene.userData.sphSchroederAdoptedParticleStorage = telemetry;
+    }
+    return telemetry;
+  }
+
   function disposeMountedMechanicsStageWorkerRunner(reason = 'dispose') {
     try {
       mountedMechanicsStageWorkerRunner?.dispose?.();
@@ -5348,6 +5419,8 @@ export async function mountSphPhaseDemoOverlay({
       || runtime?.residentAuthorityHost
       || globalThis.__ulgResidentAuthorityHost
       || null;
+    const adoptedStoragePendingTelemetry =
+      schroederAdoptedParticleStorageTelemetry(sourceExecution);
     const sequence = mountedMechanicsStageWorkerLaneSequence + 1;
     mountedMechanicsStageWorkerLaneSequence = sequence;
     publishMountedMechanicsStageWorkerLane('worker-stage-lane-pending', {
@@ -5356,6 +5429,14 @@ export async function mountSphPhaseDemoOverlay({
       generation,
       sequence,
       workerCapabilityStatus: resolvedHost?.workerCapability?.status || null,
+      schroederAdoptedParticleStoragePublicationStatus:
+        adoptedStoragePendingTelemetry.publicationStatus,
+      schroederAdoptedParticleStoragePublicationHotBufferKey:
+        adoptedStoragePendingTelemetry.publicationHotBufferKey,
+      schroederAdoptedParticleStorageLocalResolverReady:
+        adoptedStoragePendingTelemetry.localResolverReady,
+      schroederAdoptedParticleStorageContinuationRequested:
+        adoptedStoragePendingTelemetry.continuationRequested,
       ...mountedPressureInterfaceGasCellImportTelemetry()
     });
     pendingMountedMechanicsStageWorkerLanePromise = (async () => {
@@ -5417,6 +5498,12 @@ export async function mountSphPhaseDemoOverlay({
             || null
           )
         : null;
+      const adoptedStorageBeforeStage =
+        schroederAdoptedParticleStorageTelemetry(sourceExecution);
+      const adoptedStorageContinuationHotBufferKey =
+        adoptedStorageBeforeStage.localResolverReady
+          ? adoptedStorageBeforeStage.publicationHotBufferKey
+          : null;
       const workerRunner = mountedMechanicsStageWorkerRunnerForHost(resolvedHost, sequence);
       const pressureInterfaceGasCellFieldImportForWorkerLane =
         mountedWorkerPressureInterfaceGasCellImportDescriptor();
@@ -5475,6 +5562,13 @@ export async function mountSphPhaseDemoOverlay({
             pressureInterfaceGasCellFieldImportForWorkerLane?.pressureInterfaceGasCellFieldAdmission
               || scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission
               || null,
+          ...(adoptedStorageContinuationHotBufferKey
+            ? {
+                schroederAdoptedParticleStorageContinuationHotBufferKey:
+                  adoptedStorageContinuationHotBufferKey,
+                schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'
+              }
+            : {}),
           gpuHubResidentStageWorkerOutputPublisher: (payload) => (
             resolvedHost.publishWorkerRetainedMechanicsStageOutput({
               ...payload,
@@ -5487,6 +5581,8 @@ export async function mountSphPhaseDemoOverlay({
               : null
       });
         const chain = stageResult?.mechanicsStageTaskChain || null;
+        const adoptedStorageAfterStage =
+          schroederAdoptedParticleStorageTelemetry(sourceExecution, chain);
         const hotBufferKey = chain?.workerCompactPublicationHotBufferKey || null;
         const hotBufferRecord = hotBufferKey
           ? resolvedHost.stateManager?.getHotBuffer?.(hotBufferKey)
@@ -5575,6 +5671,30 @@ export async function mountSphPhaseDemoOverlay({
             sameDeviceRetainedBufferImportAvailable:
               sameDeviceRetainedBufferImport?.sameDevice === true && Boolean(sameDeviceSourceHotBufferKey),
             sameDeviceRetainedBufferImportSourceHotBufferKey: sameDeviceSourceHotBufferKey,
+            schroederAdoptedParticleStoragePublicationStatus:
+              adoptedStorageAfterStage.publicationStatus,
+            schroederAdoptedParticleStoragePublicationHotBufferKey:
+              adoptedStorageAfterStage.publicationHotBufferKey,
+            schroederAdoptedParticleStorageDescriptorReady:
+              adoptedStorageAfterStage.descriptorReady,
+            schroederAdoptedParticleStorageLocalResolverStatus:
+              adoptedStorageAfterStage.localResolverStatus,
+            schroederAdoptedParticleStorageLocalResolverReady:
+              adoptedStorageAfterStage.localResolverReady,
+            schroederAdoptedParticleStorageLocalResolverResolvedRefCount:
+              adoptedStorageAfterStage.localResolverResolvedRefCount,
+            schroederAdoptedParticleStorageContinuationRequested:
+              adoptedStorageAfterStage.continuationRequested,
+            schroederAdoptedParticleStorageContinuationScheduleStatus:
+              adoptedStorageAfterStage.continuationScheduleStatus,
+            schroederAdoptedParticleStorageContinuationSourceHotBufferKey:
+              adoptedStorageAfterStage.continuationSourceHotBufferKey,
+            schroederAdoptedParticleStorageStageLocalResolverStatus:
+              adoptedStorageAfterStage.stageLocalResolverStatus,
+            schroederAdoptedParticleStorageStageLocalResolverReady:
+              adoptedStorageAfterStage.stageLocalResolverReady,
+            schroederAdoptedParticleStorageRawGpuBufferPeerComputeTransfer:
+              adoptedStorageAfterStage.rawGpuBufferPeerComputeTransfer,
             ...mountedPressureInterfaceGasCellImportTelemetry(),
             mountedWorkerLaneRunnerReusedAcrossSchedules: true,
             mountedWorkerLanePressureInterfaceStageIncluded: includeMountedPressureInterfaceStage,
@@ -6092,7 +6212,12 @@ export async function mountSphPhaseDemoOverlay({
         execution
       });
       updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
-      if (initialResidentStageWorkersEnabled && !continueFromResidentState) {
+      const adoptedStorageForMountedStage =
+        schroederAdoptedParticleStorageTelemetry(execution);
+      if (
+        initialResidentStageWorkersEnabled
+        && (!continueFromResidentState || adoptedStorageForMountedStage.continuationRequested)
+      ) {
         maybeRunMountedMechanicsStageWorkerLane({
           host: residentAuthorityHostForSchedule,
           signature,
@@ -6529,6 +6654,8 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__sphResidentSurfaceDraw = null;
     overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
     overlay.__sphResidentGasPressureSummary = null;
+    overlay.__sphSchroederAdoptedParticleStorage = null;
+    overlay.__sphSchroederAdoptedParticleStoragePublication = null;
     overlay.__mlsMpmP2gGridProjection = null;
     overlay.__mlsMpmGridUpdate = null;
     overlay.__mlsMpmG2pReconstruction = null;
@@ -6584,6 +6711,8 @@ export async function mountSphPhaseDemoOverlay({
       overlay.__sphResidentPressureInterfaceStateError = null;
       overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
       overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+      overlay.__sphSchroederAdoptedParticleStorage = null;
+      overlay.__sphSchroederAdoptedParticleStoragePublication = null;
       overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
       overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
       resetResidentPerf(`${resetReason}-scene-reused`);
@@ -6631,6 +6760,8 @@ export async function mountSphPhaseDemoOverlay({
     overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
     overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+    overlay.__sphSchroederAdoptedParticleStorage = null;
+    overlay.__sphSchroederAdoptedParticleStoragePublication = null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -7198,6 +7329,7 @@ export async function mountSphPhaseDemoOverlay({
       const schroederBackendSelection = scene.getSchroederRenderProxyBackendSelection?.()
         || scene.scene?.userData?.schroederRenderProxyBackendSelection
         || null;
+      const schroederAdoptedStorage = schroederAdoptedParticleStorageTelemetry(residentSteps);
       const reactionTable = scene.getSphReactionTable?.() || overlay.__sphReactionTable || null;
       const residentRequestedReadback = residentSteps?.requestedReadbackMode
         || residentStep?.requestedReadbackMode
@@ -7255,6 +7387,7 @@ export async function mountSphPhaseDemoOverlay({
         `resident workers : ${initialResidentWorkersEnabled ? 'enabled' : 'disabled-by-url'}`,
         `resident policy  : ${residentExecutionPolicyStatus}`,
         `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
+        `ss storage      : pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
         `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
@@ -7433,6 +7566,7 @@ export async function mountSphPhaseDemoOverlay({
     const schroederBackendSelection = scene.getSchroederRenderProxyBackendSelection?.()
       || scene.scene?.userData?.schroederRenderProxyBackendSelection
       || null;
+    const schroederAdoptedStorage = schroederAdoptedParticleStorageTelemetry(residentSteps);
     const renderPressureSource = residentRenderState?.gasPressureSummarySource
       || overlay.__sphResidentGasPressureSummary?.source
       || gasPressure?.source
@@ -7484,6 +7618,7 @@ export async function mountSphPhaseDemoOverlay({
       `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
       `resident policy  : ${residentExecutionPolicyStatus}`,
       `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
+      `ss storage      : pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
       `resident backend : ${residentBackend}`,
       `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,

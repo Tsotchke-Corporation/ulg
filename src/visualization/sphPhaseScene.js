@@ -63,6 +63,8 @@ import {
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE,
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
+  createMlsMpmResidentStepGpuFenceReport,
+  createSchroederAdoptedParticleStorageDescriptorFromStep,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   normalizePressureInterfaceGasCellFieldImport,
@@ -13634,6 +13636,8 @@ export function createSphPhaseScene(container, {
     destroyPressureInterfaceForceRowsUpload();
     sphResidentRenderState = null;
     scene.userData.sphResidentRenderState = null;
+    scene.userData.mlsMpmResidentSchroederAdoptedParticleStoragePublication = null;
+    scene.userData.sphSchroederAdoptedParticleStorage = null;
     scene.userData.sphResidentReset = {
       schema: 'peercompute.ulg.sph-resident-reset.v0',
       status: 'resident-state-reset',
@@ -20556,6 +20560,40 @@ export function createSphPhaseScene(container, {
           computeManagerOwned: Boolean(computeManager)
         };
         let sameDeviceHotBufferSourcePublication = null;
+        const finalStepForAdoptedParticleStorage = execution?.finalStep || execution || null;
+        const schroederAdoptedParticleStorageDescriptor =
+          execution?.schroederAdoptedParticleStorageDescriptor
+          || execution?.finalStep?.schroederAdoptedParticleStorageDescriptor
+          || execution?.commitDelta?.payload?.schroederAdoptedParticleStorageDescriptor
+          || (
+            finalStepForAdoptedParticleStorage?.schroederParticleStorageAdoption?.adopted === true
+              ? createSchroederAdoptedParticleStorageDescriptorFromStep(
+                  finalStepForAdoptedParticleStorage,
+                  {
+                    gpuFence:
+                      execution?.gpuFence
+                      || execution?.gpuFenceReport
+                      || finalStepForAdoptedParticleStorage?.gpuFence
+                      || finalStepForAdoptedParticleStorage?.gpuFenceReport
+                      || createMlsMpmResidentStepGpuFenceReport(finalStepForAdoptedParticleStorage, {
+                        stateKey: sameDevicePublicationStatusBase.stateKey,
+                        laneId: execution?.computeManagerTask?.laneId || computeTaskLaneId || null
+                      }),
+                    stateKey: sameDevicePublicationStatusBase.stateKey,
+                    source: 'sph-scene-resident-steps-adopted-particle-storage',
+                    taskId: sameDevicePublicationStatusBase.sourceTaskId
+                  }
+                )
+              : null
+          );
+        if (schroederAdoptedParticleStorageDescriptor) {
+          execution.schroederAdoptedParticleStorageDescriptor =
+            schroederAdoptedParticleStorageDescriptor;
+          if (execution.finalStep) {
+            execution.finalStep.schroederAdoptedParticleStorageDescriptor =
+              schroederAdoptedParticleStorageDescriptor;
+          }
+        }
         if (
           typeof sameDeviceHotBufferPublisherFn === 'function'
           && computeManager
@@ -20637,6 +20675,100 @@ export function createSphPhaseScene(container, {
           if (requireSameDeviceHotBufferSourcePublication) {
             throw new Error(`ComputeManager resident-steps same-device source publication skipped: ${skipReason}`);
           }
+        }
+        const schroederAdoptedParticleStoragePublisherFn =
+          residentAuthorityHost?.publishSchroederAdoptedParticleStorageDescriptor || null;
+        const schroederAdoptedParticleStorageStatusBase = {
+          schema: 'peercompute.ulg.sph-scene-schroeder-adopted-particle-storage-publication.v0',
+          sourceStage: 'resident-steps',
+          sourceMode: sameDevicePublicationStatusBase.sourceMode,
+          stateKey:
+            schroederAdoptedParticleStorageDescriptor?.stateKey
+            || sameDevicePublicationStatusBase.stateKey
+            || null,
+          sourceTaskId: sameDevicePublicationStatusBase.sourceTaskId,
+          sourceNodeId: sameDevicePublicationStatusBase.sourceNodeId,
+          descriptorAvailable: Boolean(schroederAdoptedParticleStorageDescriptor),
+          descriptorStatus: schroederAdoptedParticleStorageDescriptor?.status || null,
+          descriptorReady: schroederAdoptedParticleStorageDescriptor?.ready === true,
+          adopted: schroederAdoptedParticleStorageDescriptor?.adopted === true,
+          uploadsReady: sameDevicePublicationUploadsReady,
+          publisherAvailable: typeof schroederAdoptedParticleStoragePublisherFn === 'function',
+          rawGpuBufferPeerComputeTransfer: false,
+          localResolverExpected: true,
+          localRetainedBufferMode: 'host-local-same-device-only'
+        };
+        let schroederAdoptedParticleStoragePublication = null;
+        if (
+          typeof schroederAdoptedParticleStoragePublisherFn === 'function'
+          && schroederAdoptedParticleStorageDescriptor?.ready === true
+          && sameDevicePublicationUploadsReady
+        ) {
+          try {
+            schroederAdoptedParticleStoragePublication =
+              schroederAdoptedParticleStoragePublisherFn.call(residentAuthorityHost || null, {
+                cacheKey: `ulg:sph-resident-schroeder-adopted-storage:${signature}`,
+                stateKey: schroederAdoptedParticleStorageStatusBase.stateKey,
+                hotBufferKeyPrefix: 'ulg:sph-resident-schroeder-adopted-storage',
+                descriptor: schroederAdoptedParticleStorageDescriptor,
+                sourceTaskId: sameDevicePublicationStatusBase.sourceTaskId,
+                sourceNodeId: sameDevicePublicationStatusBase.sourceNodeId,
+                sourceStage: 'resident-steps-schroeder-adopted-particle-storage',
+                sphParticleUpload: execution.nextParticleUploads.sphParticleUpload,
+                mlsMpmParticleUpload: execution.nextParticleUploads.mlsMpmParticleUpload,
+                residentExecution: execution,
+                finalStep: execution.finalStep || null
+              });
+            execution.schroederAdoptedParticleStoragePublication =
+              schroederAdoptedParticleStoragePublication;
+            execution.schroederAdoptedParticleStorageContinuationHotBufferKey =
+              schroederAdoptedParticleStoragePublication?.hotBufferKey || null;
+            if (execution.finalStep) {
+              execution.finalStep.schroederAdoptedParticleStoragePublication =
+                schroederAdoptedParticleStoragePublication;
+              execution.finalStep.schroederAdoptedParticleStorageContinuationHotBufferKey =
+                schroederAdoptedParticleStoragePublication?.hotBufferKey || null;
+            }
+            scene.userData.mlsMpmResidentSchroederAdoptedParticleStoragePublication =
+              schroederAdoptedParticleStoragePublication;
+            markResidentStepsProgress('resident-steps-schroeder-adopted-particle-storage-published', {
+              hotBufferKey: schroederAdoptedParticleStoragePublication?.hotBufferKey ?? null,
+              publicationStatus: schroederAdoptedParticleStoragePublication?.status ?? null,
+              localResolverStatus:
+                schroederAdoptedParticleStoragePublication
+                  ?.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus ?? null,
+              localResolverReady:
+                schroederAdoptedParticleStoragePublication
+                  ?.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady === true,
+              rawGpuBufferPeerComputeTransfer: false
+            });
+          } catch (error) {
+            const failure = {
+              ...schroederAdoptedParticleStorageStatusBase,
+              status: 'schroeder-adopted-particle-storage-publication-failed',
+              error: error instanceof Error ? error.message : String(error)
+            };
+            execution.schroederAdoptedParticleStoragePublication = failure;
+            scene.userData.mlsMpmResidentSchroederAdoptedParticleStoragePublication = failure;
+            markResidentStepsProgress('resident-steps-schroeder-adopted-particle-storage-publication-failed', {
+              error: failure.error
+            });
+          }
+        } else {
+          const skipReason = !schroederAdoptedParticleStorageStatusBase.publisherAvailable
+            ? 'schroeder-adopted-particle-storage-publisher-unavailable'
+            : !schroederAdoptedParticleStorageStatusBase.descriptorReady
+            ? 'schroeder-adopted-particle-storage-descriptor-unavailable'
+            : !schroederAdoptedParticleStorageStatusBase.uploadsReady
+            ? 'schroeder-adopted-particle-storage-local-uploads-unavailable'
+            : 'schroeder-adopted-particle-storage-publication-not-required';
+          const skipped = {
+            ...schroederAdoptedParticleStorageStatusBase,
+            status: 'schroeder-adopted-particle-storage-publication-skipped',
+            reason: skipReason
+          };
+          execution.schroederAdoptedParticleStoragePublication = skipped;
+          scene.userData.mlsMpmResidentSchroederAdoptedParticleStoragePublication = skipped;
         }
         const schroederPressureInterfaceGasCellFieldImportPromotion =
           promoteSchroederPressureInterfaceGasCellFieldImportFromResidentExecution(execution, {

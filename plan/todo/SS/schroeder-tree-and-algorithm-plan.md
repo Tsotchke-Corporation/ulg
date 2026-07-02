@@ -670,12 +670,33 @@ Completed in this slice:
    host summary readiness, automatic stage-chain resolver injection, missing
    local refs, and cross-peer portable-materialization gating.
 
-The next code slice on `SS` is **SS adopted storage scene scheduling hookup**:
+Completed in this slice:
 
-1. Publish adopted particle-storage descriptors from browser resident
-   executions together with their same-device local retained particle buffers.
-2. Feed the resulting hot-buffer key into mounted resident mechanics scheduling
-   so the next same-device stage-chain tick consumes the host resolver
-   automatically.
-3. Add browser/scene diagnostics proving descriptor publication, local resolver
-   readiness, scheduler consumption, and no raw GPUBuffer PeerCompute transfer.
+1. Scene resident executions now publish accepted SS adopted particle-storage
+   descriptors through the browser resident authority host while passing local
+   retained SPH state, SPH thermo, and MLS-MPM mechanics uploads only to the
+   host-local resolver registration path.
+2. Scene-local SS executions reuse the same adopted-storage descriptor builder
+   as ComputeManager resident tasks, keeping the descriptor schema single
+   sourced.
+3. Mounted resident mechanics stage scheduling now consumes the published
+   adopted-storage hot-buffer key in same-device mode when the host-local
+   resolver is ready, allowing `runMechanicsStageTaskChain` to auto-attach the
+   resolver.
+4. Browser/mount diagnostics expose publication status, local resolver
+   readiness, continuation schedule status, stage resolver status, and explicit
+   raw-transfer=false telemetry.
+
+The next code slice on `SS` is **SS adopted storage browser runtime proof and
+portable replay seed**:
+
+1. Add a browser/probe proof that drives a real SS materialized particle-storage
+   execution through the mounted scene, then asserts descriptor publication,
+   local resolver readiness, same-device stage-chain consumption, and no raw
+   GPUBuffer PeerCompute transfer.
+2. Add the first portable materialization/snapshot seed contract for cross-peer
+   adopted-storage consumers, or keep the cross-peer block explicit with a
+   concrete seed TODO if implementation proves larger than a slice.
+3. Surface the adopted-storage publication and stage-consumption telemetry in
+   the long-horizon/performance probes so progress is visible outside the
+   source-level harness.

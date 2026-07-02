@@ -35994,3 +35994,45 @@ Next:
 - Thread adopted particle-storage descriptor publication and same-device local
   resolver registration into browser scene scheduling so the next mounted
   resident mechanics tick can consume the host resolver automatically.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Scene Scheduling Hookup
+
+Status:
+
+- Exported the shared SS adopted particle-storage descriptor builder so
+  scene-local SS executions and ComputeManager resident tasks use the same
+  descriptor contract.
+- Browser scene resident executions now publish accepted adopted-storage
+  descriptors through the resident authority host and register same-device
+  retained SPH state, SPH thermo, and MLS-MPM mechanics uploads only with the
+  host-local resolver.
+- Mounted mechanics stage-worker scheduling now passes the adopted-storage
+  hot-buffer key into `runMechanicsStageTaskChain` in same-device mode when the
+  local resolver is ready, so the resident host auto-attaches the resolver.
+- Scene/mount diagnostics report descriptor publication, local resolver
+  readiness, stage-chain schedule status, stage local resolver status, and
+  raw-transfer=false evidence without exposing raw GPU handles in StateManager
+  records.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/nativeSurfaceHarness.test.mjs`.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `15/15`
+  passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `105/105` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `947/950` passing and `3` skipped.
+
+Next:
+
+- Add a browser/probe proof that exercises real SS adopted particle-storage
+  materialization through the mounted scene and records publication, resolver,
+  same-device scheduler consumption, and raw-transfer=false telemetry.
+- Start the portable materialization/snapshot seed contract needed for
+  cross-peer adopted-storage replay, or leave cross-peer continuation
+  fail-closed with a concrete implementation TODO if that expands beyond a
+  slice.

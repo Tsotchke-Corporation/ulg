@@ -5451,7 +5451,7 @@ function particleStorageRetainedRefDescriptor({
   };
 }
 
-function createSchroederAdoptedParticleStorageDescriptorFromStep(step = null, {
+export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = null, {
   gpuFence = null,
   stateKey = null,
   source = 'ulg-mls-mpm-resident-step-compute-task',

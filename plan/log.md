@@ -34665,3 +34665,39 @@ Next:
   preserving exact near-field validation and failing closed on bucket overflow.
 - Promote to sorted/radix SS tree indexing only if bucket counters or throughput
   pressure show the bucket index is not enough.
+
+## 2026-07-01 AKDT - SS Indexed Law-Neighbor Traversal Consumer
+
+Status:
+
+- Extended law-neighbor candidate params from `48` to `64` bytes to include
+  active-node bucket-index metadata.
+- Bound retained active-node bucket slots into the law-neighbor WGSL as binding
+  `6`, with a dummy sentinel buffer when the index is disabled.
+- The law-neighbor shader now hashes law-queue tile anchors to the retained
+  active-node bucket index, enumerates bucket matches first, then scans
+  non-bucket active-node rows as exact fallback. This consumes the index without
+  making it an authoritative pruning source.
+- Same-level SS orchestration now forwards opt-in `activeNodeIndex` artifacts
+  into law-neighbor candidate generation and reports the indexed traversal
+  consumer status.
+- Bumped the law-neighbor candidate pipeline cache key to v3 after the binding
+  and uniform layout change.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `48/48` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs` with `20/20` passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs` with `98/98` passing.
+- PASS: `npm test` with `839` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Add compact traversal diagnostics for bucket hits, exact fallback scans, and
+  overflow pressure.
+- Promote to sorted/radix SS tree indexing only when those diagnostics show it
+  is needed.

@@ -108,13 +108,16 @@ Landed checkpoints:
 31. `6e7f5dc` adds a retained GPU bucket index over active-node tile anchors
     and exposes it as an opt-in same-level orchestration artifact without making
     it authoritative for neighbor pruning yet.
+32. `1aa16a4` consumes the retained active-node bucket index in law-neighbor
+    traversal with bucket-first enumeration and exact full-scan fallback outside
+    indexed slots.
 
 Next implementation queue:
 
-1. Consume the retained active-node bucket index in law-neighbor traversal so
-   reaction/contact/interface broad phase stops scanning every active-node row.
-2. Replace the bucket index with sorted/radix SS tree indexing if bucket
-   overflow/candidate counters show it is the next bottleneck.
+1. Add compact traversal diagnostics for bucket hits, full-scan fallbacks, and
+   bucket overflow pressure so SS can decide whether radix indexing is required.
+2. Replace the bucket index with sorted/radix SS tree indexing if those counters
+   show it is the next bottleneck.
 3. Extend active-node mechanics filtering to the fused multi-step sequence when
    SS schedules multi-level batches through that path.
 4. Add render LOD and PeerCompute portable SS summaries.

@@ -177,15 +177,21 @@ Landed checkpoints:
     `native-webgpu-surface-consumer` refreshes, and hardens the browser/probe
     harness against overlay launch races while keeping final same-device
     readiness strict.
+49. `b573ccd` adds an opt-in scene resident execution path that wraps
+    `runSchroederSameLevelMechanicsWebGpu` around the existing resident
+    MLS-MPM step, carries portable render LOD and same-device local retained
+    buffer resolver artifacts through resident publication, and proves in
+    Chromium that the native surface pass submits SS active-leaf proxy draws
+    without a frame-copy or overlay path.
 
 Next implementation queue:
 
-1. Add an opt-in live scene path that runs
-   `runSchroederSameLevelMechanicsWebGpu` instead of the plain resident
-   MLS-MPM runner, then publishes its portable/local retained render summaries
-   into the existing render-source path.
-2. Validate native SS proxy telemetry from that SS-enabled live path, including
-   resolver/executor/camera/submit draw counts in the browser harness.
+1. Expose the SS scene path through app/use-case configuration so live runs can
+   select plain MLS-MPM or Schroeder same-level orchestration without test-only
+   `page.evaluate` calls.
+2. Feed compact SS telemetry into the visible status/performance harness:
+   selected level, native spacing, active leaves, retained proxy draw batches,
+   and native submit counts.
 3. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
 4. Keep the bucket index as the small-scene/default first GPU index and use

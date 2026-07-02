@@ -35242,3 +35242,41 @@ Next:
   `runSchroederSameLevelMechanicsWebGpu` instead of the plain resident
   MLS-MPM runner, then forwards its portable/local retained render summaries
   into the existing resident render-source/native proxy path.
+
+## 2026-07-01 AKDT - Scene-Local Schroeder Resident Execution
+
+Status:
+
+- Added an explicit `schroederSimulation` scene option to
+  `refreshMlsMpmResidentSteps`.
+- The scene path now wraps each resident step with
+  `runSchroederSameLevelMechanicsWebGpu`, then publishes the SS portable render
+  LOD summary and same-device local retained render-buffer resolver through the
+  existing resident render-source path.
+- Exported the resident continuation helpers used by the existing MLS-MPM
+  sequence so the SS scene loop preserves no-full-readback continuation
+  metadata rather than inventing a separate clone path.
+- Allowed concrete scene-local SS portable/render LOD summaries to become
+  `schroeder-render-source-local-observation-ready` even when the broader
+  render ownership policy has no admitted remote SS summary yet. Raw
+  `GPUBuffer` transfer and full-readback blockers still fail closed.
+- Added Chromium coverage proving the native surface pass resolves the
+  same-device local SS active-node buffer and submits retained proxy draws in
+  the main native pass, with no frame-copy-back or overlay route.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `171/171` passing.
+- PASS: `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase native (same-device surface consumer|surface consumer draws scene-local Schroeder render LOD)"`.
+- PASS: `git diff --check`.
+
+Next:
+
+- Expose the SS scene path through app/use-case configuration so live runs can
+  select plain MLS-MPM or Schroeder same-level orchestration without relying on
+  direct test-only scene API calls.

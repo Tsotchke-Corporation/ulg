@@ -35136,3 +35136,36 @@ Next:
   plumbing.
 - Keep the integration inside the main/native scene pass rather than using a
   detached overlay or frame-copy-back path.
+
+## 2026-07-01 AKDT - SS Local Retained Render Buffer Resolver
+
+Status:
+
+- Added deterministic `retainedBufferRef` keys to SS portable retained
+  descriptors while keeping those descriptors free of raw `GPUBuffer` handles.
+- Added a same-device-only local retained render-buffer resolver summary on SS
+  same-level execution results for active-leaf and coherent-aggregate render
+  proxy sources.
+- The local resolver explicitly marks itself non-portable for PeerCompute,
+  descriptor-only for handoff, and no-frame-copy/no-full-readback.
+- Tightened `schroederRenderProxyDrawSource` so a drawable retained descriptor
+  without a stable resolver key is blocked rather than falsely ready.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `153/153` passing.
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/schroederHierarchyGpu.test.mjs tests/sphPhaseRenderer.test.mjs`
+  with `169/169` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Create/update the SS native proxy executor from the local retained resolver
+  when the native surface bridge is ready.
+- Submit its draw commands inside the live native surface render pass after
+  writing scene camera uniforms.

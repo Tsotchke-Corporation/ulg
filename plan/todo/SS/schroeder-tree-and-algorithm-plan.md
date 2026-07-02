@@ -313,7 +313,9 @@ Suggested schemas:
   descriptor plans landed in `24ecd87`; renderer-visible proxy consumer binding
   landed in `9b31697`; descriptor-batched proxy draw-source contracts landed
   in `5b54457`; proxy backend selection landed in `4316da6`; the native
-  retained-proxy WebGPU executor landed in `bdc48a5`.
+  retained-proxy WebGPU executor landed in `bdc48a5`; deterministic retained
+  descriptor keys and the same-device-only local render-buffer resolver landed
+  in `50337ae`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -321,9 +323,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - wire the native WebGPU retained-proxy executor into the live native
-     surface render bridge with camera uniforms and same-device buffer
-     resolver plumbing;
+   - submit the native WebGPU retained-proxy executor inside the live native
+     surface render bridge with camera uniforms sourced from the scene camera;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep diagnostic CPU proxy geometry explicit, capped, and outside the
      PeerCompute hot path;
@@ -380,11 +381,11 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS native retained-proxy render bridge
-integration**:
+The next code slice on `SS` is **SS native retained-proxy render-pass
+submission**:
 
-1. Thread a same-device retained-buffer resolver from the resident SS hot-buffer
-   owner into the native proxy executor.
+1. Use the same-device retained-buffer resolver from current SS execution
+   results when creating/updating the bridge executor.
 2. Update camera/viewport uniforms from the live scene camera before each draw
    pass.
 3. Submit executor draw commands inside the native surface path, not as a

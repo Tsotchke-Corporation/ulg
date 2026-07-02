@@ -161,12 +161,15 @@ Landed checkpoints:
     refs through a same-device buffer resolver, builds a no-readback instanced
     proxy-splat pipeline, and fails closed without raw `GPUBuffer` transfer,
     frame-copy readback, or overlay ownership.
+46. `50337ae` gives SS portable retained descriptors deterministic local keys
+    and adds a same-device-only local retained render-buffer resolver on SS
+    execution results, so the native proxy executor can bind live retained
+    buffers without making raw `GPUBuffer` handles portable PeerCompute state.
 
 Next implementation queue:
 
-1. Wire the native WebGPU retained-proxy executor into the live native surface
-   render bridge with camera uniforms and same-device retained-buffer resolver
-   plumbing.
+1. Submit the native WebGPU retained-proxy executor inside the live native
+   surface render pass with camera uniforms sourced from the scene camera.
 2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
 3. Keep the bucket index as the small-scene/default first GPU index and use

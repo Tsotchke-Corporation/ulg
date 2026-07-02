@@ -178,3 +178,52 @@ test('MLS-MPM resident authority ledger records resident product mass and gas pr
   assert.equal(ledger.familyOwners[RESIDENT_STATE_FAMILIES.GAS_PRESSURE].ownerStage, 'resident-gas-product-ledger');
   assert.equal(ledger.familyOwners[RESIDENT_STATE_FAMILIES.GAS_PRESSURE].status, 'resident-gas-species-ledger-authority');
 });
+
+test('MLS-MPM resident authority ledger adopts admitted Schroeder particle storage', () => {
+  const ledger = buildMlsMpmResidentStepAuthorityLedger({
+    step: 4,
+    time: 0.4,
+    readbackMode: 'no-full-readback',
+    backend: 'webgpu',
+    stageStatus: {
+      p2g: 'webgpu-executed-no-full-readback',
+      gridUpdate: 'webgpu-executed-no-full-readback',
+      g2p: 'webgpu-executed-no-full-readback',
+      schroederParticleStorageMaterialization: 'schroeder-particle-storage-materialization-submitted'
+    },
+    stageBackends: {
+      p2g: 'webgpu',
+      gridUpdate: 'webgpu',
+      g2p: 'webgpu',
+      schroederParticleStorageMaterialization: 'webgpu'
+    },
+    schroederParticleStorageAdoption: {
+      status: 'schroeder-particle-storage-adopted',
+      adopted: true,
+      backend: 'webgpu',
+      stateBuffer: { label: 'materialized-state' },
+      thermoBuffer: { label: 'materialized-thermo' },
+      mechanicsBuffer: { label: 'materialized-mechanics' }
+    },
+    nextUsesSchroederParticleStorageMaterialization: true,
+    residentBuffersRetained: true
+  });
+
+  assert.equal(ledger.status, 'resident-authority-ledger-ready');
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.SCHROEDER_PARTICLE_STORAGE].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].status,
+    'schroeder-particle-storage-materialized-mechanics-drives-next-particles'
+  );
+  assert.equal(
+    ledger.familyOwners[RESIDENT_STATE_FAMILIES.THERMO_PHASE].status,
+    'schroeder-particle-storage-materialized-thermo-drives-next-particles'
+  );
+});

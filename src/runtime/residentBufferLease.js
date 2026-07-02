@@ -292,6 +292,7 @@ export function buildMlsMpmResidentStepBufferLeaseLedger({
   emittedResidentProductMass = null,
   residentProductMass = null,
   nextParticleUploads = null,
+  schroederParticleStorageAdoption = null,
   pressureInterfaceForceRowCount = 0,
   compactGpuSummary = null
 } = {}) {
@@ -354,6 +355,63 @@ export function buildMlsMpmResidentStepBufferLeaseLedger({
         reason: 'carried-resident-product-mass'
       });
     }
+  }
+  if (schroederParticleStorageAdoption?.adopted === true) {
+    const registerAdoptedParticleBuffer = ({
+      role,
+      buffer,
+      stateFamily,
+      byteLength,
+      rowCount,
+      strideBytes
+    }) => {
+      if (!buffer) return;
+      const resourceKey = `schroeder-particle-storage:${role}:${buffer.label || byteLength || 'buffer'}`;
+      registerResidentBufferResource(ledger, {
+        resourceKey,
+        resourceKind: 'schroeder-materialized-particle-buffer',
+        stateFamily,
+        ownerStage: 'schroeder-particle-storage-materialization',
+        producerStage: 'schroeder-particle-storage-materialization',
+        source: schroederParticleStorageAdoption.sourceStatus || schroederParticleStorageAdoption.status,
+        status: schroederParticleStorageAdoption.status,
+        retained: true,
+        byteLength,
+        rowCount,
+        strideBytes,
+        bufferLabel: buffer.label,
+        expectedConsumers: ['next-resident-step']
+      });
+      addResidentBufferLease(ledger, {
+        resourceKey,
+        consumerStage: 'next-resident-step',
+        reason: 'adopted-schroeder-particle-storage'
+      });
+    };
+    registerAdoptedParticleBuffer({
+      role: 'sph-state',
+      buffer: schroederParticleStorageAdoption.stateBuffer,
+      stateFamily: 'particle-kinematics',
+      byteLength: schroederParticleStorageAdoption.stateBufferByteLength,
+      rowCount: schroederParticleStorageAdoption.authoritativeParticleCount,
+      strideBytes: schroederParticleStorageAdoption.stateStrideBytes
+    });
+    registerAdoptedParticleBuffer({
+      role: 'sph-thermo',
+      buffer: schroederParticleStorageAdoption.thermoBuffer,
+      stateFamily: 'thermo-phase',
+      byteLength: schroederParticleStorageAdoption.thermoBufferByteLength,
+      rowCount: schroederParticleStorageAdoption.authoritativeParticleCount,
+      strideBytes: schroederParticleStorageAdoption.thermoStrideBytes
+    });
+    registerAdoptedParticleBuffer({
+      role: 'mls-mpm-mechanics',
+      buffer: schroederParticleStorageAdoption.mechanicsBuffer,
+      stateFamily: 'mechanics',
+      byteLength: schroederParticleStorageAdoption.mechanicsBufferByteLength,
+      rowCount: schroederParticleStorageAdoption.authoritativeParticleCount,
+      strideBytes: schroederParticleStorageAdoption.mechanicsStrideBytes
+    });
   }
   if (pressureInterfaceForceRowCount > 0) {
     registerResidentBufferResource(ledger, {

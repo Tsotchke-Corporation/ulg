@@ -35742,3 +35742,47 @@ Next:
   state family, conservation law, and StateManager admission contract are
   chosen. The current code can now report pressure-driven need for such a
   future path without silently changing state.
+
+## 2026-07-02 AKDT - SS Authoritative Particle-Storage Adoption
+
+Status:
+
+- Added a resident `schroeder-particle-storage` authority family and adoption
+  descriptor for StateManager-admitted SS particle-storage materialization
+  outputs.
+- The resident step now adopts retained materialized SPH state, SPH thermo, and
+  MLS-MPM mechanics buffers as the next authoritative particle storage only
+  when the materialization is admitted, submitted, target-family complete, and
+  buffer complete.
+- Adopted storage carries the materialized particle capacity into
+  `nextParticleUploads`, clone-for-next state, next-buffer mode telemetry,
+  resident authority owners, lease tracking, cleanup, and queue/fence evidence
+  without full particle readback.
+- Updated the SS plan target from authoritative storage swap to adopted-storage
+  continuation through PeerCompute descriptors/admission.
+
+Validation:
+
+- PASS: `node --check src/runtime/residentStateAuthority.js`.
+- PASS: `node --check src/runtime/residentBufferLease.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/residentStateAuthority.test.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `88/88` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `210/210` passing.
+- PASS: HTTPS browser SS proof
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "URL Schroeder water-to-steam"`
+  with `1/1` passing.
+- PASS: `npm test` with `940/943` passing and `3` skipped.
+- PASS: `git diff --check`.
+
+Next:
+
+- Carry adopted materialized particle storage through PeerCompute resident
+  step/sequence result descriptors and StateManager replay metadata so remote
+  schedulers can consume descriptor-only authoritative storage transitions
+  without raw GPUBuffer transfer.

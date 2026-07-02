@@ -25,7 +25,8 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
-  ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
+  ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
@@ -2055,6 +2056,99 @@ test('MLS-MPM resident step fuses admitted Schroeder far-force deltas into next 
   );
   assert.equal(step.diagnostics.schroederFarForceDeltaFusionStateBufferRetained, true);
   assert.equal(step.diagnostics.schroederFarForceDeltaFusionReadbackMode, 'no-full-readback');
+});
+
+test('MLS-MPM resident step adopts admitted Schroeder materialized particle storage', async () => {
+  const { buffers, tracker, options } = noFullReadbackResidentStepFixture();
+  const materializedStateBuffer = tracker.buffer('schroeder-materialized-state');
+  const materializedThermoBuffer = tracker.buffer('schroeder-materialized-thermo');
+  const materializedMechanicsBuffer = tracker.buffer('schroeder-materialized-mechanics');
+  const materializationBuffer = tracker.buffer('schroeder-materialization-rows');
+  const outputParticleCapacity = 4;
+  const schroederParticleStorageMaterialization = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    readbackMode: 'no-full-readback',
+    normalHotLoopReadbackFree: true,
+    particleStorageMaterializationAdmissionApproved: true,
+    retainedParticleBuffers: true,
+    retainedMaterializationBuffer: true,
+    targetStateFamilies: [
+      'sph-particle-state',
+      'mls-mpm-particle-mechanics',
+      'sph-particle-thermo'
+    ],
+    sourceParticleCount: buffers.sphParticleState.particleCount,
+    outputParticleCapacity,
+    particleStateBuffer: materializedStateBuffer,
+    particleThermoBuffer: materializedThermoBuffer,
+    particleMechanicsBuffer: materializedMechanicsBuffer,
+    materializationBuffer,
+    stateBufferByteLength: outputParticleCapacity * 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoBufferByteLength: outputParticleCapacity * 12 * Float32Array.BYTES_PER_ELEMENT,
+    mechanicsBufferByteLength: outputParticleCapacity * 32 * Float32Array.BYTES_PER_ELEMENT,
+    materializationBufferByteLength: 3 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    materializationMode: 'state-manager-admitted-particle-buffer-materialization',
+    replacementPolicy: 'retained-output-buffers-await-state-manager-swap',
+    stateMutationStatus: 'particle-storage-materialization-buffer-submitted',
+    stateAuthorityStatus: 'state-manager-admitted-particle-storage-materialization-materialized',
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'queue.onSubmittedWorkDone'
+  };
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    schroederParticleStorageMaterialization
+  });
+
+  assert.equal(step.schroederParticleStorageAdoptionStatus, 'schroeder-particle-storage-adopted');
+  assert.equal(step.schroederParticleStorageAdopted, true);
+  assert.equal(
+    step.schroederParticleStorageAdoptionMode,
+    'state-manager-admitted-retained-particle-buffer-swap'
+  );
+  assert.equal(step.schroederParticleStorageMaterializationStatus, 'schroeder-particle-storage-materialization-submitted');
+  assert.equal(step.schroederParticleStorageAuthoritativeParticleCount, outputParticleCapacity);
+  assert.equal(step.nextParticleCount, outputParticleCapacity);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.particleCount, outputParticleCapacity);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.particleCount, outputParticleCapacity);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, materializedStateBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, materializedThermoBuffer);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer, materializedMechanicsBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.sourceStage, 'schroeder-particle-storage-materialization');
+  assert.equal(step.nextParticleBufferMode, 'retained-schroeder-particle-storage-materialized-buffers');
+  assert.equal(step.nextParticleStateBufferByteLength, outputParticleCapacity * 8 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(step.nextParticleThermoBufferByteLength, outputParticleCapacity * 12 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(step.nextParticleMechanicsBufferByteLength, outputParticleCapacity * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(step.g2pStateBufferReplacedBySchroederParticleStorageMaterialization, true);
+  assert.equal(step.g2pMechanicsBufferReplacedBySchroederParticleStorageMaterialization, true);
+  assert.equal(step.sourceThermoBufferReplacedBySchroederParticleStorageMaterialization, true);
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.SCHROEDER_PARTICLE_STORAGE].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(
+    step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.THERMO_PHASE].ownerStage,
+    'schroeder-particle-storage-materialization'
+  );
+  assert.equal(step.diagnostics.schroederParticleStorageAdopted, true);
+  assert.equal(
+    step.diagnostics.schroederParticleStorageAuthoritativeParticleCount,
+    outputParticleCapacity
+  );
+  assert.equal(step.residentBufferLeaseActiveLeaseCount, 3);
+  assert.equal(tracker.destroyed, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(tracker.destroyed, 8);
 });
 
 test('MLS-MPM resident step carries admitted Schroeder gas state deltas as retained pressure descriptors', async () => {

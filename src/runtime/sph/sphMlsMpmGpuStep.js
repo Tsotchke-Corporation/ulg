@@ -23,6 +23,7 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -159,6 +160,8 @@ const ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_STEP_EVIDENCE_SCHEMA = 'peercompute.ulg
 const ULG_MLS_MPM_SIDECAR_AWARE_RESIDENT_SEQUENCE_SCHEMA = 'peercompute.ulg.mls-mpm-sidecar-aware-resident-sequence.v0';
 const ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-contract.v0';
 const ULG_MLS_MPM_THERMAL_SIDECAR_DIRECT_RUNNER_STEP_SCHEMA = 'peercompute.ulg.mls-mpm-thermal-sidecar-direct-runner-step.v0';
+const ULG_SCHROEDER_PARTICLE_STORAGE_ADOPTION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-adoption.v0';
 export const ULG_MLS_MPM_FUSED_RESIDENT_SEQUENCE_PREFLIGHT_SCHEMA = 'peercompute.ulg.mls-mpm-fused-resident-sequence-preflight.v0';
 export const ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA = 'peercompute.ulg.mls-mpm-webgpu-ocean-hot-loop-budget.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
@@ -210,6 +213,11 @@ export const ULG_MLS_MPM_MECHANICS_CHILD_G2P_STAGE_EVIDENCE_SCHEMA = 'peercomput
 export const ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-commit-delta.v0';
 export const ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-state-delta.v0';
 export const ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-solver-task-bridge.v0';
+const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES = Object.freeze([
+  'sph-particle-state',
+  'mls-mpm-particle-mechanics',
+  'sph-particle-thermo'
+]);
 
 export function normalizeMlsMpmResidentCompactSummaryMode(value) {
   const mode = String(value || MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP).trim().toLowerCase();
@@ -4986,6 +4994,111 @@ function retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDelt
   };
 }
 
+function retainedSchroederParticleStorageMaterializationBuffers(schroederParticleStorageMaterialization) {
+  const source = schroederParticleStorageMaterialization?.result || schroederParticleStorageMaterialization;
+  return {
+    source,
+    stateBuffer: source?.particleStateBuffer || source?.stateBuffer || source?.outputStateBuffer || null,
+    thermoBuffer: source?.particleThermoBuffer || source?.thermoBuffer || source?.outputThermoBuffer || null,
+    mechanicsBuffer: source?.particleMechanicsBuffer || source?.mechanicsBuffer || source?.outputMechanicsBuffer || null,
+    materializationBuffer: source?.materializationBuffer || null,
+    stateBufferByteLength: source?.stateBufferByteLength ?? source?.stateByteLength ?? 0,
+    thermoBufferByteLength: source?.thermoBufferByteLength ?? source?.thermoByteLength ?? 0,
+    mechanicsBufferByteLength: source?.mechanicsBufferByteLength ?? source?.mechanicsByteLength ?? 0,
+    materializationBufferByteLength: source?.materializationBufferByteLength ?? source?.materializationByteLength ?? 0,
+    destroyParticleBuffers: source?.destroyParticleBuffers || null,
+    destroyMaterializationBuffer: source?.destroyMaterializationBuffer || null
+  };
+}
+
+function createSchroederParticleStorageAdoption({
+  schroederParticleStorageMaterialization = null,
+  sphParticleState = null,
+  mlsMpmParticleState = null
+} = {}) {
+  const retained = retainedSchroederParticleStorageMaterializationBuffers(
+    schroederParticleStorageMaterialization
+  );
+  const source = retained.source;
+  if (!source) return null;
+  const warnings = [];
+  const blockers = [];
+  const targetStateFamilies = Array.isArray(source.targetStateFamilies)
+    ? [...source.targetStateFamilies]
+    : [];
+  const targetStateFamiliesAccepted = targetStateFamilies.length === 0
+    || SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES.every((family) => targetStateFamilies.includes(family));
+  const admitted = source.particleStorageMaterializationAdmissionApproved === true
+    || source.stateAuthorityStatus === 'state-manager-admitted-particle-storage-materialization-materialized';
+  const submitted = source.status === 'schroeder-particle-storage-materialization-submitted'
+    || source.schema === ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA;
+  const retainedParticleBuffers = source.retainedParticleBuffers !== false
+    && Boolean(retained.stateBuffer && retained.thermoBuffer && retained.mechanicsBuffer);
+  if (!admitted) blockers.push('schroeder-particle-storage-materialization-not-admitted');
+  if (!submitted) blockers.push('schroeder-particle-storage-materialization-not-submitted');
+  if (!targetStateFamiliesAccepted) blockers.push('schroeder-particle-storage-target-families-incomplete');
+  if (!retainedParticleBuffers) blockers.push('schroeder-particle-storage-materialization-buffers-missing');
+  if (targetStateFamilies.length === 0) warnings.push('schroeder-particle-storage-target-families-implicit');
+  const sourceParticleCount = Math.max(0, Math.round(finiteNumber(
+    source.sourceParticleCount ?? sphParticleState?.particleCount,
+    sphParticleState?.particleCount ?? 0
+  )));
+  const authoritativeParticleCount = Math.max(0, Math.round(finiteNumber(
+    source.outputParticleCapacity ?? source.particleCapacity ?? sourceParticleCount,
+    sourceParticleCount
+  )));
+  const adopted = blockers.length === 0;
+  return {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_ADOPTION_SCHEMA,
+    status: adopted
+      ? 'schroeder-particle-storage-adopted'
+      : 'schroeder-particle-storage-adoption-blocked',
+    sourceSchema: source.schema || null,
+    sourceStatus: source.status || null,
+    backend: source.backend || 'webgpu',
+    adoptionMode: adopted
+      ? 'state-manager-admitted-retained-particle-buffer-swap'
+      : 'fail-closed-retained-particle-buffer-observation',
+    adopted,
+    blockers,
+    warnings,
+    targetStateFamilies,
+    targetStateFamiliesAccepted,
+    particleStorageMaterializationAdmissionApproved: admitted,
+    retainedParticleBuffers,
+    sourceParticleCount,
+    outputParticleCapacity: authoritativeParticleCount,
+    authoritativeParticleCount,
+    sourceMlsMpmParticleCount: Math.max(0, Math.round(finiteNumber(
+      mlsMpmParticleState?.particleCount,
+      sourceParticleCount
+    ))),
+    stateBuffer: retained.stateBuffer,
+    thermoBuffer: retained.thermoBuffer,
+    mechanicsBuffer: retained.mechanicsBuffer,
+    materializationBuffer: retained.materializationBuffer,
+    stateBufferByteLength: retained.stateBufferByteLength,
+    thermoBufferByteLength: retained.thermoBufferByteLength,
+    mechanicsBufferByteLength: retained.mechanicsBufferByteLength,
+    materializationBufferByteLength: retained.materializationBufferByteLength,
+    stateStrideBytes: sphParticleState?.stateStrideBytes
+      ?? (SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT),
+    thermoStrideBytes: sphParticleState?.thermoStrideBytes
+      ?? (SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT),
+    mechanicsStrideBytes: mlsMpmParticleState?.mechanicsStrideBytes
+      ?? (MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT),
+    replacementPolicy: adopted
+      ? 'retained-output-buffers-adopted-by-resident-state-authority'
+      : (source.replacementPolicy || 'retained-output-buffers-await-state-manager-swap'),
+    stateMutationStatus: adopted
+      ? 'particle-storage-materialization-adopted-as-next-resident-particle-storage'
+      : (source.stateMutationStatus || 'particle-storage-materialization-adoption-blocked'),
+    stateAuthorityStatus: adopted
+      ? 'resident-state-authority-adopted-particle-storage-materialization'
+      : (source.stateAuthorityStatus || 'resident-state-authority-particle-storage-adoption-blocked')
+  };
+}
+
 function retainedSchroederFarAggregateGasStateDeltaBuffers(schroederFarAggregateGasStateDelta) {
   const source = schroederFarAggregateGasStateDelta?.result || schroederFarAggregateGasStateDelta;
   return {
@@ -5212,6 +5325,7 @@ function queueEvidenceFromResidentStep(step) {
     step?.reactionStep?.result || step?.reactionStep,
     step?.mechanicsRefreshStep?.result || step?.mechanicsRefreshStep,
     step?.thermalStep?.result || step?.thermalStep,
+    step?.schroederParticleStorageMaterialization?.result || step?.schroederParticleStorageMaterialization,
     step?.g2pReconstruction,
     step?.gridUpdate,
     step?.p2gGridProjection
@@ -13859,6 +13973,7 @@ function buildNextParticleUploads({
   sphParticleUpload,
   g2pReconstruction,
   schroederFarForceDeltaFusion = null,
+  schroederParticleStorageAdoption = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -13868,36 +13983,45 @@ function buildNextParticleUploads({
 }) {
   const retained = retainedG2pOutputBuffers(g2pReconstruction);
   const schroederFarForce = retainedSchroederFarForceDeltaFusionOutputBuffers(schroederFarForceDeltaFusion);
+  const schroederParticleStorage = schroederParticleStorageAdoption?.adopted === true
+    ? schroederParticleStorageAdoption
+    : null;
   const thermal = retainedThermalOutputBuffers(thermalStep);
   const reaction = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const reactionMutatesParticles = reactionOutputMutatesParticles(reactionStep);
-  const stateBuffer = (reactionMutatesParticles ? reaction.stateBuffer : null)
+  const stateBuffer = schroederParticleStorage?.stateBuffer
+    || (reactionMutatesParticles ? reaction.stateBuffer : null)
     || thermal.stateBuffer
     || schroederFarForce.stateBuffer
     || retained.stateBuffer;
-  const thermoBuffer = (reactionMutatesParticles ? reaction.thermoBuffer : null)
+  const thermoBuffer = schroederParticleStorage?.thermoBuffer
+    || (reactionMutatesParticles ? reaction.thermoBuffer : null)
     || thermal.thermoBuffer
     || (sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null);
-  const mechanicsBuffer = (reactionMutatesParticles ? reaction.mechanicsBuffer : null)
+  const mechanicsBuffer = schroederParticleStorage?.mechanicsBuffer
+    || (reactionMutatesParticles ? reaction.mechanicsBuffer : null)
     || mechanicsRefresh.mechanicsBuffer
     || retained.mechanicsBuffer;
   const residentProductMass = mergedResidentProductMass || reaction.residentProductMass || inputResidentProductMass || null;
   if (!stateBuffer || !mechanicsBuffer) return null;
   if (!thermoBuffer) return null;
+  const nextParticleCount = schroederParticleStorage?.authoritativeParticleCount
+    ?? sphParticleState.particleCount;
   return {
     residentProductMass,
     sphParticleUpload: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       sourceSchema: sphParticleState.schema,
-      particleCount: sphParticleState.particleCount,
+      sourceStage: schroederParticleStorage ? 'schroeder-particle-storage-materialization' : null,
+      particleCount: nextParticleCount,
       stateStrideBytes: sphParticleState.stateStrideBytes,
       thermoStrideBytes: sphParticleState.thermoStrideBytes,
       stateBuffer,
       thermoBuffer,
       ownsStateBuffer: true,
-      ownsThermoBuffer: Boolean(reaction.thermoBuffer || thermal.thermoBuffer),
+      ownsThermoBuffer: Boolean(schroederParticleStorage?.thermoBuffer || reaction.thermoBuffer || thermal.thermoBuffer),
       slot: particlePingPong.nextSlot,
       sourceSlot: particlePingPong.sourceSlot,
       nextSlot: particlePingPong.nextSlot,
@@ -13912,7 +14036,8 @@ function buildNextParticleUploads({
       schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       sourceSchema: mlsMpmParticleState.schema,
-      particleCount: mlsMpmParticleState.particleCount,
+      sourceStage: schroederParticleStorage ? 'schroeder-particle-storage-materialization' : null,
+      particleCount: nextParticleCount,
       mechanicsStrideBytes: mlsMpmParticleState.mechanicsStrideBytes,
       mechanicsBuffer,
       ownsMechanicsBuffer: true,
@@ -13940,6 +14065,7 @@ async function residentStepEnvelope({
   schroederFarForceDeltaFusion = null,
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
+  schroederParticleStorageMaterialization = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -13961,6 +14087,7 @@ async function residentStepEnvelope({
     schroederFarForceDeltaFusion,
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
+    schroederParticleStorageMaterialization,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep
@@ -13980,14 +14107,45 @@ async function residentStepEnvelope({
   const thermalPhaseTransition = thermalPhaseTransitionDiagnostics(thermalStep);
   const reactionOutput = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
+  const schroederParticleStorageAdoption = createSchroederParticleStorageAdoption({
+    schroederParticleStorageMaterialization,
+    sphParticleState,
+    mlsMpmParticleState
+  });
   const reactionOutputParticleMutation = reactionOutputMutatesParticles(reactionStep);
+  const nextUsesSchroederParticleStorageMaterialization =
+    schroederParticleStorageAdoption?.adopted === true;
   const nextUsesSchroederFarForceState = Boolean(schroederFarForceOutput.stateBuffer);
-  const nextUsesReactionState = Boolean(reactionOutputParticleMutation && reactionOutput.stateBuffer);
-  const nextUsesReactionThermo = Boolean(reactionOutputParticleMutation && reactionOutput.thermoBuffer);
-  const nextUsesReactionMechanics = Boolean(reactionOutputParticleMutation && reactionOutput.mechanicsBuffer);
-  const nextUsesMechanicsRefresh = Boolean(!nextUsesReactionMechanics && mechanicsRefreshOutput.mechanicsBuffer);
-  const nextUsesThermalState = Boolean(!nextUsesReactionState && thermalOutput.stateBuffer);
-  const nextUsesThermalThermo = Boolean(!nextUsesReactionThermo && thermalOutput.thermoBuffer);
+  const nextUsesReactionState = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && reactionOutputParticleMutation
+    && reactionOutput.stateBuffer
+  );
+  const nextUsesReactionThermo = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && reactionOutputParticleMutation
+    && reactionOutput.thermoBuffer
+  );
+  const nextUsesReactionMechanics = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && reactionOutputParticleMutation
+    && reactionOutput.mechanicsBuffer
+  );
+  const nextUsesMechanicsRefresh = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && !nextUsesReactionMechanics
+    && mechanicsRefreshOutput.mechanicsBuffer
+  );
+  const nextUsesThermalState = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && !nextUsesReactionState
+    && thermalOutput.stateBuffer
+  );
+  const nextUsesThermalThermo = Boolean(
+    !nextUsesSchroederParticleStorageMaterialization
+    && !nextUsesReactionThermo
+    && thermalOutput.thermoBuffer
+  );
   const thermalMechanicsRefreshStatus = thermalStep
     ? (nextUsesReactionMechanics
         ? 'mechanics-refreshed-by-reaction-output'
@@ -14019,6 +14177,7 @@ async function residentStepEnvelope({
   const schroederFarForceOutputRequired = Boolean(schroederFarForceDeltaFusion);
   const schroederGasStateDeltaRequired = Boolean(schroederFarAggregateGasStateDelta);
   const schroederGasCellImportRequired = Boolean(schroederFarAggregateGasCellImport);
+  const schroederParticleStorageMaterializationRequired = Boolean(schroederParticleStorageMaterialization);
   const thermalOutputRequired = Boolean(thermalStep);
   const reactionOutputRequired = Boolean(reactionStep);
   const mechanicsRefreshOutputRequired = Boolean(mechanicsRefreshStep);
@@ -14030,6 +14189,8 @@ async function residentStepEnvelope({
     !schroederGasStateDeltaRequired || Boolean(schroederGasStateDeltaOutput.gasStateDeltaBuffer);
   const schroederGasCellImportSatisfied =
     !schroederGasCellImportRequired || Boolean(schroederGasCellImportOutput.gasPressureCellsBuffer);
+  const schroederParticleStorageMaterializationSatisfied =
+    !schroederParticleStorageMaterializationRequired || nextUsesSchroederParticleStorageMaterialization;
   const thermalOutputSatisfied = !thermalOutputRequired || thermalOutputBuffersRetained;
   const reactionOutputSatisfied = !reactionOutputRequired || reactionOutputBuffersRetained;
   const mechanicsRefreshOutputSatisfied = !mechanicsRefreshOutputRequired || mechanicsRefreshOutputBuffersRetained;
@@ -14038,6 +14199,7 @@ async function residentStepEnvelope({
     && schroederFarForceOutputSatisfied
     && schroederGasStateDeltaSatisfied
     && schroederGasCellImportSatisfied
+    && schroederParticleStorageMaterializationSatisfied
     && thermalOutputSatisfied
     && reactionOutputSatisfied
     && mechanicsRefreshOutputSatisfied;
@@ -14065,6 +14227,7 @@ async function residentStepEnvelope({
     sphParticleUpload,
     g2pReconstruction,
     schroederFarForceDeltaFusion,
+    schroederParticleStorageAdoption,
     thermalStep,
     reactionStep,
     mechanicsRefreshStep,
@@ -14100,6 +14263,8 @@ async function residentStepEnvelope({
       stageStatus(schroederFarAggregateGasStateDelta?.result || schroederFarAggregateGasStateDelta),
     schroederFarAggregateGasCellImport:
       stageStatus(schroederFarAggregateGasCellImport?.result || schroederFarAggregateGasCellImport),
+    schroederParticleStorageMaterialization:
+      stageStatus(schroederParticleStorageMaterialization?.result || schroederParticleStorageMaterialization),
     thermal: stageStatus(thermalStep?.result || thermalStep),
     reaction: stageStatus(reactionStep?.result || reactionStep),
     mechanicsRefresh: stageStatus(mechanicsRefreshStep?.result || mechanicsRefreshStep)
@@ -14117,6 +14282,10 @@ async function residentStepEnvelope({
     schroederFarAggregateGasCellImport:
       schroederFarAggregateGasCellImport?.backend
       || schroederFarAggregateGasCellImport?.result?.backend
+      || null,
+    schroederParticleStorageMaterialization:
+      schroederParticleStorageMaterialization?.backend
+      || schroederParticleStorageMaterialization?.result?.backend
       || null,
     thermal: thermalStep?.backend || thermalStep?.result?.backend || null,
     reaction: reactionStep?.backend || reactionStep?.result?.backend || null,
@@ -14143,7 +14312,9 @@ async function residentStepEnvelope({
     stageStatus: stageStatusSummary,
     stageBackends: stageBackendSummary,
     schroederFarForceDeltaFusion,
+    schroederParticleStorageAdoption,
     nextUsesSchroederFarForceState,
+    nextUsesSchroederParticleStorageMaterialization,
     thermalStep,
     reactionStep,
     reactionOutputParticleMutation,
@@ -14170,6 +14341,7 @@ async function residentStepEnvelope({
     emittedResidentProductMass,
     residentProductMass,
     nextParticleUploads,
+    schroederParticleStorageAdoption,
     pressureInterfaceForceRowCount: gridUpdate?.pressureInterfaceForceRowCount ?? 0,
     compactGpuSummary
   });
@@ -14184,6 +14356,17 @@ async function residentStepEnvelope({
     residentAuthorityParticleOwner: residentAuthoritySummary.familyOwners['particle-kinematics']?.ownerStage ?? null,
     residentAuthorityMechanicsOwner: residentAuthoritySummary.familyOwners.mechanics?.ownerStage ?? null,
     residentAuthorityThermoOwner: residentAuthoritySummary.familyOwners['thermo-phase']?.ownerStage ?? null,
+    schroederParticleStorageAdoptionStatus: schroederParticleStorageAdoption?.status ?? null,
+    schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
+    schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
+    schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
+    schroederParticleStorageAdoptionWarnings: [...(schroederParticleStorageAdoption?.warnings || [])],
+    schroederParticleStorageAuthoritativeParticleCount:
+      schroederParticleStorageAdoption?.authoritativeParticleCount ?? null,
+    schroederParticleStorageMaterializationStatus:
+      schroederParticleStorageMaterialization?.status
+      ?? schroederParticleStorageMaterialization?.result?.status
+      ?? null,
     schroederFarAggregateGasStateDeltaStatus: schroederFarAggregateGasStateDelta?.status ?? null,
     schroederFarAggregateGasStateDeltaStateMutationStatus:
       schroederFarAggregateGasStateDelta?.stateMutationStatus ?? null,
@@ -14263,6 +14446,37 @@ async function residentStepEnvelope({
     schroederFarForceDeltaFusion,
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
+    schroederParticleStorageMaterialization,
+    schroederParticleStorageAdoption,
+    schroederParticleStorageAdoptionStatus: schroederParticleStorageAdoption?.status ?? null,
+    schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
+    schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
+    schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
+    schroederParticleStorageAdoptionWarnings: [...(schroederParticleStorageAdoption?.warnings || [])],
+    schroederParticleStorageMaterializationStatus:
+      schroederParticleStorageMaterialization?.status
+      ?? schroederParticleStorageMaterialization?.result?.status
+      ?? null,
+    schroederParticleStorageMaterializationRetainedParticleBuffers:
+      Boolean(schroederParticleStorageAdoption?.retainedParticleBuffers),
+    schroederParticleStorageMaterializationSourceParticleCount:
+      schroederParticleStorageAdoption?.sourceParticleCount ?? 0,
+    schroederParticleStorageAuthoritativeParticleCount:
+      schroederParticleStorageAdoption?.authoritativeParticleCount ?? null,
+    schroederParticleStorageStateBufferRetained:
+      Boolean(schroederParticleStorageAdoption?.stateBuffer),
+    schroederParticleStorageThermoBufferRetained:
+      Boolean(schroederParticleStorageAdoption?.thermoBuffer),
+    schroederParticleStorageMechanicsBufferRetained:
+      Boolean(schroederParticleStorageAdoption?.mechanicsBuffer),
+    schroederParticleStorageStateBufferByteLength:
+      schroederParticleStorageAdoption?.stateBufferByteLength ?? 0,
+    schroederParticleStorageThermoBufferByteLength:
+      schroederParticleStorageAdoption?.thermoBufferByteLength ?? 0,
+    schroederParticleStorageMechanicsBufferByteLength:
+      schroederParticleStorageAdoption?.mechanicsBufferByteLength ?? 0,
+    schroederParticleStorageMaterializationBufferByteLength:
+      schroederParticleStorageAdoption?.materializationBufferByteLength ?? 0,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
       schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
@@ -14438,22 +14652,44 @@ async function residentStepEnvelope({
     residentActiveGridDispatchPlanHintMetadataBufferByteLength: activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
     nextParticleUploads,
     nextParticleBufferMode: nextParticleUploads
-      ? (nextUsesReactionState
+      ? (nextUsesSchroederParticleStorageMaterialization
+          ? 'retained-schroeder-particle-storage-materialized-buffers'
+          : (nextUsesReactionState
           ? 'retained-reaction-output-buffers'
           : (thermalOutput.stateBuffer
               ? (nextUsesMechanicsRefresh ? 'retained-thermal-output-and-refreshed-mechanics-buffers' : 'retained-thermal-output-and-g2p-mechanics-buffers')
               : (schroederFarForceOutput.stateBuffer
                   ? 'retained-schroeder-far-force-fused-state-and-g2p-mechanics-buffers'
-                  : 'retained-g2p-output-buffers')))
+                  : 'retained-g2p-output-buffers'))))
       : 'not-available',
-    nextParticleStateBufferByteLength: (nextUsesReactionState ? reactionOutput.stateBufferByteLength : 0)
+    nextParticleStateBufferByteLength:
+      (nextUsesSchroederParticleStorageMaterialization
+        ? schroederParticleStorageAdoption.stateBufferByteLength
+        : 0)
+      || (nextUsesReactionState ? reactionOutput.stateBufferByteLength : 0)
       || (nextUsesThermalState ? thermalOutput.stateBufferByteLength : 0)
       || (nextUsesSchroederFarForceState ? schroederFarForceOutput.stateBufferByteLength : 0)
       || g2pOutput.stateBufferByteLength,
-    nextParticleThermoBufferByteLength: (nextUsesReactionThermo ? reactionOutput.thermoBufferByteLength : 0) || thermalOutput.thermoBufferByteLength,
-    nextParticleMechanicsBufferByteLength: (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
+    nextParticleThermoBufferByteLength:
+      (nextUsesSchroederParticleStorageMaterialization
+        ? schroederParticleStorageAdoption.thermoBufferByteLength
+        : 0)
+      || (nextUsesReactionThermo ? reactionOutput.thermoBufferByteLength : 0)
+      || thermalOutput.thermoBufferByteLength,
+    nextParticleMechanicsBufferByteLength:
+      (nextUsesSchroederParticleStorageMaterialization
+        ? schroederParticleStorageAdoption.mechanicsBufferByteLength
+        : 0)
+      || (nextUsesReactionMechanics ? reactionOutput.mechanicsBufferByteLength : 0)
       || (nextUsesMechanicsRefresh ? mechanicsRefreshOutput.mechanicsBufferByteLength : 0)
       || g2pOutput.mechanicsBufferByteLength,
+    nextParticleCount: nextParticleUploads?.sphParticleUpload?.particleCount ?? sphParticleState.particleCount,
+    g2pStateBufferReplacedBySchroederParticleStorageMaterialization:
+      nextUsesSchroederParticleStorageMaterialization,
+    g2pMechanicsBufferReplacedBySchroederParticleStorageMaterialization:
+      nextUsesSchroederParticleStorageMaterialization,
+    sourceThermoBufferReplacedBySchroederParticleStorageMaterialization:
+      nextUsesSchroederParticleStorageMaterialization,
     g2pStateBufferReplacedByThermalStep: nextUsesThermalState,
     g2pMechanicsBufferReplacedByMechanicsRefresh: nextUsesMechanicsRefresh,
     thermalThermoBufferHandoffStatus: thermalStep
@@ -14505,6 +14741,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederLawNeighborCandidates = null,
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
+  schroederParticleStorageMaterialization = null,
   schroederFarAggregateForceApplication = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -15088,6 +15325,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederFarForceDeltaFusion,
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
+    schroederParticleStorageMaterialization,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
       schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,
@@ -15558,6 +15796,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     const g2pOutput = retainedG2pOutputBuffers(step.g2pReconstruction);
     const schroederFarForceOutput =
       retainedSchroederFarForceDeltaFusionOutputBuffers(step.schroederFarForceDeltaFusion);
+    const schroederParticleStorageOutput =
+      retainedSchroederParticleStorageMaterializationBuffers(step.schroederParticleStorageMaterialization);
     const thermalOutput = retainedThermalOutputBuffers(step.thermalStep);
     const reactionOutput = retainedReactionOutputBuffers(step.reactionStep);
     const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(step.mechanicsRefreshStep);
@@ -15574,6 +15814,25 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (g2pOutput.mechanicsBuffer && g2pOutput.mechanicsBuffer !== usedMechanicsBuffer) destroyUnlessPreserved(g2pOutput.mechanicsBuffer);
     if (thermalOutput.stateBuffer && thermalOutput.stateBuffer !== usedStateBuffer) destroyUnlessPreserved(thermalOutput.stateBuffer);
     if (thermalOutput.thermoBuffer && thermalOutput.thermoBuffer !== usedThermoBuffer) destroyUnlessPreserved(thermalOutput.thermoBuffer);
+    if (
+      schroederParticleStorageOutput.stateBuffer
+      && schroederParticleStorageOutput.stateBuffer !== usedStateBuffer
+    ) {
+      destroyUnlessPreserved(schroederParticleStorageOutput.stateBuffer);
+    }
+    if (
+      schroederParticleStorageOutput.thermoBuffer
+      && schroederParticleStorageOutput.thermoBuffer !== usedThermoBuffer
+    ) {
+      destroyUnlessPreserved(schroederParticleStorageOutput.thermoBuffer);
+    }
+    if (
+      schroederParticleStorageOutput.mechanicsBuffer
+      && schroederParticleStorageOutput.mechanicsBuffer !== usedMechanicsBuffer
+    ) {
+      destroyUnlessPreserved(schroederParticleStorageOutput.mechanicsBuffer);
+    }
+    destroyUnlessPreserved(schroederParticleStorageOutput.materializationBuffer);
     if (reactionOutput.stateBuffer && reactionOutput.stateBuffer !== usedStateBuffer) destroyUnlessPreserved(reactionOutput.stateBuffer);
     if (reactionOutput.thermoBuffer && reactionOutput.thermoBuffer !== usedThermoBuffer) destroyUnlessPreserved(reactionOutput.thermoBuffer);
     if (reactionOutput.mechanicsBuffer && reactionOutput.mechanicsBuffer !== usedMechanicsBuffer) destroyUnlessPreserved(reactionOutput.mechanicsBuffer);
@@ -15584,6 +15843,21 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       destroyInputResidentProductMass,
       preserveBuffers
     });
+  } else if (step?.schroederParticleStorageMaterialization) {
+    const schroederParticleStorageOutput =
+      retainedSchroederParticleStorageMaterializationBuffers(step.schroederParticleStorageMaterialization);
+    if (step.schroederParticleStorageMaterialization.destroyParticleBuffers) {
+      step.schroederParticleStorageMaterialization.destroyParticleBuffers();
+    } else {
+      destroyUnlessPreserved(schroederParticleStorageOutput.stateBuffer);
+      destroyUnlessPreserved(schroederParticleStorageOutput.thermoBuffer);
+      destroyUnlessPreserved(schroederParticleStorageOutput.mechanicsBuffer);
+    }
+    if (step.schroederParticleStorageMaterialization.destroyMaterializationBuffer) {
+      step.schroederParticleStorageMaterialization.destroyMaterializationBuffer();
+    } else {
+      destroyUnlessPreserved(schroederParticleStorageOutput.materializationBuffer);
+    }
   } else if (step?.schroederFarForceDeltaFusion?.destroyOutputParticleBuffers) {
     step.schroederFarForceDeltaFusion.destroyOutputParticleBuffers();
   } else if (step?.g2pReconstruction?.destroyOutputParticleBuffers) {
@@ -15614,6 +15888,9 @@ export function cloneSphParticleStateForNext(source, step) {
   const thermalResult = step.thermalStep?.result || step.thermalStep;
   const schroederFarForceResult =
     step.schroederFarForceDeltaFusion?.result || step.schroederFarForceDeltaFusion;
+  const schroederParticleStorageParticleCount = step.schroederParticleStorageAdoption?.adopted === true
+    ? step.schroederParticleStorageAdoption.authoritativeParticleCount
+    : null;
   const activeGridDispatch = step.stageTiming?.activeGridDispatch
     || step.fusedResidentSequence?.activeGridDispatch
     || step.gridUpdate?.activeGridDispatch
@@ -15627,6 +15904,7 @@ export function cloneSphParticleStateForNext(source, step) {
   return {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
+    particleCount: schroederParticleStorageParticleCount ?? source.particleCount,
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
     state: noFullReadback
@@ -15654,9 +15932,13 @@ export function cloneSphParticleStateForNext(source, step) {
 export function cloneMlsMpmParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   const reactionResult = step.reactionStep?.result || step.reactionStep;
+  const schroederParticleStorageParticleCount = step.schroederParticleStorageAdoption?.adopted === true
+    ? step.schroederParticleStorageAdoption.authoritativeParticleCount
+    : null;
   return {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
+    particleCount: schroederParticleStorageParticleCount ?? source.particleCount,
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
     mechanics: noFullReadback ? source.mechanics : (reactionResult?.mechanics?.length ? reactionResult.mechanics : step.mechanics),
@@ -16089,6 +16371,13 @@ function summarizeResidentStepForSequence(step, index) {
     residentBufferLeaseActiveLeaseCount: step.residentBufferLeaseActiveLeaseCount ?? 0,
     residentBufferLeaseWarnings: [...(step.residentBufferLeaseWarnings || [])],
     residentBufferLeaseBlockers: [...(step.residentBufferLeaseBlockers || [])],
+    schroederParticleStorageAdoptionStatus: step.schroederParticleStorageAdoptionStatus ?? null,
+    schroederParticleStorageAdopted: step.schroederParticleStorageAdopted === true,
+    schroederParticleStorageAdoptionMode: step.schroederParticleStorageAdoptionMode ?? null,
+    schroederParticleStorageAuthoritativeParticleCount:
+      step.schroederParticleStorageAuthoritativeParticleCount ?? null,
+    schroederParticleStorageMaterializationStatus:
+      step.schroederParticleStorageMaterializationStatus ?? null,
     gpuResidentLaneStatus: step.gpuResidentLaneStatus ?? null,
     gpuResidentLaneLeaseId: step.gpuResidentLaneLeaseId ?? null,
     gpuResidentLaneFenceStatus: step.gpuResidentLaneFenceStatus ?? null,
@@ -16159,6 +16448,7 @@ function summarizeResidentStepForSequence(step, index) {
     pressureInterfaceForceConsumerStatus: step.pressureInterfaceForceConsumerStatus ?? null,
     internalPressureScale: step.internalPressureScale ?? null,
     nextParticleBufferMode: step.nextParticleBufferMode,
+    nextParticleCount: step.nextParticleCount ?? step.nextParticleUploads?.sphParticleUpload?.particleCount ?? null,
     particlePingPong: { ...step.particlePingPong },
     diagnostics: {
       particleCount: step.diagnostics?.particleCount ?? 0,

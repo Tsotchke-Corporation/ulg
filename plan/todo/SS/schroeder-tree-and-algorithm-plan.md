@@ -586,15 +586,28 @@ Completed in this slice:
    forwarding while leaving the authoritative state swap as a separate owner
    decision.
 
-The next code slice on `SS` is **SS authoritative particle-storage swap**:
+Completed in this slice:
 
 1. Teach the resident/state-manager authority path to adopt admitted retained
    materialized particle buffers as the next authoritative particle storage.
-2. Preserve fail-closed StateManager admission, cleanup/lease ownership, and
-   rollback semantics before replacing source particle buffers.
-3. Preserve the URL-scheduled H2O steam proof: expected level delta > 2,
+2. Added fail-closed resident adoption telemetry, target-family checks,
+   next-particle count propagation, buffer lease tracking, and cleanup ownership
+   for retained materialized SPH state, SPH thermo, and MLS-MPM mechanics
+   buffers.
+3. Preserved the URL-scheduled H2O steam proof target: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent
    bulk, refine-pressure count/mask 0 for coherent bulk, particle growth <= 1,
    no full readback, and status telemetry separating expansion detection from
    level-update deltas.
+
+The next code slice on `SS` is **SS adopted storage continuation**:
+
+1. Carry adopted materialized particle storage through PeerCompute resident
+   step/sequence compute-task result descriptors so remote and local schedulers
+   can distinguish current source buffers from newly authoritative buffers.
+2. Add StateManager-admitted commit/replay metadata for the adopted storage
+   descriptor without transferring raw GPUBuffer objects across peers.
+3. Preserve same-device hot-loop behavior: local resident execution may keep
+   direct retained buffers, while distributed PeerCompute paths receive only
+   replayable descriptors and explicit admission/lease evidence.

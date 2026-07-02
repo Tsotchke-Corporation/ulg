@@ -9,6 +9,7 @@ import {
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
+  SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
@@ -30,6 +31,8 @@ import {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
@@ -53,12 +56,15 @@ import {
   SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
   SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+  SCHROEDER_LAW_QUEUE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_NO_FULL_READBACK_MODE,
+  SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE,
   DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
   DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY,
+  DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
@@ -78,6 +84,8 @@ import {
   createSchroederHierarchyAggregateNodeParamsArray,
   createSchroederHierarchyAggregateNodePlan,
   createSchroederHierarchyAggregatePlan,
+  createSchroederLawQueueParamsArray,
+  createSchroederLawQueuePlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
   createSchroederPhaseVolumeDiagnosticSummaryParamsArray,
@@ -97,6 +105,7 @@ import {
   runSchroederCrossLevelTransferWebGpu,
   runSchroederHierarchyAggregateNodeReductionWebGpu,
   runSchroederHierarchyAggregateWebGpu,
+  runSchroederLawQueueWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   runSchroederPhaseVolumeLevelUpdateWebGpu,
@@ -288,6 +297,14 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS, 16);
   assert.equal(SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length, SCHROEDER_ACTIVE_NODE_FLOATS);
   assert.equal(SCHROEDER_ACTIVE_NODE_FLOATS % 4, 0);
+  assert.equal(ULG_SCHROEDER_LAW_QUEUE_SCHEMA, 'peercompute.ulg.schroeder-law-queue.v0');
+  assert.equal(
+    ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-law-queue-execution.v0'
+  );
+  assert.equal(SCHROEDER_LAW_QUEUE_FLOATS, 32);
+  assert.equal(SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length, SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(SCHROEDER_LAW_QUEUE_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA, 'peercompute.ulg.schroeder-cross-level-coupling.v0');
   assert.equal(
     ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
@@ -488,6 +505,55 @@ test('Schroeder active-node plan uses retained level assignments as unsorted til
   assert.equal(view.getUint32(0, true), 5);
   assert.equal(view.getUint32(4, true), 4);
   assert.equal(view.getFloat32(16, true), 2);
+});
+
+test('Schroeder law queue plan projects active nodes into local law work descriptors', () => {
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 130,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const plan = createSchroederLawQueuePlan({
+    activeNodeList,
+    queueEpoch: 7,
+    stateFamilyId: 2
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_LAW_QUEUE_SCHEMA);
+  assert.equal(plan.status, 'schroeder-law-queue-plan-ready');
+  assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(plan.activeNodeCount, 130);
+  assert.equal(plan.lawQueueStrideFloats, SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(plan.lawQueueByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK);
+  assert.equal(plan.candidateBudget, DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET);
+  assert.equal(plan.queueEpoch, 7);
+  assert.equal(plan.stateFamilyId, 2);
+  assert.deepEqual(plan.lawFamilies, ['reaction', 'contact', 'interface']);
+  assert.equal(plan.queueTopology, 'one-law-queue-row-per-active-node');
+  assert.equal(plan.outputCompaction, 'active-node-local-law-queue-descriptors');
+  assert.equal(
+    plan.exactNearFieldRequirement,
+    'reaction-contact-interface-queues-require-exact-near-field-validation'
+  );
+  assert.equal(plan.aggregateAdmissibilityStatus, 'far-aggregate-laws-not-enabled-for-local-queues');
+  assert.equal(plan.reactionScopeStatus, 'sedenion-scope-preserved-for-reaction-queue');
+  assert.equal(plan.stateMutationStatus, 'law-queue-planned-no-state-mutation');
+  assert.equal(plan.stateAuthorityStatus, 'state-manager-admission-required-before-law-output-mutation');
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederLawQueueParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(view.getFloat32(16, true), SCHROEDER_LOCAL_LAW_QUEUE_MASK);
+  assert.equal(view.getFloat32(20, true), DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET);
+  assert.equal(view.getFloat32(24, true), 7);
+  assert.equal(view.getFloat32(28, true), 2);
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -1071,6 +1137,51 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
   assert.equal(activeNodes.activeNodes.length, 0);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder law queue consumes retained active nodes without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 130,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'retained-active-node-buffer' }
+  };
+  const lawQueue = await runSchroederLawQueueWebGpu({
+    device,
+    activeNodeList,
+    queueEpoch: 7,
+    stateFamilyId: 2
+  });
+
+  assert.equal(lawQueue.schema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(lawQueue.lawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_SCHEMA);
+  assert.equal(lawQueue.status, 'schroeder-law-queue-submitted');
+  assert.equal(lawQueue.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(lawQueue.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(lawQueue.fullReadbackPerformed, false);
+  assert.equal(lawQueue.fullParticleReadbackPerformed, false);
+  assert.equal(lawQueue.normalHotLoopReadbackFree, true);
+  assert.equal(lawQueue.retainedLawQueueBuffer, true);
+  assert.ok(lawQueue.lawQueueBuffer);
+  assert.equal(lawQueue.lawQueueBuffer.destroyed, false);
+  assert.equal(lawQueue.lawQueueBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(lawQueue.lawQueueRows.length, 0);
+  assert.equal(lawQueue.lawQueueStatus, 'local-law-queues-submitted');
+  assert.equal(
+    lawQueue.exactNearFieldRequirement,
+    'reaction-contact-interface-queues-require-exact-near-field-validation'
+  );
+  assert.equal(lawQueue.reactionScopeStatus, 'sedenion-scope-preserved-for-reaction-queue');
+  assert.equal(lawQueue.stateMutationStatus, 'law-queue-buffer-submitted-no-state-mutation');
+  assert.equal(lawQueue.stateAuthorityStatus, 'state-manager-admission-required-before-law-output-mutation');
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederLawQueueParams')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false

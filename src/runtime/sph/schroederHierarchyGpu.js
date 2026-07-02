@@ -7,6 +7,7 @@ import {
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
+  SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
@@ -28,6 +29,8 @@ import {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
@@ -53,6 +56,7 @@ import {
   schroederCrossLevelStateDeltaWgsl,
   schroederCrossLevelTransferWgsl,
   schroederLevelAssignmentWgsl,
+  schroederLawQueueWgsl,
   schroederPhaseVolumeDiagnosticSummaryWgsl,
   schroederPhaseVolumeLevelUpdateWgsl,
   schroederPhaseVolumeMigrationWgsl
@@ -82,6 +86,8 @@ export {
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
@@ -104,6 +110,7 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS = SCHROEDER_CROSS_LEVEL_ST
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
+export const SCHROEDER_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length;
@@ -116,12 +123,14 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
+export const SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
 export const SCHROEDER_CROSS_LEVEL_COUPLING_SCOPE = 'schroeder-gpu-cross-level-coupling';
+export const SCHROEDER_LAW_QUEUE_SCOPE = 'schroeder-gpu-law-queue';
 export const SCHROEDER_LEVEL_ASSIGNMENT_SCOPE = 'schroeder-gpu-level-assignment';
 export const SCHROEDER_SAME_LEVEL_MECHANICS_SCOPE = 'schroeder-same-level-mls-mpm-ocean-mechanics';
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -134,6 +143,7 @@ export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
+export const SCHROEDER_FULL_LAW_QUEUE_READBACK_MODE = 'full-schroeder-law-queue-readback';
 export const SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-phase-volume-diagnostic-summary-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schroeder-phase-volume-level-update-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
@@ -143,6 +153,14 @@ export const SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE =
 export const SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE = 'auto';
 export const DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS = 512;
 export const DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY = 32;
+export const SCHROEDER_LOCAL_LAW_REACTION_MASK = 1;
+export const SCHROEDER_LOCAL_LAW_CONTACT_MASK = 2;
+export const SCHROEDER_LOCAL_LAW_INTERFACE_MASK = 4;
+export const SCHROEDER_LOCAL_LAW_QUEUE_MASK =
+  SCHROEDER_LOCAL_LAW_REACTION_MASK
+  | SCHROEDER_LOCAL_LAW_CONTACT_MASK
+  | SCHROEDER_LOCAL_LAW_INTERFACE_MASK;
+export const DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET = 64;
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -413,6 +431,38 @@ export function createSchroederActiveNodeParamsArray({
   view.setFloat32(20, Math.max(0, finiteNumber(minTileSpacingM, 0)), true);
   view.setFloat32(24, Math.max(0, finiteNumber(maxTileSpacingM, 0)), true);
   view.setFloat32(28, 0, true);
+  return buffer;
+}
+
+export function createSchroederLawQueueParamsArray({
+  activeNodeCount = 0,
+  activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
+  lawQueueStrideFloats = SCHROEDER_LAW_QUEUE_FLOATS,
+  flags = 0,
+  enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+  candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    lawQueueStrideFloats,
+    SCHROEDER_LAW_QUEUE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(16, Math.max(0, finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK)), true);
+  view.setFloat32(20, Math.max(0, finiteNumber(
+    candidateBudget,
+    DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
+  )), true);
+  view.setFloat32(24, finiteNumber(queueEpoch, 0), true);
+  view.setFloat32(28, finiteNumber(stateFamilyId, 1), true);
   return buffer;
 }
 
@@ -760,6 +810,29 @@ function assertActiveNodeListInput(activeNodeList, particleCount) {
   }
 }
 
+function assertLawQueueActiveNodeInput(activeNodeList) {
+  if (
+    activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA
+    && activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA
+  ) {
+    throw new TypeError('Schroeder law queue requires a Schroeder active-node input');
+  }
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    0
+  )));
+  if (activeNodeCount <= 0) {
+    throw new RangeError('Schroeder law queue requires at least one active-node row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  )));
+  if (stride !== SCHROEDER_ACTIVE_NODE_FLOATS) {
+    throw new RangeError('Schroeder law queue requires the current active-node row layout');
+  }
+}
+
 function assertCrossLevelCouplingInput(crossLevelCoupling) {
   if (
     crossLevelCoupling?.schema !== ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA
@@ -1102,6 +1175,64 @@ export function createSchroederActiveNodeListPlan({
     activeNodeStrideBytes: SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     activeNodeByteLength,
     outputCompaction: 'unsorted-one-row-per-particle-tile-range',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederLawQueuePlan({
+  activeNodeList,
+  enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+  candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  assertLawQueueActiveNodeInput(activeNodeList);
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    0
+  )));
+  const resolvedLawMask = Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK)));
+  const lawFamilies = [];
+  if ((resolvedLawMask & SCHROEDER_LOCAL_LAW_REACTION_MASK) !== 0) lawFamilies.push('reaction');
+  if ((resolvedLawMask & SCHROEDER_LOCAL_LAW_CONTACT_MASK) !== 0) lawFamilies.push('contact');
+  if ((resolvedLawMask & SCHROEDER_LOCAL_LAW_INTERFACE_MASK) !== 0) lawFamilies.push('interface');
+  const lawQueueByteLength = Math.max(
+    4,
+    activeNodeCount * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
+    status: 'schroeder-law-queue-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: SCHROEDER_LAW_QUEUE_SCOPE,
+    sourceActiveNodeSchema: activeNodeList.schema,
+    sourceActiveNodeStatus: activeNodeList.status ?? null,
+    activeNodeCount,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    lawQueueRowLayout: [...SCHROEDER_LAW_QUEUE_ROW_LAYOUT],
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueStrideBytes: SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    lawQueueByteLength,
+    enabledLawMask: resolvedLawMask,
+    candidateBudget: Math.max(0, finiteNumber(
+      candidateBudget,
+      DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
+    )),
+    queueEpoch: finiteNumber(queueEpoch, 0),
+    stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    lawFamilies,
+    queueTopology: 'one-law-queue-row-per-active-node',
+    outputCompaction: 'active-node-local-law-queue-descriptors',
+    exactNearFieldRequirement: 'reaction-contact-interface-queues-require-exact-near-field-validation',
+    aggregateAdmissibilityStatus: 'far-aggregate-laws-not-enabled-for-local-queues',
+    reactionScopeStatus: 'sedenion-scope-preserved-for-reaction-queue',
+    stateMutationTarget: 'schroeder-retained-local-law-queue-buffer',
+    stateMutationStatus: 'law-queue-planned-no-state-mutation',
+    stateAuthorityStatus: 'state-manager-admission-required-before-law-output-mutation',
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -1962,6 +2093,145 @@ export async function runSchroederActiveNodeListWebGpu({
     const cleanup = () => {
       if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
       if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
+export async function runSchroederLawQueueWebGpu({
+  device,
+  activeNodeList,
+  enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+  candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  queueEpoch = 0,
+  stateFamilyId = 1,
+  retainLawQueueBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederLawQueueWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederLawQueuePlan({
+    activeNodeList,
+    enabledLawMask,
+    candidateBudget,
+    queueEpoch,
+    stateFamilyId
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedActiveNodeBuffer = activeNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
+    ? activeNodeList.activeNodes
+    : null;
+  if (!borrowedActiveNodeBuffer && !(activeNodeRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder law queue requires a retained active-node buffer or explicit active-node rows');
+  }
+  const activeNodeBuffer = borrowedActiveNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-law-queue-active-node-in', activeNodeRows);
+  const lawQueueBuffer = device.createBuffer({
+    label: 'ulg-schroeder-law-queue-out',
+    size: plan.lawQueueByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-law-queue-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-law-queue-readback',
+      size: plan.lawQueueByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedLawQueueBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederLawQueueParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-law-queue.v0',
+      label: 'ulg-schroeder-law-queue',
+      code: schroederLawQueueWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: activeNodeBuffer } },
+        { binding: 1, resource: { buffer: lawQueueBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(plan.activeNodeCount / SCHROEDER_LAW_QUEUE_WORKGROUP_SIZE)));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(lawQueueBuffer, 0, readBuffer, 0, plan.lawQueueByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let lawQueueRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      lawQueueRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.activeNodeCount * SCHROEDER_LAW_QUEUE_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+      lawQueueSchema: plan.schema,
+      status: 'schroeder-law-queue-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback ? SCHROEDER_NO_FULL_READBACK_MODE : SCHROEDER_FULL_LAW_QUEUE_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedLawQueueBuffer: Boolean(retainLawQueueBuffer),
+      lawQueueBufferByteLength: plan.lawQueueByteLength,
+      lawQueueRows,
+      lawQueueStatus: 'local-law-queues-submitted',
+      exactNearFieldRequirement: plan.exactNearFieldRequirement,
+      aggregateAdmissibilityStatus: plan.aggregateAdmissibilityStatus,
+      reactionScopeStatus: plan.reactionScopeStatus,
+      conservativeTransferStatus: 'local-law-queue-descriptors-submitted-no-transfer',
+      stateMutationStatus: 'law-queue-buffer-submitted-no-state-mutation',
+      stateAuthorityStatus: 'state-manager-admission-required-before-law-output-mutation',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainLawQueueBuffer) {
+      result.lawQueueBuffer = lawQueueBuffer;
+      result.destroyLawQueueBuffer = () => lawQueueBuffer.destroy?.();
+      returnedRetainedLawQueueBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      if (!retainLawQueueBuffer || !returnedRetainedLawQueueBuffer) lawQueueBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };

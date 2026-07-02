@@ -7458,6 +7458,104 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederLawQueueWgsl = `
+struct SchroederLawQueueParams {
+  active_node_count: u32,
+  active_node_stride: u32,
+  law_queue_stride: u32,
+  flags: u32,
+  enabled_law_mask: f32,
+  candidate_budget: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+};
+
+@group(0) @binding(0) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(1) var<storage, read_write> law_queue_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederLawQueueParams;
+
+const SCHROEDER_ACTIVE_NODE_STRIDE_FOR_LAW_QUEUE: u32 = 16u;
+const SCHROEDER_LAW_QUEUE_STRIDE: u32 = 32u;
+const SCHROEDER_LAW_REACTION_MASK: u32 = 1u;
+const SCHROEDER_LAW_CONTACT_MASK: u32 = 2u;
+const SCHROEDER_LAW_INTERFACE_MASK: u32 = 4u;
+
+fn ss_law_queue_mask_enabled(mask: u32, bit: u32) -> bool {
+  return (mask & bit) != 0u;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.active_node_count) {
+    return;
+  }
+  let active_stride = max(params.active_node_stride, SCHROEDER_ACTIVE_NODE_STRIDE_FOR_LAW_QUEUE);
+  let queue_stride = max(params.law_queue_stride, SCHROEDER_LAW_QUEUE_STRIDE);
+  let active_offset = row_index * active_stride;
+  let queue_offset = row_index * queue_stride;
+  let active_status = active_nodes[active_offset + 11u];
+  let active_node_enabled = active_status > 0.0 && active_status < 32.0;
+  let law_mask = u32(max(round(params.enabled_law_mask), 0.0));
+  let reaction_enabled = active_node_enabled && ss_law_queue_mask_enabled(law_mask, SCHROEDER_LAW_REACTION_MASK);
+  let contact_enabled = active_node_enabled && ss_law_queue_mask_enabled(law_mask, SCHROEDER_LAW_CONTACT_MASK);
+  let interface_enabled = active_node_enabled && ss_law_queue_mask_enabled(law_mask, SCHROEDER_LAW_INTERFACE_MASK);
+  let status = select(32.0, 1.0, active_node_enabled && law_mask != 0u);
+  let tile_min = vec3<f32>(
+    active_nodes[active_offset + 1u],
+    active_nodes[active_offset + 2u],
+    active_nodes[active_offset + 3u]
+  );
+  let tile_max = vec3<f32>(
+    active_nodes[active_offset + 4u],
+    active_nodes[active_offset + 5u],
+    active_nodes[active_offset + 6u]
+  );
+  let tile_span = max(tile_max - tile_min + vec3<f32>(1.0), vec3<f32>(0.0));
+  let tile_cell_estimate = tile_span.x * tile_span.y * tile_span.z;
+  let candidate_budget = max(params.candidate_budget, 0.0);
+  let local_law_enabled = reaction_enabled || contact_enabled || interface_enabled;
+  let estimated_candidate_count = select(
+    0.0,
+    min(max(tile_cell_estimate, 1.0), candidate_budget),
+    local_law_enabled && candidate_budget > 0.0
+  );
+
+  law_queue_rows[queue_offset + 0u] = active_nodes[active_offset + 10u];
+  law_queue_rows[queue_offset + 1u] = active_nodes[active_offset + 0u];
+  law_queue_rows[queue_offset + 2u] = active_nodes[active_offset + 15u];
+  law_queue_rows[queue_offset + 3u] = status;
+  law_queue_rows[queue_offset + 4u] = tile_min.x;
+  law_queue_rows[queue_offset + 5u] = tile_min.y;
+  law_queue_rows[queue_offset + 6u] = tile_min.z;
+  law_queue_rows[queue_offset + 7u] = tile_max.x;
+  law_queue_rows[queue_offset + 8u] = tile_max.y;
+  law_queue_rows[queue_offset + 9u] = tile_max.z;
+  law_queue_rows[queue_offset + 10u] = active_nodes[active_offset + 7u];
+  law_queue_rows[queue_offset + 11u] = active_nodes[active_offset + 9u];
+  law_queue_rows[queue_offset + 12u] = f32(law_mask);
+  law_queue_rows[queue_offset + 13u] = select(0.0, 1.0, reaction_enabled);
+  law_queue_rows[queue_offset + 14u] = select(0.0, 1.0, contact_enabled);
+  law_queue_rows[queue_offset + 15u] = select(0.0, 1.0, interface_enabled);
+  law_queue_rows[queue_offset + 16u] = 0.0;
+  law_queue_rows[queue_offset + 17u] = select(0.0, 1.0, local_law_enabled);
+  law_queue_rows[queue_offset + 18u] = 0.0;
+  law_queue_rows[queue_offset + 19u] = select(0.0, 1.0, reaction_enabled);
+  law_queue_rows[queue_offset + 20u] = candidate_budget;
+  law_queue_rows[queue_offset + 21u] = estimated_candidate_count;
+  law_queue_rows[queue_offset + 22u] = 1.0;
+  law_queue_rows[queue_offset + 23u] = 1.0;
+  law_queue_rows[queue_offset + 24u] = params.state_family_id;
+  law_queue_rows[queue_offset + 25u] = select(0.0, 1.0, local_law_enabled);
+  law_queue_rows[queue_offset + 26u] = active_status;
+  law_queue_rows[queue_offset + 27u] = f32(row_index);
+  law_queue_rows[queue_offset + 28u] = params.queue_epoch;
+  law_queue_rows[queue_offset + 29u] = 0.0;
+  law_queue_rows[queue_offset + 30u] = 0.0;
+  law_queue_rows[queue_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederCrossLevelCouplingWgsl = `
 struct SchroederCrossLevelParams {
   particle_count: u32,

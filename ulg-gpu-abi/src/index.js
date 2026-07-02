@@ -73,6 +73,8 @@ export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA = 'peercompute.ulg.schroeder-
 export const ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-level-assignment-execution.v0';
 export const ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA = 'peercompute.ulg.schroeder-active-node-list.v0';
 export const ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-list-execution.v0';
+export const ULG_SCHROEDER_LAW_QUEUE_SCHEMA = 'peercompute.ulg.schroeder-law-queue.v0';
+export const ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-queue-execution.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
@@ -737,6 +739,40 @@ export const SCHROEDER_ACTIVE_NODE_ROW_LAYOUT = Object.freeze([
   'positionYM:f32',
   'positionZM:f32',
   'chartId:f32'
+]);
+export const SCHROEDER_LAW_QUEUE_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'levelId:f32',
+  'chartId:f32',
+  'status:f32',
+  'tileMinX:f32',
+  'tileMinY:f32',
+  'tileMinZ:f32',
+  'tileMaxX:f32',
+  'tileMaxY:f32',
+  'tileMaxZ:f32',
+  'tileSpacingM:f32',
+  'supportRadiusM:f32',
+  'lawMask:f32',
+  'reactionQueueEligible:f32',
+  'contactQueueEligible:f32',
+  'interfaceQueueEligible:f32',
+  'materialPhaseMask:f32',
+  'exactNearFieldRequired:f32',
+  'aggregateAdmissible:f32',
+  'sedenionScopeRequired:f32',
+  'candidateBudget:f32',
+  'estimatedCandidateCount:f32',
+  'queueModeId:f32',
+  'capacityStatus:f32',
+  'stateFamilyId:f32',
+  'admissionRequired:f32',
+  'sourceActiveNodeStatus:f32',
+  'sourceActiveNodeIndex:f32',
+  'queueEpoch:f32',
+  'pad0:f32',
+  'pad1:f32',
+  'pad2:f32'
 ]);
 export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

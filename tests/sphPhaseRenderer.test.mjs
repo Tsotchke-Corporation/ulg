@@ -17,6 +17,7 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
   SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL,
   ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -33,6 +34,7 @@ import {
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
   createProductEventSurfaceBatches,
+  createSchroederRenderSourceMetadata,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
@@ -101,6 +103,8 @@ import {
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 
@@ -114,6 +118,52 @@ function opticalRecordField(table, record, fieldName) {
     .findIndex((entry) => String(entry).split(':')[0] === fieldName);
   assert.ok(fieldIndex >= 0, `missing optical record field ${fieldName}`);
   return table.records[(record.recordIndex * table.recordStrideFloats) + fieldIndex];
+}
+
+function schroederPortableSummaryFixture(overrides = {}) {
+  const renderLod = {
+    schema: ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+    status: 'schroeder-render-lod-summary-planned',
+    mode: 'active-node-leaf-and-aggregate-proxy-lod',
+    selectedLevel: 2,
+    nativeGridSpacingM: 0.25,
+    activeLeafProxyCount: 12,
+    aggregateProxyCount: 3,
+    lawQueueProxyCount: 5,
+    phaseVolumeDiagnosticRowsAvailable: true,
+    geometryPolicy: 'active-leaf-spheres-and-coherent-aggregate-proxies',
+    opticalPolicy: 'closure-derived-pbr-materials',
+    fullParticleReadbackRequired: false,
+    ...(overrides.renderLod || {})
+  };
+  return {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+    status: 'schroeder-portable-summary-plan-ready',
+    portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
+    transferMode: 'peercompute-portable-summary-descriptors',
+    peerComputeUseCase: 'scene-render-source-test',
+    retainedRefCount: 2,
+    retainedBufferRefCount: 2,
+    retainedRefs: [
+      {
+        role: 'activeNodes',
+        schema: 'peercompute.ulg.schroeder-active-node-list.v0',
+        retainedBufferRef: 'active-node-list:test',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer'
+      },
+      {
+        role: 'aggregateNodes',
+        schema: 'peercompute.ulg.schroeder-hierarchy-aggregate-node.v0',
+        retainedBufferRef: 'aggregate-node:test',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer'
+      }
+    ],
+    renderLod,
+    presentationAuthority: 'presentation-consumes-render-lod-summary-not-physics-state',
+    stateAuthorityStatus: 'state-manager-admission-required-before-authoritative-remote-replay',
+    fullParticleReadbackRequired: false,
+    ...overrides
+  };
 }
 
 test('SPH scene background color defaults to sky blue and normalizes URL hex values', () => {
@@ -3008,6 +3058,99 @@ test('SPH resident render source metadata keeps stale retained surfaces visible'
   assert.equal(retainedSurfaceDraw.sourceResidentExecutionGenerationMatchesCurrent, false);
   assert.equal(retainedSurfaceDraw.sourceResidentRetainedPrevious, true);
   assert.match(retainedSurfaceDraw.sourceResidentRetentionReason, /previous native surface/);
+});
+
+test('SPH scene materializes admitted Schroeder render LOD summaries as render source metadata', () => {
+  const portableSummary = schroederPortableSummaryFixture();
+  const admission = {
+    schema: 'peercompute.ulg.schroeder-portable-summary-admission.v0',
+    status: 'schroeder-portable-summary-admission-published',
+    scope: 'ulg-schroeder-portable-summary-admissions',
+    stateKey: 'schroeder-summary:test-state',
+    cacheKey: 'schroeder-summary:test-cache',
+    hotBufferKey: 'schroeder-summary:test-hot',
+    portableSummary,
+    renderLod: portableSummary.renderLod
+  };
+  const source = createSchroederRenderSourceMetadata({
+    residentExecution: {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      status: 'resident-steps-executed',
+      portableSummary
+    },
+    schroederPortableSummaryAdmission: admission,
+    source: 'resident-step-publication'
+  });
+
+  assert.equal(source.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA);
+  assert.equal(source.status, 'schroeder-render-source-admitted');
+  assert.equal(source.renderLodPresentationReady, true);
+  assert.equal(source.renderLodPresentationSourceMode, 'schroeder-portable-summary-render-lod');
+  assert.equal(source.activeLeafProxyCount, 12);
+  assert.equal(source.aggregateProxyCount, 3);
+  assert.equal(source.lawQueueProxyCount, 5);
+  assert.equal(source.totalProxyCount, 20);
+  assert.equal(source.nativeGridSpacingM, 0.25);
+  assert.equal(source.geometryPolicy, 'active-leaf-spheres-and-coherent-aggregate-proxies');
+  assert.equal(source.opticalPolicy, 'closure-derived-pbr-materials');
+  assert.equal(source.closureDerivedPbr, true);
+  assert.equal(source.descriptorOnlyPeerComputeHandoff, true);
+  assert.equal(source.fullParticleReadbackAvoided, true);
+  assert.equal(source.rawGpuBufferTransferDetected, false);
+  assert.equal(source.rawGpuBufferTransferAllowed, false);
+  assert.equal(source.admissionPublished, true);
+  assert.equal(source.admissionStateKey, 'schroeder-summary:test-state');
+
+  const metadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      signature: 'steps-with-schroeder-summary',
+      residentExecutionGeneration: 11,
+      currentResidentExecutionGeneration: 11,
+      nextSphParticleState: { step: 7, time: 0.035, particleCount: 128 },
+      portableSummary
+    },
+    schroederPortableSummaryAdmission: admission,
+    source: 'resident-render-refresh'
+  });
+  assert.equal(metadata.schroederRenderSource.status, 'schroeder-render-source-admitted');
+  assert.equal(metadata.schroederRenderSource.renderLodSummarySchema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+
+  const target = {};
+  applyResidentRenderSourceMetadata(target, metadata);
+  assert.equal(target.sourceSchroederRenderSourceSchema, ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA);
+  assert.equal(target.sourceSchroederRenderSourceStatus, 'schroeder-render-source-admitted');
+  assert.equal(target.sourceSchroederRenderSourcePresentationReady, true);
+  assert.equal(target.sourceSchroederRenderSourceActiveLeafProxyCount, 12);
+  assert.equal(target.sourceSchroederRenderSourceAggregateProxyCount, 3);
+  assert.equal(target.sourceSchroederRenderSourceLawQueueProxyCount, 5);
+  assert.equal(target.sourceSchroederRenderSourceTotalProxyCount, 20);
+  assert.equal(target.sourceSchroederRenderSourceClosureDerivedPbr, true);
+  assert.equal(target.sourceSchroederRenderSourceDescriptorOnlyHandoff, true);
+  assert.equal(target.sourceSchroederRenderSourceFullParticleReadbackAvoided, true);
+  assert.equal(target.sourceSchroederRenderSourceRawGpuBufferTransferDetected, false);
+  assert.equal(target.sourceSchroederRenderSourceAdmissionPublished, true);
+  assert.equal(target.sourceSchroederRenderSourceAdmissionStateKey, 'schroeder-summary:test-state');
+});
+
+test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {
+  const portableSummary = schroederPortableSummaryFixture({
+    retainedRefs: [
+      {
+        role: 'activeNodes',
+        schema: 'peercompute.ulg.schroeder-active-node-list.v0',
+        buffer: { fakeGpuBuffer: true },
+        transferMode: 'structured-clone-gpubuffer'
+      }
+    ]
+  });
+  const source = createSchroederRenderSourceMetadata({ schroederPortableSummary: portableSummary });
+
+  assert.equal(source.status, 'blocked-schroeder-render-source');
+  assert.equal(source.blocker, 'schroeder-portable-summary-raw-gpubuffer-transfer-detected');
+  assert.equal(source.renderLodPresentationReady, false);
+  assert.equal(source.descriptorOnlyPeerComputeHandoff, false);
+  assert.equal(source.rawGpuBufferTransferDetected, true);
+  assert.equal(source.rawGpuBufferTransferAllowed, false);
 });
 
 test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {

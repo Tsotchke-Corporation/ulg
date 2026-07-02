@@ -9,7 +9,9 @@ import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
-  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+  ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import {
   createBufferVolumeDescriptor as createWebGpuMarchingCubesBufferVolumeDescriptor,
@@ -148,6 +150,8 @@ export const ULG_PRESENTATION_WORKER_RETAINED_COMPACT_SNAPSHOT_EXPORT_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-compact-snapshot-export.v0';
 export const ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-phase-volume-diagnostic-status.v0';
+export const ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-render-source.v0';
 
 const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
   Object.fromEntries(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.map((entry, index) => [
@@ -289,6 +293,217 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     particleExplosionAvoidanceStatus: migrationObserved
       ? 'phase-volume-level-migration-represented-without-particle-count-growth'
       : 'phase-volume-level-migration-not-observed',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function schroederRenderSourceCount(value, fallback = 0) {
+  if (value == null || value === '') return fallback;
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function schroederRenderSourcePositiveNumber(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function schroederRenderSourceRawGpuBufferTransferDetected(retainedRefs = []) {
+  if (!Array.isArray(retainedRefs)) return false;
+  return retainedRefs.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    return Object.hasOwn(entry, 'buffer')
+      || Object.hasOwn(entry, 'gpuBuffer')
+      || (
+        entry.transferMode
+        && entry.transferMode !== 'descriptor-only-no-raw-gpubuffer-transfer'
+      );
+  });
+}
+
+function resolveSchroederRenderLodInputs({
+  residentExecution = null,
+  finalStep = null,
+  schroederPortableSummary = null,
+  schroederRenderLodSummary = null,
+  schroederPortableSummaryAdmission = null
+} = {}) {
+  const sourceStep = finalStep || residentExecution?.finalStep || residentExecution || null;
+  const portable = schroederPortableSummary
+    || sourceStep?.portableSummary
+    || residentExecution?.portableSummary
+    || schroederPortableSummaryAdmission?.portableSummary
+    || null;
+  const renderLod = schroederRenderLodSummary
+    || portable?.renderLod
+    || sourceStep?.renderLod
+    || residentExecution?.renderLod
+    || schroederPortableSummaryAdmission?.renderLod
+    || null;
+  return { sourceStep, portable, renderLod };
+}
+
+export function createSchroederRenderSourceMetadata({
+  residentExecution = null,
+  finalStep = null,
+  schroederPortableSummary = null,
+  schroederRenderLodSummary = null,
+  schroederPortableSummaryAdmission = null,
+  renderOwnershipPolicy = null,
+  source = 'resident-render-refresh'
+} = {}) {
+  const { sourceStep, portable, renderLod } = resolveSchroederRenderLodInputs({
+    residentExecution,
+    finalStep,
+    schroederPortableSummary,
+    schroederRenderLodSummary,
+    schroederPortableSummaryAdmission
+  });
+  const policy = renderOwnershipPolicy && typeof renderOwnershipPolicy === 'object'
+    ? renderOwnershipPolicy
+    : {};
+  const retainedRefs = Array.isArray(portable?.retainedRefs) ? portable.retainedRefs : [];
+  const portablePresent = Boolean(portable);
+  const renderLodPresent = Boolean(renderLod);
+  if (!portablePresent && !renderLodPresent && !policy.schroederRenderLodSummaryPresent) return null;
+
+  const portableSchemaAccepted = !portablePresent || portable.schema === ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA;
+  const renderLodSchemaAccepted = !renderLodPresent || renderLod.schema === ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA;
+  const transferMode = portable?.transferMode || policy.schroederPortableSummaryTransferMode || null;
+  const portableSummaryMode = portable?.portableSummaryMode || policy.schroederPortableSummaryMode || null;
+  const descriptorOnlyTransfer = Boolean(
+    policy.schroederPortableSummaryDescriptorOnlyTransfer === true
+      || !portablePresent
+      || transferMode === 'peercompute-portable-summary-descriptors'
+      || portableSummaryMode === 'portable-descriptors-not-raw-gpubuffers'
+  );
+  const rawGpuBufferTransferDetected = Boolean(
+    policy.schroederPortableSummaryRawGpuBufferTransferDetected === true
+      || schroederRenderSourceRawGpuBufferTransferDetected(retainedRefs)
+  );
+  const fullParticleReadbackRequired = Boolean(
+    portable?.fullParticleReadbackRequired === true
+      || renderLod?.fullParticleReadbackRequired === true
+      || policy.schroederRenderLodFullParticleReadbackRequired === true
+  );
+  const presentationReady = Boolean(
+    renderLodPresent
+      && portableSchemaAccepted
+      && renderLodSchemaAccepted
+      && descriptorOnlyTransfer
+      && !rawGpuBufferTransferDetected
+      && !fullParticleReadbackRequired
+      && policy.schroederRenderLodPresentationReady !== false
+  );
+  const admissionStatus = schroederPortableSummaryAdmission?.status || null;
+  const admissionPublished = Boolean(
+    admissionStatus === 'schroeder-portable-summary-admission-published'
+      || admissionStatus === 'schroeder-portable-summary-admitted'
+  );
+  let blocker = null;
+  if (!presentationReady) {
+    if (!renderLodPresent) {
+      blocker = 'schroeder-render-lod-summary-missing';
+    } else if (!portableSchemaAccepted) {
+      blocker = 'schroeder-portable-summary-schema-mismatch';
+    } else if (!renderLodSchemaAccepted) {
+      blocker = 'schroeder-render-lod-summary-schema-mismatch';
+    } else if (!descriptorOnlyTransfer) {
+      blocker = 'schroeder-portable-summary-not-descriptor-only';
+    } else if (rawGpuBufferTransferDetected) {
+      blocker = 'schroeder-portable-summary-raw-gpubuffer-transfer-detected';
+    } else if (fullParticleReadbackRequired) {
+      blocker = 'schroeder-render-lod-summary-requires-full-particle-readback';
+    } else {
+      blocker = policy.schroederRenderLodBlocker || 'schroeder-render-lod-summary-not-ready';
+    }
+  }
+  const status = presentationReady
+    ? (admissionPublished
+      ? 'schroeder-render-source-admitted'
+      : 'schroeder-render-source-local-observation-ready')
+    : 'blocked-schroeder-render-source';
+  const activeLeafProxyCount = schroederRenderSourceCount(
+    renderLod?.activeLeafProxyCount ?? policy.schroederRenderLodActiveLeafProxyCount,
+    0
+  );
+  const aggregateProxyCount = schroederRenderSourceCount(
+    renderLod?.aggregateProxyCount ?? policy.schroederRenderLodAggregateProxyCount,
+    0
+  );
+  const lawQueueProxyCount = schroederRenderSourceCount(
+    renderLod?.lawQueueProxyCount ?? policy.schroederRenderLodLawQueueProxyCount,
+    0
+  );
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA,
+    status,
+    blocker,
+    source,
+    sourceSchema: residentExecution?.schema ?? null,
+    sourceStatus: residentExecution?.status ?? null,
+    sourceStepSchema: sourceStep?.schema ?? null,
+    sourceStepStatus: sourceStep?.status ?? null,
+    portableSummarySchema: portable?.schema || policy.schroederPortableSummarySchema || null,
+    portableSummaryStatus: portable?.status || policy.schroederPortableSummaryStatus || null,
+    portableSummaryMode,
+    portableSummaryTransferMode: transferMode,
+    portableSummaryDescriptorOnlyTransfer: descriptorOnlyTransfer,
+    portableSummaryRetainedRefCount: schroederRenderSourceCount(
+      portable?.retainedRefCount ?? policy.schroederPortableSummaryRetainedRefCount,
+      retainedRefs.length
+    ),
+    portableSummaryRetainedBufferRefCount: schroederRenderSourceCount(
+      portable?.retainedBufferRefCount ?? policy.schroederPortableSummaryRetainedBufferRefCount,
+      0
+    ),
+    rawGpuBufferTransferDetected,
+    rawGpuBufferTransferAllowed: false,
+    renderLodSummarySchema: renderLod?.schema || policy.schroederRenderLodSummarySchema || null,
+    renderLodSummaryStatus: renderLod?.status || policy.schroederRenderLodSummaryStatus || null,
+    renderLodStatus: policy.schroederRenderLodStatus || null,
+    renderLodMode: renderLod?.mode || policy.schroederRenderLodMode || null,
+    renderLodPresentationReady: presentationReady,
+    renderLodPresentationSourceMode: presentationReady
+      ? (policy.schroederRenderLodPresentationSourceMode || 'schroeder-portable-summary-render-lod')
+      : null,
+    selectedLevel: finiteNumberOrNull(renderLod?.selectedLevel),
+    nativeGridSpacingM: schroederRenderSourcePositiveNumber(
+      renderLod?.nativeGridSpacingM ?? policy.schroederRenderLodNativeGridSpacingM,
+      null
+    ),
+    activeLeafProxyCount,
+    aggregateProxyCount,
+    lawQueueProxyCount,
+    totalProxyCount: activeLeafProxyCount + aggregateProxyCount + lawQueueProxyCount,
+    phaseVolumeDiagnosticRowsAvailable: Boolean(renderLod?.phaseVolumeDiagnosticRowsAvailable),
+    geometryPolicy: renderLod?.geometryPolicy || policy.schroederRenderLodGeometryPolicy || null,
+    opticalPolicy: renderLod?.opticalPolicy || policy.schroederRenderLodOpticalPolicy || null,
+    closureDerivedPbr: (
+      renderLod?.opticalPolicy === 'closure-derived-pbr-materials'
+      || policy.schroederRenderLodOpticalPolicy === 'closure-derived-pbr-materials'
+    ),
+    presentationAuthority: portable?.presentationAuthority
+      || policy.schroederRenderLodPresentationAuthority
+      || (presentationReady ? 'presentation-consumes-render-lod-summary-not-physics-state' : null),
+    stateAuthorityStatus: portable?.stateAuthorityStatus
+      || policy.schroederRenderLodStateAuthorityStatus
+      || (renderLodPresent ? 'state-manager-admission-required-before-authoritative-remote-replay' : null),
+    physicsAuthority: 'resident-schroeder-mechanics',
+    admissionSchema: schroederPortableSummaryAdmission?.schema || null,
+    admissionStatus,
+    admissionPublished,
+    admissionScope: schroederPortableSummaryAdmission?.scope || null,
+    admissionStateKey: schroederPortableSummaryAdmission?.stateKey || null,
+    admissionCacheKey: schroederPortableSummaryAdmission?.cacheKey || null,
+    admissionHotBufferKey: schroederPortableSummaryAdmission?.hotBufferKey || null,
+    descriptorOnlyPeerComputeHandoff: descriptorOnlyTransfer && !rawGpuBufferTransferDetected,
+    fullParticleReadbackRequired,
+    fullParticleReadbackAvoided: presentationReady && !fullParticleReadbackRequired,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -4804,6 +5019,10 @@ export function createResidentRenderSourceMetadata({
   currentResidentExecutionGeneration = null,
   stepsSignature = null,
   stepSignature = null,
+  schroederPortableSummary = null,
+  schroederRenderLodSummary = null,
+  schroederPortableSummaryAdmission = null,
+  renderOwnershipPolicy = null,
   source = 'resident-render-refresh'
 } = {}) {
   const step = finalStep || residentSteps?.finalStep || null;
@@ -4842,6 +5061,15 @@ export function createResidentRenderSourceMetadata({
     && currentGeneration != null
     && generation === currentGeneration
   );
+  const schroederRenderSource = createSchroederRenderSourceMetadata({
+    residentExecution: residentSteps,
+    finalStep: step,
+    schroederPortableSummary,
+    schroederRenderLodSummary,
+    schroederPortableSummaryAdmission,
+    renderOwnershipPolicy,
+    source
+  });
 
   return {
     schema: 'peercompute.ulg.sph-resident-render-source.v0',
@@ -4866,6 +5094,7 @@ export function createResidentRenderSourceMetadata({
         ?? nextMlsMpmParticleState?.particleCount
         ?? step?.particleCount
     ),
+    schroederRenderSource,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -4896,6 +5125,43 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
   target.sourceResidentSourceTimeS = metadata.sourceTimeS;
   target.sourceResidentNextTimeS = metadata.nextTimeS;
   target.sourceResidentParticleCount = metadata.particleCount;
+  target.schroederRenderSource = metadata.schroederRenderSource || null;
+  target.sourceSchroederRenderSourceSchema = metadata.schroederRenderSource?.schema ?? null;
+  target.sourceSchroederRenderSourceStatus = metadata.schroederRenderSource?.status ?? null;
+  target.sourceSchroederRenderSourceBlocker = metadata.schroederRenderSource?.blocker ?? null;
+  target.sourceSchroederRenderSourceMode = metadata.schroederRenderSource?.renderLodMode ?? null;
+  target.sourceSchroederRenderSourcePresentationReady =
+    Boolean(metadata.schroederRenderSource?.renderLodPresentationReady);
+  target.sourceSchroederRenderSourcePresentationSourceMode =
+    metadata.schroederRenderSource?.renderLodPresentationSourceMode ?? null;
+  target.sourceSchroederRenderSourceActiveLeafProxyCount =
+    metadata.schroederRenderSource?.activeLeafProxyCount ?? 0;
+  target.sourceSchroederRenderSourceAggregateProxyCount =
+    metadata.schroederRenderSource?.aggregateProxyCount ?? 0;
+  target.sourceSchroederRenderSourceLawQueueProxyCount =
+    metadata.schroederRenderSource?.lawQueueProxyCount ?? 0;
+  target.sourceSchroederRenderSourceTotalProxyCount =
+    metadata.schroederRenderSource?.totalProxyCount ?? 0;
+  target.sourceSchroederRenderSourceNativeGridSpacingM =
+    metadata.schroederRenderSource?.nativeGridSpacingM ?? null;
+  target.sourceSchroederRenderSourceGeometryPolicy =
+    metadata.schroederRenderSource?.geometryPolicy ?? null;
+  target.sourceSchroederRenderSourceOpticalPolicy =
+    metadata.schroederRenderSource?.opticalPolicy ?? null;
+  target.sourceSchroederRenderSourceClosureDerivedPbr =
+    Boolean(metadata.schroederRenderSource?.closureDerivedPbr);
+  target.sourceSchroederRenderSourceDescriptorOnlyHandoff =
+    Boolean(metadata.schroederRenderSource?.descriptorOnlyPeerComputeHandoff);
+  target.sourceSchroederRenderSourceFullParticleReadbackAvoided =
+    Boolean(metadata.schroederRenderSource?.fullParticleReadbackAvoided);
+  target.sourceSchroederRenderSourceRawGpuBufferTransferDetected =
+    Boolean(metadata.schroederRenderSource?.rawGpuBufferTransferDetected);
+  target.sourceSchroederRenderSourceAdmissionStatus =
+    metadata.schroederRenderSource?.admissionStatus ?? null;
+  target.sourceSchroederRenderSourceAdmissionPublished =
+    Boolean(metadata.schroederRenderSource?.admissionPublished);
+  target.sourceSchroederRenderSourceAdmissionStateKey =
+    metadata.schroederRenderSource?.admissionStateKey ?? null;
   target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
   target.sourceResidentRetentionReason = retentionReason ?? null;
   return target;
@@ -8344,7 +8610,9 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentStep = null;
   scene.userData.mlsMpmResidentSteps = null;
   scene.userData.schroederPhaseVolumeDiagnostics = null;
+  scene.userData.schroederRenderSource = null;
   renderer.userData.schroederPhaseVolumeDiagnostics = null;
+  renderer.userData.schroederRenderSource = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
@@ -10449,7 +10717,9 @@ export function createSphPhaseScene(container, {
     mlsMpmResidentStepsSignature = null;
     scene.userData.mlsMpmResidentSteps = null;
     scene.userData.schroederPhaseVolumeDiagnostics = null;
+    scene.userData.schroederRenderSource = null;
     renderer.userData.schroederPhaseVolumeDiagnostics = null;
+    renderer.userData.schroederRenderSource = null;
     const cleanup = () => destroyCapturedMlsMpmResidentExecutionArtifacts({
       ...captured,
       preserveBuffers: normalizedPreserveBuffers
@@ -15165,9 +15435,13 @@ export function createSphPhaseScene(container, {
       currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
       stepsSignature,
       stepSignature: signature,
+      renderOwnershipPolicy:
+        scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null,
       source: 'resident-step-publication'
     });
     scene.userData.mlsMpmResidentPublishedRenderSource = residentRenderSource;
+    scene.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
+    renderer.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
     const markRenderArtifactStale = (target, reason) => {
       if (!target) return;
       target.residentRenderSourceStaleAfterPublish = true;
@@ -20674,6 +20948,8 @@ export function createSphPhaseScene(container, {
       || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
       || mlsMpmGpuParticleUpload
       || null;
+    const renderOwnershipPolicyForRefresh =
+      scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null;
     const residentRenderSource = createResidentRenderSourceMetadata({
       residentSteps,
       finalStep,
@@ -20683,8 +20959,11 @@ export function createSphPhaseScene(container, {
       currentResidentExecutionGeneration: mlsMpmResidentExecutionGeneration,
       stepsSignature: residentSteps?.signature ?? mlsMpmResidentStepsSignature,
       stepSignature: finalStep?.signature ?? mlsMpmResidentStepSignature,
+      renderOwnershipPolicy: renderOwnershipPolicyForRefresh,
       source: 'resident-render-refresh'
     });
+    scene.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
+    renderer.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
       particleCount: nextSphParticleState?.particleCount ?? 0,
@@ -20695,8 +20974,6 @@ export function createSphPhaseScene(container, {
       surfaceDrawDiagnosticMode,
       nativeSurfaceExtractionAllowed
     });
-    const renderOwnershipPolicyForRefresh =
-      scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null;
     const presentationWorkerRetainedOutputStatus = (
       renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
     )
@@ -25242,6 +25519,9 @@ export function createSphPhaseScene(container, {
     },
     getSchroederPhaseVolumeDiagnostics() {
       return scene.userData.schroederPhaseVolumeDiagnostics || null;
+    },
+    getSchroederRenderSource() {
+      return scene.userData.schroederRenderSource || null;
     },
     getMlsMpmResidentRequestedReadbackMode() {
       return scene.userData.mlsMpmResidentRequestedReadbackMode;

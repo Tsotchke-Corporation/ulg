@@ -169,6 +169,12 @@ export const SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE = 'compact-
 export const SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-phase-volume-diagnostic-summary-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schroeder-phase-volume-level-update-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
+export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE = 'auto';
+export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE = 'exact-active-node-scan';
+export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE = 'bucketed-active-node-index';
+export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE = 'sorted-radix-active-node-index';
+export const DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD = 0.25;
+export const DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD = 0.05;
 export const SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE = 'gpu-exact-global-scan-o-n2';
 export const SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE =
   'gpu-bucketed-bounded-slot-reduction';
@@ -1038,6 +1044,168 @@ function assertLawNeighborActiveNodeIndexInput(activeNodeIndex) {
   }
 }
 
+function normalizeLawNeighborTraversalPolicyMode(mode) {
+  const resolved = String(mode || SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE);
+  if (resolved === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE) {
+    return SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
+  }
+  if (resolved === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE) {
+    return SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE;
+  }
+  if (resolved === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE) {
+    return SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE;
+  }
+  return SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE;
+}
+
+export function decodeSchroederLawNeighborTraversalDiagnostics(counters = []) {
+  const source = ArrayBuffer.isView(counters) || Array.isArray(counters) ? counters : [];
+  const read = (index) => Math.max(0, Math.round(finiteNumber(source[index], 0)));
+  return {
+    candidateInvocationCount: read(0),
+    bucketIndexAttemptCount: read(1),
+    bucketSelectedCount: read(2),
+    exactFallbackScanCount: read(3),
+    exactFallbackSelectedCount: read(4),
+    inactiveCandidateCount: read(5),
+    bucketPressureCount: read(6),
+    sourceSpanWriteCount: read(7)
+  };
+}
+
+export function createSchroederLawNeighborTraversalPolicy({
+  lawNeighborCandidates = null,
+  diagnosticCounters = lawNeighborCandidates?.diagnosticCounters,
+  activeNodeIndexEnabled = lawNeighborCandidates?.activeNodeIndexEnabled ?? false,
+  lawQueueCount = lawNeighborCandidates?.lawQueueCount ?? 0,
+  candidateBudget = lawNeighborCandidates?.candidateBudget ?? DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
+  activeNodeIndexBucketCount = lawNeighborCandidates?.activeNodeIndexBucketCount ?? 0,
+  traversalPolicyMode = lawNeighborCandidates?.traversalPolicyMode
+    ?? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+  fallbackScanRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
+  bucketPressureRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD,
+  sortedRadixTraversalAvailable = false
+} = {}) {
+  if (
+    lawNeighborCandidates
+    && lawNeighborCandidates.schema !== ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA
+    && lawNeighborCandidates.schema !== ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA
+  ) {
+    throw new TypeError('Schroeder law-neighbor traversal policy requires law-neighbor candidate input');
+  }
+  const mode = normalizeLawNeighborTraversalPolicyMode(traversalPolicyMode);
+  const diagnostics = decodeSchroederLawNeighborTraversalDiagnostics(diagnosticCounters);
+  const diagnosticCountersAvailable = (
+    (ArrayBuffer.isView(diagnosticCounters) || Array.isArray(diagnosticCounters))
+    && diagnosticCounters.length >= SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT
+  );
+  const resolvedLawQueueCount = Math.max(0, Math.round(finiteNumber(lawQueueCount, 0)));
+  const resolvedCandidateBudget = Math.max(1, Math.round(finiteNumber(
+    candidateBudget,
+    DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
+  )));
+  const expectedCandidateInvocationCount = resolvedLawQueueCount * resolvedCandidateBudget;
+  const fallbackDenominator = Math.max(
+    1,
+    diagnostics.bucketIndexAttemptCount || diagnostics.candidateInvocationCount || expectedCandidateInvocationCount
+  );
+  const bucketPressureDenominator = Math.max(
+    1,
+    diagnostics.bucketIndexAttemptCount || diagnostics.candidateInvocationCount || activeNodeIndexBucketCount || resolvedLawQueueCount
+  );
+  const bucketHitRatio = diagnosticCountersAvailable
+    ? diagnostics.bucketSelectedCount / Math.max(1, diagnostics.bucketIndexAttemptCount)
+    : 0;
+  const exactFallbackScanRatio = diagnosticCountersAvailable
+    ? diagnostics.exactFallbackScanCount / fallbackDenominator
+    : 0;
+  const bucketPressureRatio = diagnosticCountersAvailable
+    ? diagnostics.bucketPressureCount / bucketPressureDenominator
+    : 0;
+  const fallbackThreshold = Math.max(0, finiteNumber(
+    fallbackScanRatioThreshold,
+    DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD
+  ));
+  const bucketPressureThreshold = Math.max(0, finiteNumber(
+    bucketPressureRatioThreshold,
+    DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD
+  ));
+  const appliedTraversalIndexMode = activeNodeIndexEnabled
+    ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+    : SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
+  const forcedSortedRadix = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE;
+  const forcedBucket = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE;
+  const forcedExactScan = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
+  const diagnosticSortedRadixPressure = diagnosticCountersAvailable
+    && mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE
+    && (
+      exactFallbackScanRatio > fallbackThreshold
+      || bucketPressureRatio > bucketPressureThreshold
+    );
+  const sortedRadixIndexRequired = forcedSortedRadix || diagnosticSortedRadixPressure;
+  const recommendedTraversalIndexMode = sortedRadixIndexRequired
+    ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+    : (forcedExactScan
+      ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE
+      : (forcedBucket && activeNodeIndexEnabled
+        ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+        : appliedTraversalIndexMode));
+  const selectedTraversalIndexMode = (
+    sortedRadixIndexRequired && sortedRadixTraversalAvailable
+  )
+    ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+    : recommendedTraversalIndexMode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+      ? appliedTraversalIndexMode
+      : (recommendedTraversalIndexMode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE
+        && activeNodeIndexEnabled
+        ? appliedTraversalIndexMode
+        : recommendedTraversalIndexMode);
+  const sortedRadixIndexStatus = sortedRadixIndexRequired
+    ? (sortedRadixTraversalAvailable
+      ? 'sorted-radix-active-node-index-selected'
+      : 'sorted-radix-active-node-index-required-pending-implementation')
+    : 'sorted-radix-active-node-index-not-required';
+  let traversalPolicyStatus = 'traversal-policy-auto-within-diagnostic-thresholds';
+  if (!diagnosticCountersAvailable) {
+    traversalPolicyStatus = 'traversal-policy-pending-compact-diagnostic-counters';
+  } else if (forcedSortedRadix) {
+    traversalPolicyStatus = 'traversal-policy-forced-sorted-radix-index';
+  } else if (diagnosticSortedRadixPressure) {
+    traversalPolicyStatus = 'traversal-policy-diagnostics-require-sorted-radix-index';
+  } else if (forcedExactScan) {
+    traversalPolicyStatus = 'traversal-policy-forced-exact-active-node-scan';
+  } else if (forcedBucket) {
+    traversalPolicyStatus = activeNodeIndexEnabled
+      ? 'traversal-policy-forced-bucketed-active-node-index'
+      : 'traversal-policy-forced-bucketed-index-unavailable-using-exact-scan';
+  }
+  return {
+    status: traversalPolicyStatus,
+    policyMode: mode,
+    appliedTraversalIndexMode,
+    recommendedTraversalIndexMode,
+    selectedTraversalIndexMode,
+    sortedRadixIndexRequired,
+    sortedRadixIndexStatus,
+    sortedRadixTraversalAvailable: Boolean(sortedRadixTraversalAvailable),
+    diagnosticCountersAvailable,
+    diagnosticReadbackRecommended: !diagnosticCountersAvailable
+      && mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+    diagnostics,
+    ratios: {
+      bucketHitRatio,
+      exactFallbackScanRatio,
+      bucketPressureRatio
+    },
+    thresholds: {
+      fallbackScanRatioThreshold: fallbackThreshold,
+      bucketPressureRatioThreshold: bucketPressureThreshold
+    },
+    fullParticleReadbackRequired: false,
+    stateAuthorityStatus: 'state-manager-admission-required-before-traversal-policy-mutation'
+  };
+}
+
 function assertCrossLevelCouplingInput(crossLevelCoupling) {
   if (
     crossLevelCoupling?.schema !== ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA
@@ -1609,6 +1777,16 @@ export function createSchroederLawNeighborCandidatePlan({
     treeTraversalStatus: activeNodeIndexEnabled
       ? 'active-node-bucket-index-traversal-with-exact-scan-fallback'
       : 'active-node-tile-traversal-before-sorted-schroeder-tree-index',
+    traversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+    traversalPolicyStatus: 'traversal-policy-pending-compact-diagnostic-counters',
+    appliedTraversalIndexMode: activeNodeIndexEnabled
+      ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+      : SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE,
+    recommendedTraversalIndexMode: activeNodeIndexEnabled
+      ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+      : SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE,
+    sortedRadixIndexStatus: 'sorted-radix-active-node-index-not-required-without-diagnostics',
+    traversalDiagnosticReadbackPolicy: 'compact-counter-readback-optional',
     exactNearFieldRequirement: 'candidate-rows-feed-reaction-contact-interface-exact-near-field-consumers',
     stateMutationTarget: 'schroeder-retained-local-law-neighbor-candidate-buffer',
     stateMutationStatus: 'law-neighbor-candidates-planned-no-state-mutation',
@@ -2857,6 +3035,10 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   enabledLawMask = lawQueue?.enabledLawMask ?? SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   retainNeighborCandidateBuffer = true,
   retainDiagnosticCounterBuffer = true,
+  traversalPolicyMode = SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+  traversalPolicyFallbackScanRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
+  traversalPolicyBucketPressureRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD,
+  sortedRadixTraversalAvailable = false,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -3108,6 +3290,23 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    const traversalPolicy = createSchroederLawNeighborTraversalPolicy({
+      lawNeighborCandidates: result,
+      traversalPolicyMode,
+      fallbackScanRatioThreshold: traversalPolicyFallbackScanRatioThreshold,
+      bucketPressureRatioThreshold: traversalPolicyBucketPressureRatioThreshold,
+      sortedRadixTraversalAvailable
+    });
+    result.traversalPolicy = traversalPolicy;
+    result.traversalPolicyMode = traversalPolicy.policyMode;
+    result.traversalPolicyStatus = traversalPolicy.status;
+    result.appliedTraversalIndexMode = traversalPolicy.appliedTraversalIndexMode;
+    result.recommendedTraversalIndexMode = traversalPolicy.recommendedTraversalIndexMode;
+    result.selectedTraversalIndexMode = traversalPolicy.selectedTraversalIndexMode;
+    result.sortedRadixIndexRequired = traversalPolicy.sortedRadixIndexRequired;
+    result.sortedRadixIndexStatus = traversalPolicy.sortedRadixIndexStatus;
+    result.diagnosticCountersAvailable = traversalPolicy.diagnosticCountersAvailable;
+    result.diagnosticReadbackRecommended = traversalPolicy.diagnosticReadbackRecommended;
     if (retainNeighborCandidateBuffer) {
       result.neighborCandidateBuffer = neighborCandidateBuffer;
       result.destroyNeighborCandidateBuffer = () => neighborCandidateBuffer.destroy?.();
@@ -4736,6 +4935,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   lawQueueCandidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   lawNeighborCandidateBudget = lawQueueCandidateBudget,
+  lawNeighborCandidateReadbackMode = null,
+  lawNeighborTraversalPolicyMode = SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+  lawNeighborTraversalPolicyFallbackScanRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
+  lawNeighborTraversalPolicyBucketPressureRatioThreshold = DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD,
+  sortedRadixTraversalAvailable = false,
   enableCrossLevelCoupling = true,
   enableConservationSummary = enableCrossLevelCoupling,
   enableCrossLevelTransfer = enableConservationSummary,
@@ -4938,7 +5142,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       candidateBudget: lawNeighborCandidateBudget,
       enabledLawMask,
       retainNeighborCandidateBuffer: true,
-      readbackMode
+      traversalPolicyMode: lawNeighborTraversalPolicyMode,
+      traversalPolicyFallbackScanRatioThreshold: lawNeighborTraversalPolicyFallbackScanRatioThreshold,
+      traversalPolicyBucketPressureRatioThreshold: lawNeighborTraversalPolicyBucketPressureRatioThreshold,
+      sortedRadixTraversalAvailable,
+      readbackMode: lawNeighborCandidateReadbackMode ?? readbackMode
     });
   const resolvedCrossLevelCoupling = !enableCrossLevelCoupling
     ? null
@@ -5154,6 +5362,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       activeNodeIndexEnabled: Boolean(resolvedLawNeighborCandidates.activeNodeIndexEnabled),
       activeNodeIndexConsumerStatus: resolvedLawNeighborCandidates.activeNodeIndexConsumerStatus,
       traversalDiagnosticStatus: resolvedLawNeighborCandidates.traversalDiagnosticStatus,
+      traversalPolicyStatus: resolvedLawNeighborCandidates.traversalPolicyStatus,
+      traversalPolicyMode: resolvedLawNeighborCandidates.traversalPolicyMode,
+      appliedTraversalIndexMode: resolvedLawNeighborCandidates.appliedTraversalIndexMode,
+      recommendedTraversalIndexMode: resolvedLawNeighborCandidates.recommendedTraversalIndexMode,
+      selectedTraversalIndexMode: resolvedLawNeighborCandidates.selectedTraversalIndexMode,
+      sortedRadixIndexRequired: Boolean(resolvedLawNeighborCandidates.sortedRadixIndexRequired),
+      sortedRadixIndexStatus: resolvedLawNeighborCandidates.sortedRadixIndexStatus,
+      diagnosticCountersAvailable: Boolean(resolvedLawNeighborCandidates.diagnosticCountersAvailable),
+      diagnosticReadbackRecommended: Boolean(resolvedLawNeighborCandidates.diagnosticReadbackRecommended),
       retainedDiagnosticCounterBuffer: Boolean(resolvedLawNeighborCandidates.diagnosticCounterBuffer),
       diagnosticCounterBufferByteLength: resolvedLawNeighborCandidates.diagnosticCounterBufferByteLength
         ?? resolvedLawNeighborCandidates.diagnosticCounterByteLength
@@ -5308,9 +5525,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     denseLocalBackend: 'existing-mls-mpm-ocean-resident-mechanics',
     activeNodeConsumerStatus: 'active-node-list-forwarded-to-mls-mpm-p2g-g2p',
     activeNodeIndexStatus: resolvedActiveNodeIndex?.status ?? 'disabled-active-node-index',
-    activeNodeIndexConsumerStatus: resolvedActiveNodeIndex
-      ? 'active-node-index-available-not-yet-authoritative-for-law-neighbor-traversal'
-      : 'disabled-active-node-index',
+    activeNodeIndexConsumerStatus: resolvedLawNeighborCandidates?.activeNodeIndexConsumerStatus
+      ?? (resolvedActiveNodeIndex
+        ? 'active-node-index-available-not-yet-authoritative-for-law-neighbor-traversal'
+        : 'disabled-active-node-index'),
     lawQueueStatus: resolvedLawQueue?.status ?? 'disabled-local-law-queue',
     lawQueueConsumerStatus: resolvedLawQueue
       ? (resolvedLawNeighborCandidates

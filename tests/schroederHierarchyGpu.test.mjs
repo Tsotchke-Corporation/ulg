@@ -68,6 +68,10 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
+  SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
+  SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
+  SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE,
+  SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
   SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT,
   SCHROEDER_NO_FULL_READBACK_MODE,
   SCHROEDER_LOCAL_LAW_QUEUE_MASK,
@@ -75,6 +79,8 @@ import {
   DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
   DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY,
   DEFAULT_ACTIVE_NODE_INDEX_BUCKET_SLOT_CAPACITY,
+  DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD,
+  DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
   DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
@@ -99,6 +105,7 @@ import {
   createSchroederHierarchyAggregatePlan,
   createSchroederLawNeighborCandidateParamsArray,
   createSchroederLawNeighborCandidatePlan,
+  createSchroederLawNeighborTraversalPolicy,
   createSchroederLawQueueParamsArray,
   createSchroederLawQueuePlan,
   createSchroederLevelAssignmentParamsArray,
@@ -110,6 +117,7 @@ import {
   createSchroederPhaseVolumeMigrationParamsArray,
   createSchroederPhaseVolumeMigrationPlan,
   createSchroederSameLevelMechanicsPlan,
+  decodeSchroederLawNeighborTraversalDiagnostics,
   estimateSchroederLevelDeltaForVolumeRatio,
   estimateSchroederLevelFromSupportRadius,
   runSchroederActiveNodeIndexWebGpu,
@@ -715,6 +723,12 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
     plan.treeTraversalStatus,
     'active-node-tile-traversal-before-sorted-schroeder-tree-index'
   );
+  assert.equal(plan.traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE);
+  assert.equal(plan.traversalPolicyStatus, 'traversal-policy-pending-compact-diagnostic-counters');
+  assert.equal(plan.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE);
+  assert.equal(plan.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE);
+  assert.equal(plan.sortedRadixIndexStatus, 'sorted-radix-active-node-index-not-required-without-diagnostics');
+  assert.equal(plan.traversalDiagnosticReadbackPolicy, 'compact-counter-readback-optional');
   assert.equal(plan.gpuFirst, true);
   assert.equal(plan.cpuReferenceRequired, false);
   assert.equal(plan.fullParticleReadbackRequired, false);
@@ -780,6 +794,8 @@ test('Schroeder law-neighbor candidate plan can consume an active-node bucket in
   assert.equal(plan.enumerationMode, 'schroeder-active-node-indexed-tile-traversal-neighbor-enumeration');
   assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-bucket-index-consumed-with-exact-scan-fallback');
   assert.equal(plan.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
+  assert.equal(plan.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(plan.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
 
   const params = createSchroederLawNeighborCandidateParamsArray(plan);
   const view = new DataView(params);
@@ -787,6 +803,113 @@ test('Schroeder law-neighbor candidate plan can consume an active-node bucket in
   assert.equal(view.getUint32(48, true), 2);
   assert.equal(view.getUint32(52, true), 4);
   assert.equal(view.getUint32(56, true), 8);
+});
+
+test('Schroeder law-neighbor traversal diagnostics decode compact counters', () => {
+  const decoded = decodeSchroederLawNeighborTraversalDiagnostics(new Uint32Array([
+    10,
+    8,
+    6,
+    2,
+    1,
+    4,
+    3,
+    5
+  ]));
+
+  assert.deepEqual(decoded, {
+    candidateInvocationCount: 10,
+    bucketIndexAttemptCount: 8,
+    bucketSelectedCount: 6,
+    exactFallbackScanCount: 2,
+    exactFallbackSelectedCount: 1,
+    inactiveCandidateCount: 4,
+    bucketPressureCount: 3,
+    sourceSpanWriteCount: 5
+  });
+});
+
+test('Schroeder law-neighbor traversal policy preserves bucket mode without diagnostic readback', () => {
+  const policy = createSchroederLawNeighborTraversalPolicy({
+    lawNeighborCandidates: {
+      schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+      activeNodeIndexEnabled: true,
+      lawQueueCount: 4,
+      candidateBudget: 8,
+      activeNodeIndexBucketCount: 4,
+      diagnosticCounters: new Uint32Array()
+    }
+  });
+
+  assert.equal(policy.status, 'traversal-policy-pending-compact-diagnostic-counters');
+  assert.equal(policy.policyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE);
+  assert.equal(policy.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.sortedRadixIndexRequired, false);
+  assert.equal(policy.diagnosticCountersAvailable, false);
+  assert.equal(policy.diagnosticReadbackRecommended, true);
+  assert.equal(policy.fullParticleReadbackRequired, false);
+});
+
+test('Schroeder law-neighbor traversal policy requires sorted radix when counters show pressure', () => {
+  const policy = createSchroederLawNeighborTraversalPolicy({
+    lawNeighborCandidates: {
+      schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+      activeNodeIndexEnabled: true,
+      lawQueueCount: 4,
+      candidateBudget: 8,
+      activeNodeIndexBucketCount: 4,
+      diagnosticCounters: new Uint32Array([
+        32,
+        32,
+        4,
+        28,
+        8,
+        20,
+        8,
+        4
+      ])
+    }
+  });
+
+  assert.equal(policy.status, 'traversal-policy-diagnostics-require-sorted-radix-index');
+  assert.equal(policy.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(policy.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.sortedRadixIndexRequired, true);
+  assert.equal(policy.sortedRadixIndexStatus, 'sorted-radix-active-node-index-required-pending-implementation');
+  assert.equal(policy.diagnosticCountersAvailable, true);
+  assert.equal(policy.diagnosticReadbackRecommended, false);
+  assert.ok(policy.ratios.exactFallbackScanRatio > DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD);
+  assert.ok(policy.ratios.bucketPressureRatio > DEFAULT_SCHROEDER_LAW_NEIGHBOR_BUCKET_PRESSURE_RATIO_THRESHOLD);
+});
+
+test('Schroeder law-neighbor traversal policy keeps forced bucket mode explicit', () => {
+  const policy = createSchroederLawNeighborTraversalPolicy({
+    lawNeighborCandidates: {
+      schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+      activeNodeIndexEnabled: true,
+      lawQueueCount: 4,
+      candidateBudget: 8,
+      activeNodeIndexBucketCount: 4,
+      diagnosticCounters: new Uint32Array([
+        32,
+        32,
+        1,
+        31,
+        8,
+        20,
+        8,
+        4
+      ])
+    },
+    traversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+  });
+
+  assert.equal(policy.status, 'traversal-policy-forced-bucketed-active-node-index');
+  assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.sortedRadixIndexRequired, false);
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -1573,6 +1696,16 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.sourceCandidateSpanRows.length, 0);
   assert.equal(candidates.diagnosticCounters.length, 0);
   assert.equal(candidates.traversalDiagnosticStatus, 'law-neighbor-traversal-diagnostic-counters-submitted');
+  assert.equal(candidates.traversalPolicyStatus, 'traversal-policy-pending-compact-diagnostic-counters');
+  assert.equal(candidates.traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE);
+  assert.equal(candidates.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE);
+  assert.equal(candidates.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE);
+  assert.equal(candidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE);
+  assert.equal(candidates.sortedRadixIndexRequired, false);
+  assert.equal(candidates.sortedRadixIndexStatus, 'sorted-radix-active-node-index-not-required');
+  assert.equal(candidates.diagnosticCountersAvailable, false);
+  assert.equal(candidates.diagnosticReadbackRecommended, true);
+  assert.equal(candidates.traversalPolicy.fullParticleReadbackRequired, false);
   assert.equal(candidates.neighborCandidateStatus, 'local-law-neighbor-candidates-submitted');
   assert.equal(candidates.sourceCandidateSpanStatus, 'local-law-neighbor-source-spans-submitted');
   assert.equal(candidates.stateMutationStatus, 'law-neighbor-candidates-buffer-submitted-no-state-mutation');
@@ -1688,6 +1821,10 @@ test('Schroeder law-neighbor candidates consume retained active-node bucket inde
     candidates.activeNodeIndexConsumerStatus,
     'active-node-bucket-index-consumed-with-exact-scan-fallback'
   );
+  assert.equal(candidates.traversalPolicyStatus, 'traversal-policy-pending-compact-diagnostic-counters');
+  assert.equal(candidates.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(candidates.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(candidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(candidates.retainedDiagnosticCounterBuffer, true);
   assert.equal(device.bindGroups.at(-1).entries.length, 8);
   assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer, activeNodeIndexBucketSlotBuffer);
@@ -1754,6 +1891,10 @@ test('Schroeder law-neighbor candidates can read compact traversal diagnostics o
   assert.equal(candidates.neighborCandidateRows.length, 0);
   assert.equal(candidates.sourceCandidateSpanRows.length, 0);
   assert.equal(candidates.diagnosticCounters.length, SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_COUNTER_COUNT);
+  assert.equal(candidates.traversalPolicyStatus, 'traversal-policy-auto-within-diagnostic-thresholds');
+  assert.equal(candidates.diagnosticCountersAvailable, true);
+  assert.equal(candidates.diagnosticReadbackRecommended, false);
+  assert.equal(candidates.sortedRadixIndexRequired, false);
   assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-law-neighbor-diagnostic-counters-readback'));
   assert.equal(
     device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-law-neighbor-candidates-readback'),
@@ -2555,6 +2696,10 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
     enableActiveNodeIndex: true,
     activeNodeIndexBucketSlotCapacity: 4,
     enableCrossLevelCoupling: false,
+    lawNeighborCandidateReadbackMode: SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+    lawNeighborTraversalPolicyFallbackScanRatioThreshold: 0.125,
+    lawNeighborTraversalPolicyBucketPressureRatioThreshold: 0.03125,
     lawNeighborCandidateRunner: async (options) => {
       lawNeighborCalls.push(options);
       return {
@@ -2568,6 +2713,18 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
         treeTraversalStatus: 'active-node-bucket-index-traversal-with-exact-scan-fallback',
         activeNodeIndexEnabled: Boolean(options.activeNodeIndex),
         activeNodeIndexConsumerStatus: 'active-node-bucket-index-consumed-with-exact-scan-fallback',
+        traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
+        traversalPolicyStatus: 'traversal-policy-forced-sorted-radix-index',
+        traversalPolicyMode: options.traversalPolicyMode,
+        appliedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
+        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        selectedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
+        sortedRadixIndexRequired: true,
+        sortedRadixIndexStatus: 'sorted-radix-active-node-index-required-pending-implementation',
+        diagnosticCountersAvailable: true,
+        diagnosticReadbackRecommended: false,
+        diagnosticCounterBuffer: { label: 'stub-traversal-diagnostics' },
+        diagnosticCounterBufferByteLength: 8 * Uint32Array.BYTES_PER_ELEMENT,
         neighborCandidateBuffer: { label: 'stub-indexed-law-neighbor-candidates' },
         neighborCandidateBufferByteLength: 4 * Float32Array.BYTES_PER_ELEMENT
       };
@@ -2582,12 +2739,30 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
   assert.equal(lawNeighborCalls.length, 1);
   assert.equal(lawNeighborCalls[0].activeNodeIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
   assert.equal(lawNeighborCalls[0].activeNodeIndex.bucketSlotCapacity, 4);
+  assert.equal(lawNeighborCalls[0].readbackMode, SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE);
+  assert.equal(lawNeighborCalls[0].traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(lawNeighborCalls[0].traversalPolicyFallbackScanRatioThreshold, 0.125);
+  assert.equal(lawNeighborCalls[0].traversalPolicyBucketPressureRatioThreshold, 0.03125);
   assert.equal(result.lawNeighborCandidates.activeNodeIndexEnabled, true);
   assert.equal(
     result.lawNeighborCandidates.activeNodeIndexConsumerStatus,
     'active-node-bucket-index-consumed-with-exact-scan-fallback'
   );
   assert.equal(result.lawNeighborCandidates.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
+  assert.equal(result.lawNeighborCandidates.traversalPolicyStatus, 'traversal-policy-forced-sorted-radix-index');
+  assert.equal(
+    result.lawNeighborCandidates.recommendedTraversalIndexMode,
+    SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+  );
+  assert.equal(result.lawNeighborCandidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(result.lawNeighborCandidates.sortedRadixIndexRequired, true);
+  assert.equal(
+    result.lawNeighborCandidates.sortedRadixIndexStatus,
+    'sorted-radix-active-node-index-required-pending-implementation'
+  );
+  assert.equal(result.lawNeighborCandidates.diagnosticCountersAvailable, true);
+  assert.equal(result.lawNeighborCandidates.retainedDiagnosticCounterBuffer, true);
+  assert.equal(result.activeNodeIndexConsumerStatus, 'active-node-bucket-index-consumed-with-exact-scan-fallback');
   assert.equal(result.lawNeighborCandidateConsumerStatus, 'law-neighbor-candidates-forwarded-to-resident-backend');
   assert.equal(result.residentStep.hasLawNeighborCandidates, true);
 });

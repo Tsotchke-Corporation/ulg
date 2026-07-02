@@ -5820,6 +5820,13 @@ struct SchroederContactLawNeighborParams {
   _pad3: u32,
 };
 
+struct SchroederContactSourceSpanParams {
+  enabled: u32,
+  source_span_count: u32,
+  source_span_stride: u32,
+  broad_candidate_fallback_enabled: u32,
+};
+
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> particle_state_rows: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> particle_thermo_rows: array<vec4<f32>>;
@@ -5832,6 +5839,8 @@ struct SchroederContactLawNeighborParams {
 @group(0) @binding(9) var<uniform> schroeder_contact_law_queue_params: SchroederContactLawQueueParams;
 @group(0) @binding(10) var<storage, read> schroeder_contact_neighbor_candidate_rows: array<f32>;
 @group(0) @binding(11) var<uniform> schroeder_contact_neighbor_candidate_params: SchroederContactLawNeighborParams;
+@group(0) @binding(12) var<storage, read> schroeder_contact_source_span_rows: array<f32>;
+@group(0) @binding(13) var<uniform> schroeder_contact_source_span_params: SchroederContactSourceSpanParams;
 
 const SCHROEDER_CONTACT_LAW_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_CONTACT_LAW_QUEUE_STATUS_OFFSET: u32 = 3u;
@@ -5844,6 +5853,11 @@ const SCHROEDER_CONTACT_LAW_NEIGHBOR_NEIGHBOR_OFFSET: u32 = 1u;
 const SCHROEDER_CONTACT_LAW_NEIGHBOR_LAW_MASK_OFFSET: u32 = 2u;
 const SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_OFFSET: u32 = 3u;
 const SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
+const SCHROEDER_CONTACT_SOURCE_SPAN_STRIDE: u32 = 4u;
+const SCHROEDER_CONTACT_SOURCE_SPAN_SOURCE_OFFSET: u32 = 0u;
+const SCHROEDER_CONTACT_SOURCE_SPAN_START_OFFSET: u32 = 1u;
+const SCHROEDER_CONTACT_SOURCE_SPAN_COUNT_OFFSET: u32 = 2u;
+const SCHROEDER_CONTACT_SOURCE_SPAN_STATUS_OFFSET: u32 = 3u;
 
 struct CkParticleCandidate {
   source_match: u32,
@@ -5916,6 +5930,47 @@ fn ck_schroeder_neighbor_candidates_enabled() -> bool {
     && schroeder_contact_neighbor_candidate_params.candidate_count > 0u
     && schroeder_contact_neighbor_candidate_params.candidate_stride > 0u
     && schroeder_contact_neighbor_candidate_params.law_mask != 0u;
+}
+
+fn ck_schroeder_source_spans_enabled() -> bool {
+  return ck_schroeder_neighbor_candidates_enabled()
+    && schroeder_contact_source_span_params.enabled != 0u
+    && schroeder_contact_source_span_params.source_span_count > 0u
+    && schroeder_contact_source_span_params.source_span_stride > 0u;
+}
+
+fn ck_schroeder_candidate_span(source_particle_index: u32) -> vec4<u32> {
+  if (!ck_schroeder_source_spans_enabled()
+      || source_particle_index >= schroeder_contact_source_span_params.source_span_count) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let span_stride = max(
+    schroeder_contact_source_span_params.source_span_stride,
+    SCHROEDER_CONTACT_SOURCE_SPAN_STRIDE
+  );
+  let span_offset = source_particle_index * span_stride;
+  let status = schroeder_contact_source_span_rows[
+    span_offset + SCHROEDER_CONTACT_SOURCE_SPAN_STATUS_OFFSET
+  ];
+  if (abs(status - SCHROEDER_CONTACT_LAW_NEIGHBOR_STATUS_READY) > 0.5) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let row_source = u32(max(round(schroeder_contact_source_span_rows[
+    span_offset + SCHROEDER_CONTACT_SOURCE_SPAN_SOURCE_OFFSET
+  ]), 0.0));
+  if (row_source != source_particle_index) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let span_start = min(
+    u32(max(round(schroeder_contact_source_span_rows[
+      span_offset + SCHROEDER_CONTACT_SOURCE_SPAN_START_OFFSET
+    ]), 0.0)),
+    schroeder_contact_neighbor_candidate_params.candidate_count
+  );
+  let span_count = u32(max(round(schroeder_contact_source_span_rows[
+    span_offset + SCHROEDER_CONTACT_SOURCE_SPAN_COUNT_OFFSET
+  ]), 0.0));
+  return vec4<u32>(span_start, span_count, 1u, 0u);
 }
 
 fn ck_schroeder_candidate_particle(candidate_index: u32, endpoint: u32) -> u32 {
@@ -6100,8 +6155,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var source_mass_kg = 0.0;
   var target_mass_kg = 0.0;
 
-  if (ck_schroeder_neighbor_candidates_enabled()) {
-    for (var candidate_index = 0u; candidate_index < schroeder_contact_neighbor_candidate_params.candidate_count; candidate_index = candidate_index + 1u) {
+  let element_source_particle_index = u32(max(round(element_row0.x), 0.0));
+  let schroeder_span = ck_schroeder_candidate_span(element_source_particle_index);
+  let schroeder_span_ready = schroeder_span.z != 0u;
+  let schroeder_broad_candidate_fallback =
+    schroeder_contact_source_span_params.broad_candidate_fallback_enabled != 0u;
+  if (ck_schroeder_neighbor_candidates_enabled() && (schroeder_span_ready || schroeder_broad_candidate_fallback)) {
+    let candidate_start = select(0u, schroeder_span.x, schroeder_span_ready);
+    let candidate_count = select(
+      schroeder_contact_neighbor_candidate_params.candidate_count,
+      min(schroeder_span.y, schroeder_contact_neighbor_candidate_params.candidate_count - candidate_start),
+      schroeder_span_ready
+    );
+    let candidate_end = min(
+      candidate_start + candidate_count,
+      schroeder_contact_neighbor_candidate_params.candidate_count
+    );
+    for (var candidate_index = candidate_start; candidate_index < candidate_end; candidate_index = candidate_index + 1u) {
       for (var endpoint = 0u; endpoint < 2u; endpoint = endpoint + 1u) {
         let candidate_particle_index = ck_schroeder_candidate_particle(candidate_index, endpoint);
         if (candidate_particle_index >= params.particle_count) {

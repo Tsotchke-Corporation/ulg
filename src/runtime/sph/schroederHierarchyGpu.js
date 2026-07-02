@@ -3212,6 +3212,12 @@ export function createSchroederLawNeighborCandidatePlan({
       : 'schroeder-active-node-tile-traversal-neighbor-enumeration'),
     outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
     candidateIndexingMode: 'particle-source-candidate-span-table',
+    pressureInterfaceSpatialIndexStatus: 'pressure-interface-source-span-spatial-index-planned',
+    pressureInterfaceSpatialIndexMode: 'source-particle-candidate-span-table',
+    pressureInterfaceSpatialIndexConsumerStatus:
+      'available-for-pressure-interface-contact-kinematics-source-span-binding',
+    pressureInterfaceSpatialIndexFallbackPolicy:
+      'no-implicit-full-candidate-scan-without-source-span-descriptor',
     activeNodeIndexConsumerStatus: activeNodeSortedIndexEnabled
       ? 'active-node-sorted-radix-index-consumed-with-exact-scan-fallback'
       : (activeNodeIndexEnabled
@@ -6466,6 +6472,12 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       activeNodeIndexConsumerStatus: plan.activeNodeIndexConsumerStatus,
       traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
       sourceCandidateSpanStatus: 'local-law-neighbor-source-spans-submitted',
+      pressureInterfaceSpatialIndexStatus: 'pressure-interface-source-span-spatial-index-submitted',
+      pressureInterfaceSpatialIndexMode: plan.pressureInterfaceSpatialIndexMode,
+      pressureInterfaceSpatialIndexConsumerStatus:
+        'available-for-pressure-interface-contact-kinematics-source-span-binding',
+      pressureInterfaceSpatialIndexFallbackPolicy:
+        'no-implicit-full-candidate-scan-without-source-span-descriptor',
       neighborCandidateStatus: 'local-law-neighbor-candidates-submitted',
       conservativeTransferStatus: 'local-law-neighbor-candidates-submitted-no-transfer',
       stateMutationStatus: 'law-neighbor-candidates-buffer-submitted-no-state-mutation',

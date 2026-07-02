@@ -294,8 +294,11 @@ Suggested schemas:
   same-level orchestration or supplied as a retained artifact. Policy-driven
   automatic construction landed in `f29951e`, with disabled, auto, force, and
   diagnostic-driven selection reported in same-level summaries.
-  Pressure/interface contact-kinematics still needs a spatial/interface index
-  rather than only a source-particle span.
+  The current pressure/interface source-span checkpoint binds retained
+  source-candidate span rows directly into the pressure contact-kinematics
+  kernel, advertises the span table as the pressure/interface spatial-index
+  descriptor, and prevents implicit full candidate scans when a retained
+  source-span descriptor is absent.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -410,6 +413,9 @@ Suggested schemas:
    - keep StateManager admissions and replay descriptors descriptor-only across
      PeerCompute boundaries.
 3. Law work queues:
+   - keep pressure/interface contact kinematics on retained source-span indexed
+     candidate ranges; no implicit full candidate scan without an explicit
+     broad-fallback flag;
    - keep compact traversal diagnostics as the escalation input rather than
      making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
@@ -459,13 +465,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS pressure/interface spatial indexing**:
+The next code slice on `SS` is **SS pressure/interface interface-source indexing**:
 
-1. Build a retained GPU spatial/interface index for pressure/interface contact
-   kinematics so exact near-field pressure work stops leaning on broad
-   source-span scans.
-2. Feed the pressure/interface consumer from retained active-node, source-span,
-   and interface-index descriptors while preserving the exact local law
-   boundary.
+1. Add an explicit retained interface/source-particle key descriptor for
+   material-interface rows so pressure contact kinematics no longer overloads
+   `surfaceIndex` as the candidate source-span lookup key.
+2. Feed that descriptor into the pressure contact kernel alongside retained
+   source spans, preserving source-span bounded iteration and the particle-bin
+   fallback for non-particle-backed interface elements.
 3. Keep descriptor-only PeerCompute replay artifacts and no-full-readback
    validation as the default path.

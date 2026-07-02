@@ -821,6 +821,22 @@ function createSchroederPressureInterfaceLawNeighborCandidateParamsArray(schroed
   return buffer;
 }
 
+function createSchroederPressureInterfaceSourceSpanParamsArray(schroederLawNeighborCandidates) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, schroederLawNeighborCandidates?.sourceCandidateSpanBufferConsumed ? 1 : 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates?.sourceCandidateSpanCount,
+    0
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    schroederLawNeighborCandidates?.sourceCandidateSpanStrideFloats,
+    4
+  ))), true);
+  view.setUint32(12, schroederLawNeighborCandidates?.broadCandidateScanFallback === true ? 1 : 0, true);
+  return buffer;
+}
+
 function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeighborCandidates = null, {
   device = null
 } = {}) {
@@ -839,6 +855,18 @@ function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeig
     neighborCandidateBufferConsumed: false,
     neighborCandidateCount: 0,
     neighborCandidateStrideFloats: SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    sourceCandidateSpanBuffer: null,
+    sourceCandidateSpanBufferObserved: false,
+    sourceCandidateSpanBufferConsumed: false,
+    sourceCandidateSpanCount: 0,
+    sourceCandidateSpanStrideFloats: 4,
+    sourceCandidateSpanConsumerStatus: 'schroeder-pressure-interface-source-spans-not-provided',
+    sourceCandidateSpanReason: schroederLawNeighborCandidates
+      ? null
+      : 'No Schroeder source-span table was provided to the pressure/interface stage',
+    pressureInterfaceSpatialIndexStatus: 'pressure-interface-spatial-index-unavailable',
+    pressureInterfaceSpatialIndexMode: null,
+    broadCandidateScanFallback: false,
     candidateBudget: 0,
     lawQueueCount: 0,
     enabledLawMask: 0,
@@ -931,22 +959,80 @@ function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeig
   }
   const traversalBacked = String(schroederLawNeighborCandidates.enumerationMode || '').includes('active-node')
     || String(schroederLawNeighborCandidates.treeTraversalStatus || '').includes('active-node');
+  const sourceCandidateSpanBuffer = schroederLawNeighborCandidates.sourceCandidateSpanBuffer
+    || schroederLawNeighborCandidates.sourceSpanBuffer
+    || schroederLawNeighborCandidates.sourceCandidateSpanRowsBuffer
+    || null;
+  const sourceCandidateSpanCount = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.sourceCandidateSpanCount
+      ?? schroederLawNeighborCandidates.sourceSpanCount
+      ?? schroederLawNeighborCandidates.particleCount,
+    0
+  )));
+  const sourceCandidateSpanStrideFloats = Math.max(4, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.sourceCandidateSpanStrideFloats
+      ?? schroederLawNeighborCandidates.sourceSpanStrideFloats
+      ?? schroederLawNeighborCandidates.sourceCandidateSpanRowStrideFloats,
+    4
+  )));
+  const sourceSpanMismatch = sourceCandidateSpanBuffer
+    ? webGpuDeviceMismatchInfo({ buffer: sourceCandidateSpanBuffer, device })
+    : null;
+  const sourceSpanDeviceReady = Boolean(sourceCandidateSpanBuffer && !sourceSpanMismatch?.mismatch);
+  const sourceSpanReady = Boolean(
+    sourceSpanDeviceReady
+      && sourceCandidateSpanCount > 0
+      && sourceCandidateSpanStrideFloats >= 4
+  );
+  const broadCandidateScanFallback = schroederLawNeighborCandidates.broadCandidateScanFallback === true
+    || schroederLawNeighborCandidates.allowBroadCandidateScanFallback === true;
+  const candidateBufferConsumed = traversalBacked && (sourceSpanReady || broadCandidateScanFallback);
+  const pressureInterfaceSpatialIndexStatus = sourceSpanReady
+    ? 'pressure-interface-source-span-spatial-index-ready'
+    : (sourceCandidateSpanBuffer && sourceSpanMismatch?.mismatch
+        ? 'pressure-interface-source-span-spatial-index-rejected-cross-device'
+        : (broadCandidateScanFallback
+            ? 'pressure-interface-source-span-spatial-index-bypassed-broad-fallback-enabled'
+            : 'pressure-interface-source-span-spatial-index-unavailable-using-particle-bins'));
+  const sourceCandidateSpanConsumerStatus = sourceSpanReady
+    ? 'schroeder-pressure-interface-source-spans-consumed'
+    : (sourceCandidateSpanBuffer && sourceSpanMismatch?.mismatch
+        ? 'blocked-cross-device-schroeder-pressure-interface-source-spans'
+        : 'schroeder-pressure-interface-source-spans-missing-or-empty');
   return {
     ...base,
     status: 'schroeder-pressure-interface-law-neighbor-candidates-ready',
-    consumerStatus: traversalBacked
+    consumerStatus: candidateBufferConsumed
       ? 'schroeder-pressure-interface-law-neighbor-candidates-consumed-authoritative'
       : 'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative',
-    reason: traversalBacked
-      ? 'Traversal-backed law-neighbor candidate rows are consumed as direct pressure/interface contact input'
-      : 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
+    reason: candidateBufferConsumed
+      ? (sourceSpanReady
+          ? 'Traversal-backed law-neighbor candidate rows are consumed through retained source-span ranges'
+          : 'Traversal-backed law-neighbor candidate rows are consumed with explicit broad-scan fallback')
+      : 'Schroeder law-neighbor candidate rows are validated but not consumed until a retained source-span index is available',
     available: true,
-    authoritative: traversalBacked,
+    authoritative: candidateBufferConsumed,
     neighborCandidateBuffer,
     neighborCandidateBufferObserved: true,
-    neighborCandidateBufferConsumed: traversalBacked,
+    neighborCandidateBufferConsumed: candidateBufferConsumed,
     neighborCandidateCount,
     neighborCandidateStrideFloats,
+    sourceCandidateSpanBuffer,
+    sourceCandidateSpanBufferObserved: Boolean(sourceCandidateSpanBuffer),
+    sourceCandidateSpanBufferConsumed: sourceSpanReady,
+    sourceCandidateSpanCount,
+    sourceCandidateSpanStrideFloats,
+    sourceCandidateSpanConsumerStatus,
+    sourceCandidateSpanReason: sourceSpanReady
+      ? null
+      : (sourceCandidateSpanBuffer && sourceSpanMismatch?.mismatch
+          ? 'Schroeder source-span buffer was created on a different WebGPU device'
+          : 'Schroeder source-span rows are required to avoid a full candidate scan in pressure/interface contact kinematics'),
+    pressureInterfaceSpatialIndexStatus,
+    pressureInterfaceSpatialIndexMode: sourceSpanReady
+      ? 'source-particle-candidate-span-table'
+      : (broadCandidateScanFallback ? 'full-candidate-scan-explicit-fallback' : null),
+    broadCandidateScanFallback,
     candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
     lawQueueCount: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.lawQueueCount, 0))),
     enabledLawMask,
@@ -1441,6 +1527,27 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     0,
     createSchroederPressureInterfaceLawNeighborCandidateParamsArray(consumedSchroederLawNeighborCandidates)
   );
+  const borrowedSchroederSourceSpanBuffer = consumedSchroederLawNeighborCandidates?.sourceCandidateSpanBufferConsumed
+    ? consumedSchroederLawNeighborCandidates.sourceCandidateSpanBuffer
+    : null;
+  const localSchroederSourceSpanBuffer = borrowedSchroederSourceSpanBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-schroeder-source-spans-disabled',
+      new Float32Array(4)
+    );
+  const schroederSourceSpanBuffer = borrowedSchroederSourceSpanBuffer || localSchroederSourceSpanBuffer;
+  const schroederSourceSpanParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-schroeder-source-spans-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  device.queue.writeBuffer(
+    schroederSourceSpanParamsBuffer,
+    0,
+    createSchroederPressureInterfaceSourceSpanParamsArray(consumedSchroederLawNeighborCandidates)
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
@@ -1451,7 +1558,7 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     particleBinGrid: resolvedParticleBins.enabled ? resolvedParticleBins.particleBinGrid : null
   }));
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v1',
+    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v2',
     label: 'ulg-sph-pressure-interface-contact-kinematics',
     code: sphPressureInterfaceContactKinematicsWgsl,
     entryPoint: 'main',
@@ -1467,7 +1574,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(8, 'read-only-storage'),
       computeBufferBinding(9, 'uniform'),
       computeBufferBinding(10, 'read-only-storage'),
-      computeBufferBinding(11, 'uniform')
+      computeBufferBinding(11, 'uniform'),
+      computeBufferBinding(12, 'read-only-storage'),
+      computeBufferBinding(13, 'uniform')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1484,7 +1593,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 8, resource: { buffer: schroederLawQueueBuffer } },
       { binding: 9, resource: { buffer: schroederLawQueueParamsBuffer } },
       { binding: 10, resource: { buffer: schroederLawNeighborCandidateBuffer } },
-      { binding: 11, resource: { buffer: schroederLawNeighborCandidateParamsBuffer } }
+      { binding: 11, resource: { buffer: schroederLawNeighborCandidateParamsBuffer } },
+      { binding: 12, resource: { buffer: schroederSourceSpanBuffer } },
+      { binding: 13, resource: { buffer: schroederSourceSpanParamsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1543,6 +1654,24 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       consumedSchroederLawNeighborCandidates?.neighborCandidateBufferObserved === true,
     schroederLawNeighborCandidateBufferConsumed:
       consumedSchroederLawNeighborCandidates?.neighborCandidateBufferConsumed === true,
+    schroederLawNeighborSourceSpanBufferObserved:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanBufferObserved === true,
+    schroederLawNeighborSourceSpanBufferConsumed:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanBufferConsumed === true,
+    schroederLawNeighborSourceSpanCount:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanCount ?? 0,
+    schroederLawNeighborSourceSpanStrideFloats:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanStrideFloats ?? null,
+    schroederLawNeighborSourceSpanConsumerStatus:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanConsumerStatus ?? null,
+    schroederLawNeighborSourceSpanReason:
+      consumedSchroederLawNeighborCandidates?.sourceCandidateSpanReason ?? null,
+    pressureInterfaceSpatialIndexStatus:
+      consumedSchroederLawNeighborCandidates?.pressureInterfaceSpatialIndexStatus ?? null,
+    pressureInterfaceSpatialIndexMode:
+      consumedSchroederLawNeighborCandidates?.pressureInterfaceSpatialIndexMode ?? null,
+    pressureInterfaceBroadCandidateScanFallback:
+      consumedSchroederLawNeighborCandidates?.broadCandidateScanFallback === true,
     schroederLawNeighborCandidateSourceDeviceId: consumedSchroederLawNeighborCandidates?.sourceDeviceId ?? null,
     schroederLawNeighborCandidateConsumerDeviceId: consumedSchroederLawNeighborCandidates?.consumerDeviceId ?? null,
     queueCompletionStatus: 'queue-submitted',
@@ -1559,6 +1688,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       schroederLawQueueParamsBuffer,
       localSchroederLawNeighborCandidateBuffer,
       schroederLawNeighborCandidateParamsBuffer,
+      localSchroederSourceSpanBuffer,
+      schroederSourceSpanParamsBuffer,
       ...(resolvedParticleBins.cleanupBuffers || [])
     ],
     destroyContactKinematicsBuffer() {
@@ -1903,6 +2034,24 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         schroederLawNeighborCandidateTreeTraversalStatus: schroederPressureInterfaceLawNeighborCandidates.treeTraversalStatus,
         schroederLawNeighborCandidateBufferObserved: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferObserved === true,
         schroederLawNeighborCandidateBufferConsumed: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferConsumed === true,
+        schroederLawNeighborSourceSpanBufferObserved:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferObserved === true,
+        schroederLawNeighborSourceSpanBufferConsumed:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferConsumed === true,
+        schroederLawNeighborSourceSpanCount:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanCount,
+        schroederLawNeighborSourceSpanStrideFloats:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanStrideFloats,
+        schroederLawNeighborSourceSpanConsumerStatus:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanConsumerStatus,
+        schroederLawNeighborSourceSpanReason:
+          schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanReason,
+        pressureInterfaceSpatialIndexStatus:
+          schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexStatus,
+        pressureInterfaceSpatialIndexMode:
+          schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexMode,
+        pressureInterfaceBroadCandidateScanFallback:
+          schroederPressureInterfaceLawNeighborCandidates.broadCandidateScanFallback === true,
         schroederLawNeighborCandidateSourceDeviceId: schroederPressureInterfaceLawNeighborCandidates.sourceDeviceId,
         schroederLawNeighborCandidateConsumerDeviceId: schroederPressureInterfaceLawNeighborCandidates.consumerDeviceId,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
@@ -2167,6 +2316,27 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       schroederLawNeighborCandidateTreeTraversalStatus: schroederPressureInterfaceLawNeighborCandidates.treeTraversalStatus,
       schroederLawNeighborCandidateBufferObserved: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferObserved === true,
       schroederLawNeighborCandidateBufferConsumed: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferConsumed === true,
+      schroederLawNeighborSourceSpanBufferObserved:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferObserved === true,
+      schroederLawNeighborSourceSpanBufferConsumed:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferConsumed === true,
+      schroederLawNeighborSourceSpanCount:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanCount,
+      schroederLawNeighborSourceSpanStrideFloats:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanStrideFloats,
+      schroederLawNeighborSourceSpanConsumerStatus:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanConsumerStatus,
+      schroederLawNeighborSourceSpanReason:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanReason,
+      pressureInterfaceSpatialIndexStatus:
+        contactKinematicsGpuDerivation?.pressureInterfaceSpatialIndexStatus
+        ?? schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexStatus,
+      pressureInterfaceSpatialIndexMode:
+        contactKinematicsGpuDerivation?.pressureInterfaceSpatialIndexMode
+        ?? schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexMode,
+      pressureInterfaceBroadCandidateScanFallback:
+        contactKinematicsGpuDerivation?.pressureInterfaceBroadCandidateScanFallback === true
+        || schroederPressureInterfaceLawNeighborCandidates.broadCandidateScanFallback === true,
       schroederLawNeighborCandidateSourceDeviceId: schroederPressureInterfaceLawNeighborCandidates.sourceDeviceId,
       schroederLawNeighborCandidateConsumerDeviceId: schroederPressureInterfaceLawNeighborCandidates.consumerDeviceId,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
@@ -2260,6 +2430,20 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       schroederLawNeighborCandidateAvailable: schroederPressureInterfaceLawNeighborCandidates.available === true,
       schroederLawNeighborCandidateAuthoritative: schroederPressureInterfaceLawNeighborCandidates.authoritative === true,
       schroederLawNeighborCandidateCount: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateCount,
+      schroederLawNeighborSourceSpanBufferObserved:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferObserved === true,
+      schroederLawNeighborSourceSpanBufferConsumed:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanBufferConsumed === true,
+      schroederLawNeighborSourceSpanCount:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanCount,
+      schroederLawNeighborSourceSpanConsumerStatus:
+        schroederPressureInterfaceLawNeighborCandidates.sourceCandidateSpanConsumerStatus,
+      pressureInterfaceSpatialIndexStatus:
+        contactKinematicsGpuDerivation?.pressureInterfaceSpatialIndexStatus
+        ?? schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexStatus,
+      pressureInterfaceSpatialIndexMode:
+        contactKinematicsGpuDerivation?.pressureInterfaceSpatialIndexMode
+        ?? schroederPressureInterfaceLawNeighborCandidates.pressureInterfaceSpatialIndexMode,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

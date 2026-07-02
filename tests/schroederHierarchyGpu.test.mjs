@@ -1069,6 +1069,16 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(plan.enumerationMode, 'schroeder-active-node-tile-traversal-neighbor-enumeration');
   assert.equal(plan.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
   assert.equal(plan.candidateIndexingMode, 'particle-source-candidate-span-table');
+  assert.equal(plan.pressureInterfaceSpatialIndexStatus, 'pressure-interface-source-span-spatial-index-planned');
+  assert.equal(plan.pressureInterfaceSpatialIndexMode, 'source-particle-candidate-span-table');
+  assert.equal(
+    plan.pressureInterfaceSpatialIndexConsumerStatus,
+    'available-for-pressure-interface-contact-kinematics-source-span-binding'
+  );
+  assert.equal(
+    plan.pressureInterfaceSpatialIndexFallbackPolicy,
+    'no-implicit-full-candidate-scan-without-source-span-descriptor'
+  );
   assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-index-disabled-full-active-node-scan');
   assert.equal(
     plan.treeTraversalStatus,
@@ -2893,6 +2903,16 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.traversalPolicy.fullParticleReadbackRequired, false);
   assert.equal(candidates.neighborCandidateStatus, 'local-law-neighbor-candidates-submitted');
   assert.equal(candidates.sourceCandidateSpanStatus, 'local-law-neighbor-source-spans-submitted');
+  assert.equal(candidates.pressureInterfaceSpatialIndexStatus, 'pressure-interface-source-span-spatial-index-submitted');
+  assert.equal(candidates.pressureInterfaceSpatialIndexMode, 'source-particle-candidate-span-table');
+  assert.equal(
+    candidates.pressureInterfaceSpatialIndexConsumerStatus,
+    'available-for-pressure-interface-contact-kinematics-source-span-binding'
+  );
+  assert.equal(
+    candidates.pressureInterfaceSpatialIndexFallbackPolicy,
+    'no-implicit-full-candidate-scan-without-source-span-descriptor'
+  );
   assert.equal(candidates.stateMutationStatus, 'law-neighbor-candidates-buffer-submitted-no-state-mutation');
   assert.equal(
     candidates.stateAuthorityStatus,

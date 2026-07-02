@@ -601,13 +601,23 @@ Completed in this slice:
    no full readback, and status telemetry separating expansion detection from
    level-update deltas.
 
-The next code slice on `SS` is **SS adopted storage continuation**:
+Completed in this slice:
 
-1. Carry adopted materialized particle storage through PeerCompute resident
-   step/sequence compute-task result descriptors so remote and local schedulers
-   can distinguish current source buffers from newly authoritative buffers.
-2. Add StateManager-admitted commit/replay metadata for the adopted storage
-   descriptor without transferring raw GPUBuffer objects across peers.
-3. Preserve same-device hot-loop behavior: local resident execution may keep
-   direct retained buffers, while distributed PeerCompute paths receive only
-   replayable descriptors and explicit admission/lease evidence.
+1. Added `peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0`
+   as a descriptor-only handoff for StateManager-admitted materialized particle
+   storage.
+2. Threaded adopted materialized particle storage through resident
+   step/sequence compute-task results and commit-delta payloads without
+   serializing raw GPUBuffer handles.
+3. Extended resident commit-bridge admission so StateManager warm-delta commits
+   validate descriptor schema, copy mode, raw-transfer flags, authoritative
+   particle count, and warm-entry replay consistency.
+
+The next code slice on `SS` is **SS adopted storage hot-buffer publication**:
+
+1. Add a browser resident-host admission/publication helper that stores the
+   descriptor in StateManager hot storage under an SS particle-storage key.
+2. Preserve same-device retained buffers as private lane handles while
+   publishing only descriptor/admission/lease evidence to PeerCompute.
+3. Add host tests proving accepted descriptors publish as hot-buffer metadata
+   and raw-buffer descriptor attempts are rejected before StateManager commit.

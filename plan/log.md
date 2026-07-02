@@ -35786,3 +35786,44 @@ Next:
   step/sequence result descriptors and StateManager replay metadata so remote
   schedulers can consume descriptor-only authoritative storage transitions
   without raw GPUBuffer transfer.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Continuation Descriptor
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0` as the
+  descriptor-only PeerCompute handoff for StateManager-admitted SS
+  particle-storage swaps.
+- Resident step and resident-step sequence compute-task results now expose the
+  adopted storage descriptor, continuation availability, and raw GPUBuffer
+  transfer status while keeping same-device retained buffers local.
+- MLS-MPM resident step commit deltas now carry descriptor-only adopted storage
+  metadata and compact final-step particle-count/adoption telemetry for
+  StateManager warm-delta replay.
+- The resident commit bridge now validates descriptor schema, copy mode,
+  raw-transfer flags, authoritative particle count, and warm-entry replay
+  consistency before accepting SS adopted storage deltas.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/peercomputeResidentCommitBridge.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check tests/peercomputeResidentCommitBridge.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `82/82`
+  passing.
+- PASS: `node --test tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/residentStateAuthority.test.mjs`
+  with `91/91` passing.
+- PASS: `node --test tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/residentStateAuthority.test.mjs tests/residentBufferLease.test.mjs`
+  with `94/94` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `943/946` passing and `3` skipped.
+
+Next:
+
+- Add browser resident-host hot-buffer publication/admission for the adopted
+  storage descriptor so PeerCompute can store/publish SS particle-storage
+  continuation evidence without exposing raw retained GPUBuffer handles.

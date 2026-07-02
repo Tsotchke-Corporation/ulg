@@ -1,4 +1,5 @@
 import {
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA
 } from './sph/sphMlsMpmGpuStep.js';
@@ -21,6 +22,12 @@ function finiteNonNegativeNumber(value) {
   return Number.isFinite(number) && number >= 0;
 }
 
+function schroederParticleStorageDescriptorFromPayload(payload = null) {
+  return plainObject(payload?.schroederAdoptedParticleStorageDescriptor)
+    ? payload.schroederAdoptedParticleStorageDescriptor
+    : null;
+}
+
 function createAdmission({
   accepted,
   status,
@@ -30,6 +37,7 @@ function createAdmission({
   issues = []
 } = {}) {
   const gpuFence = plainObject(payload?.gpuFence) ? payload.gpuFence : null;
+  const schroederParticleStorageDescriptor = schroederParticleStorageDescriptorFromPayload(payload);
   return {
     schema: ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA,
     accepted: accepted === true,
@@ -50,6 +58,22 @@ function createAdmission({
     outputFamilies: Array.isArray(payload?.outputFamilies)
       ? [...payload.outputFamilies]
       : [],
+    schroederParticleStorageContinuationAvailable:
+      payload?.schroederParticleStorageContinuationAvailable === true,
+    schroederAdoptedParticleStorageDescriptorStatus:
+      schroederParticleStorageDescriptor?.status ?? null,
+    schroederAdoptedParticleStorageReady:
+      schroederParticleStorageDescriptor?.ready === true,
+    schroederAdoptedParticleStorageAuthoritativeParticleCount:
+      finiteNonNegativeNumber(schroederParticleStorageDescriptor?.authoritativeParticleCount)
+        ? Number(schroederParticleStorageDescriptor.authoritativeParticleCount)
+        : null,
+    schroederParticleStorageStateManagerAdmissionRequired:
+      payload?.schroederParticleStorageStateManagerAdmissionRequired === true
+      || schroederParticleStorageDescriptor?.stateManagerAdmissionRequired === true,
+    schroederParticleStorageRawGpuBufferTransferDetected:
+      payload?.schroederParticleStorageRawGpuBufferTransferDetected === true
+      || schroederParticleStorageDescriptor?.rawGpuBufferTransferDetected === true,
     timestamp: Date.now()
   };
 }
@@ -102,6 +126,28 @@ export function validateResidentStepsCommitDelta(delta, {
       }
       if (payload.stateKey && gpuFence.stateKey && payload.stateKey !== gpuFence.stateKey) {
         issues.push('state-key-fence-mismatch');
+      }
+    }
+    const schroederParticleStorageDescriptor = schroederParticleStorageDescriptorFromPayload(payload);
+    if (schroederParticleStorageDescriptor) {
+      if (schroederParticleStorageDescriptor.schema !== ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA) {
+        issues.push('unexpected-schroeder-particle-storage-descriptor-schema');
+      }
+      if (schroederParticleStorageDescriptor.ready !== true) {
+        issues.push('schroeder-particle-storage-descriptor-not-ready');
+      }
+      if (schroederParticleStorageDescriptor.copyMode !== 'descriptor-only-no-raw-gpubuffer-transfer') {
+        issues.push('schroeder-particle-storage-descriptor-copy-mode-not-portable');
+      }
+      if (
+        payload.schroederParticleStorageRawGpuBufferTransferDetected === true
+        || schroederParticleStorageDescriptor.rawGpuBufferTransferDetected === true
+        || schroederParticleStorageDescriptor.rawGpuBufferTransferAllowed === true
+      ) {
+        issues.push('schroeder-particle-storage-raw-gpubuffer-transfer-detected');
+      }
+      if (!finiteNonNegativeNumber(schroederParticleStorageDescriptor.authoritativeParticleCount)) {
+        issues.push('invalid-schroeder-particle-storage-authoritative-count');
       }
     }
   }
@@ -214,6 +260,27 @@ export function validateResidentStepsCommittedWarmEntry(entry, delta, {
       issues.push('warm-entry-gpu-fence-missing');
     } else if (requireFenceSatisfied && gpuFence.fenceSatisfied !== true) {
       issues.push('warm-entry-gpu-fence-unsatisfied');
+    }
+    const deltaSchroederDescriptor = schroederParticleStorageDescriptorFromPayload(deltaPayload);
+    const warmSchroederDescriptor = schroederParticleStorageDescriptorFromPayload(payload);
+    if (deltaSchroederDescriptor) {
+      if (!warmSchroederDescriptor) {
+        issues.push('warm-entry-schroeder-particle-storage-descriptor-missing');
+      } else {
+        if (warmSchroederDescriptor.schema !== ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA) {
+          issues.push('warm-entry-schroeder-particle-storage-descriptor-schema-mismatch');
+        }
+        if (warmSchroederDescriptor.rawGpuBufferTransferDetected === true) {
+          issues.push('warm-entry-schroeder-particle-storage-raw-gpubuffer-transfer-detected');
+        }
+        if (
+          finiteNonNegativeNumber(deltaSchroederDescriptor.authoritativeParticleCount)
+          && Number(warmSchroederDescriptor.authoritativeParticleCount)
+            !== Number(deltaSchroederDescriptor.authoritativeParticleCount)
+        ) {
+          issues.push('warm-entry-schroeder-particle-storage-authoritative-count-mismatch');
+        }
+      }
     }
   }
   if (entry.version !== undefined && delta?.version !== undefined && entry.version !== delta.version) {

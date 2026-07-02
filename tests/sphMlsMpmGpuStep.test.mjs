@@ -36,6 +36,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
   ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -5136,6 +5137,117 @@ test('MLS-MPM resident steps compute task handler returns fence evidence without
   assert.equal(result.gpuResidentLaneStatus, undefined);
   assert.equal(ignoredLaneManager.calls.acquire.length, 0);
   destroyMlsMpmResidentStepsBuffers(result);
+});
+
+test('MLS-MPM resident steps commit delta carries descriptor-only Schroeder adopted particle storage', async () => {
+  const { buffers, options, tracker } = noFullReadbackResidentStepFixture();
+  const materializedStateBuffer = tracker.buffer('schroeder-materialized-state');
+  const materializedThermoBuffer = tracker.buffer('schroeder-materialized-thermo');
+  const materializedMechanicsBuffer = tracker.buffer('schroeder-materialized-mechanics');
+  const materializationBuffer = tracker.buffer('schroeder-materialization-rows');
+  const outputParticleCapacity = 4;
+  const schroederParticleStorageMaterialization = {
+    schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    readbackMode: 'no-full-readback',
+    normalHotLoopReadbackFree: true,
+    particleStorageMaterializationAdmissionApproved: true,
+    retainedParticleBuffers: true,
+    retainedMaterializationBuffer: true,
+    targetStateFamilies: [
+      'sph-particle-state',
+      'mls-mpm-particle-mechanics',
+      'sph-particle-thermo'
+    ],
+    sourceParticleCount: buffers.sphParticleState.particleCount,
+    outputParticleCapacity,
+    particleStateBuffer: materializedStateBuffer,
+    particleThermoBuffer: materializedThermoBuffer,
+    particleMechanicsBuffer: materializedMechanicsBuffer,
+    materializationBuffer,
+    stateBufferByteLength: outputParticleCapacity * 8 * Float32Array.BYTES_PER_ELEMENT,
+    thermoBufferByteLength: outputParticleCapacity * 12 * Float32Array.BYTES_PER_ELEMENT,
+    mechanicsBufferByteLength: outputParticleCapacity * 32 * Float32Array.BYTES_PER_ELEMENT,
+    materializationBufferByteLength: 3 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    materializationMode: 'state-manager-admitted-particle-buffer-materialization',
+    replacementPolicy: 'retained-output-buffers-await-state-manager-swap',
+    stateMutationStatus: 'particle-storage-materialization-buffer-submitted',
+    stateAuthorityStatus: 'state-manager-admitted-particle-storage-materialization-materialized',
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'queue.onSubmittedWorkDone'
+  };
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-schroeder-adopted-storage-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 1,
+    compactSummaryMode: 'final-only',
+    schroederParticleStorageMaterialization
+  });
+
+  const result = await runMlsMpmResidentStepsComputeTask(task.data);
+
+  assert.equal(result.completedStepCount, 1);
+  assert.equal(result.finalStep.schroederParticleStorageAdopted, true);
+  assert.equal(result.finalStep.nextParticleCount, outputParticleCapacity);
+  assert.equal(result.schroederParticleStorageContinuationAvailable, true);
+  const descriptor = result.schroederAdoptedParticleStorageDescriptor;
+  assert.equal(descriptor.schema, ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA);
+  assert.equal(descriptor.status, 'schroeder-adopted-particle-storage-descriptor-ready');
+  assert.equal(descriptor.ready, true);
+  assert.equal(descriptor.copyMode, 'descriptor-only-no-raw-gpubuffer-transfer');
+  assert.equal(descriptor.rawGpuBufferTransferAllowed, false);
+  assert.equal(descriptor.rawGpuBufferTransferDetected, false);
+  assert.equal(descriptor.sameDeviceReplayReady, true);
+  assert.equal(descriptor.crossPeerReplayReady, false);
+  assert.equal(descriptor.portableSnapshotRequired, true);
+  assert.equal(descriptor.authoritativeStateMutation, true);
+  assert.equal(descriptor.authoritativeParticleCount, outputParticleCapacity);
+  assert.equal(descriptor.stateBufferRef, 'sph-state-buffer');
+  assert.equal(descriptor.thermoBufferRef, 'sph-thermo-buffer');
+  assert.equal(descriptor.mechanicsBufferRef, 'mls-mpm-mechanics-buffer');
+  assert.deepEqual(descriptor.retainedBufferRefs, [
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.deepEqual(
+    descriptor.retainedRefs.map((entry) => entry.transferMode),
+    [
+      'descriptor-only-no-raw-gpubuffer-transfer',
+      'descriptor-only-no-raw-gpubuffer-transfer',
+      'descriptor-only-no-raw-gpubuffer-transfer'
+    ]
+  );
+  assert.equal(descriptor.gpuFence.fenceSatisfied, true);
+  assert.equal(descriptor.gpuFence.stateKey, 'ulg:test:sph-state-steps');
+
+  const payloadDescriptor = result.commitDelta.payload.schroederAdoptedParticleStorageDescriptor;
+  assert.equal(payloadDescriptor.schema, ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA);
+  assert.equal(payloadDescriptor.ready, true);
+  assert.equal(payloadDescriptor.rawGpuBufferTransferDetected, false);
+  assert.equal(result.commitDelta.payload.schroederParticleStorageContinuationAvailable, true);
+  assert.equal(result.commitDelta.payload.schroederParticleStorageStateManagerAdmissionRequired, true);
+  assert.equal(result.commitDelta.payload.finalStep.schroederParticleStorageAdopted, true);
+  assert.equal(
+    result.commitDelta.payload.finalStep.schroederParticleStorageAuthoritativeParticleCount,
+    outputParticleCapacity
+  );
+  assert.equal(result.commitDelta.payload.finalStep.nextParticleCount, outputParticleCapacity);
+  const portablePayload = JSON.stringify(payloadDescriptor);
+  assert.doesNotMatch(portablePayload, /schroeder-materialized-state/);
+  assert.doesNotMatch(portablePayload, /schroeder-materialized-thermo/);
+  assert.doesNotMatch(portablePayload, /schroeder-materialized-mechanics/);
+  assert.doesNotMatch(portablePayload, /"stateBuffer":/);
+  assert.doesNotMatch(portablePayload, /"thermoBuffer":/);
+  assert.doesNotMatch(portablePayload, /"mechanicsBuffer":/);
+  assert.doesNotMatch(portablePayload, /"materializationBuffer":/);
+
+  destroyMlsMpmResidentStepsBuffers(result);
+  assert.equal(tracker.destroyed, 8);
 });
 
 test('MLS-MPM resident steps compute task submit helper uses a ComputeManager-compatible submitTask surface', async () => {

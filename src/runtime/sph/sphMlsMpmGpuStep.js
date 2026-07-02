@@ -213,6 +213,8 @@ export const ULG_MLS_MPM_MECHANICS_CHILD_G2P_STAGE_EVIDENCE_SCHEMA = 'peercomput
 export const ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-commit-delta.v0';
 export const ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-state-delta.v0';
 export const ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-solver-task-bridge.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0';
 const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES = Object.freeze([
   'sph-particle-state',
   'mls-mpm-particle-mechanics',
@@ -5099,6 +5101,201 @@ function createSchroederParticleStorageAdoption({
   };
 }
 
+function rawGpuBufferTransferDetectedInDescriptor(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return false;
+  const rawBufferKeys = new Set([
+    'buffer',
+    'gpuBuffer',
+    'stateBuffer',
+    'thermoBuffer',
+    'mechanicsBuffer',
+    'materializationBuffer',
+    'particleStateBuffer',
+    'particleThermoBuffer',
+    'particleMechanicsBuffer',
+    'outputStateBuffer',
+    'outputThermoBuffer',
+    'outputMechanicsBuffer'
+  ]);
+  for (const [key, entry] of Object.entries(value)) {
+    if (rawBufferKeys.has(key) && entry && typeof entry === 'object') return true;
+    if (entry && typeof entry === 'object' && rawGpuBufferTransferDetectedInDescriptor(entry, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function particleStorageRetainedRefDescriptor({
+  ref,
+  role,
+  family,
+  byteLength,
+  strideBytes,
+  particleCount,
+  retained
+}) {
+  return {
+    ref,
+    role,
+    family,
+    byteLength: Math.max(0, Math.round(finiteNumber(byteLength, 0))),
+    strideBytes: Math.max(0, Math.round(finiteNumber(strideBytes, 0))),
+    particleCount: Math.max(0, Math.round(finiteNumber(particleCount, 0))),
+    retained: retained === true,
+    sourceStage: 'schroeder-particle-storage-materialization',
+    transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferSerialized: false,
+    rawGpuBufferTransferable: false
+  };
+}
+
+function createSchroederAdoptedParticleStorageDescriptorFromStep(step = null, {
+  gpuFence = null,
+  stateKey = null,
+  source = 'ulg-mls-mpm-resident-step-compute-task',
+  taskId = null
+} = {}) {
+  const adoption = step?.schroederParticleStorageAdoption;
+  if (!adoption || adoption.adopted !== true) return null;
+  const authoritativeParticleCount = Math.max(0, Math.round(finiteNumber(
+    adoption.authoritativeParticleCount ?? step?.nextParticleCount,
+    0
+  )));
+  const retainedBufferRefs = uniqueNonEmptyStrings([
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  const retainedRefs = [
+    particleStorageRetainedRefDescriptor({
+      ref: 'sph-state-buffer',
+      role: 'particle-state',
+      family: 'sph-particle-state',
+      byteLength: adoption.stateBufferByteLength,
+      strideBytes: adoption.stateStrideBytes,
+      particleCount: authoritativeParticleCount,
+      retained: Boolean(adoption.stateBuffer)
+    }),
+    particleStorageRetainedRefDescriptor({
+      ref: 'sph-thermo-buffer',
+      role: 'particle-thermo',
+      family: 'sph-particle-thermo',
+      byteLength: adoption.thermoBufferByteLength,
+      strideBytes: adoption.thermoStrideBytes,
+      particleCount: authoritativeParticleCount,
+      retained: Boolean(adoption.thermoBuffer)
+    }),
+    particleStorageRetainedRefDescriptor({
+      ref: 'mls-mpm-mechanics-buffer',
+      role: 'particle-mechanics',
+      family: 'mls-mpm-particle-mechanics',
+      byteLength: adoption.mechanicsBufferByteLength,
+      strideBytes: adoption.mechanicsStrideBytes,
+      particleCount: authoritativeParticleCount,
+      retained: Boolean(adoption.mechanicsBuffer)
+    })
+  ];
+  const compactFence = compactGpuFenceForStateDelta(gpuFence || step?.gpuFence || step?.gpuFenceReport || null);
+  const descriptor = {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
+    status: 'schroeder-adopted-particle-storage-descriptor-ready',
+    ready: true,
+    adopted: true,
+    source,
+    taskId,
+    stateKey: stateKey || compactFence?.stateKey || null,
+    sourceStage: 'schroeder-particle-storage-materialization',
+    sourceSchema: adoption.sourceSchema || null,
+    sourceStatus: adoption.sourceStatus || null,
+    adoptionSchema: adoption.schema || ULG_SCHROEDER_PARTICLE_STORAGE_ADOPTION_SCHEMA,
+    adoptionStatus: adoption.status || null,
+    adoptionMode: adoption.adoptionMode || null,
+    materializationStatus: step?.schroederParticleStorageMaterializationStatus ?? adoption.sourceStatus ?? null,
+    particleStorageMaterializationAdmissionApproved:
+      adoption.particleStorageMaterializationAdmissionApproved === true,
+    stateAuthorityStatus: adoption.stateAuthorityStatus || null,
+    stateMutationStatus: adoption.stateMutationStatus || null,
+    replacementPolicy: adoption.replacementPolicy || null,
+    sourceParticleCount: Math.max(0, Math.round(finiteNumber(adoption.sourceParticleCount, 0))),
+    sourceMlsMpmParticleCount: Math.max(0, Math.round(finiteNumber(adoption.sourceMlsMpmParticleCount, 0))),
+    outputParticleCapacity: authoritativeParticleCount,
+    authoritativeParticleCount,
+    targetStateFamilies: uniqueNonEmptyStrings(
+      adoption.targetStateFamilies?.length
+        ? adoption.targetStateFamilies
+        : SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES
+    ),
+    outputFamilies: uniqueNonEmptyStrings([
+      ...SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES,
+      'schroeder-particle-storage'
+    ]),
+    stateMutationFamilies: uniqueNonEmptyStrings([
+      'sph-particle-state',
+      'sph-particle-thermo',
+      'mls-mpm-particle-mechanics',
+      'schroeder-particle-storage'
+    ]),
+    retainedBufferRefs,
+    retainedBufferRefCount: retainedBufferRefs.length,
+    retainedRefs,
+    retainedRefCount: retainedRefs.length,
+    retainedParticleBuffers: adoption.retainedParticleBuffers === true,
+    stateBufferRef: 'sph-state-buffer',
+    thermoBufferRef: 'sph-thermo-buffer',
+    mechanicsBufferRef: 'mls-mpm-mechanics-buffer',
+    stateBufferRetained: Boolean(adoption.stateBuffer),
+    thermoBufferRetained: Boolean(adoption.thermoBuffer),
+    mechanicsBufferRetained: Boolean(adoption.mechanicsBuffer),
+    stateBufferByteLength: Math.max(0, Math.round(finiteNumber(adoption.stateBufferByteLength, 0))),
+    thermoBufferByteLength: Math.max(0, Math.round(finiteNumber(adoption.thermoBufferByteLength, 0))),
+    mechanicsBufferByteLength: Math.max(0, Math.round(finiteNumber(adoption.mechanicsBufferByteLength, 0))),
+    materializationBufferByteLength: Math.max(0, Math.round(finiteNumber(adoption.materializationBufferByteLength, 0))),
+    stateStrideBytes: Math.max(0, Math.round(finiteNumber(adoption.stateStrideBytes, 0))),
+    thermoStrideBytes: Math.max(0, Math.round(finiteNumber(adoption.thermoStrideBytes, 0))),
+    mechanicsStrideBytes: Math.max(0, Math.round(finiteNumber(adoption.mechanicsStrideBytes, 0))),
+    sameDeviceHotLoopContinuationReady: true,
+    sameDeviceReplayReady: true,
+    descriptorOnlyPeerComputeHandoff: true,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    sourceMode: 'same-device-retained-particle-buffer-swap-descriptor',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    fullParticleReadbackRequired: false,
+    fullParticleReadbackAvoided: true,
+    portableSnapshotRequired: true,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: 'descriptor-evidence-ready-cross-peer-requires-portable-materialization',
+    crossPeerReplayBlocker:
+      'materialized-gpu-buffers-remain-device-local-descriptor-replay-requires-peer-local-materialization-or-portable-snapshot',
+    stateManagerAdmissionRequired: true,
+    stateManagerAdmissionStatus: 'state-manager-admitted-retained-particle-buffer-swap',
+    authoritativeStateMutation: true,
+    authoritativeMutation: 'state-manager-admitted-schroeder-particle-storage-swap',
+    stateMutationFamily: 'schroeder-particle-storage',
+    gpuFence: compactFence,
+    gpuFenceSatisfied: compactFence?.fenceSatisfied === true,
+    residentBufferLeaseLedgerStatus: step?.residentBufferLeaseLedgerStatus ?? null,
+    residentBufferLeaseActiveLeaseCount: step?.residentBufferLeaseActiveLeaseCount ?? 0,
+    residentBufferLeaseResourceCount: step?.residentBufferLeaseResourceCount ?? 0,
+    residentAuthorityLedgerStatus: step?.residentAuthorityLedgerStatus ?? null,
+    warnings: [...(adoption.warnings || [])],
+    blockers: [...(adoption.blockers || [])],
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+  descriptor.rawGpuBufferTransferDetected = rawGpuBufferTransferDetectedInDescriptor(descriptor);
+  if (descriptor.rawGpuBufferTransferDetected) {
+    descriptor.status = 'schroeder-adopted-particle-storage-descriptor-blocked';
+    descriptor.ready = false;
+    descriptor.crossPeerReplayStatus = 'blocked-raw-gpubuffer-transfer-detected';
+    descriptor.crossPeerReplayBlocker = 'raw-gpubuffer-transfer-detected';
+  }
+  return descriptor;
+}
+
 function retainedSchroederFarAggregateGasStateDeltaBuffers(schroederFarAggregateGasStateDelta) {
   const source = schroederFarAggregateGasStateDelta?.result || schroederFarAggregateGasStateDelta;
   return {
@@ -5447,6 +5644,14 @@ function compactResidentStepSummaryForStateDelta(summary = null) {
     compactSummaryAuthority: summary.compactSummaryAuthority ?? null,
     compactSummaryAdmissionStatus: summary.compactSummaryAdmissionStatus ?? null,
     compactSummaryAuthoritativeMutation: summary.compactSummaryAuthoritativeMutation === true,
+    schroederParticleStorageAdoptionStatus: summary.schroederParticleStorageAdoptionStatus ?? null,
+    schroederParticleStorageAdopted: summary.schroederParticleStorageAdopted === true,
+    schroederParticleStorageAdoptionMode: summary.schroederParticleStorageAdoptionMode ?? null,
+    schroederParticleStorageAuthoritativeParticleCount:
+      summary.schroederParticleStorageAuthoritativeParticleCount ?? null,
+    schroederParticleStorageMaterializationStatus:
+      summary.schroederParticleStorageMaterializationStatus ?? null,
+    nextParticleCount: summary.nextParticleCount ?? null,
     diagnostics: summary.diagnostics && typeof summary.diagnostics === 'object'
       ? {
           particleCount: summary.diagnostics.particleCount ?? null,
@@ -5482,6 +5687,14 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
     : summarizeResidentStepForSequence(execution?.finalStep || execution, Math.max(0, stepSummaries.length - 1));
   const gpuFence = compactGpuFenceForStateDelta(execution?.gpuFence || execution?.gpuFenceReport || null);
   const resolvedStateKey = stateKey || gpuFence?.stateKey || gpuResidentLane?.stateKey || null;
+  const schroederAdoptedParticleStorageDescriptor =
+    execution?.schroederAdoptedParticleStorageDescriptor
+    || createSchroederAdoptedParticleStorageDescriptorFromStep(execution?.finalStep || execution, {
+      gpuFence,
+      stateKey: resolvedStateKey,
+      source: 'ulg-mls-mpm-resident-steps-state-delta',
+      taskId
+    });
   const completedStepCount = Math.max(0, Math.round(finiteNumber(execution?.completedStepCount, stepSummaries.length)));
   const version = Math.max(
     0,
@@ -5514,6 +5727,13 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       outputFamilies: [...(outputFamilies || [])],
       gpuFence,
       retainedBufferRefs: [...(gpuFence?.retainedBufferRefs || [])],
+      schroederAdoptedParticleStorageDescriptor,
+      schroederParticleStorageContinuationAvailable:
+        schroederAdoptedParticleStorageDescriptor?.ready === true,
+      schroederParticleStorageStateManagerAdmissionRequired:
+        schroederAdoptedParticleStorageDescriptor?.stateManagerAdmissionRequired === true,
+      schroederParticleStorageRawGpuBufferTransferDetected:
+        schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true,
       gpuResidentLaneRequirement: gpuResidentLane || execution?.gpuResidentLaneRequirement || null,
       residentSequenceLaneContract: residentSequenceLaneContract || execution?.residentSequenceLaneContract || null,
       finalStep: compactResidentStepSummaryForStateDelta(finalStepSummary),
@@ -6718,6 +6938,13 @@ export async function runMlsMpmResidentStepComputeTask(data = {}) {
     step,
     gpuFenceRequirement || gpuResidentLane || {}
   );
+  const schroederAdoptedParticleStorageDescriptor =
+    createSchroederAdoptedParticleStorageDescriptorFromStep(step, {
+      gpuFence,
+      stateKey: gpuFence?.stateKey || gpuResidentLane?.stateKey || null,
+      source: 'ulg-mls-mpm-resident-step-compute-task',
+      taskId: null
+    });
   return {
     ...step,
     schema: step?.schema || ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
@@ -6726,7 +6953,12 @@ export async function runMlsMpmResidentStepComputeTask(data = {}) {
     lawGraphNode,
     gpuFence,
     gpuFenceReport: gpuFence,
-    gpuResidentLaneRequirement: gpuResidentLane || null
+    gpuResidentLaneRequirement: gpuResidentLane || null,
+    schroederAdoptedParticleStorageDescriptor,
+    schroederParticleStorageContinuationAvailable:
+      schroederAdoptedParticleStorageDescriptor?.ready === true,
+    schroederParticleStorageRawGpuBufferTransferDetected:
+      schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true
   };
 }
 
@@ -7063,6 +7295,17 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     gpuFenceReport: gpuFence,
     gpuResidentLaneRequirement: gpuResidentLane || null
   };
+  result.schroederAdoptedParticleStorageDescriptor =
+    createSchroederAdoptedParticleStorageDescriptorFromStep(execution?.finalStep || execution, {
+      gpuFence,
+      stateKey: gpuFence?.stateKey || gpuResidentLane?.stateKey || commitDeltaStateKey || null,
+      source: 'ulg-mls-mpm-resident-steps-compute-task',
+      taskId: computeTaskId
+    });
+  result.schroederParticleStorageContinuationAvailable =
+    result.schroederAdoptedParticleStorageDescriptor?.ready === true;
+  result.schroederParticleStorageRawGpuBufferTransferDetected =
+    result.schroederAdoptedParticleStorageDescriptor?.rawGpuBufferTransferDetected === true;
   if (emitCommitDelta !== false) {
     result.commitDelta = createMlsMpmResidentStepsCommitDelta(result, {
       taskId: computeTaskId,

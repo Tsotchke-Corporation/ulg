@@ -645,13 +645,26 @@ Completed in this slice:
    descriptor refs and refuses cross-peer adopted-storage execution without a
    portable replay source.
 
-The next code slice on `SS` is **SS adopted storage resolver binding**:
+Completed in this slice:
 
-1. Bind scheduled same-device adopted-storage descriptor refs to a local
-   retained-buffer resolver for the mechanics P2G/G2P path instead of relying on
-   stale CPU particle mirrors.
-2. Keep the resolver same-device-only and descriptor-only; cross-peer execution
-   must still require a portable snapshot or peer-local materialization seed.
-3. Add tests proving missing retained refs block resolver-backed consumption and
-   valid local refs reach the resident stage worker/P2G task without raw
-   GPUBuffer transfer through PeerCompute.
+1. Added
+   `peercompute.ulg.schroeder-adopted-particle-storage-local-resolver.v0`
+   diagnostics and a same-device retained-buffer resolver binding for scheduled
+   adopted-storage continuations.
+2. Bound resolved local retained refs into mechanics P2G stage uploads so valid
+   same-device adopted storage can feed resident stage tasks without stale CPU
+   mirrors or raw GPUBuffer PeerCompute transfer.
+3. Kept missing local refs fail-closed for the stage scheduler and added tests
+   for both valid same-device resolver consumption and unresolved-ref blocking.
+
+The next code slice on `SS` is **SS adopted storage resident-host resolver
+hookup**:
+
+1. Add a browser resident-host resolver surface that maps admitted
+   adopted-storage descriptor refs to local retained buffers on the same device.
+2. Thread that resolver into browser-mounted resident scheduling so descriptor
+   hot-buffer publication, continuation planning, and mechanics stage execution
+   form one local same-device path.
+3. Add integration tests proving host-planned same-device refs resolve locally
+   while missing refs and cross-peer consumers remain blocked without portable
+   materialization evidence.

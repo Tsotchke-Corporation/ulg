@@ -35923,3 +35923,39 @@ Next:
   resolver for the mechanics path so valid local adopted storage can feed
   resident stages without using stale CPU mirrors or raw GPUBuffer PeerCompute
   transfer.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Local Resolver Binding
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-local-resolver.v0`.
+- Resident mechanics stage-chain construction now binds scheduled same-device
+  adopted-storage descriptor refs to a caller-supplied local retained-buffer
+  resolver.
+- Valid same-device retained refs become local `webgpu-uploaded` SPH state,
+  SPH thermo, and MLS-MPM mechanics uploads for P2G stage consumption without
+  raw GPUBuffer PeerCompute transfer.
+- Missing local refs block the stage scheduler even when the continuation plan
+  itself is same-device-scheduled, keeping unresolved descriptor refs from
+  falling back to stale CPU particle mirrors.
+- Task-chain and mechanics-only split-path diagnostics expose sanitized
+  resolver status, resolved refs, missing refs, and upload-readiness fields
+  without embedding the local GPU handles.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `85/85`
+  passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `105/105` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `946/949` passing and `3` skipped.
+
+Next:
+
+- Add the browser resident-host resolver hookup so admitted adopted-storage
+  descriptor refs can resolve to same-device retained buffers automatically
+  when scheduling resident mechanics stages.

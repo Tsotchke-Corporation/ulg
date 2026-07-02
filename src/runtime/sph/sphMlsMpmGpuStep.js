@@ -217,6 +217,8 @@ export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-continuation-schedule.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RESOLVER_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-local-resolver.v0';
 const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES = Object.freeze([
   'sph-particle-state',
   'mls-mpm-particle-mechanics',
@@ -415,6 +417,206 @@ function createSchroederAdoptedParticleStorageContinuationSchedule({
     schedulerPolicy: mode === 'cross-peer'
       ? 'fail-closed-until-portable-snapshot-or-materialization-seed'
       : 'same-device-private-lane-descriptor-continuation'
+  };
+}
+
+function schroederAdoptedParticleStorageRoleRefs(schedule = null) {
+  const refs = uniqueNonEmptyStrings(schedule?.sameDevicePrivateLaneRefs?.length
+    ? schedule.sameDevicePrivateLaneRefs
+    : schedule?.retainedBufferRefs);
+  const byRole = {
+    state: refs.find((ref) => /(^|[-_:])state([-_:]|$)/i.test(ref) && !/thermo/i.test(ref))
+      || refs.find((ref) => ref === 'sph-state-buffer')
+      || null,
+    thermo: refs.find((ref) => /thermo/i.test(ref))
+      || refs.find((ref) => ref === 'sph-thermo-buffer')
+      || null,
+    mechanics: refs.find((ref) => /mechanics/i.test(ref))
+      || refs.find((ref) => ref === 'mls-mpm-mechanics-buffer')
+      || null
+  };
+  return { refs, byRole };
+}
+
+function resolveSchroederAdoptedParticleStorageLocalBuffer({
+  resolver = null,
+  ref = null,
+  role = null,
+  schedule = null
+} = {}) {
+  if (!resolver || !ref) return null;
+  let resolved = null;
+  if (typeof resolver === 'function') {
+    resolved = resolver(ref, { role, schedule });
+  } else if (resolver instanceof Map) {
+    resolved = resolver.get(ref);
+  } else if (resolver && typeof resolver === 'object') {
+    resolved = resolver[ref] || resolver[role] || null;
+  }
+  if (!resolved) return null;
+  const buffer = resolved.buffer || resolved.gpuBuffer || null;
+  if (!buffer) return null;
+  return {
+    ref,
+    role,
+    buffer,
+    byteLength: Math.max(0, Math.round(finiteNumber(resolved.byteLength, 0))),
+    strideBytes: Math.max(0, Math.round(finiteNumber(resolved.strideBytes, 0))),
+    particleCount: Math.max(0, Math.round(finiteNumber(resolved.particleCount, 0))),
+    status: resolved.status || 'retained-buffer-ready',
+    resourceKey: resolved.resourceKey || ref
+  };
+}
+
+function createSchroederAdoptedParticleStorageLocalResolverBinding({
+  schedule = null,
+  resolver = null,
+  sphParticleState = null,
+  mlsMpmParticleState = null
+} = {}) {
+  const requested = schedule?.scheduled === true && schedule.consumerMode === 'same-device';
+  const { refs, byRole } = schroederAdoptedParticleStorageRoleRefs(schedule);
+  const missingDeclaredRefs = ['state', 'thermo', 'mechanics']
+    .filter((role) => !byRole[role])
+    .map((role) => `${role}-ref`);
+  const resolved = {
+    state: resolveSchroederAdoptedParticleStorageLocalBuffer({
+      resolver,
+      ref: byRole.state,
+      role: 'state',
+      schedule
+    }),
+    thermo: resolveSchroederAdoptedParticleStorageLocalBuffer({
+      resolver,
+      ref: byRole.thermo,
+      role: 'thermo',
+      schedule
+    }),
+    mechanics: resolveSchroederAdoptedParticleStorageLocalBuffer({
+      resolver,
+      ref: byRole.mechanics,
+      role: 'mechanics',
+      schedule
+    })
+  };
+  const missingResolvedRefs = ['state', 'thermo', 'mechanics']
+    .filter((role) => byRole[role] && !resolved[role])
+    .map((role) => byRole[role]);
+  const resolverMissing = requested && !resolver;
+  const ready = Boolean(
+    requested
+    && !resolverMissing
+    && missingDeclaredRefs.length === 0
+    && missingResolvedRefs.length === 0
+  );
+  const particleCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      resolved.state?.particleCount
+        || resolved.thermo?.particleCount
+        || resolved.mechanics?.particleCount
+        || sphParticleState?.particleCount
+        || mlsMpmParticleState?.particleCount,
+      0
+    ))
+  );
+  const blocker = ready
+    ? null
+    : !requested
+      ? 'schroeder-adopted-particle-storage-continuation-not-scheduled'
+      : resolverMissing
+        ? 'same-device-retained-buffer-resolver-required'
+        : missingDeclaredRefs.length > 0
+          ? 'schroeder-adopted-particle-storage-required-refs-missing'
+          : 'schroeder-adopted-particle-storage-local-resolver-missing-retained-refs';
+  const sphParticleUpload = ready
+    ? {
+        schema: 'peercompute.ulg.schroeder-adopted-particle-storage-sph-upload.v0',
+        status: 'webgpu-uploaded',
+        source: 'schroeder-adopted-particle-storage-local-resolver',
+        sourceHotBufferKey: schedule.sourceHotBufferKey || null,
+        particleCount,
+        stateBuffer: resolved.state.buffer,
+        thermoBuffer: resolved.thermo.buffer,
+        stateBufferByteLength: resolved.state.byteLength,
+        thermoBufferByteLength: resolved.thermo.byteLength,
+        retainedBufferRefs: [byRole.state, byRole.thermo],
+        sameDeviceOnly: true,
+        peerComputePortable: false,
+        rawGpuBufferPeerComputeTransfer: false
+      }
+    : null;
+  const mlsMpmParticleUpload = ready
+    ? {
+        schema: 'peercompute.ulg.schroeder-adopted-particle-storage-mls-mpm-upload.v0',
+        status: 'webgpu-uploaded',
+        source: 'schroeder-adopted-particle-storage-local-resolver',
+        sourceHotBufferKey: schedule.sourceHotBufferKey || null,
+        particleCount,
+        mechanicsBuffer: resolved.mechanics.buffer,
+        mechanicsBufferByteLength: resolved.mechanics.byteLength,
+        retainedBufferRefs: [byRole.mechanics],
+        sameDeviceOnly: true,
+        peerComputePortable: false,
+        rawGpuBufferPeerComputeTransfer: false
+      }
+    : null;
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RESOLVER_SCHEMA,
+    status: !requested
+      ? 'schroeder-adopted-particle-storage-local-resolver-not-requested'
+      : ready
+        ? 'schroeder-adopted-particle-storage-local-resolver-ready'
+        : 'blocked-schroeder-adopted-particle-storage-local-resolver',
+    requested,
+    ready,
+    blocker,
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferPeerComputeTransfer: false,
+    sourceHotBufferKey: schedule?.sourceHotBufferKey || null,
+    retainedBufferRefs: refs,
+    requiredRefsByRole: byRole,
+    missingDeclaredRefs,
+    missingResolvedRefs,
+    resolvedRefs: uniqueNonEmptyStrings(
+      ['state', 'thermo', 'mechanics'].map((role) => resolved[role]?.ref)
+    ),
+    resolvedRefCount: ['state', 'thermo', 'mechanics'].filter((role) => resolved[role]).length,
+    particleCount,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function summarizeSchroederAdoptedParticleStorageLocalResolverBinding(binding = null) {
+  if (!binding || typeof binding !== 'object') return null;
+  return {
+    schema: binding.schema || ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RESOLVER_SCHEMA,
+    status: binding.status || null,
+    requested: binding.requested === true,
+    ready: binding.ready === true,
+    blocker: binding.blocker || null,
+    sameDeviceOnly: binding.sameDeviceOnly === true,
+    peerComputePortable: binding.peerComputePortable === true,
+    descriptorOnlyPeerComputeHandoff: binding.descriptorOnlyPeerComputeHandoff === true,
+    rawGpuBufferTransferAllowed: binding.rawGpuBufferTransferAllowed === true,
+    rawGpuBufferPeerComputeTransfer: binding.rawGpuBufferPeerComputeTransfer === true,
+    sourceHotBufferKey: binding.sourceHotBufferKey || null,
+    retainedBufferRefs: [...(binding.retainedBufferRefs || [])],
+    requiredRefsByRole: { ...(binding.requiredRefsByRole || {}) },
+    missingDeclaredRefs: [...(binding.missingDeclaredRefs || [])],
+    missingResolvedRefs: [...(binding.missingResolvedRefs || [])],
+    resolvedRefs: [...(binding.resolvedRefs || [])],
+    resolvedRefCount: binding.resolvedRefCount ?? 0,
+    particleCount: binding.particleCount ?? 0,
+    sphUploadReady: binding.sphParticleUpload?.status === 'webgpu-uploaded',
+    mlsMpmUploadReady: binding.mlsMpmParticleUpload?.status === 'webgpu-uploaded'
   };
 }
 
@@ -11680,6 +11882,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   schroederAdoptedParticleStorageContinuationConsumerMode = 'same-device',
   schroederAdoptedParticleStorageContinuationPortableSnapshot = null,
   schroederAdoptedParticleStorageContinuationPortableMaterializationSeed = null,
+  schroederAdoptedParticleStorageRetainedBufferResolver = null,
   requireSchroederAdoptedParticleStorageContinuation = false,
   sameDeviceRetainedBufferImport = null,
   localSameDeviceRetainedBufferImport = null,
@@ -11837,10 +12040,34 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       laneId: laneStagePlanId,
       stateKey: laneStagePlanStateKey
     });
-  const schroederAdoptedParticleStorageContinuationBlocksStageTasks =
-    schroederAdoptedParticleStorageContinuationSchedule.failClosed === true;
   const sphParticleState = stepOptions.sphParticleState;
   const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
+  const schroederAdoptedParticleStorageLocalResolverBinding =
+    createSchroederAdoptedParticleStorageLocalResolverBinding({
+      schedule: schroederAdoptedParticleStorageContinuationSchedule,
+      resolver: schroederAdoptedParticleStorageRetainedBufferResolver,
+      sphParticleState,
+      mlsMpmParticleState
+    });
+  const schroederAdoptedParticleStorageLocalResolverBindingSummary =
+    summarizeSchroederAdoptedParticleStorageLocalResolverBinding(
+      schroederAdoptedParticleStorageLocalResolverBinding
+    );
+  const schroederAdoptedParticleStorageContinuationBlocksStageTasks =
+    schroederAdoptedParticleStorageContinuationSchedule.failClosed === true
+    || (
+      schroederAdoptedParticleStorageContinuationSchedule.scheduled === true
+      && schroederAdoptedParticleStorageContinuationSchedule.consumerMode === 'same-device'
+      && schroederAdoptedParticleStorageLocalResolverBinding.ready !== true
+    );
+  const schroederAdoptedParticleStorageSphParticleUpload =
+    schroederAdoptedParticleStorageLocalResolverBinding.sphParticleUpload
+    || stepOptions.sphParticleUpload
+    || null;
+  const schroederAdoptedParticleStorageMlsMpmParticleUpload =
+    schroederAdoptedParticleStorageLocalResolverBinding.mlsMpmParticleUpload
+    || stepOptions.mlsMpmParticleUpload
+    || null;
   const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(
     stepOptions.gravityMPerS2 ?? mlsMpmParticleState?.gravityMPerS2,
@@ -11861,6 +12088,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && includePressureInterfaceStage !== true
     && includeThermalPhaseStage !== true
     && includeReactionProductStage !== true
+    && schroederAdoptedParticleStorageContinuationSchedule.scheduled !== true
     && !stepOptions.sphParticleUpload
     && !stepOptions.mlsMpmParticleUpload;
   if (canUseNativeTaskGraph) {
@@ -12268,11 +12496,15 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         domainKey: gpuResidentLaneDomainKey,
         preferWebGpu: stepOptions.preferWebGpu === true,
         readbackMode,
+        sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
+        mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
         sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
         schroederAdoptedParticleStorageContinuationSchedule:
           schroederAdoptedParticleStorageContinuationSchedule.scheduled === true
             ? schroederAdoptedParticleStorageContinuationSchedule
-            : null
+            : null,
+        schroederAdoptedParticleStorageLocalResolverBinding:
+          schroederAdoptedParticleStorageLocalResolverBindingSummary
       });
       return {
         value: result,
@@ -12744,9 +12976,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             schroederAdoptedParticleStorageContinuationSchedule,
             schroederAdoptedParticleStorageContinuationPlan:
               resolvedSchroederAdoptedParticleStorageContinuationPlan,
+            schroederAdoptedParticleStorageLocalResolverBinding:
+              schroederAdoptedParticleStorageLocalResolverBindingSummary,
             common: {
               sphParticleState,
               mlsMpmParticleState,
+              sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
+              mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
               gridSpacingM: stepOptions.gridSpacingM ?? sphParticleState?.smoothingLengthM,
               boxDimsM: dims,
               dt: dtSeconds,
@@ -12824,7 +13060,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             ? 'ulg-mechanics-stage-chain-native-task-graph-results'
             : 'ulg-mechanics-stage-chain-lane-executor-stage-tasks',
           taskIdPrefix,
-          schroederAdoptedParticleStorageContinuationSchedule
+          schroederAdoptedParticleStorageContinuationSchedule,
+          schroederAdoptedParticleStorageLocalResolverBinding:
+            schroederAdoptedParticleStorageLocalResolverBindingSummary
         },
         context: {
           nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
@@ -12834,6 +13072,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           gpuHubResidentStageExecutorMode,
           gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
           schroederAdoptedParticleStorageContinuationSchedule,
+          schroederAdoptedParticleStorageLocalResolverBinding:
+            schroederAdoptedParticleStorageLocalResolverBindingSummary,
           ...(mechanicsResidentStageWorkerContext
             ? { ulgMechanicsResidentStageWorker: mechanicsResidentStageWorkerContext }
             : {})
@@ -12873,6 +13113,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
     ...stepOptions,
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+    sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
+    mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
     p2gStageRunner: schroederAdoptedParticleStorageContinuationBlocksStageTasks
       ? null
       : (stageOptions) => submitStageTask(
@@ -12880,10 +13122,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           createMlsMpmMechanicsP2gStageComputeTask,
           {
             ...stageOptions,
+            sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
+            mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
             schroederAdoptedParticleStorageContinuationSchedule:
               schroederAdoptedParticleStorageContinuationSchedule.scheduled === true
                 ? schroederAdoptedParticleStorageContinuationSchedule
-                : null
+                : null,
+            schroederAdoptedParticleStorageLocalResolverBinding:
+              schroederAdoptedParticleStorageLocalResolverBindingSummary
           }
         ),
     gridUpdateStageRunner: schroederAdoptedParticleStorageContinuationBlocksStageTasks
@@ -13325,6 +13571,30 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       schroederAdoptedParticleStorageContinuationSchedule.sameDevicePrivateLaneRefs || [],
     schroederAdoptedParticleStorageContinuationPortableReplayAvailable:
       schroederAdoptedParticleStorageContinuationSchedule.portableReplayAvailable === true,
+    schroederAdoptedParticleStorageLocalResolverBinding:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary,
+    schroederAdoptedParticleStorageLocalResolverSchema:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.schema || null,
+    schroederAdoptedParticleStorageLocalResolverStatus:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.status || null,
+    schroederAdoptedParticleStorageLocalResolverRequested:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.requested === true,
+    schroederAdoptedParticleStorageLocalResolverReady:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.ready === true,
+    schroederAdoptedParticleStorageLocalResolverBlocker:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.blocker || null,
+    schroederAdoptedParticleStorageLocalResolverResolvedRefs:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.resolvedRefs || [],
+    schroederAdoptedParticleStorageLocalResolverMissingDeclaredRefs:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.missingDeclaredRefs || [],
+    schroederAdoptedParticleStorageLocalResolverMissingResolvedRefs:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.missingResolvedRefs || [],
+    schroederAdoptedParticleStorageLocalResolverSphUploadReady:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.sphUploadReady === true,
+    schroederAdoptedParticleStorageLocalResolverMlsMpmUploadReady:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.mlsMpmUploadReady === true,
+    schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer:
+      schroederAdoptedParticleStorageLocalResolverBindingSummary?.rawGpuBufferPeerComputeTransfer === true,
     gpuHubResidentStageExecutorMode,
     gpuHubResidentStageExecutorRegisteredCount: gpuHubResidentStageExecutorRegistrations.length,
     gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
@@ -13607,6 +13877,28 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         [...stageTaskChain.schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs],
       schroederAdoptedParticleStorageContinuationPortableReplayAvailable:
         stageTaskChain.schroederAdoptedParticleStorageContinuationPortableReplayAvailable,
+      schroederAdoptedParticleStorageLocalResolverSchema:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverSchema,
+      schroederAdoptedParticleStorageLocalResolverStatus:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverStatus,
+      schroederAdoptedParticleStorageLocalResolverRequested:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverRequested,
+      schroederAdoptedParticleStorageLocalResolverReady:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverReady,
+      schroederAdoptedParticleStorageLocalResolverBlocker:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverBlocker,
+      schroederAdoptedParticleStorageLocalResolverResolvedRefs:
+        [...stageTaskChain.schroederAdoptedParticleStorageLocalResolverResolvedRefs],
+      schroederAdoptedParticleStorageLocalResolverMissingDeclaredRefs:
+        [...stageTaskChain.schroederAdoptedParticleStorageLocalResolverMissingDeclaredRefs],
+      schroederAdoptedParticleStorageLocalResolverMissingResolvedRefs:
+        [...stageTaskChain.schroederAdoptedParticleStorageLocalResolverMissingResolvedRefs],
+      schroederAdoptedParticleStorageLocalResolverSphUploadReady:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverSphUploadReady,
+      schroederAdoptedParticleStorageLocalResolverMlsMpmUploadReady:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverMlsMpmUploadReady,
+      schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer:
+        stageTaskChain.schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer,
       gpuHubResidentStageExecutorMode: stageTaskChain.gpuHubResidentStageExecutorMode,
       gpuHubResidentStageExecutorRegisteredCount: stageTaskChain.gpuHubResidentStageExecutorRegisteredCount,
       gpuHubResidentStageExecutorStageIds: [...stageTaskChain.gpuHubResidentStageExecutorStageIds],

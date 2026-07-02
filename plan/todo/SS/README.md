@@ -62,11 +62,13 @@ Landed checkpoints:
 15. `730f2ff` adds retained GPU phase-volume migration decision rows that
     consume level assignments and aggregate nodes without full particle
     readback.
+16. `ab1ec57` adds StateManager-admitted retained phase-volume level-update
+    rows and same-level orchestration handoff.
 
 Next implementation queue:
 
-1. Consume phase-volume migration rows through StateManager admission and make
-   water-to-steam migration visible in an SS stress case.
+1. Surface admitted phase-volume level-update diagnostics in a visible
+   water-to-steam SS stress case.
 2. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
    or bucket reduction once the node contract is consumed by later slices.
 3. Route reaction/contact/interface work queues through SS active nodes.

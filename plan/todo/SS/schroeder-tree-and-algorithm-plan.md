@@ -240,8 +240,8 @@ Suggested schemas:
 
 - Status: retained GPU phase-volume migration decision rows over level
   assignments and aggregate nodes landed in `730f2ff`; StateManager-admitted
-  level migration consumption and visible water-to-steam stress-case wiring are
-  next.
+  retained level-update rows and same-level orchestration handoff landed in
+  `ab1ec57`; visible water-to-steam stress-case diagnostics are next.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -280,8 +280,7 @@ Suggested schemas:
    - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
-   - consume retained migration rows through a StateManager-admitted level
-     migration boundary;
+   - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
@@ -329,15 +328,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **StateManager-admitted phase-volume level
-migration consumption**:
+The next code slice on `SS` is **visible phase-volume migration diagnostics**:
 
-1. Add a compact admission artifact for retained phase-volume migration rows.
-2. Apply approved migration rows as an authoritative SS level/state-family
-   update without full particle readback.
-3. Surface visible water-to-steam migration diagnostics in the SS path: target
-   level counts, coarsen/refine counters, aggregate coherence counters, and
-   conservation residual counters.
+1. Decode compact admitted level-update summaries without full particle
+   readback.
+2. Surface water-to-steam SS diagnostics: target level counts,
+   coarsen/refine counters, aggregate coherence counters, and conservation
+   residual counters.
+3. Feed those diagnostics into the visible stress-case status path so a 700x
+   expansion can be observed as level migration rather than particle-count
+   explosion.
 4. Preserve fine representation near surfaces, reactions, walls, and large
    pressure/interface gradients.
 5. Keep the exact aggregate-node reducer as a correctness-first bridge; replace

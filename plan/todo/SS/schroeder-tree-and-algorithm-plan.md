@@ -270,7 +270,8 @@ Suggested schemas:
   candidate lookup landed in `c22ed0a`. A retained bucketed active-node tile
   anchor index landed in `6e7f5dc` as an opt-in GPU-resident orchestration
   artifact. Law-neighbor traversal consumes that retained index with exact
-  full-scan fallback in `1aa16a4`.
+  full-scan fallback in `1aa16a4`. Compact retained traversal diagnostics
+  landed in `255a67d`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
@@ -281,6 +282,9 @@ Suggested schemas:
   candidate scans when spans are present. The producer now tries retained
   bucketed active-node matches before falling back to an exact non-bucket row
   scan, so the index is consumed without becoming a correctness bottleneck.
+  Traversal diagnostics now count bucket attempts/hits, exact fallback scans,
+  inactive rows, bucket pressure, and source-span writes; compact readback is
+  opt-in and the default hot path remains no-full-readback.
   Pressure/interface contact-kinematics still needs a spatial/interface index
   rather than only a source-particle span.
 
@@ -300,8 +304,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - add compact traversal diagnostics for bucket hits, exact fallback scans,
-     and overflow pressure;
+   - use compact traversal diagnostics to decide whether the retained bucket
+     index is enough for current law queues;
    - replace the bucket index with sorted/radix SS tree indexing when
      diagnostics make it necessary;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
@@ -358,13 +362,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS indexed traversal diagnostics**:
+The next code slice on `SS` is **SS traversal policy escalation**:
 
-1. Add compact GPU counters for bucket hits, exact fallback scans, inactive
-   rows, and active-node bucket pressure.
-2. Keep exact near-field validation and no-full-readback operation as the
-   default hot path.
-3. Promote to sorted/radix active-node indexing only after diagnostics show
-   it is needed for throughput or correctness.
-4. Keep all new outputs GPU-resident, no-full-readback, and
+1. Preserve retained bucketed active-node traversal as the first GPU index.
+2. Use compact diagnostic counters to surface bucket pressure and exact
+   fallback pressure without full particle readback.
+3. Add the smallest retained policy/status layer that can choose sorted/radix
+   active-node indexing only when diagnostics or configured use case require it.
+4. Keep all new outputs GPU-resident, no-full-readback by default, and
    StateManager-admission-aware.

@@ -34701,3 +34701,37 @@ Next:
   overflow pressure.
 - Promote to sorted/radix SS tree indexing only when those diagnostics show it
   is needed.
+
+## 2026-07-01 AKDT - SS Law-Neighbor Traversal Diagnostics
+
+Status:
+
+- Added retained law-neighbor traversal diagnostic counters for candidate
+  invocations, active-node bucket attempts, bucket-selected candidates, exact
+  fallback scans, exact fallback selections, inactive rows, bucket pressure, and
+  source-span writes.
+- Added an opt-in compact diagnostic readback mode that reads only the retained
+  counter buffer and does not allocate candidate/source-span readback buffers.
+- Kept the default law-neighbor hot path no-full-readback while retaining the
+  diagnostics buffer for later GPU-resident policy/status consumption.
+- Bumped the law-neighbor candidate pipeline cache key to v4 after adding the
+  diagnostic storage binding.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `49/49` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs` with `20/20` passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs` with `98/98` passing.
+- PASS: `npm test` with `840` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Add a retained traversal policy/status layer that uses the compact counters to
+  decide whether bucketed active-node traversal is sufficient or sorted/radix
+  indexing should be selected for the use case.
+- Continue active-node mechanics filtering into fused multi-step sequence paths
+  once traversal policy is represented.

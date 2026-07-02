@@ -111,11 +111,15 @@ Landed checkpoints:
 32. `1aa16a4` consumes the retained active-node bucket index in law-neighbor
     traversal with bucket-first enumeration and exact full-scan fallback outside
     indexed slots.
+33. `255a67d` adds retained law-neighbor traversal diagnostic counters for
+    bucket attempts/hits, exact fallback scans, inactive rows, bucket pressure,
+    and source-span writes, plus an optional compact diagnostics readback mode.
 
 Next implementation queue:
 
-1. Add compact traversal diagnostics for bucket hits, full-scan fallbacks, and
-   bucket overflow pressure so SS can decide whether radix indexing is required.
+1. Use traversal diagnostics to decide whether bucketed active-node indexing is
+   sufficient for the current law queues or whether sorted/radix indexing is
+   required.
 2. Replace the bucket index with sorted/radix SS tree indexing if those counters
    show it is the next bottleneck.
 3. Extend active-node mechanics filtering to the fused multi-step sequence when

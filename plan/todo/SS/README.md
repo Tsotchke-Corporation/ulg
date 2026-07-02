@@ -64,11 +64,14 @@ Landed checkpoints:
     readback.
 16. `ab1ec57` adds StateManager-admitted retained phase-volume level-update
     rows and same-level orchestration handoff.
+17. `3295777` adds compact GPU phase-volume diagnostic summaries over admitted
+    level updates, including water-to-steam scale migration counters without
+    full particle readback.
 
 Next implementation queue:
 
-1. Surface admitted phase-volume level-update diagnostics in a visible
-   water-to-steam SS stress case.
+1. Wire compact SS phase-volume diagnostic summaries into the visible
+   water-to-steam scene/status path.
 2. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
    or bucket reduction once the node contract is consumed by later slices.
 3. Route reaction/contact/interface work queues through SS active nodes.

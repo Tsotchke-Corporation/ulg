@@ -176,6 +176,8 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-hierarchy-aggregate.v0`
 - `peercompute.ulg.schroeder-hierarchy-aggregate-node.v0`
 - `peercompute.ulg.schroeder-phase-volume-migration.v0`
+- `peercompute.ulg.schroeder-phase-volume-level-update.v0`
+- `peercompute.ulg.schroeder-phase-volume-diagnostic-summary.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -241,7 +243,8 @@ Suggested schemas:
 - Status: retained GPU phase-volume migration decision rows over level
   assignments and aggregate nodes landed in `730f2ff`; StateManager-admitted
   retained level-update rows and same-level orchestration handoff landed in
-  `ab1ec57`; visible water-to-steam stress-case diagnostics are next.
+  `ab1ec57`; compact GPU diagnostic summaries over admitted level updates
+  landed in `3295777`; visible water-to-steam scene/status wiring is next.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.

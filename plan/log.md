@@ -34579,3 +34579,33 @@ Next:
 - Replace the unsorted active-node broad phase with a sorted/radix SS tree index
   once candidate count or throughput pressure requires it.
 - Consume retained SS active-node rows directly inside same-level P2G/G2P.
+
+## 2026-07-01 AKDT - SS Active-Node Mechanics Consumer
+
+Status:
+
+- Added retained SS active-node consumption to fused no-full MLS-MPM mechanics.
+  P2G now prefers active-node rows when present and falls back to the older
+  level-assignment filter only when no active-node filter is supplied.
+- G2P now consumes the same active-node rows and copies filtered particles
+  through unchanged, preventing non-selected hierarchy levels from being
+  reconstructed against the selected level grid.
+- The shared standalone P2G/G2P wrappers now bind dummy active-node rows so the
+  WGSL ABI stays complete for non-SS callers.
+- Bumped P2G/G2P pipeline cache keys after the bind-group layout change.
+- Fused sequence callers still bind dummy active-node rows; direct sequence
+  filtering is deferred until SS schedules multi-level mechanics batches through
+  that path.
+
+Validation:
+
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphG2pGpuKernel.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with `132/132` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Replace the unsorted active-node broad phase with a sorted/radix SS tree index
+  once retained candidate counts or throughput pressure justify it.
+- Extend direct active-node mechanics filtering to fused sequence batches when
+  SS starts dispatching multiple hierarchy levels through the sequence path.

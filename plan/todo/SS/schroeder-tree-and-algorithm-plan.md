@@ -301,9 +301,12 @@ Suggested schemas:
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
-   - consume retained SS active-node rows in same-level P2G/G2P dispatch;
-   - keep fused no-full active-grid behavior readback-free;
-   - avoid presentation-owned physics cadence.
+   - direct retained active-node filtering is now landed for fused single-step
+     P2G/G2P mechanics;
+   - extend the same direct filtering to fused multi-step sequence batches when
+     SS begins scheduling multi-level mechanics through that path;
+   - keep fused no-full active-grid behavior readback-free and avoid
+     presentation-owned physics cadence.
 3. Phase-volume migration:
    - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
@@ -349,12 +352,11 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS sorted active-node indexing and active-node
-mechanics consumption**:
+The next code slice on `SS` is **SS sorted active-node/tree indexing**:
 
 1. Add sorted/radix active-node indexing once direct consumers expose candidate
    count or throughput pressure.
-2. Consume retained active-node rows directly inside same-level P2G/G2P instead
-   of only filtering by level assignment.
+2. Use the sorted index to replace row-order assumptions in law-neighbor
+   candidate generation and future multilevel mechanics batches.
 3. Keep all new outputs GPU-resident, no-full-readback, and
    StateManager-admission-aware.

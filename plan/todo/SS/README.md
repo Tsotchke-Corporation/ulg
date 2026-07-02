@@ -99,10 +99,14 @@ Landed checkpoints:
 28. `c22ed0a` adds retained particle source-span rows beside law-neighbor
     candidate rows, fixes the candidate params buffer size, and routes reaction
     proposal scans through per-source candidate spans when present.
+29. `17c9de8` consumes retained SS active-node rows directly in fused P2G/G2P
+    mechanics, with copy-through G2P behavior for filtered particles and dummy
+    bindings for non-SS/shared shader callers.
 
 Next implementation queue:
 
 1. Replace the unsorted active-node broad phase with a sorted/radix SS tree
    index when candidate counts become the next bottleneck.
-2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
+2. Extend active-node mechanics filtering to the fused multi-step sequence when
+   SS schedules multi-level batches through that path.
 3. Add render LOD and PeerCompute portable SS summaries.

@@ -288,6 +288,13 @@ Suggested schemas:
   bulk H2O steam remains coarsened only when the pressure mask is zero; aggregate
   missing/interface, conservation residual, and sparse-surface preservation bits
   now gate refine-required rows before any split/merge mutation path exists.
+  The split/merge proposal checkpoint adds retained GPU
+  `schroeder-phase-volume-split-merge-proposal` rows after migration: coarsen
+  rows become merge proposals, refine-pressure rows become split proposals, and
+  every row carries deferred zero momentum/internal-energy deltas plus
+  `stateAdmissionRequired`/`mutationDeferred` fields. Same-level mechanics
+  forwards the proposal descriptor to the resident step, but no particle-count
+  mutation occurs before a future StateManager-admitted apply stage.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -530,13 +537,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS StateManager-admitted split/merge proposals**:
+The next code slice on `SS` is **SS StateManager-admitted split/merge apply**:
 
-1. Consume compact `refinePressureCount/refinePressureReasonMask` diagnostics
-   and retained migration rows to emit split/merge proposal rows without
-   mutating particle state.
-2. Require StateManager admission before any particle-count or represented-mass
-   mutation, with mass/momentum/energy continuity rows preserved for replay.
+1. Add an admission object for retained split/merge proposal rows and keep it
+   descriptor-only/same-device until StateManager accepts the proposal family.
+2. Add a retained apply-plan/execution artifact that can materialize particle
+   count/represented-mass changes only after admission, with continuity rows
+   preserved for replay.
 3. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent

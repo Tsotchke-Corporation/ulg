@@ -11885,6 +11885,124 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederPhaseVolumeSplitMergeProposalWgsl = `
+struct SchroederPhaseVolumeSplitMergeProposalParams {
+  migration_row_count: u32,
+  migration_stride: u32,
+  proposal_stride: u32,
+  flags: u32,
+  proposal_epoch: f32,
+  state_family_id: f32,
+  coarsen_mode_id: f32,
+  refine_mode_id: f32,
+};
+
+@group(0) @binding(0) var<storage, read> migration_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> proposal_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeSplitMergeProposalParams;
+
+const SCHROEDER_PVSMP_MIGRATION_STRIDE: u32 = 32u;
+const SCHROEDER_PVSMP_PROPOSAL_STRIDE: u32 = 32u;
+
+fn ss_pvsmp_active_migration(migration_offset: u32) -> bool {
+  let status = migration_rows[migration_offset + 3u];
+  return status > 0.0 && status < 32.0;
+}
+
+fn ss_pvsmp_write_empty(proposal_offset: u32, migration_offset: u32, status: f32) {
+  proposal_rows[proposal_offset + 0u] = migration_rows[migration_offset + 0u];
+  proposal_rows[proposal_offset + 1u] = migration_rows[migration_offset + 1u];
+  proposal_rows[proposal_offset + 2u] = migration_rows[migration_offset + 2u];
+  proposal_rows[proposal_offset + 3u] = status;
+  for (var column = 4u; column < SCHROEDER_PVSMP_PROPOSAL_STRIDE; column = column + 1u) {
+    proposal_rows[proposal_offset + column] = 0.0;
+  }
+  proposal_rows[proposal_offset + 27u] = params.proposal_epoch;
+  proposal_rows[proposal_offset + 28u] = params.state_family_id;
+  proposal_rows[proposal_offset + 29u] = 1.0;
+  proposal_rows[proposal_offset + 30u] = 1.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.migration_row_count) {
+    return;
+  }
+
+  let migration_stride = max(params.migration_stride, SCHROEDER_PVSMP_MIGRATION_STRIDE);
+  let proposal_stride = max(params.proposal_stride, SCHROEDER_PVSMP_PROPOSAL_STRIDE);
+  let migration_offset = row_index * migration_stride;
+  let proposal_offset = row_index * proposal_stride;
+
+  if (!ss_pvsmp_active_migration(migration_offset)) {
+    ss_pvsmp_write_empty(proposal_offset, migration_offset, 32.0);
+    return;
+  }
+
+  let coarsen_eligible = migration_rows[migration_offset + 22u];
+  let refine_required = migration_rows[migration_offset + 23u];
+  if (coarsen_eligible <= 0.0 && refine_required <= 0.0) {
+    ss_pvsmp_write_empty(proposal_offset, migration_offset, 32.0);
+    return;
+  }
+
+  let refine_pressure_reason_mask = migration_rows[migration_offset + 31u];
+  let conservation_residual_status = migration_rows[migration_offset + 26u];
+  let proposal_mode_id = select(
+    0.0,
+    select(params.coarsen_mode_id, params.refine_mode_id, refine_required > 0.0),
+    coarsen_eligible > 0.0 || refine_required > 0.0
+  );
+  var status = 1.0;
+  if (coarsen_eligible > 0.0) {
+    status = status + 2.0;
+  }
+  if (refine_required > 0.0) {
+    status = status + 4.0;
+  }
+  if (refine_pressure_reason_mask > 0.0) {
+    status = status + 8.0;
+  }
+  if (conservation_residual_status > 1.0) {
+    status = status + 16.0;
+  }
+
+  proposal_rows[proposal_offset + 0u] = migration_rows[migration_offset + 0u];
+  proposal_rows[proposal_offset + 1u] = migration_rows[migration_offset + 1u];
+  proposal_rows[proposal_offset + 2u] = migration_rows[migration_offset + 2u];
+  proposal_rows[proposal_offset + 3u] = status;
+  proposal_rows[proposal_offset + 4u] = proposal_mode_id;
+  proposal_rows[proposal_offset + 5u] = coarsen_eligible;
+  proposal_rows[proposal_offset + 6u] = refine_required;
+  proposal_rows[proposal_offset + 7u] = refine_pressure_reason_mask;
+  proposal_rows[proposal_offset + 8u] = migration_rows[migration_offset + 6u];
+  proposal_rows[proposal_offset + 9u] = migration_rows[migration_offset + 7u];
+  proposal_rows[proposal_offset + 10u] = migration_rows[migration_offset + 8u];
+  proposal_rows[proposal_offset + 11u] = migration_rows[migration_offset + 9u];
+  proposal_rows[proposal_offset + 12u] = migration_rows[migration_offset + 12u];
+  proposal_rows[proposal_offset + 13u] = migration_rows[migration_offset + 13u];
+  proposal_rows[proposal_offset + 14u] = migration_rows[migration_offset + 15u];
+  proposal_rows[proposal_offset + 15u] = migration_rows[migration_offset + 16u];
+  proposal_rows[proposal_offset + 16u] = migration_rows[migration_offset + 17u];
+  proposal_rows[proposal_offset + 17u] = migration_rows[migration_offset + 18u];
+  proposal_rows[proposal_offset + 18u] = 0.0;
+  proposal_rows[proposal_offset + 19u] = 0.0;
+  proposal_rows[proposal_offset + 20u] = 0.0;
+  proposal_rows[proposal_offset + 21u] = 0.0;
+  proposal_rows[proposal_offset + 22u] = migration_rows[migration_offset + 4u];
+  proposal_rows[proposal_offset + 23u] = migration_rows[migration_offset + 5u];
+  proposal_rows[proposal_offset + 24u] = migration_rows[migration_offset + 19u];
+  proposal_rows[proposal_offset + 25u] = migration_rows[migration_offset + 20u];
+  proposal_rows[proposal_offset + 26u] = migration_rows[migration_offset + 28u];
+  proposal_rows[proposal_offset + 27u] = params.proposal_epoch;
+  proposal_rows[proposal_offset + 28u] = params.state_family_id;
+  proposal_rows[proposal_offset + 29u] = 1.0;
+  proposal_rows[proposal_offset + 30u] = 1.0;
+  proposal_rows[proposal_offset + 31u] = 1.0;
+}
+`;
+
 export const schroederPhaseVolumeLevelUpdateWgsl = `
 struct SchroederPhaseVolumeLevelUpdateParams {
   migration_row_count: u32,

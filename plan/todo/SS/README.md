@@ -264,11 +264,18 @@ Landed checkpoints:
     pressure-gradient imports, binds the borrowed gas-pressure-cell buffer at
     the existing pressure-interface gas-cell binding, and avoids the CPU
     gas-cell snapshot/upload bridge on the default path.
+66. `04d7627` promotes retained SS gas-cell imports from same-level resident
+    execution into the scene pressure-interface state. Mounted scheduling can
+    now reuse a pressure-interface import descriptor that preserves the
+    retained gas-pressure-cell GPU buffer, row metadata, and admission evidence;
+    the resident cleanup preservation list also carries that buffer forward.
 
 Next implementation queue:
 
-1. Continue Slice 7 by threading retained SS gas-cell import artifacts from
-   same-level/scene execution into mounted pressure-interface stage scheduling.
+1. Continue Slice 7 by using the promoted SS pressure-interface gas-cell import
+   as the next pressure-feedback input across repeated same-level/mounted
+   worker-lane schedules, with compact telemetry showing whether the retained
+   rows were consumed.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

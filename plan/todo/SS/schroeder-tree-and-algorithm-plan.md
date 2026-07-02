@@ -312,7 +312,8 @@ Suggested schemas:
   `794e4aa`; admitted gas-pressure state-delta rows landed in `b3f62cf`;
   retained pressure-interface gas-cell row materialization landed in
   `8d87b5b`; direct pressure-interface WebGPU consumption of retained SS
-  gas-cell rows landed in `bbd4bdf`.
+  gas-cell rows landed in `bbd4bdf`; same-level/scene promotion of retained SS
+  gas-cell imports into pressure-interface scheduling landed in `04d7627`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -346,6 +347,11 @@ Suggested schemas:
   as retained local pressure-gradient inputs, binds the borrowed
   gas-pressure-cell buffer at the existing gas-cell storage binding, and skips
   CPU gas-cell snapshot/upload plumbing on the no-full-readback path.
+  `04d7627` promotes the retained SS gas-cell artifact out of same-level
+  resident execution into the scene pressure-interface state, converts it into
+  the existing pressure-interface import descriptor while preserving the SS
+  source schema and GPU buffer handle, and adds the retained gas-cell buffer to
+  resident cleanup preservation.
 
 ### Slice 8: Render And Distribution
 
@@ -379,8 +385,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - thread retained SS gas-cell import artifacts from same-level/scene
-     execution into mounted pressure-interface stage scheduling;
+   - use promoted SS pressure-interface gas-cell imports as the next
+     pressure-feedback input across repeated same-level/mounted worker-lane
+     schedules, with compact telemetry showing retained-row consumption;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -439,11 +446,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS gas-cell pressure-interface orchestration**:
+The next code slice on `SS` is **SS pressure-feedback reuse telemetry**:
 
-1. Thread admitted `schroeder-far-aggregate-gas-cell-import` artifacts from
-   same-level/scene execution into mounted pressure-interface stage scheduling.
+1. Reuse promoted `schroeder-far-aggregate-gas-cell-import` descriptors as
+   next-frame pressure-feedback inputs across repeated same-level/mounted
+   worker-lane schedules.
 2. Preserve the boundary between far aggregate gas pressure summaries and
    exact-near-field pressure/interface contact work.
-3. Keep compact diagnostics and descriptor-only PeerCompute replay artifacts;
-   do not introduce full particle readback as the validation path.
+3. Report compact telemetry for retained-row consumption and keep
+   descriptor-only PeerCompute replay artifacts; do not introduce full particle
+   readback as the validation path.

@@ -10,6 +10,7 @@ import {
   SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
@@ -45,6 +46,9 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
@@ -86,6 +90,7 @@ import {
   schroederFarAggregateDiagnosticSummaryWgsl,
   schroederFarAggregateForceApplicationWgsl,
   schroederFarAggregateForceSummaryWgsl,
+  schroederFarAggregateLawConsumerWgsl,
   schroederLevelAssignmentWgsl,
   schroederLawNeighborCandidateWgsl,
   schroederLawQueueWgsl,
@@ -127,6 +132,9 @@ export {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
@@ -166,6 +174,8 @@ export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS =
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS =
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS =
+  SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
@@ -187,6 +197,7 @@ export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_WORKGROUP_SIZE = 64;
+export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE = 64;
@@ -219,6 +230,8 @@ export const SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE =
 export const SCHROEDER_FULL_FAR_AGGREGATE_FORCE_APPLICATION_READBACK_MODE =
   'full-schroeder-far-aggregate-force-application-readback';
 export const SCHROEDER_FULL_FAR_AGGREGATE_FORCE_SUMMARY_READBACK_MODE = 'full-schroeder-far-aggregate-force-summary-readback';
+export const SCHROEDER_FULL_FAR_AGGREGATE_LAW_CONSUMER_READBACK_MODE =
+  'full-schroeder-far-aggregate-law-consumer-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
 export const SCHROEDER_FULL_LAW_NEIGHBOR_CANDIDATE_READBACK_MODE = 'full-schroeder-law-neighbor-candidate-readback';
@@ -255,6 +268,10 @@ export const SCHROEDER_FAR_LAW_GRAVITY_MASK = 8;
 export const SCHROEDER_FAR_LAW_RADIATION_MASK = 16;
 export const SCHROEDER_FAR_LAW_PLASMA_MASK = 32;
 export const SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK = 64;
+export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK =
+  SCHROEDER_FAR_LAW_RADIATION_MASK
+  | SCHROEDER_FAR_LAW_PLASMA_MASK
+  | SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK;
 export const SCHROEDER_FAR_AGGREGATE_LAW_MASK =
   SCHROEDER_FAR_LAW_GRAVITY_MASK
   | SCHROEDER_FAR_LAW_RADIATION_MASK
@@ -270,6 +287,11 @@ export const DEFAULT_SCHROEDER_FAR_AGGREGATE_FORCE_SCALE = 1;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD = 0;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_APPLICATION_ACCELERATION_SCALE = 1;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_APPLICATION_MAX_ACCELERATION_M_PER_S2 = 0;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE = 1;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE = 1;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE = 1;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K = 293.15;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY = 287.05;
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -287,6 +309,8 @@ const SCHROEDER_STATE_DELTA_OUTPUT_FAMILY = 'schroeder-hierarchy-state-delta';
 const SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY = 'schroeder-hierarchy';
 const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_OUTPUT_FAMILY =
   'schroeder-far-aggregate-force-application';
+const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_OUTPUT_FAMILY =
+  'schroeder-far-aggregate-law-consumer';
 const SCHROEDER_STATE_DELTA_MERGE_ADMITTED_STATUSES = new Set([
   'schroeder-state-delta-merge-admission-published',
   'schroeder-state-delta-merge-admission-admitted',
@@ -305,6 +329,13 @@ const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ADMITTED_STATUSES = new Set([
   'schroeder-far-aggregate-force-application-admission-published',
   'schroeder-far-aggregate-force-application-admission-admitted',
   'worker-retained-schroeder-far-aggregate-force-application-output-admitted',
+  'accepted',
+  'admitted'
+]);
+const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMITTED_STATUSES = new Set([
+  'schroeder-far-aggregate-law-consumer-admission-published',
+  'schroeder-far-aggregate-law-consumer-admission-admitted',
+  'worker-retained-schroeder-far-aggregate-law-consumer-output-admitted',
   'accepted',
   'admitted'
 ]);
@@ -925,6 +956,82 @@ export function createSchroederFarAggregateDiagnosticSummaryParamsArray({
   view.setFloat32(36, 0, true);
   view.setFloat32(40, 0, true);
   view.setFloat32(44, 0, true);
+  return buffer;
+}
+
+export function createSchroederFarAggregateLawConsumerParamsArray({
+  forceSummaryRowCount = 0,
+  forceSummaryStrideFloats = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+  diagnosticSummaryStrideFloats = SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+  lawConsumerStrideFloats = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS,
+  enabledConsumerLawMask = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK,
+  admissionApproved = false,
+  flags = 0,
+  radiationScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE,
+  plasmaScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE,
+  gasSummaryScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE,
+  gasTemperatureK = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K,
+  maxFarFieldErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  maxOpeningRatio = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  queueEpoch = 0,
+  stateFamilyId = 1,
+  gasConstantProxy = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY
+} = {}) {
+  const buffer = new ArrayBuffer(80);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(forceSummaryRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    forceSummaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    diagnosticSummaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    lawConsumerStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS
+  ))), true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(
+    enabledConsumerLawMask,
+    SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK
+  ))), true);
+  view.setUint32(20, admissionApproved ? 1 : 0, true);
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(28, 0, true);
+  view.setFloat32(32, finiteNumber(
+    radiationScale,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE
+  ), true);
+  view.setFloat32(36, finiteNumber(
+    plasmaScale,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE
+  ), true);
+  view.setFloat32(40, finiteNumber(
+    gasSummaryScale,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE
+  ), true);
+  view.setFloat32(44, Math.max(0, finiteNumber(
+    gasTemperatureK,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K
+  )), true);
+  view.setFloat32(48, Math.max(0, finiteNumber(
+    maxFarFieldErrorBound,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+  )), true);
+  view.setFloat32(52, Math.max(0, finiteNumber(
+    maxOpeningRatio,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+  )), true);
+  view.setFloat32(56, finiteNumber(queueEpoch, 0), true);
+  view.setFloat32(60, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(64, Math.max(0, finiteNumber(
+    gasConstantProxy,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY
+  )), true);
+  view.setFloat32(68, 0, true);
+  view.setFloat32(72, 0, true);
+  view.setFloat32(76, 0, true);
   return buffer;
 }
 
@@ -1980,6 +2087,103 @@ function schroederFarAggregateForceApplicationAdmissionDescriptor(admission = nu
     || admission;
 }
 
+function schroederFarAggregateLawConsumerAdmissionDescriptor(admission = null) {
+  if (!admission || typeof admission !== 'object') return null;
+  return admission.schroederFarAggregateLawConsumerPublication
+    || admission.admittedSchroederFarAggregateLawConsumerPublication
+    || admission.publication
+    || admission.descriptor
+    || admission;
+}
+
+export function schroederFarAggregateLawConsumerAdmissionAllowsConsumption({
+  farAggregateLawConsumerAdmission = null,
+  farAggregateForceSummary = null,
+  farAggregateDiagnosticSummary = null,
+  lawConsumerRowCount = 0,
+  enabledConsumerLawMask = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK
+} = {}) {
+  const descriptor = schroederFarAggregateLawConsumerAdmissionDescriptor(
+    farAggregateLawConsumerAdmission
+  );
+  const status = farAggregateLawConsumerAdmission?.status || descriptor?.status || null;
+  const descriptorStatus = descriptor?.status
+    || farAggregateLawConsumerAdmission?.publicationStatus
+    || farAggregateLawConsumerAdmission?.admittedStatus
+    || status;
+  const outputFamilies = Array.isArray(farAggregateLawConsumerAdmission?.outputFamilies)
+    ? farAggregateLawConsumerAdmission.outputFamilies
+    : (Array.isArray(descriptor?.outputFamilies) ? descriptor.outputFamilies : []);
+  const admittedRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      farAggregateLawConsumerAdmission?.schroederFarAggregateLawConsumerRowCount
+        ?? descriptor?.schroederFarAggregateLawConsumerRowCount
+        ?? farAggregateLawConsumerAdmission?.lawConsumerRowCount
+        ?? descriptor?.lawConsumerRowCount
+        ?? farAggregateLawConsumerAdmission?.forceSummaryRowCount
+        ?? descriptor?.forceSummaryRowCount,
+      lawConsumerRowCount
+    ))
+  );
+  const requiredRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      farAggregateForceSummary?.forceSummaryRowCount ?? farAggregateForceSummary?.activeNodeCount,
+      lawConsumerRowCount
+    ))
+  );
+  const admissionApproved = farAggregateLawConsumerAdmission?.farAggregateLawConsumerApproved === true;
+  const descriptorAdmitted = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMITTED_STATUSES.has(descriptorStatus)
+    || descriptor?.committed === true
+    || farAggregateLawConsumerAdmission?.committed === true;
+  const familyAccepted = outputFamilies.includes(SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_OUTPUT_FAMILY);
+  const rowCountAccepted = admittedRowCount >= requiredRowCount || requiredRowCount === 0;
+  const diagnosticsAccepted = farAggregateLawConsumerAdmission?.farAggregateDiagnosticsAccepted !== false
+    && farAggregateDiagnosticSummary?.stateMutationRequired !== true
+    && farAggregateDiagnosticSummary?.fullParticleReadbackRequired !== true;
+  const resolvedConsumerMask = Math.max(0, Math.round(finiteNumber(
+    farAggregateLawConsumerAdmission?.enabledConsumerLawMask
+      ?? descriptor?.enabledConsumerLawMask
+      ?? enabledConsumerLawMask,
+    enabledConsumerLawMask
+  ))) & SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK;
+  const consumerMaskAccepted = resolvedConsumerMask !== 0;
+  return {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
+    status: admissionApproved
+      && descriptorAdmitted
+      && familyAccepted
+      && rowCountAccepted
+      && diagnosticsAccepted
+      && consumerMaskAccepted
+      ? 'schroeder-far-aggregate-law-consumer-admission-approved'
+      : 'schroeder-far-aggregate-law-consumer-admission-blocked',
+    approved: admissionApproved
+      && descriptorAdmitted
+      && familyAccepted
+      && rowCountAccepted
+      && diagnosticsAccepted
+      && consumerMaskAccepted,
+    admissionApproved,
+    descriptorAdmitted,
+    descriptorStatus,
+    familyAccepted,
+    rowCountAccepted,
+    diagnosticsAccepted,
+    consumerMaskAccepted,
+    enabledConsumerLawMask: resolvedConsumerMask,
+    lawConsumerRowCount: admittedRowCount,
+    requiredLawConsumerRowCount: requiredRowCount,
+    sourceHotBufferKey: farAggregateLawConsumerAdmission?.sourceHotBufferKey
+      || farAggregateLawConsumerAdmission?.hotBufferKey
+      || descriptor?.sourceHotBufferKey
+      || descriptor?.hotBufferKey
+      || null,
+    outputFamilies: [...outputFamilies]
+  };
+}
+
 export function schroederFarAggregateForceApplicationAdmissionAllowsApplication({
   farAggregateForceApplicationAdmission = null,
   farAggregateForceSummary = null,
@@ -2201,6 +2405,29 @@ function assertFarAggregateDiagnosticSummaryInput(farAggregateDiagnosticSummary)
   )));
   if (stride !== SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS) {
     throw new RangeError('Schroeder far-aggregate diagnostic summary input requires the current row layout');
+  }
+}
+
+function assertFarAggregateLawConsumerInput(farAggregateLawConsumer) {
+  if (
+    farAggregateLawConsumer?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA
+    && farAggregateLawConsumer?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_SCHEMA
+  ) {
+    throw new TypeError('Schroeder portable summary requires a Schroeder far-aggregate law consumer input');
+  }
+  const consumerRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateLawConsumer.lawConsumerRowCount ?? farAggregateLawConsumer.forceSummaryRowCount,
+    0
+  )));
+  if (consumerRowCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate law consumer input requires at least one consumer row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    farAggregateLawConsumer.lawConsumerStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS
+  )));
+  if (stride !== SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS) {
+    throw new RangeError('Schroeder far-aggregate law consumer input requires the current row layout');
   }
 }
 
@@ -3166,6 +3393,137 @@ export function createSchroederFarAggregateDiagnosticSummaryPlan({
   };
 }
 
+export function createSchroederFarAggregateLawConsumerPlan({
+  farAggregateForceSummary,
+  farAggregateDiagnosticSummary = null,
+  farAggregateLawConsumerAdmission = null,
+  enabledConsumerLawMask = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK,
+  radiationScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE,
+  plasmaScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE,
+  gasSummaryScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE,
+  gasTemperatureK = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K,
+  gasConstantProxy = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY,
+  maxFarFieldErrorBound = farAggregateDiagnosticSummary?.farFieldErrorBound
+    ?? farAggregateForceSummary?.farFieldErrorBound
+    ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  maxOpeningRatio = farAggregateDiagnosticSummary?.openingTheta
+    ?? farAggregateForceSummary?.openingTheta
+    ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  queueEpoch = farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateForceSummary?.stateFamilyId ?? 1
+} = {}) {
+  assertFarAggregateForceSummaryInput(farAggregateForceSummary);
+  if (farAggregateDiagnosticSummary) assertFarAggregateDiagnosticSummaryInput(farAggregateDiagnosticSummary);
+  const forceSummaryRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateForceSummary.forceSummaryRowCount ?? farAggregateForceSummary.activeNodeCount,
+    0
+  )));
+  if (forceSummaryRowCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate law consumer requires at least one force-summary row');
+  }
+  const resolvedConsumerMask = Math.max(0, Math.round(finiteNumber(
+    enabledConsumerLawMask,
+    SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK
+  ))) & SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK;
+  const admission = schroederFarAggregateLawConsumerAdmissionAllowsConsumption({
+    farAggregateLawConsumerAdmission,
+    farAggregateForceSummary,
+    farAggregateDiagnosticSummary,
+    lawConsumerRowCount: forceSummaryRowCount,
+    enabledConsumerLawMask: resolvedConsumerMask
+  });
+  const lawConsumerByteLength = Math.max(
+    4,
+    forceSummaryRowCount * SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const lawFamilies = [];
+  if ((admission.enabledConsumerLawMask & SCHROEDER_FAR_LAW_RADIATION_MASK) !== 0) lawFamilies.push('radiation');
+  if ((admission.enabledConsumerLawMask & SCHROEDER_FAR_LAW_PLASMA_MASK) !== 0) lawFamilies.push('plasma-electromagnetic');
+  if ((admission.enabledConsumerLawMask & SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK) !== 0) lawFamilies.push('gas-summary');
+  return {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_SCHEMA,
+    status: admission.approved
+      ? 'schroeder-far-aggregate-law-consumer-plan-ready'
+      : 'schroeder-far-aggregate-law-consumer-plan-blocked-admission-required',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-far-aggregate-law-consumer',
+    sourceFarAggregateForceSummarySchema: farAggregateForceSummary.schema,
+    sourceFarAggregateForceSummaryStatus: farAggregateForceSummary.status ?? null,
+    sourceFarAggregateDiagnosticSummarySchema: farAggregateDiagnosticSummary?.schema ?? null,
+    sourceFarAggregateDiagnosticSummaryStatus: farAggregateDiagnosticSummary?.status ?? null,
+    forceSummaryRowCount,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    diagnosticSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+    lawConsumerRowLayout: [...SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT],
+    lawConsumerStrideFloats: SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS,
+    lawConsumerStrideBytes: SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    lawConsumerByteLength,
+    lawConsumerRowCount: forceSummaryRowCount,
+    enabledConsumerLawMask: admission.enabledConsumerLawMask,
+    requestedConsumerLawMask: resolvedConsumerMask,
+    lawFamilies,
+    radiationScale: finiteNumber(
+      radiationScale,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE
+    ),
+    plasmaScale: finiteNumber(
+      plasmaScale,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE
+    ),
+    gasSummaryScale: finiteNumber(
+      gasSummaryScale,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE
+    ),
+    gasTemperatureK: Math.max(0, finiteNumber(
+      gasTemperatureK,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K
+    )),
+    gasConstantProxy: Math.max(0, finiteNumber(
+      gasConstantProxy,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY
+    )),
+    maxFarFieldErrorBound: Math.max(0, finiteNumber(
+      maxFarFieldErrorBound,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+    )),
+    maxOpeningRatio: Math.max(0, finiteNumber(
+      maxOpeningRatio,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+    )),
+    queueEpoch: finiteNumber(queueEpoch, 0),
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    admission,
+    farAggregateLawConsumerAdmissionSchema: admission.schema,
+    farAggregateLawConsumerAdmissionStatus: admission.status,
+    farAggregateLawConsumerAdmissionApproved: admission.approved,
+    farAggregateLawConsumerAdmissionSourceHotBufferKey: admission.sourceHotBufferKey,
+    outputCompaction: 'one-far-aggregate-law-consumer-row-per-source',
+    consumerMode: 'read-only-radiation-plasma-gas-summary-proxies',
+    aggregateAdmissibilityStatus: 'aggregate-admissible-far-field-laws-only-local-laws-excluded',
+    exactNearFieldRequirement: 'local-incompressibility-reaction-contact-interface-remain-near-field',
+    diagnosticPressurePolicy: 'compact-diagnostics-gate-consumer-row-status',
+    conservationStatus: admission.approved
+      ? 'law-consumer-summary-ready-no-state-mutation'
+      : 'law-consumer-blocked-admission-required',
+    stateMutationRequired: false,
+    stateMutationStatus: admission.approved
+      ? 'far-aggregate-law-consumer-summary-planned'
+      : 'blocked-far-aggregate-law-consumer-admission-required',
+    stateAuthorityStatus: admission.approved
+      ? 'state-manager-admitted-read-only-far-aggregate-law-consumer'
+      : 'requires-state-manager-admission-before-far-aggregate-law-consumer',
+    outputFamilies: [
+      SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_OUTPUT_FAMILY,
+      'schroeder-far-aggregate-force-summary',
+      'schroeder-far-aggregate-diagnostics'
+    ],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
 export function createSchroederFarAggregateForceApplicationPlan({
   farAggregateForceSummary,
   farAggregateDiagnosticSummary = null,
@@ -3635,6 +3993,7 @@ export function createSchroederPortableSummaryPlan({
   farAggregateCandidates = null,
   farAggregateForceSummary = null,
   farAggregateDiagnosticSummary = null,
+  farAggregateLawConsumer = null,
   farAggregateForceApplication = null,
   hierarchyAggregateNode = null,
   conservationSummary = null,
@@ -3656,6 +4015,7 @@ export function createSchroederPortableSummaryPlan({
   if (farAggregateCandidates) assertFarAggregateCandidateInput(farAggregateCandidates);
   if (farAggregateForceSummary) assertFarAggregateForceSummaryInput(farAggregateForceSummary);
   if (farAggregateDiagnosticSummary) assertFarAggregateDiagnosticSummaryInput(farAggregateDiagnosticSummary);
+  if (farAggregateLawConsumer) assertFarAggregateLawConsumerInput(farAggregateLawConsumer);
   if (farAggregateForceApplication) assertFarAggregateForceApplicationInput(farAggregateForceApplication);
   if (hierarchyAggregateNode) assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
 
@@ -3683,6 +4043,10 @@ export function createSchroederPortableSummaryPlan({
   const farAggregateDiagnosticSummaryCount = Math.max(0, Math.round(finiteNumber(
     farAggregateDiagnosticSummary?.diagnosticSummaryRowCount
       ?? farAggregateDiagnosticSummary?.summaryRowCount,
+    0
+  )));
+  const farAggregateLawConsumerCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateLawConsumer?.lawConsumerRowCount ?? farAggregateLawConsumer?.forceSummaryRowCount,
     0
   )));
   const farAggregateForceApplicationCount = Math.max(0, Math.round(finiteNumber(
@@ -3777,6 +4141,16 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateDiagnosticSummary.diagnosticSummaryByteLength,
       retained: Boolean(farAggregateDiagnosticSummary.diagnosticSummaryBuffer)
     }) : null,
+    farAggregateLawConsumer ? schroederPortableRetainedRef({
+      family: 'schroeder-far-aggregate-law-consumer',
+      role: 'read-only-radiation-plasma-gas-summary-consumers',
+      artifact: farAggregateLawConsumer,
+      rowCount: farAggregateLawConsumerCount,
+      strideFloats: SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS,
+      byteLength: farAggregateLawConsumer.lawConsumerBufferByteLength
+        ?? farAggregateLawConsumer.lawConsumerByteLength,
+      retained: Boolean(farAggregateLawConsumer.lawConsumerBuffer)
+    }) : null,
     farAggregateForceApplication ? schroederPortableRetainedRef({
       family: 'schroeder-far-aggregate-force-application',
       role: 'admitted-far-field-force-application-deltas',
@@ -3834,6 +4208,7 @@ export function createSchroederPortableSummaryPlan({
     farAggregateCandidateProxyCount: farAggregateCandidateCount,
     farAggregateForceSummaryCount,
     farAggregateDiagnosticSummaryCount,
+    farAggregateLawConsumerCount,
     farAggregateForceApplicationCount,
     phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
     opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
@@ -3861,6 +4236,7 @@ export function createSchroederPortableSummaryPlan({
     farAggregateCandidateCount,
     farAggregateForceSummaryCount,
     farAggregateDiagnosticSummaryCount,
+    farAggregateLawConsumerCount,
     farAggregateForceApplicationCount,
     retainedRefs,
     retainedRefCount: retainedRefs.length,
@@ -6802,6 +7178,225 @@ export async function runSchroederFarAggregateDiagnosticSummaryWebGpu({
   }
 }
 
+export async function runSchroederFarAggregateLawConsumerWebGpu({
+  device,
+  farAggregateForceSummary,
+  farAggregateDiagnosticSummary = null,
+  farAggregateLawConsumerAdmission = null,
+  enabledConsumerLawMask = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK,
+  radiationScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE,
+  plasmaScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE,
+  gasSummaryScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE,
+  gasTemperatureK = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K,
+  gasConstantProxy = DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY,
+  maxFarFieldErrorBound = farAggregateDiagnosticSummary?.farFieldErrorBound
+    ?? farAggregateForceSummary?.farFieldErrorBound
+    ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  maxOpeningRatio = farAggregateDiagnosticSummary?.openingTheta
+    ?? farAggregateForceSummary?.openingTheta
+    ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  queueEpoch = farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateForceSummary?.stateFamilyId ?? 1,
+  retainLawConsumerBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederFarAggregateLawConsumerWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederFarAggregateLawConsumerPlan({
+    farAggregateForceSummary,
+    farAggregateDiagnosticSummary,
+    farAggregateLawConsumerAdmission,
+    enabledConsumerLawMask,
+    radiationScale,
+    plasmaScale,
+    gasSummaryScale,
+    gasTemperatureK,
+    gasConstantProxy,
+    maxFarFieldErrorBound,
+    maxOpeningRatio,
+    queueEpoch,
+    stateFamilyId
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  if (!plan.farAggregateLawConsumerAdmissionApproved) {
+    return {
+      ...plan,
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA,
+      farAggregateLawConsumerSchema: plan.schema,
+      status: 'schroeder-far-aggregate-law-consumer-blocked-admission-required',
+      backend: 'webgpu',
+      readbackMode,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedLawConsumerBuffer: false,
+      lawConsumerBufferByteLength: 0,
+      lawConsumerRows: new Float32Array(),
+      conservationStatus: 'law-consumer-blocked-admission-required',
+      stateMutationRequired: false,
+      stateMutationStatus: 'blocked-far-aggregate-law-consumer-admission-required',
+      stateAuthorityStatus: 'requires-state-manager-admission-before-far-aggregate-law-consumer',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+
+  const borrowedForceSummaryBuffer = farAggregateForceSummary?.forceSummaryBuffer || null;
+  const forceSummaryRows = farAggregateForceSummary?.forceSummaryRows instanceof Float32Array
+    ? farAggregateForceSummary.forceSummaryRows
+    : null;
+  if (!borrowedForceSummaryBuffer && !(forceSummaryRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate law consumer requires a retained force-summary buffer or explicit rows');
+  }
+  const borrowedDiagnosticSummaryBuffer = farAggregateDiagnosticSummary?.diagnosticSummaryBuffer
+    || farAggregateDiagnosticSummary?.summaryBuffer
+    || null;
+  const diagnosticSummaryRows = farAggregateDiagnosticSummary?.diagnosticSummaryRows instanceof Float32Array
+    ? farAggregateDiagnosticSummary.diagnosticSummaryRows
+    : (farAggregateDiagnosticSummary?.summaryRows instanceof Float32Array
+        ? farAggregateDiagnosticSummary.summaryRows
+        : null);
+  if (!borrowedDiagnosticSummaryBuffer && !(diagnosticSummaryRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate law consumer requires retained compact diagnostics or explicit rows');
+  }
+
+  const forceSummaryBuffer = borrowedForceSummaryBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-law-consumer-force-summary-in', forceSummaryRows);
+  const diagnosticSummaryBuffer = borrowedDiagnosticSummaryBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-law-consumer-diagnostic-summary-in', diagnosticSummaryRows);
+  const lawConsumerBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-law-consumer-out',
+    size: plan.lawConsumerByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsArray = createSchroederFarAggregateLawConsumerParamsArray({
+    ...plan,
+    admissionApproved: plan.farAggregateLawConsumerAdmissionApproved
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-law-consumer-params',
+    size: paramsArray.byteLength,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-far-aggregate-law-consumer-readback',
+      size: plan.lawConsumerByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedLawConsumerBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-far-aggregate-law-consumer.v0',
+      label: 'ulg-schroeder-far-aggregate-law-consumer',
+      code: schroederFarAggregateLawConsumerWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: forceSummaryBuffer } },
+        { binding: 1, resource: { buffer: diagnosticSummaryBuffer } },
+        { binding: 2, resource: { buffer: lawConsumerBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.lawConsumerRowCount / SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(
+        lawConsumerBuffer,
+        0,
+        readBuffer,
+        0,
+        plan.lawConsumerByteLength
+      );
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let lawConsumerRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      lawConsumerRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.lawConsumerRowCount * SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA,
+      farAggregateLawConsumerSchema: plan.schema,
+      status: 'schroeder-far-aggregate-law-consumer-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_FAR_AGGREGATE_LAW_CONSUMER_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedLawConsumerBuffer: Boolean(retainLawConsumerBuffer),
+      lawConsumerBufferByteLength: plan.lawConsumerByteLength,
+      lawConsumerRows,
+      consumerMode: plan.consumerMode,
+      aggregateAdmissibilityStatus: plan.aggregateAdmissibilityStatus,
+      exactNearFieldRequirement: plan.exactNearFieldRequirement,
+      diagnosticPressurePolicy: plan.diagnosticPressurePolicy,
+      conservationStatus: 'law-consumer-summary-submitted-no-state-mutation',
+      stateMutationRequired: false,
+      stateMutationStatus: 'admitted-far-aggregate-law-consumer-buffer-submitted',
+      stateAuthorityStatus: 'state-manager-admitted-read-only-far-aggregate-law-consumer',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainLawConsumerBuffer) {
+      result.lawConsumerBuffer = lawConsumerBuffer;
+      result.destroyLawConsumerBuffer = () => lawConsumerBuffer.destroy?.();
+      returnedRetainedLawConsumerBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedForceSummaryBuffer) forceSummaryBuffer.destroy?.();
+      if (!borrowedDiagnosticSummaryBuffer) diagnosticSummaryBuffer.destroy?.();
+      if (!retainLawConsumerBuffer || !returnedRetainedLawConsumerBuffer) {
+        lawConsumerBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederFarAggregateForceApplicationWebGpu({
   device,
   farAggregateForceSummary,
@@ -7501,6 +8096,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateCandidates = null,
   farAggregateForceSummary = null,
   farAggregateDiagnosticSummary = null,
+  farAggregateLawConsumer = null,
   farAggregateForceApplication = null,
   crossLevelCoupling = null,
   conservationSummary = null,
@@ -7515,6 +8111,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   portableSummary = null,
   stateDeltaMergeAdmission = null,
   phaseVolumeMigrationAdmission = null,
+  farAggregateLawConsumerAdmission = null,
   farAggregateForceApplicationAdmission = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
@@ -7551,6 +8148,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableFarAggregateCandidates = enableHierarchyAggregateNodeReduction,
   enableFarAggregateForceSummary = enableFarAggregateCandidates,
   enableFarAggregateDiagnosticSummary = enableFarAggregateForceSummary,
+  enableFarAggregateLawConsumer = Boolean(farAggregateLawConsumerAdmission),
   enableFarAggregateForceApplication = Boolean(farAggregateForceApplicationAdmission),
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
@@ -7575,6 +8173,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateDiagnosticReadbackMode = SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
   farAggregateDiagnosticAccelerationPressureThreshold =
     DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
+  farAggregateLawConsumerReadbackMode = null,
+  farAggregateLawConsumerMask = SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK,
+  farAggregateLawConsumerRadiationScale =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_RADIATION_SCALE,
+  farAggregateLawConsumerPlasmaScale =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_PLASMA_SCALE,
+  farAggregateLawConsumerGasSummaryScale =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_SUMMARY_SCALE,
+  farAggregateLawConsumerGasTemperatureK =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_TEMPERATURE_K,
+  farAggregateLawConsumerGasConstantProxy =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_GAS_CONSTANT_PROXY,
   farAggregateForceApplicationReadbackMode = null,
   farAggregateForceApplicationAccelerationScale =
     DEFAULT_SCHROEDER_FAR_AGGREGATE_APPLICATION_ACCELERATION_SCALE,
@@ -7602,6 +8212,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateCandidateRunner = runSchroederFarAggregateCandidateWebGpu,
   farAggregateForceSummaryRunner = runSchroederFarAggregateForceSummaryWebGpu,
   farAggregateDiagnosticSummaryRunner = runSchroederFarAggregateDiagnosticSummaryWebGpu,
+  farAggregateLawConsumerRunner = runSchroederFarAggregateLawConsumerWebGpu,
   farAggregateForceApplicationRunner = runSchroederFarAggregateForceApplicationWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
@@ -7710,6 +8321,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof farAggregateDiagnosticSummaryRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateDiagnosticSummaryRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && enableFarAggregateCandidates
+    && enableFarAggregateForceSummary
+    && enableFarAggregateLawConsumer
+    && typeof farAggregateLawConsumerRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateLawConsumerRunner function');
   }
   if (
     enableCrossLevelCoupling
@@ -7979,6 +8604,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainDiagnosticSummaryBuffer: true,
       readbackMode: farAggregateDiagnosticReadbackMode
     });
+  const resolvedFarAggregateLawConsumer = !resolvedFarAggregateForceSummary || !enableFarAggregateLawConsumer
+    ? null
+    : farAggregateLawConsumer || await farAggregateLawConsumerRunner({
+      device,
+      farAggregateForceSummary: resolvedFarAggregateForceSummary,
+      farAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary,
+      farAggregateLawConsumerAdmission,
+      enabledConsumerLawMask: farAggregateLawConsumerMask,
+      radiationScale: farAggregateLawConsumerRadiationScale,
+      plasmaScale: farAggregateLawConsumerPlasmaScale,
+      gasSummaryScale: farAggregateLawConsumerGasSummaryScale,
+      gasTemperatureK: farAggregateLawConsumerGasTemperatureK,
+      gasConstantProxy: farAggregateLawConsumerGasConstantProxy,
+      maxFarFieldErrorBound: farAggregateErrorBound,
+      maxOpeningRatio: farAggregateOpeningTheta,
+      queueEpoch: mergeEpoch,
+      retainLawConsumerBuffer: true,
+      readbackMode: farAggregateLawConsumerReadbackMode ?? readbackMode
+    });
   const resolvedFarAggregateForceApplication = !resolvedFarAggregateForceSummary || !enableFarAggregateForceApplication
     ? null
     : farAggregateForceApplication || await farAggregateForceApplicationRunner({
@@ -8048,6 +8692,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       farAggregateCandidates: resolvedFarAggregateCandidates,
       farAggregateForceSummary: resolvedFarAggregateForceSummary,
       farAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary,
+      farAggregateLawConsumer: resolvedFarAggregateLawConsumer,
       farAggregateForceApplication: resolvedFarAggregateForceApplication,
       hierarchyAggregateNode: resolvedHierarchyAggregateNode,
       conservationSummary: resolvedConservationSummary,
@@ -8083,6 +8728,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederFarAggregateCandidates: resolvedFarAggregateCandidates,
     schroederFarAggregateForceSummary: resolvedFarAggregateForceSummary,
     schroederFarAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary,
+    schroederFarAggregateLawConsumer: resolvedFarAggregateLawConsumer,
     schroederFarAggregateForceApplication: resolvedFarAggregateForceApplication,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
@@ -8294,6 +8940,29 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? Array.from(resolvedFarAggregateDiagnosticSummary.diagnosticSummaryRows)
         : []
     } : null,
+    farAggregateLawConsumer: resolvedFarAggregateLawConsumer ? {
+      schema: resolvedFarAggregateLawConsumer.schema,
+      status: resolvedFarAggregateLawConsumer.status,
+      forceSummaryRowCount: resolvedFarAggregateLawConsumer.forceSummaryRowCount,
+      lawConsumerRowCount: resolvedFarAggregateLawConsumer.lawConsumerRowCount,
+      outputCompaction: resolvedFarAggregateLawConsumer.outputCompaction,
+      consumerMode: resolvedFarAggregateLawConsumer.consumerMode,
+      enabledConsumerLawMask: resolvedFarAggregateLawConsumer.enabledConsumerLawMask,
+      lawFamilies: [...(resolvedFarAggregateLawConsumer.lawFamilies || [])],
+      aggregateAdmissibilityStatus: resolvedFarAggregateLawConsumer.aggregateAdmissibilityStatus,
+      exactNearFieldRequirement: resolvedFarAggregateLawConsumer.exactNearFieldRequirement,
+      diagnosticPressurePolicy: resolvedFarAggregateLawConsumer.diagnosticPressurePolicy,
+      farAggregateLawConsumerAdmissionApproved:
+        resolvedFarAggregateLawConsumer.farAggregateLawConsumerAdmissionApproved === true,
+      conservationStatus: resolvedFarAggregateLawConsumer.conservationStatus,
+      stateMutationRequired: resolvedFarAggregateLawConsumer.stateMutationRequired === true,
+      stateMutationStatus: resolvedFarAggregateLawConsumer.stateMutationStatus,
+      stateAuthorityStatus: resolvedFarAggregateLawConsumer.stateAuthorityStatus,
+      retainedLawConsumerBuffer: Boolean(resolvedFarAggregateLawConsumer.lawConsumerBuffer),
+      lawConsumerBufferByteLength: resolvedFarAggregateLawConsumer.lawConsumerBufferByteLength
+        ?? resolvedFarAggregateLawConsumer.lawConsumerByteLength
+        ?? 0
+    } : null,
     farAggregateForceApplication: resolvedFarAggregateForceApplication ? {
       schema: resolvedFarAggregateForceApplication.schema,
       status: resolvedFarAggregateForceApplication.status,
@@ -8466,6 +9135,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       farAggregateCandidateCount: resolvedPortableSummary.farAggregateCandidateCount,
       farAggregateForceSummaryCount: resolvedPortableSummary.farAggregateForceSummaryCount,
       farAggregateDiagnosticSummaryCount: resolvedPortableSummary.farAggregateDiagnosticSummaryCount,
+      farAggregateLawConsumerCount: resolvedPortableSummary.farAggregateLawConsumerCount,
       farAggregateForceApplicationCount: resolvedPortableSummary.farAggregateForceApplicationCount,
       retainedRefs: Array.isArray(resolvedPortableSummary.retainedRefs)
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
@@ -8495,6 +9165,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         farAggregateCandidateProxyCount: resolvedPortableSummary.renderLod.farAggregateCandidateProxyCount,
         farAggregateForceSummaryCount: resolvedPortableSummary.renderLod.farAggregateForceSummaryCount,
         farAggregateDiagnosticSummaryCount: resolvedPortableSummary.renderLod.farAggregateDiagnosticSummaryCount,
+        farAggregateLawConsumerCount: resolvedPortableSummary.renderLod.farAggregateLawConsumerCount,
         farAggregateForceApplicationCount: resolvedPortableSummary.renderLod.farAggregateForceApplicationCount,
         phaseVolumeDiagnosticRowsAvailable: resolvedPortableSummary.renderLod.phaseVolumeDiagnosticRowsAvailable,
         opticalPolicy: resolvedPortableSummary.renderLod.opticalPolicy,
@@ -8560,6 +9231,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       : (resolvedFarAggregateForceSummary
         ? 'disabled-far-aggregate-diagnostic-summary'
         : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates')),
+    farAggregateLawConsumerStatus: resolvedFarAggregateLawConsumer?.status ?? (
+      resolvedFarAggregateForceSummary
+        ? 'disabled-far-aggregate-law-consumer-admission-not-provided'
+        : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates')
+    ),
+    farAggregateLawConsumerConsumerStatus: resolvedFarAggregateLawConsumer
+      ? 'far-aggregate-law-consumer-forwarded-to-resident-backend'
+      : (resolvedFarAggregateForceSummary
+        ? 'disabled-far-aggregate-law-consumer-admission-not-provided'
+        : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates')),
     farAggregateForceApplicationStatus: resolvedFarAggregateForceApplication?.status ?? (
       resolvedFarAggregateForceSummary
         ? 'disabled-far-aggregate-force-application-admission-not-provided'
@@ -8622,6 +9303,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
       ?? resolvedPhaseVolumeMigration?.conservativeTransferStatus
       ?? resolvedFarAggregateForceApplication?.conservationStatus
+      ?? resolvedFarAggregateLawConsumer?.conservationStatus
       ?? resolvedHierarchyAggregateNode?.conservativeTransferStatus
       ?? resolvedHierarchyAggregate?.conservativeTransferStatus
       ?? resolvedCrossLevelStateDeltaMerge?.conservativeTransferStatus
@@ -8632,6 +9314,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     stateMutationStatus: resolvedPhaseVolumeLevelUpdate?.stateMutationStatus
       ?? resolvedPhaseVolumeMigration?.stateMutationStatus
       ?? resolvedFarAggregateForceApplication?.stateMutationStatus
+      ?? resolvedFarAggregateLawConsumer?.stateMutationStatus
       ?? resolvedHierarchyAggregateNode?.stateMutationStatus
       ?? resolvedHierarchyAggregate?.stateMutationStatus
       ?? resolvedCrossLevelStateDeltaMerge?.stateMutationStatus
@@ -8641,6 +9324,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     stateAuthorityStatus: resolvedPhaseVolumeLevelUpdate?.stateAuthorityStatus
       ?? resolvedPhaseVolumeMigration?.stateAuthorityStatus
       ?? resolvedFarAggregateForceApplication?.stateAuthorityStatus
+      ?? resolvedFarAggregateLawConsumer?.stateAuthorityStatus
       ?? resolvedHierarchyAggregateNode?.stateAuthorityStatus
       ?? resolvedHierarchyAggregate?.stateAuthorityStatus
       ?? resolvedCrossLevelStateDeltaMerge?.stateAuthorityStatus

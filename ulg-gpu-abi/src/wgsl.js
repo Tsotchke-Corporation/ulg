@@ -10354,6 +10354,162 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateLawConsumerWgsl = `
+struct SchroederFarAggregateLawConsumerParams {
+  force_summary_row_count: u32,
+  force_summary_stride: u32,
+  diagnostic_stride: u32,
+  consumer_stride: u32,
+  enabled_consumer_law_mask: u32,
+  admission_approved: u32,
+  flags: u32,
+  pad0: u32,
+  radiation_scale: f32,
+  plasma_scale: f32,
+  gas_summary_scale: f32,
+  gas_temperature_k: f32,
+  max_far_field_error_bound: f32,
+  max_opening_ratio: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  gas_constant_proxy: f32,
+  pad1: f32,
+  pad2: f32,
+  pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> force_summary_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> diagnostic_summary_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> law_consumer_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederFarAggregateLawConsumerParams;
+
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE_FOR_CONSUMERS: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_DIAGNOSTIC_STRIDE_FOR_CONSUMERS: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_STRIDE: u32 = 32u;
+const SCHROEDER_FAR_LAW_RADIATION_MASK_WGSL: u32 = 16u;
+const SCHROEDER_FAR_LAW_PLASMA_MASK_WGSL: u32 = 32u;
+const SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK_WGSL: u32 = 64u;
+const SCHROEDER_FAR_LAW_CONSUMER_MASK_WGSL: u32 =
+  SCHROEDER_FAR_LAW_RADIATION_MASK_WGSL
+  | SCHROEDER_FAR_LAW_PLASMA_MASK_WGSL
+  | SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK_WGSL;
+
+fn ss_consumer_mask_enabled(mask: u32, bit: u32) -> bool {
+  return (mask & bit) != 0u;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.force_summary_row_count) {
+    return;
+  }
+
+  let force_stride = max(
+    params.force_summary_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE_FOR_CONSUMERS
+  );
+  let diagnostic_stride = max(
+    params.diagnostic_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_DIAGNOSTIC_STRIDE_FOR_CONSUMERS
+  );
+  let consumer_stride = max(
+    params.consumer_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_LAW_CONSUMER_STRIDE
+  );
+  let force_offset = row_index * force_stride;
+  let diagnostic_offset = 0u * diagnostic_stride;
+  let consumer_offset = row_index * consumer_stride;
+
+  let source_law_mask = u32(max(force_summary_rows[force_offset + 3u], 0.0));
+  let enabled_consumer_mask = params.enabled_consumer_law_mask & SCHROEDER_FAR_LAW_CONSUMER_MASK_WGSL;
+  let emitted_consumer_mask = source_law_mask & enabled_consumer_mask;
+  let force_status = force_summary_rows[force_offset + 18u];
+  let active_candidate_count = max(force_summary_rows[force_offset + 7u], 0.0);
+  let accepted_candidate_count = max(force_summary_rows[force_offset + 6u], 0.0);
+  let total_aggregate_mass = max(force_summary_rows[force_offset + 12u], 0.0);
+  let min_distance_m = max(force_summary_rows[force_offset + 13u], 0.000001);
+  let max_opening_ratio = max(force_summary_rows[force_offset + 14u], 0.0);
+  let max_far_field_error_bound = max(force_summary_rows[force_offset + 15u], 0.0);
+  let acceleration = vec3<f32>(
+    force_summary_rows[force_offset + 8u],
+    force_summary_rows[force_offset + 9u],
+    force_summary_rows[force_offset + 10u]
+  );
+  let acceleration_magnitude = length(acceleration);
+  let potential_magnitude = abs(force_summary_rows[force_offset + 11u]);
+  let overflow_count = max(force_summary_rows[force_offset + 16u], 0.0);
+
+  let error_pressure = max_far_field_error_bound > params.max_far_field_error_bound
+    && params.max_far_field_error_bound > 0.0;
+  let opening_pressure = max_opening_ratio > params.max_opening_ratio
+    && params.max_opening_ratio > 0.0;
+  let overflow_pressure = overflow_count > 0.0 || diagnostic_summary_rows[diagnostic_offset + 3u] > 0.0;
+  let diagnostic_status = diagnostic_summary_rows[diagnostic_offset + 28u];
+
+  let inv_distance2 = 1.0 / max(min_distance_m * min_distance_m, 0.000001);
+  let volume_proxy = max(4.1887902047863905 * min_distance_m * min_distance_m * min_distance_m, 0.000001);
+  let radiation_exposure = select(
+    0.0,
+    (potential_magnitude + total_aggregate_mass * inv_distance2) * params.radiation_scale,
+    ss_consumer_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_RADIATION_MASK_WGSL)
+  );
+  let plasma_collective_acceleration = select(
+    0.0,
+    acceleration_magnitude * params.plasma_scale,
+    ss_consumer_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_PLASMA_MASK_WGSL)
+  );
+  let gas_density_proxy = select(
+    0.0,
+    total_aggregate_mass / volume_proxy * params.gas_summary_scale,
+    ss_consumer_mask_enabled(emitted_consumer_mask, SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK_WGSL)
+  );
+  let gas_pressure_proxy = gas_density_proxy * max(params.gas_temperature_k, 0.0) * max(params.gas_constant_proxy, 0.0);
+
+  var status = select(32.0, 1.0, active_candidate_count > 0.0 && force_status > 0.0 && force_status < 32.0);
+  if (params.admission_approved == 0u) {
+    status = 128.0;
+  } else if (emitted_consumer_mask == 0u) {
+    status = 96.0;
+  } else if (error_pressure || opening_pressure || overflow_pressure) {
+    status = 64.0;
+  }
+
+  law_consumer_rows[consumer_offset + 0u] = force_summary_rows[force_offset + 0u];
+  law_consumer_rows[consumer_offset + 1u] = force_summary_rows[force_offset + 1u];
+  law_consumer_rows[consumer_offset + 2u] = force_summary_rows[force_offset + 2u];
+  law_consumer_rows[consumer_offset + 3u] = force_summary_rows[force_offset + 3u];
+  law_consumer_rows[consumer_offset + 4u] = f32(enabled_consumer_mask);
+  law_consumer_rows[consumer_offset + 5u] = f32(emitted_consumer_mask);
+  law_consumer_rows[consumer_offset + 6u] = status;
+  law_consumer_rows[consumer_offset + 7u] = force_status;
+  law_consumer_rows[consumer_offset + 8u] = active_candidate_count;
+  law_consumer_rows[consumer_offset + 9u] = accepted_candidate_count;
+  law_consumer_rows[consumer_offset + 10u] = total_aggregate_mass;
+  law_consumer_rows[consumer_offset + 11u] = min_distance_m;
+  law_consumer_rows[consumer_offset + 12u] = max_opening_ratio;
+  law_consumer_rows[consumer_offset + 13u] = max_far_field_error_bound;
+  law_consumer_rows[consumer_offset + 14u] = acceleration_magnitude;
+  law_consumer_rows[consumer_offset + 15u] = potential_magnitude;
+  law_consumer_rows[consumer_offset + 16u] = radiation_exposure;
+  law_consumer_rows[consumer_offset + 17u] = plasma_collective_acceleration;
+  law_consumer_rows[consumer_offset + 18u] = gas_density_proxy;
+  law_consumer_rows[consumer_offset + 19u] = gas_pressure_proxy;
+  law_consumer_rows[consumer_offset + 20u] = select(0.0, 1.0, error_pressure);
+  law_consumer_rows[consumer_offset + 21u] = select(0.0, 1.0, opening_pressure);
+  law_consumer_rows[consumer_offset + 22u] = select(0.0, 1.0, overflow_pressure);
+  law_consumer_rows[consumer_offset + 23u] = diagnostic_status;
+  law_consumer_rows[consumer_offset + 24u] = f32(params.admission_approved);
+  law_consumer_rows[consumer_offset + 25u] = 0.0;
+  law_consumer_rows[consumer_offset + 26u] = 0.0;
+  law_consumer_rows[consumer_offset + 27u] = params.queue_epoch;
+  law_consumer_rows[consumer_offset + 28u] = params.state_family_id;
+  law_consumer_rows[consumer_offset + 29u] = 1.0;
+  law_consumer_rows[consumer_offset + 30u] = f32(row_index);
+  law_consumer_rows[consumer_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederFarAggregateForceApplicationWgsl = `
 struct SchroederFarAggregateForceApplicationParams {
   particle_count: u32,

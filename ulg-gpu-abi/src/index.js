@@ -87,6 +87,9 @@ export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA = 'peercompute.ulg
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-summary-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-admission.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-admission.v0';
@@ -922,6 +925,40 @@ export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.free
   'status:f32',
   'fullParticleReadbackRequired:f32',
   'stateMutationRequired:f32',
+  'pad0:f32'
+]);
+export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'sourceChartId:f32',
+  'sourceLawMask:f32',
+  'enabledConsumerLawMask:f32',
+  'emittedConsumerLawMask:f32',
+  'status:f32',
+  'forceSummaryStatus:f32',
+  'activeCandidateCount:f32',
+  'acceptedCandidateCount:f32',
+  'totalAggregateMassKg:f32',
+  'minDistanceM:f32',
+  'maxOpeningRatio:f32',
+  'maxFarFieldErrorBound:f32',
+  'accelerationMagnitudeMPerS2:f32',
+  'potentialMagnitudeJPerKg:f32',
+  'radiationExposureProxy:f32',
+  'plasmaCollectiveAccelerationProxy:f32',
+  'gasDensityProxyKgPerM3:f32',
+  'gasPressureProxyPa:f32',
+  'errorPressureFlag:f32',
+  'openingPressureFlag:f32',
+  'overflowPressureFlag:f32',
+  'diagnosticStatus:f32',
+  'admissionApproved:f32',
+  'stateMutationRequired:f32',
+  'fullParticleReadbackRequired:f32',
+  'queueEpoch:f32',
+  'stateFamilyId:f32',
+  'consumerModeId:f32',
+  'consumerRowIndex:f32',
   'pad0:f32'
 ]);
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT = Object.freeze([

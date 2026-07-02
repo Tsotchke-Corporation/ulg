@@ -396,7 +396,12 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
   assert.equal(status.representedToRestVolumeRatio, 700);
   assert.ok(Math.abs(status.representedRadiusScale - Math.cbrt(700)) < 1e-12);
   assert.ok(Math.abs(status.expectedLevelDeltaFromVolume - Math.log2(Math.cbrt(700))) < 1e-12);
+  assert.equal(status.expectedPositiveLevelDelta, true);
   assert.equal(status.observedPositiveLevelDelta, 3);
+  assert.equal(status.observedPositiveLevelUpdateDelta, true);
+  assert.equal(status.phaseVolumeLevelUpdateChanged, true);
+  assert.equal(status.phaseVolumeExpansionDetected, true);
+  assert.equal(status.phaseVolumeUpdateEffectStatus, 'admitted-phase-volume-level-update-changed-level');
   assert.ok(status.expectedObservedLevelDeltaAgreement < 0.2);
   assert.equal(status.waterToSteamScaleMigrationObserved, true);
   assert.equal(status.waterToSteamStressCaseStatus, 'water-to-steam-level-migration-observable');
@@ -406,6 +411,62 @@ test('SPH scene summarizes Schroeder phase-volume diagnostics for visible water-
   );
   assert.equal(status.particleCountGrowthStatus, 'particle-count-stable-or-reduced');
   assert.equal(status.fullPhysicsValidation, false);
+});
+
+test('SPH scene reads Schroeder phase-volume diagnostics from compact resident mechanics', () => {
+  const row = new Float32Array(32);
+  row[0] = 8; // migrationRowCount
+  row[1] = 8; // activeUpdateCount
+  row[10] = 3; // maxPositiveLevelDelta
+  row[12] = 1; // totalRestVolumeM3
+  row[13] = 700; // totalRepresentedVolumeM3
+  row[18] = 8; // steamExpansionCandidateCount
+  row[21] = 8; // visibleMigrationCount
+  row[23] = 8; // levelChangedCount
+
+  const status = summarizeSchroederPhaseVolumeDiagnosticStatus({
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    schroederSimulation: true,
+    finalStep: {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-submitted',
+      schroederSameLevelMechanics: {
+        schema: 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0',
+        status: 'schroeder-same-level-mechanics-submitted',
+        selectedLevel: 0,
+        phaseVolumeMigrationStatus: 'schroeder-phase-volume-migration-submitted',
+        phaseVolumeMigrationParticleCount: 8,
+        phaseVolumeLevelUpdateStatus: 'schroeder-phase-volume-level-update-submitted',
+        phaseVolumeLevelUpdateRetainedBuffer: true,
+        phaseVolumeDiagnosticSummaryStatus:
+          'schroeder-phase-volume-diagnostic-summary-submitted',
+        phaseVolumeDiagnosticSummary: {
+          schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+          status: 'schroeder-phase-volume-diagnostic-summary-submitted',
+          visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-submitted',
+          compactSummaryReadbackPerformed: true,
+          fullReadbackPerformed: false,
+          fullParticleReadbackPerformed: false,
+          summaryRowCount: 1,
+          summaryRows: row
+        }
+      }
+    }
+  });
+
+  assert.equal(status.status, 'schroeder-phase-volume-visible-diagnostics-ready');
+  assert.equal(status.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
+  assert.equal(status.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(status.phaseVolumeLevelUpdateConsumed, true);
+  assert.equal(status.phaseVolumeLevelUpdateRetainedBuffer, true);
+  assert.equal(status.sourceParticleCount, 8);
+  assert.equal(status.particleCountGrowthFactor, 1);
+  assert.equal(status.noFullParticleReadback, true);
+  assert.equal(status.waterToSteamScaleMigrationObserved, true);
+  assert.equal(status.representedToRestVolumeRatio, 700);
+  assert.equal(status.phaseVolumeExpansionDetected, true);
+  assert.equal(status.phaseVolumeLevelUpdateChanged, true);
 });
 
 test('SPH scene phase-volume overlay feedback keeps GPU buffer local and publishes summary only', () => {

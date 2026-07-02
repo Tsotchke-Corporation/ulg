@@ -2872,6 +2872,24 @@ export async function mountSphPhaseDemoOverlay({
       || residentStep?.schroederPhaseVolumeAssignmentOverlayFeedback
       || residentStep?.phaseVolumeAssignmentOverlayFeedback
       || null;
+    const phaseVolumeDiagnostics = residentSteps?.schroederPhaseVolumeDiagnostics
+      || residentSteps?.phaseVolumeDiagnostics
+      || residentStep?.schroederPhaseVolumeDiagnostics
+      || residentStep?.phaseVolumeDiagnostics
+      || null;
+    const phaseLevelUpdateChanged = phaseVolumeDiagnostics?.phaseVolumeLevelUpdateChanged === true;
+    const phaseExpansionDetected = phaseVolumeDiagnostics?.phaseVolumeExpansionDetected === true
+      || phaseVolumeDiagnostics?.waterToSteamScaleMigrationObserved === true;
+    const phaseMigrationStatus = phaseLevelUpdateChanged
+      ? 'changed'
+      : (phaseExpansionDetected
+          ? 'detected'
+          : (phaseVolumeDiagnostics?.phaseVolumeDiagnosticSummaryStatus
+              ? 'noop'
+              : (phaseVolumeFeedback?.ready ? 'pending' : 'off')));
+    const phaseObservedDelta = Number(phaseVolumeDiagnostics?.observedPositiveLevelDelta);
+    const phaseExpectedDelta = Number(phaseVolumeDiagnostics?.expectedLevelDeltaFromVolume);
+    const phaseVolumeRatio = Number(phaseVolumeDiagnostics?.representedToRestVolumeRatio);
     const drawBatchCount = schroederDrawSource?.drawBatchCount ?? 0;
     const retainedRefCount = residentSteps?.schroederLocalRetainedRenderBuffers?.retainedBufferRefs?.length
       ?? residentSteps?.localRetainedRenderBuffers?.retainedBufferRefs?.length
@@ -2895,6 +2913,12 @@ export async function mountSphPhaseDemoOverlay({
       `phase-feedback=${phaseVolumeFeedback?.ready ? 'ready' : 'off'}`,
       `phase-feedback-rows=${phaseVolumeFeedback?.levelUpdateRowCount ?? 0}`,
       `phase-feedback-index=${phaseVolumeFeedback?.sparseOverlayIndexRequired ? 'required' : 'not-required'}`,
+      `phase-migration=${phaseMigrationStatus}`,
+      `phase-delta=${Number.isFinite(phaseExpectedDelta) ? fmt(phaseExpectedDelta, 2) : 'pending'}`,
+      `phase-update-delta=${Number.isFinite(phaseObservedDelta) ? fmt(phaseObservedDelta, 2) : 'pending'}`,
+      `phase-update=${phaseLevelUpdateChanged ? 'changed' : (phaseExpansionDetected ? 'preleveled-or-refine' : 'pending')}`,
+      `phase-ratio=${Number.isFinite(phaseVolumeRatio) ? fmt(phaseVolumeRatio, 1) : 'pending'}`,
+      `phase-no-full=${phaseVolumeDiagnostics?.noFullParticleReadback === true ? 'true' : 'pending'}`,
       `draw-batches=${drawBatchCount}`,
       `retained=${retainedRefCount}`,
       `native-draws=${nativeSubmitDrawCount}`,

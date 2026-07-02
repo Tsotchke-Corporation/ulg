@@ -73,6 +73,7 @@ const AVOGADRO_R = 8.314462618;
 const TAIT_EXPONENT = 7;
 const DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT = 64;
 const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
+const PHASE_VOLUME_EXPANSIVE_PHASE_NAMES = new Set(['gas', 'vapor', 'vapour', 'plasma']);
 const DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA = 2e-3;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
   mechanics: true,
@@ -169,6 +170,45 @@ function materialEntityVolumeM3({ densityKgPerM3, molarMassKgPerMol } = {}) {
   return molarMass / (density * AVOGADRO_COUNT);
 }
 
+function phaseVolumeReferenceDensityRecord(props, phaseName, densityKgPerM3) {
+  const currentDensity = Math.max(Number(densityKgPerM3) || 0, 0);
+  const normalizedPhase = String(phaseName || '').toLowerCase();
+  if (!PHASE_VOLUME_EXPANSIVE_PHASE_NAMES.has(normalizedPhase)) {
+    return {
+      densityKgPerM3: currentDensity,
+      phase: normalizedPhase || null,
+      source: 'current-phase-density'
+    };
+  }
+  const condensed = Array.isArray(props?.phases)
+    ? props.phases
+      .map((phase) => ({
+        phase: String(phase?.name || '').toLowerCase(),
+        densityKgPerM3: Math.max(Number(phase?.densityKgPerM3) || 0, 0)
+      }))
+      .filter((phase) => (
+        phase.densityKgPerM3 > 0
+        && !PHASE_VOLUME_EXPANSIVE_PHASE_NAMES.has(phase.phase)
+      ))
+    : [];
+  const reference = condensed.reduce(
+    (best, phase) => phase.densityKgPerM3 > best.densityKgPerM3 ? phase : best,
+    { phase: null, densityKgPerM3: 0 }
+  );
+  if (reference.densityKgPerM3 > 0) {
+    return {
+      densityKgPerM3: reference.densityKgPerM3,
+      phase: reference.phase,
+      source: 'condensed-phase-density-for-ss-phase-volume-reference'
+    };
+  }
+  return {
+    densityKgPerM3: currentDensity,
+    phase: normalizedPhase || null,
+    source: 'current-gas-density-no-condensed-reference'
+  };
+}
+
 function particleSizeStateFromVolume({
   material = null,
   role = null,
@@ -226,6 +266,19 @@ function fillCube({
   const step = size / n;
   const cellVolume = step * step * step;
   const massKg = densityKgPerM3 * cellVolume;
+  const phaseVolumeReferenceDensityKgPerM3 = Math.max(
+    Number(particleSizePlan?.phaseVolumeReferenceDensityKgPerM3) || densityKgPerM3,
+    0
+  );
+  const phaseVolumeReferenceMassKg = Number(particleSizePlan?.phaseVolumeReferenceMassKg) > 0
+    ? Number(particleSizePlan.phaseVolumeReferenceMassKg)
+    : phaseVolumeReferenceDensityKgPerM3 * cellVolume;
+  const phaseVolumeReferenceVolumeM3 = densityKgPerM3 > 0
+    ? phaseVolumeReferenceMassKg / densityKgPerM3
+    : cellVolume;
+  const phaseVolumeReferenceMassRatio = massKg > 0
+    ? phaseVolumeReferenceMassKg / massKg
+    : null;
   const visualRestVolumeM3 = Number(particleSizePlan?.restVolumeM3) > 0
     ? Number(particleSizePlan.restVolumeM3)
     : cellVolume;
@@ -255,6 +308,14 @@ function fillCube({
           temperatureK,
           restDensityKgPerM3: densityKgPerM3, // initial rest density (sets the MLS-MPM particle volume)
           pressurePa,
+          phaseVolumeReferenceDensityKgPerM3,
+          phaseVolumeReferenceMassKg,
+          phaseVolumeReferenceVolumeM3,
+          phaseVolumeReferenceMassRatio,
+          phaseVolumeReferenceDensitySource:
+            particleSizePlan?.phaseVolumeReferenceDensitySource || null,
+          phaseVolumeReferencePhase:
+            particleSizePlan?.phaseVolumeReferencePhase || null,
           initialParticleSpacingM: step,
           initialCellVolumeM3: cellVolume,
           continuumCellVolumeM3: cellVolume,
@@ -333,6 +394,19 @@ function resolveInitialParticleSpacingPlan({
     const continuumCellVolumeM3 = spacingM > 0 ? spacingM ** 3 : 0;
     const density = Math.max(Number(row.densityKgPerM3) || 0, 0);
     const particleMassKg = density * continuumCellVolumeM3;
+    const phaseVolumeReferenceDensityRecord = {
+      densityKgPerM3: Math.max(
+        Number(row.materialState?.phaseVolumeReferenceDensityKgPerM3) || density,
+        0
+      ),
+      source: row.materialState?.phaseVolumeReferenceDensitySource || 'current-phase-density',
+      phase: row.materialState?.phaseVolumeReferencePhase || row.materialState?.phase || null
+    };
+    const phaseVolumeReferenceMassKg =
+      phaseVolumeReferenceDensityRecord.densityKgPerM3 * continuumCellVolumeM3;
+    const phaseVolumeReferenceVolumeM3 = density > 0
+      ? phaseVolumeReferenceMassKg / density
+      : continuumCellVolumeM3;
     const materialStateEntityVolumeM3 = materialEntityVolumeM3({
       densityKgPerM3: density,
       molarMassKgPerMol: row.materialState?.molarMassKgPerMol
@@ -346,6 +420,14 @@ function resolveInitialParticleSpacingPlan({
       mechanicsRestVolumeM3: continuumCellVolumeM3,
       restVolumeM3: globalVisualParticleVolumeM3,
       particleMassKg,
+      phaseVolumeReferenceDensityKgPerM3: phaseVolumeReferenceDensityRecord.densityKgPerM3,
+      phaseVolumeReferenceMassKg,
+      phaseVolumeReferenceVolumeM3,
+      phaseVolumeReferenceMassRatio: particleMassKg > 0
+        ? phaseVolumeReferenceMassKg / particleMassKg
+        : null,
+      phaseVolumeReferenceDensitySource: phaseVolumeReferenceDensityRecord.source,
+      phaseVolumeReferencePhase: phaseVolumeReferenceDensityRecord.phase,
       materialStateRestVolumeM3: continuumCellVolumeM3,
       materialStateEntityVolumeM3,
       materialReferenceParticleRadiusM,
@@ -520,6 +602,7 @@ function resolveInitialParticleSpacingPlan({
       mechanicsRestVolumeModel: 'globalParticleSpacingM^3',
       visualRestVolumeModel: 'sphere(radius=globalParticleSpacingM/2)',
       massModel: 'phase-density-at-temperature-pressure * mechanicsRestVolumeM3',
+      hierarchyPhaseVolumeReferenceMassModel: 'condensed-phase-reference-density * mechanicsRestVolumeM3 for expansive phases, current phase density otherwise',
       currentVolumeModel: 'visualRestVolumeM3 * volumeRatioJ',
       phaseChangeVolumeModel: 'fixed-particle-count-no-automatic-gas-expansion',
       gasExpansionHandling: 'gas mass and pressure use species ledgers/fields until an explicit gas-admission or adaptive split policy creates solver particles',
@@ -554,16 +637,21 @@ function materialStateAtTemperaturePressure(props, temperatureK, pressurePa = PH
     : PHYSICAL_CONSTANTS.standardAtmospherePa;
   const molarMassKgPerMol = Number(props?.molarMassKgPerMol);
   if (props.idealGas) {
+    const densityKgPerM3 = idealGasDensityKgPerM3({
+      pressurePa: pressure,
+      temperatureK,
+      molarMassKgPerMol: props.molarMassKgPerMol
+    });
+    const phaseVolumeReference = phaseVolumeReferenceDensityRecord(props, 'gas', densityKgPerM3);
     return {
       phase: 'gas',
-      densityKgPerM3: idealGasDensityKgPerM3({
-        pressurePa: pressure,
-        temperatureK,
-        molarMassKgPerMol: props.molarMassKgPerMol
-      }),
+      densityKgPerM3,
       molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
       pressurePa: pressure,
       densitySource: 'material-ideal-gas-law-at-role-temperature-pressure',
+      phaseVolumeReferenceDensityKgPerM3: phaseVolumeReference.densityKgPerM3,
+      phaseVolumeReferenceDensitySource: phaseVolumeReference.source,
+      phaseVolumeReferencePhase: phaseVolumeReference.phase,
       bulkModulusPa: null,
       pressureDensityAdjustment: null
     };
@@ -573,16 +661,21 @@ function materialStateAtTemperaturePressure(props, temperatureK, pressurePa = PH
   const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
   const phaseName = ph?.name || phase || null;
   if (phaseName === 'gas' && props.molarMassKgPerMol > 0) {
+    const densityKgPerM3 = idealGasDensityKgPerM3({
+      pressurePa: pressure,
+      temperatureK,
+      molarMassKgPerMol: props.molarMassKgPerMol
+    });
+    const phaseVolumeReference = phaseVolumeReferenceDensityRecord(props, phaseName, densityKgPerM3);
     return {
       phase: phaseName,
-      densityKgPerM3: idealGasDensityKgPerM3({
-        pressurePa: pressure,
-        temperatureK,
-        molarMassKgPerMol: props.molarMassKgPerMol
-      }),
+      densityKgPerM3,
       molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
       pressurePa: pressure,
       densitySource: 'material-molar-mass-ideal-gas-law-at-role-temperature-pressure',
+      phaseVolumeReferenceDensityKgPerM3: phaseVolumeReference.densityKgPerM3,
+      phaseVolumeReferenceDensitySource: phaseVolumeReference.source,
+      phaseVolumeReferencePhase: phaseVolumeReference.phase,
       bulkModulusPa: null,
       pressureDensityAdjustment: null
     };
@@ -593,14 +686,19 @@ function materialStateAtTemperaturePressure(props, temperatureK, pressurePa = PH
   const pressureDensityFactor = bulkModulusPa > 0
     ? Math.exp(Math.max(-0.25, Math.min(0.25, pressureDeltaPa / bulkModulusPa)))
     : 1;
+  const densityKgPerM3 = baseDensity > 0 ? baseDensity * pressureDensityFactor : 0;
+  const phaseVolumeReference = phaseVolumeReferenceDensityRecord(props, phaseName, densityKgPerM3);
   return {
     phase: phaseName,
-    densityKgPerM3: baseDensity > 0 ? baseDensity * pressureDensityFactor : 0,
+    densityKgPerM3,
     molarMassKgPerMol: molarMassKgPerMol > 0 ? molarMassKgPerMol : null,
     pressurePa: pressure,
     densitySource: bulkModulusPa > 0
       ? 'material-phase-density-temperature-with-bulk-modulus-pressure-correction'
       : 'material-phase-density-temperature',
+    phaseVolumeReferenceDensityKgPerM3: phaseVolumeReference.densityKgPerM3,
+    phaseVolumeReferenceDensitySource: phaseVolumeReference.source,
+    phaseVolumeReferencePhase: phaseVolumeReference.phase,
     bulkModulusPa: bulkModulusPa > 0 ? bulkModulusPa : null,
     pressureDensityAdjustment: bulkModulusPa > 0
       ? {
@@ -1237,6 +1335,12 @@ export function buildSphPhaseDemoState({
     p.temperatureK = all[index].temperatureK;
     p.pressurePa = all[index].pressurePa;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
+    p.phaseVolumeReferenceDensityKgPerM3 = all[index].phaseVolumeReferenceDensityKgPerM3;
+    p.phaseVolumeReferenceMassKg = all[index].phaseVolumeReferenceMassKg;
+    p.phaseVolumeReferenceVolumeM3 = all[index].phaseVolumeReferenceVolumeM3;
+    p.phaseVolumeReferenceMassRatio = all[index].phaseVolumeReferenceMassRatio;
+    p.phaseVolumeReferenceDensitySource = all[index].phaseVolumeReferenceDensitySource;
+    p.phaseVolumeReferencePhase = all[index].phaseVolumeReferencePhase;
     p.initialParticleSpacingM = all[index].initialParticleSpacingM;
     p.initialCellVolumeM3 = all[index].initialCellVolumeM3;
     p.continuumCellVolumeM3 = all[index].continuumCellVolumeM3;

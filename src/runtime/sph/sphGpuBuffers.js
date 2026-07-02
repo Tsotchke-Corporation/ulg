@@ -461,6 +461,10 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     const volume0 = finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
     const J = finiteNumber(particle.mpmJ, 1);
     const status = statusForEquilibrium(eq, properties);
+    const phaseVolumeReferenceMassKg = finiteNumber(
+      particle.phaseVolumeReferenceMassKg,
+      finiteNumber(particle.massKg, 0)
+    );
     const offset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     mechanics.set([
       F[0], F[1], F[2], F[3],
@@ -479,7 +483,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
       constitutive.dynamicViscosityPaS,
       constitutive.surfaceTensionNPerM,
-      0
+      phaseVolumeReferenceMassKg
     ], offset);
     metadata.push({
       id: particle.id ?? `p${index}`,
@@ -494,7 +498,8 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       eosModelId: constitutive.eosModelId,
       hydrostaticPressurePa: Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
       dynamicViscosityPaS: constitutive.dynamicViscosityPaS,
-      surfaceTensionNPerM: constitutive.surfaceTensionNPerM
+      surfaceTensionNPerM: constitutive.surfaceTensionNPerM,
+      phaseVolumeReferenceMassKg
     });
   }
   const materialPropertyBankWarmInputTable = buildMaterialPropertyBankGpuWarmInputTable(
@@ -700,7 +705,8 @@ export function decodeMlsMpmGpuParticleRows(packed) {
       constitutiveStatus: packed.mechanics[offset + 27],
       hydrostaticPressurePa: packed.mechanics[offset + 28],
       dynamicViscosityPaS: packed.mechanics[offset + 29],
-      surfaceTensionNPerM: packed.mechanics[offset + 30]
+      surfaceTensionNPerM: packed.mechanics[offset + 30],
+      phaseVolumeReferenceMassKg: packed.mechanics[offset + 31]
     });
   }
   return rows;

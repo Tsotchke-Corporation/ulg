@@ -328,7 +328,11 @@ function particlesFromDecodedSphMlsMpmRows(sourceParticles, sphRows, mechanicsRo
       mpmSolid: mechanics.solidFlag >= 0.5,
       hydrostaticPressurePa: finiteSeedNumber(mechanics.hydrostaticPressurePa, particle.hydrostaticPressurePa ?? 0),
       dynamicViscosityPaS: finiteSeedNumber(mechanics.dynamicViscosityPaS, particle.dynamicViscosityPaS ?? 0),
-      surfaceTensionNPerM: finiteSeedNumber(mechanics.surfaceTensionNPerM, particle.surfaceTensionNPerM ?? 0)
+      surfaceTensionNPerM: finiteSeedNumber(mechanics.surfaceTensionNPerM, particle.surfaceTensionNPerM ?? 0),
+      phaseVolumeReferenceMassKg: finiteSeedNumber(
+        mechanics.phaseVolumeReferenceMassKg,
+        particle.phaseVolumeReferenceMassKg ?? particle.massKg
+      )
     };
   });
 }

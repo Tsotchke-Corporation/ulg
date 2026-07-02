@@ -638,7 +638,7 @@ export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'hydrostaticPressurePa:f32',
   'dynamicViscosityPaS:f32',
   'surfaceTensionNPerM:f32',
-  'pad3:f32'
+  'phaseVolumeReferenceMassKg:f32'
 ]);
 export const MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT = Object.freeze([
   'massKg:f32',

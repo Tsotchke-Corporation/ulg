@@ -335,11 +335,42 @@ test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first ste
   assert.equal(fe.eosModelId, 1);
   assert.equal(h2o.dynamicViscosityPaS, 0);
   assert.equal(h2o.surfaceTensionNPerM, 0);
+  assert.ok(h2o.phaseVolumeReferenceMassKg > 0);
   assert.ok(fe.dynamicViscosityPaS > 0);
   assert.equal(fe.surfaceTensionNPerM, 0);
+  assert.ok(fe.phaseVolumeReferenceMassKg > 0);
   assert.ok(packed.viscosityEnabled);
   assert.ok(packed.mlsMpmArtificialViscosityAlpha > 0);
   assert.ok(packed.viscosityLengthM > 0);
+});
+
+test('MLS-MPM GPU mechanics buffer packs SS phase-volume reference mass for vapor', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 650,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 2,
+    baseParticleEdge: 2
+  });
+  const packed = buildMlsMpmGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const rows = decodeMlsMpmGpuParticleRows(packed);
+  const dropIndex = demo.state.particles.findIndex((particle) => particle.role === 'drop');
+  const dropParticle = demo.state.particles[dropIndex];
+  const dropRow = rows[dropIndex];
+
+  assert.equal(dropRow.metadata.phase, 'gas');
+  assert.ok(dropParticle.phaseVolumeReferenceMassKg > dropParticle.massKg);
+  nearlyEqual(
+    dropRow.phaseVolumeReferenceMassKg,
+    dropParticle.phaseVolumeReferenceMassKg,
+    dropParticle.phaseVolumeReferenceMassKg * 1e-6
+  );
+  assert.ok(dropRow.phaseVolumeReferenceMassKg / dropParticle.massKg > 100);
 });
 
 test('MLS-MPM GPU mechanics buffer preserves carrier-updated F, C, J, and V0', () => {

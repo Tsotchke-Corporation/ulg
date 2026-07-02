@@ -1023,7 +1023,7 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     'hydrostaticPressurePa:f32',
     'dynamicViscosityPaS:f32',
     'surfaceTensionNPerM:f32',
-    'pad3:f32'
+    'phaseVolumeReferenceMassKg:f32'
   ]);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);

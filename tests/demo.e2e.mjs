@@ -7877,6 +7877,93 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase URL Schroeder water-to-steam phase-volume diagnostics stay readback-free', async ({ page }) => {
+  test.setTimeout(240_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|too many warnings|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentStepsPerSchedule=1&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps;
+    const diagnostics = execution?.schroederPhaseVolumeDiagnostics
+      || execution?.phaseVolumeDiagnostics
+      || overlay?.__sphScene?.getSchroederPhaseVolumeDiagnostics?.()
+      || null;
+    return Boolean(
+      execution?.status === 'resident-steps-executed'
+      && diagnostics?.phaseVolumeDiagnosticSummaryStatus === 'schroeder-phase-volume-diagnostic-summary-submitted'
+    );
+  }, null, { timeout: 180_000 });
+
+  const result = await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const execution = overlay.__mlsMpmResidentSteps || scene.getMlsMpmResidentSteps?.() || null;
+    const diagnostics = execution?.schroederPhaseVolumeDiagnostics
+      || execution?.phaseVolumeDiagnostics
+      || scene.getSchroederPhaseVolumeDiagnostics?.()
+      || null;
+    const statusText = overlay.querySelector('#sph-status')?.textContent || '';
+    return {
+      executionStatus: execution?.status ?? null,
+      phaseVolumeAdmissionStatus:
+        execution?.residentExecutionPolicy?.schroederPhaseVolumeMigrationAdmissionStatus ?? null,
+      phaseVolumeAdmissionPublicationStatus:
+        execution?.residentExecutionPolicy?.schroederPhaseVolumeMigrationAdmissionPublicationStatus ?? null,
+      phaseVolumeDiagnosticSummaryStatus:
+        diagnostics?.phaseVolumeDiagnosticSummaryStatus ?? null,
+      phaseVolumeExpansionDetected:
+        diagnostics?.phaseVolumeExpansionDetected ?? null,
+      phaseVolumeLevelUpdateChanged:
+        diagnostics?.phaseVolumeLevelUpdateChanged ?? null,
+      phaseVolumeUpdateEffectStatus:
+        diagnostics?.phaseVolumeUpdateEffectStatus ?? null,
+      representedToRestVolumeRatio:
+        diagnostics?.representedToRestVolumeRatio ?? null,
+      expectedLevelDeltaFromVolume:
+        diagnostics?.expectedLevelDeltaFromVolume ?? null,
+      observedPositiveLevelDelta:
+        diagnostics?.observedPositiveLevelDelta ?? null,
+      particleCountGrowthFactor:
+        diagnostics?.particleCountGrowthFactor ?? null,
+      noFullParticleReadback:
+        diagnostics?.noFullParticleReadback ?? null,
+      statusTextIncludesPhaseTelemetry:
+        statusText.includes('phase-migration=detected')
+        && statusText.includes('phase-delta=')
+        && statusText.includes('phase-update-delta=0.00')
+        && statusText.includes('phase-no-full=true')
+    };
+  });
+
+  expect(result.executionStatus).toBe('resident-steps-executed');
+  expect(result.phaseVolumeAdmissionStatus)
+    .toBe('schroeder-phase-volume-migration-admission-admitted');
+  expect(result.phaseVolumeAdmissionPublicationStatus)
+    .toBe('schroeder-phase-volume-migration-admission-published');
+  expect(result.phaseVolumeDiagnosticSummaryStatus)
+    .toBe('schroeder-phase-volume-diagnostic-summary-submitted');
+  expect(result.phaseVolumeExpansionDetected).toBe(true);
+  expect(result.phaseVolumeLevelUpdateChanged).toBe(false);
+  expect(result.phaseVolumeUpdateEffectStatus)
+    .toBe('phase-volume-expansion-detected-without-additional-level-change');
+  expect(result.representedToRestVolumeRatio).toBeGreaterThan(100);
+  expect(result.expectedLevelDeltaFromVolume).toBeGreaterThan(2);
+  expect(result.observedPositiveLevelDelta).toBe(0);
+  expect(result.particleCountGrowthFactor).toBeLessThanOrEqual(1);
+  expect(result.noFullParticleReadback).toBe(true);
+  expect(result.statusTextIncludesPhaseTelemetry).toBe(true);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase URL Schroeder config drives native resident schedule', async ({ page }) => {
   test.setTimeout(240_000);
   const consoleIssues = [];

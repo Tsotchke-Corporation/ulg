@@ -246,6 +246,7 @@ import {
   schroederStateDeltaMergeAdmissionAllowsApplication
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
+import { schroederLevelAssignmentWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 function manualBuffers({
   particleCount = 1,
@@ -853,6 +854,19 @@ test('Schroeder level assignment plan is GPU-first and readback-free by contract
   assert.equal(view.getInt32(4, true), -4);
   assert.equal(view.getInt32(8, true), 6);
   assert.equal(view.getFloat32(16, true), 0.25);
+});
+
+test('Schroeder level assignment WGSL uses SS phase-volume reference mass for represented volume', () => {
+  assert.match(schroederLevelAssignmentWgsl, /phase_volume_reference_mass_kg/);
+  assert.match(schroederLevelAssignmentWgsl, /mls_mpm_mechanics\[mechanics_offset \+ 31u\]/);
+  assert.match(
+    schroederLevelAssignmentWgsl,
+    /density_represented_volume_m3 = phase_volume_reference_mass_kg \/ rest_density_kg_per_m3/
+  );
+  assert.match(
+    schroederLevelAssignmentWgsl,
+    /represented_volume_m3 = max\(mechanics_volume_m3, density_represented_volume_m3\)/
+  );
 });
 
 test('Schroeder active-node plan uses retained level assignments as unsorted tile ranges', () => {

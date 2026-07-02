@@ -359,11 +359,20 @@ export function summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(feedback 
 
 export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution = null) {
   const sourceStep = residentExecution?.finalStep || residentExecution || null;
+  const sourceMechanics = sourceStep?.schroederSameLevelMechanics
+    || residentExecution?.schroederSameLevelMechanics
+    || null;
   const sourceSummary = sourceStep?.phaseVolumeDiagnosticSummary
+    || sourceStep?.schroederPhaseVolumeDiagnosticSummary
     || residentExecution?.phaseVolumeDiagnosticSummary
+    || residentExecution?.schroederPhaseVolumeDiagnosticSummary
+    || sourceMechanics?.phaseVolumeDiagnosticSummary
     || null;
   const sourceStatus = sourceStep?.phaseVolumeDiagnosticSummaryStatus
+    || sourceStep?.schroederPhaseVolumeDiagnosticSummaryStatus
     || residentExecution?.phaseVolumeDiagnosticSummaryStatus
+    || residentExecution?.schroederPhaseVolumeDiagnosticSummaryStatus
+    || sourceMechanics?.phaseVolumeDiagnosticSummaryStatus
     || sourceSummary?.status
     || null;
   const phaseVolumeAssignmentOverlayFeedback = summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
@@ -394,12 +403,18 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
       ?? sourceStep?.schroederSelectedLevel
       ?? residentExecution?.selectedLevel
       ?? residentExecution?.schroederSelectedLevel
+      ?? sourceMechanics?.selectedLevel
       ?? sourceStep?.portableSummary?.renderLod?.selectedLevel
       ?? residentExecution?.portableSummary?.renderLod?.selectedLevel
+      ?? sourceMechanics?.portableSummary?.renderLod?.selectedLevel
   );
   const sourceParticleCount = finiteNumberOrNull(
     sourceStep?.phaseVolumeMigration?.particleCount
+      ?? sourceStep?.schroederPhaseVolumeMigration?.particleCount
       ?? residentExecution?.phaseVolumeMigration?.particleCount
+      ?? residentExecution?.schroederPhaseVolumeMigration?.particleCount
+      ?? sourceMechanics?.phaseVolumeMigrationParticleCount
+      ?? sourceMechanics?.sourceParticleCount
       ?? sourceStep?.particleCount
       ?? residentExecution?.particleCount
   );
@@ -415,19 +430,36 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
   const expectedLevelDelta = representedRadiusScale != null && representedRadiusScale > 0
     ? Math.log2(representedRadiusScale)
     : null;
+  const expectedPositiveLevelDelta = expectedLevelDelta != null && expectedLevelDelta > 0.01;
+  const observedPositiveLevelUpdateDelta = maxPositiveLevelDelta != null && maxPositiveLevelDelta > 0.01;
+  const levelUpdateChanged = observedPositiveLevelUpdateDelta || (levelChangedCount ?? 0) > 0;
+  const phaseVolumeExpansionDetected = Boolean(
+    expectedPositiveLevelDelta
+      && (steamExpansionCandidateCount ?? 0) > 0
+      && volumeExpansionRatio != null
+      && volumeExpansionRatio >= 1
+  );
   const migrationObserved = Boolean(
-    (steamExpansionCandidateCount ?? 0) > 0
+    phaseVolumeExpansionDetected
+      || (steamExpansionCandidateCount ?? 0) > 0
       || (visibleMigrationCount ?? 0) > 0
       || (levelChangedCount ?? 0) > 0
   );
   const levelUpdateConsumed = sourceStep?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted'
     || sourceStep?.phaseVolumeLevelUpdate?.status === 'schroeder-phase-volume-level-update-submitted'
-    || residentExecution?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted';
+    || sourceStep?.schroederPhaseVolumeLevelUpdate?.status === 'schroeder-phase-volume-level-update-submitted'
+    || residentExecution?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted'
+    || residentExecution?.schroederPhaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted'
+    || sourceMechanics?.phaseVolumeLevelUpdateStatus === 'schroeder-phase-volume-level-update-submitted';
   const retainedLevelUpdateBuffer = Boolean(
     sourceStep?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
       ?? sourceStep?.phaseVolumeLevelUpdate?.levelUpdateBuffer
+      ?? sourceStep?.schroederPhaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
+      ?? sourceStep?.schroederPhaseVolumeLevelUpdate?.levelUpdateBuffer
       ?? residentExecution?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
       ?? residentExecution?.phaseVolumeLevelUpdate?.levelUpdateBuffer
+      ?? residentExecution?.schroederPhaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
+      ?? sourceMechanics?.phaseVolumeLevelUpdateRetainedBuffer
   );
   const noFullParticleReadback = sourceSummary
     ? sourceSummary.fullParticleReadbackPerformed !== true && sourceSummary.fullReadbackPerformed !== true
@@ -447,8 +479,16 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     phaseVolumeDiagnosticSummarySchema:
       sourceSummary?.schema ?? ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
     phaseVolumeDiagnosticSummaryStatus: sourceStatus,
-    phaseVolumeMigrationStatus: sourceStep?.phaseVolumeMigrationStatus ?? null,
-    phaseVolumeLevelUpdateStatus: sourceStep?.phaseVolumeLevelUpdateStatus ?? null,
+    phaseVolumeMigrationStatus:
+      sourceStep?.phaseVolumeMigrationStatus
+      ?? residentExecution?.phaseVolumeMigrationStatus
+      ?? sourceMechanics?.phaseVolumeMigrationStatus
+      ?? null,
+    phaseVolumeLevelUpdateStatus:
+      sourceStep?.phaseVolumeLevelUpdateStatus
+      ?? residentExecution?.phaseVolumeLevelUpdateStatus
+      ?? sourceMechanics?.phaseVolumeLevelUpdateStatus
+      ?? null,
     phaseVolumeAssignmentOverlayFeedbackStatus: phaseVolumeAssignmentOverlayFeedback.status,
     phaseVolumeAssignmentOverlayFeedbackReady: phaseVolumeAssignmentOverlayFeedback.ready === true,
     phaseVolumeAssignmentOverlayFeedbackRowCount:
@@ -460,10 +500,12 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     phaseVolumeNextTickAssignmentOverlayStatus:
       sourceStep?.phaseVolumeNextTickAssignmentOverlayStatus
       ?? residentExecution?.phaseVolumeNextTickAssignmentOverlayStatus
+      ?? sourceMechanics?.phaseVolumeNextTickAssignmentOverlayStatus
       ?? null,
     phaseVolumeNextTickAssignmentOverlayConsumerStatus:
       sourceStep?.phaseVolumeNextTickAssignmentOverlayConsumerStatus
       ?? residentExecution?.phaseVolumeNextTickAssignmentOverlayConsumerStatus
+      ?? sourceMechanics?.phaseVolumeNextTickAssignmentOverlayConsumerStatus
       ?? null,
     visibleStressCaseStatus: sourceSummary?.visibleStressCaseStatus ?? null,
     readbackPolicy: sourceSummary?.readbackPolicy ?? 'compact-summary-only-no-particle-readback',
@@ -507,8 +549,17 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     representedToRestVolumeRatio: volumeExpansionRatio,
     representedRadiusScale,
     expectedLevelDeltaFromVolume: expectedLevelDelta,
+    expectedPositiveLevelDelta,
     expectedWaterToSteamLevelDelta: Math.log2(Math.cbrt(700)),
     observedPositiveLevelDelta: maxPositiveLevelDelta,
+    observedPositiveLevelUpdateDelta,
+    phaseVolumeLevelUpdateChanged: levelUpdateChanged,
+    phaseVolumeExpansionDetected,
+    phaseVolumeUpdateEffectStatus: levelUpdateChanged
+      ? 'admitted-phase-volume-level-update-changed-level'
+      : (phaseVolumeExpansionDetected
+          ? 'phase-volume-expansion-detected-without-additional-level-change'
+          : 'phase-volume-expansion-not-detected'),
     expectedObservedLevelDeltaAgreement:
       expectedLevelDelta != null && maxPositiveLevelDelta != null
         ? Math.abs(maxPositiveLevelDelta - expectedLevelDelta)
@@ -7388,40 +7439,40 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
   target.renderBridgeOffscreenValidationSample = Array.isArray(bridge.offscreenValidationSample)
     ? [...bridge.offscreenValidationSample]
     : null;
-	  target.renderBridgeReadbackSmokeValidationStatus = bridge.readbackSmokeValidationStatus ?? null;
-	  target.renderBridgeReadbackSmokeValidationReason = bridge.readbackSmokeValidationReason ?? null;
-	  target.renderBridgeReadbackSmokeValidationSample = Array.isArray(bridge.readbackSmokeValidationSample)
-	    ? [...bridge.readbackSmokeValidationSample]
-	    : null;
-	  target.renderBridgeReadbackSmokeValidationAttemptCount =
-	    bridge.readbackSmokeValidationAttemptCount ?? null;
-	  target.renderBridgeNativeSurfaceValidationCadenceStatus =
-	    bridge.nativeSurfaceValidationCadenceStatus ?? null;
-	  target.renderBridgeNativeSurfaceValidationCadenceReason =
-	    bridge.nativeSurfaceValidationCadenceReason ?? null;
-	  target.renderBridgeNativeSurfaceValidationEncoderRequired =
-	    bridge.nativeSurfaceValidationEncoderRequired ?? null;
-	  target.renderBridgeNativeSurfaceValidationScope =
-	    bridge.nativeSurfaceValidationScope ?? null;
-	  target.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
-	    bridge.nativeSurfaceReadbackSmokeValidationNeeded ?? null;
-	  target.renderBridgeNativeSurfaceOffscreenValidationEligible =
-	    bridge.nativeSurfaceOffscreenValidationEligible ?? null;
-	  target.renderBridgeNativeSurfaceOffscreenValidationNeeded =
-	    bridge.nativeSurfaceOffscreenValidationNeeded ?? null;
-	  target.renderBridgeNativeSurfaceOffscreenValidationSkippedReason =
-	    bridge.nativeSurfaceOffscreenValidationSkippedReason ?? null;
-	  target.renderBridgeOffscreenValidationNonzeroPixelCount =
-	    bridge.offscreenValidationNonzeroPixelCount ?? null;
-	  target.renderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
-	  target.renderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
-	  target.renderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
-	  target.renderBridgeOffscreenValidationAttemptCount = bridge.offscreenValidationAttemptCount ?? null;
-	  target.renderBridgeTransparencyCompositeMode = bridge.lastTransparentCompositeMode
-	    || bridge.transparencyCompositeMode
-	    || null;
-	  target.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
-	  target.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+    target.renderBridgeReadbackSmokeValidationStatus = bridge.readbackSmokeValidationStatus ?? null;
+    target.renderBridgeReadbackSmokeValidationReason = bridge.readbackSmokeValidationReason ?? null;
+    target.renderBridgeReadbackSmokeValidationSample = Array.isArray(bridge.readbackSmokeValidationSample)
+      ? [...bridge.readbackSmokeValidationSample]
+      : null;
+    target.renderBridgeReadbackSmokeValidationAttemptCount =
+      bridge.readbackSmokeValidationAttemptCount ?? null;
+    target.renderBridgeNativeSurfaceValidationCadenceStatus =
+      bridge.nativeSurfaceValidationCadenceStatus ?? null;
+    target.renderBridgeNativeSurfaceValidationCadenceReason =
+      bridge.nativeSurfaceValidationCadenceReason ?? null;
+    target.renderBridgeNativeSurfaceValidationEncoderRequired =
+      bridge.nativeSurfaceValidationEncoderRequired ?? null;
+    target.renderBridgeNativeSurfaceValidationScope =
+      bridge.nativeSurfaceValidationScope ?? null;
+    target.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
+      bridge.nativeSurfaceReadbackSmokeValidationNeeded ?? null;
+    target.renderBridgeNativeSurfaceOffscreenValidationEligible =
+      bridge.nativeSurfaceOffscreenValidationEligible ?? null;
+    target.renderBridgeNativeSurfaceOffscreenValidationNeeded =
+      bridge.nativeSurfaceOffscreenValidationNeeded ?? null;
+    target.renderBridgeNativeSurfaceOffscreenValidationSkippedReason =
+      bridge.nativeSurfaceOffscreenValidationSkippedReason ?? null;
+    target.renderBridgeOffscreenValidationNonzeroPixelCount =
+      bridge.offscreenValidationNonzeroPixelCount ?? null;
+    target.renderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
+    target.renderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+    target.renderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+    target.renderBridgeOffscreenValidationAttemptCount = bridge.offscreenValidationAttemptCount ?? null;
+    target.renderBridgeTransparencyCompositeMode = bridge.lastTransparentCompositeMode
+      || bridge.transparencyCompositeMode
+      || null;
+    target.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
+    target.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
   target.renderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
     ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
@@ -7453,19 +7504,19 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.lastSchroederRenderProxyNativeDrawCommandCount ?? 0;
   target.renderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount =
     bridge.lastSchroederRenderProxyNativeDrawInstanceCount ?? 0;
-	  target.renderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
-	    || bridge.nativeSurfaceDebugMode
-	    || 'none';
-	  target.renderBridgeNativeSurfaceDebugStatus = bridge.lastNativeSurfaceDebugStatus ?? null;
-	  target.renderBridgeNativeSurfaceDebugSkippedDrawCount =
-	    bridge.lastNativeSurfaceDebugSkippedDrawCount ?? null;
-	  target.renderBridgeNativeSurfaceDebugClearValue = bridge.lastNativeSurfaceDebugClearValue ?? null;
-	  target.renderBridgeNativeSurfaceDeferredResourceReleaseStatus =
-	    bridge.nativeSurfaceDeferredResourceReleaseStatus ?? null;
-	  target.renderBridgeNativeSurfaceDeferredResourceReleaseReason =
-	    bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
-	  target.renderBridgeNativeSurfaceDeferredResourceReleasePending =
-	    bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
+    target.renderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
+      || bridge.nativeSurfaceDebugMode
+      || 'none';
+    target.renderBridgeNativeSurfaceDebugStatus = bridge.lastNativeSurfaceDebugStatus ?? null;
+    target.renderBridgeNativeSurfaceDebugSkippedDrawCount =
+      bridge.lastNativeSurfaceDebugSkippedDrawCount ?? null;
+    target.renderBridgeNativeSurfaceDebugClearValue = bridge.lastNativeSurfaceDebugClearValue ?? null;
+    target.renderBridgeNativeSurfaceDeferredResourceReleaseStatus =
+      bridge.nativeSurfaceDeferredResourceReleaseStatus ?? null;
+    target.renderBridgeNativeSurfaceDeferredResourceReleaseReason =
+      bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
+    target.renderBridgeNativeSurfaceDeferredResourceReleasePending =
+      bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
   target.renderBridgeExternalGpuBufferByteLength = bridge.externalGpuBufferByteLength ?? 0;
   target.renderBridgeExternalGpuBufferInputLayout = bridge.externalGpuBufferInputLayout ?? null;
   target.renderBridgeExternalGpuBufferVertexRowStrideFloats =
@@ -7475,8 +7526,8 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.compactPositionDirectInputByteLength ?? 0;
   target.renderBridgeCompactPositionDirectInputVertexCount =
     bridge.compactPositionDirectInputVertexCount ?? 0;
-	  return target;
-	}
+    return target;
+  }
 
 function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
   if (!target || !bridge) return target;
@@ -7565,16 +7616,16 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.nativeSurfaceOffscreenValidationSkippedReason ?? null;
   target.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount =
     bridge.offscreenValidationNonzeroPixelCount ?? null;
-	  target.surfaceDrawRenderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
-	  target.surfaceDrawRenderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
-	  target.surfaceDrawRenderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
-	  target.surfaceDrawRenderBridgeOffscreenValidationAttemptCount =
-	    bridge.offscreenValidationAttemptCount ?? null;
-	  target.surfaceDrawRenderBridgeTransparencyCompositeMode = bridge.lastTransparentCompositeMode
-	    || bridge.transparencyCompositeMode
-	    || null;
-	  target.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
-	  target.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+    target.surfaceDrawRenderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
+    target.surfaceDrawRenderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+    target.surfaceDrawRenderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+    target.surfaceDrawRenderBridgeOffscreenValidationAttemptCount =
+      bridge.offscreenValidationAttemptCount ?? null;
+    target.surfaceDrawRenderBridgeTransparencyCompositeMode = bridge.lastTransparentCompositeMode
+      || bridge.transparencyCompositeMode
+      || null;
+    target.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
+    target.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
   target.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus =
     bridge.schroederRenderProxyLocalResolverStatus
     ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
@@ -7606,21 +7657,21 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.lastSchroederRenderProxyNativeDrawCommandCount ?? 0;
   target.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount =
     bridge.lastSchroederRenderProxyNativeDrawInstanceCount ?? 0;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
-	    || bridge.nativeSurfaceDebugMode
-	    || 'none';
-	  target.surfaceDrawRenderBridgeNativeSurfaceDebugStatus =
-	    bridge.lastNativeSurfaceDebugStatus ?? null;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDebugSkippedDrawCount =
-	    bridge.lastNativeSurfaceDebugSkippedDrawCount ?? null;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDebugClearValue =
-	    bridge.lastNativeSurfaceDebugClearValue ?? null;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseStatus =
-	    bridge.nativeSurfaceDeferredResourceReleaseStatus ?? null;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseReason =
-	    bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
-	  target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending =
-	    bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
+    target.surfaceDrawRenderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
+      || bridge.nativeSurfaceDebugMode
+      || 'none';
+    target.surfaceDrawRenderBridgeNativeSurfaceDebugStatus =
+      bridge.lastNativeSurfaceDebugStatus ?? null;
+    target.surfaceDrawRenderBridgeNativeSurfaceDebugSkippedDrawCount =
+      bridge.lastNativeSurfaceDebugSkippedDrawCount ?? null;
+    target.surfaceDrawRenderBridgeNativeSurfaceDebugClearValue =
+      bridge.lastNativeSurfaceDebugClearValue ?? null;
+    target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseStatus =
+      bridge.nativeSurfaceDeferredResourceReleaseStatus ?? null;
+    target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseReason =
+      bridge.nativeSurfaceDeferredResourceReleaseReason ?? null;
+    target.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending =
+      bridge.nativeSurfaceDeferredResourceReleasePending ?? 0;
   target.surfaceDrawRenderBridgeExternalGpuBufferByteLength = bridge.externalGpuBufferByteLength ?? 0;
   target.surfaceDrawRenderBridgeExternalGpuBufferInputLayout = bridge.externalGpuBufferInputLayout ?? null;
   target.surfaceDrawRenderBridgeExternalGpuBufferVertexRowStrideFloats =
@@ -7630,8 +7681,8 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.compactPositionDirectInputByteLength ?? 0;
   target.surfaceDrawRenderBridgeCompactPositionDirectInputVertexCount =
     bridge.compactPositionDirectInputVertexCount ?? 0;
-	  return target;
-	}
+    return target;
+  }
 
 function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride = null) {
   const Three = activeThreeNamespace || THREE;
@@ -13249,19 +13300,19 @@ export function createSphPhaseScene(container, {
       if (renderBridge === sphResidentSurfaceDrawRenderBridge) {
         scene.userData.sphResidentSurfaceDrawRenderBridge = renderBridge;
       }
-	    }
-	    surfaceDraw?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
-	    surfaceDraw?.surfaceDraw?.destroySurfaceDrawBuffers?.({
-	      releaseLeases: true,
-	      reason: status
-	    });
-	    surfaceDraw?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({
-	      status
-	    });
-	    surfaceDraw?.surfaceVertices?.destroySurfaceVertexBuffers?.({
-	      releaseLeases: true,
-	      reason: status
-	    });
+      }
+      surfaceDraw?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
+      surfaceDraw?.surfaceDraw?.destroySurfaceDrawBuffers?.({
+        releaseLeases: true,
+        reason: status
+      });
+      surfaceDraw?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({
+        status
+      });
+      surfaceDraw?.surfaceVertices?.destroySurfaceVertexBuffers?.({
+        releaseLeases: true,
+        reason: status
+      });
     surfaceDraw?.renderFieldExecution?.releaseRenderFieldBufferLeases?.({
       status
     });
@@ -13269,7 +13320,7 @@ export function createSphPhaseScene(container, {
       releaseLeases: true,
       reason: status
     });
-	  }
+    }
 
   function releasePreviousSphResidentSurfaceDrawResources(previousSurfaceDraw, previousRenderBridge) {
     if (!previousSurfaceDraw && !previousRenderBridge) return;
@@ -16985,11 +17036,11 @@ export function createSphPhaseScene(container, {
       const drawOrder = residentSurfaceDrawOrder(surfaceDrawExecution.surfaces || [], {
         indirectStrideBytes
       });
-	      const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []);
-	      const nativeSurfaceDebugMode = useNativeConsumer
-	        ? resolveSphNativeWebGpuSurfaceConsumerDebugMode()
-	        : 'none';
-	      const bridge = {
+        const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []);
+        const nativeSurfaceDebugMode = useNativeConsumer
+          ? resolveSphNativeWebGpuSurfaceConsumerDebugMode()
+          : 'none';
+        const bridge = {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
         status: useNativeConsumer
           ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS
@@ -17048,25 +17099,25 @@ export function createSphPhaseScene(container, {
         pixelValidationReadbackSource: enableNativeSurfacePixelValidation
           ? 'native-canvas-current-texture'
           : 'disabled',
-	        nativeWebGpuSurfaceConsumerOffscreenValidationStatus:
-	          nativeConsumer?.offscreenValidationStatus || 'not-run',
-	        nativeSurfaceDebugMode,
-	        lastNativeSurfaceDebugMode: nativeSurfaceDebugMode,
-		        lastNativeSurfaceDebugStatus: null,
-		        lastNativeSurfaceDebugSkippedDrawCount: null,
-		        lastNativeSurfaceDebugClearValue: null,
-		        nativeSurfaceDeferredResourceReleases: [],
-		        nativeSurfaceDeferredResourceReleaseStatus:
-		          'native-webgpu-surface-resource-release-idle',
-		        nativeSurfaceDeferredResourceReleaseReason: null,
-		        nativeSurfaceDeferredResourceReleasePending: 0,
-		        readbackSmokeValidationStatus: nativeConsumer?.readbackSmokeValidationStatus || 'not-run',
-		        readbackSmokeValidationReason: nativeConsumer?.readbackSmokeValidationReason || null,
-		        readbackSmokeValidationSample: Array.isArray(nativeConsumer?.readbackSmokeValidationSample)
-		          ? [...nativeConsumer.readbackSmokeValidationSample]
-		          : null,
-		        readbackSmokeValidationAttemptCount: 0,
-		        offscreenValidationStatus: nativeConsumer?.offscreenValidationStatus || 'not-run',
+          nativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+            nativeConsumer?.offscreenValidationStatus || 'not-run',
+          nativeSurfaceDebugMode,
+          lastNativeSurfaceDebugMode: nativeSurfaceDebugMode,
+            lastNativeSurfaceDebugStatus: null,
+            lastNativeSurfaceDebugSkippedDrawCount: null,
+            lastNativeSurfaceDebugClearValue: null,
+            nativeSurfaceDeferredResourceReleases: [],
+            nativeSurfaceDeferredResourceReleaseStatus:
+              'native-webgpu-surface-resource-release-idle',
+            nativeSurfaceDeferredResourceReleaseReason: null,
+            nativeSurfaceDeferredResourceReleasePending: 0,
+            readbackSmokeValidationStatus: nativeConsumer?.readbackSmokeValidationStatus || 'not-run',
+            readbackSmokeValidationReason: nativeConsumer?.readbackSmokeValidationReason || null,
+            readbackSmokeValidationSample: Array.isArray(nativeConsumer?.readbackSmokeValidationSample)
+              ? [...nativeConsumer.readbackSmokeValidationSample]
+              : null,
+            readbackSmokeValidationAttemptCount: 0,
+            offscreenValidationStatus: nativeConsumer?.offscreenValidationStatus || 'not-run',
         offscreenValidationReason: nativeConsumer?.offscreenValidationReason || null,
         offscreenValidationSample: Array.isArray(nativeConsumer?.offscreenValidationSample)
           ? [...nativeConsumer.offscreenValidationSample]
@@ -17495,30 +17546,30 @@ export function createSphPhaseScene(container, {
         );
       const opaqueDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
       const transparentDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
-	      updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
-	        viewProjection,
-	        drawOrder,
-	        opaqueDraws,
-	        transparentDraws
-	      });
-	      const nativeSurfaceDebugMode = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	        ? resolveSphNativeWebGpuSurfaceConsumerDebugMode({ bridge })
-	        : 'none';
-	      const nativeSurfaceClearOnly = nativeSurfaceDebugMode === 'clear-only';
-	      bridge.nativeSurfaceDebugMode = nativeSurfaceDebugMode;
-	      bridge.lastNativeSurfaceDebugMode = nativeSurfaceDebugMode;
-	      bridge.lastNativeSurfaceDebugStatus = nativeSurfaceClearOnly
-	        ? 'native-webgpu-surface-consumer-debug-clear-only'
-	        : null;
-	      bridge.lastNativeSurfaceDebugSkippedDrawCount = nativeSurfaceClearOnly
-	        ? opaqueDraws.length + transparentDraws.length
-	        : null;
-	      bridge.lastNativeSurfaceDebugClearValue = nativeSurfaceClearOnly
-	        ? { ...SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE }
-	        : null;
-	      bridge.lastNativeContextReconfigured = nativeContextReconfigured;
-	      bridge.lastRenderSkipStatus = null;
-	      bridge.lastRenderSkipReason = null;
+        updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
+          viewProjection,
+          drawOrder,
+          opaqueDraws,
+          transparentDraws
+        });
+        const nativeSurfaceDebugMode = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? resolveSphNativeWebGpuSurfaceConsumerDebugMode({ bridge })
+          : 'none';
+        const nativeSurfaceClearOnly = nativeSurfaceDebugMode === 'clear-only';
+        bridge.nativeSurfaceDebugMode = nativeSurfaceDebugMode;
+        bridge.lastNativeSurfaceDebugMode = nativeSurfaceDebugMode;
+        bridge.lastNativeSurfaceDebugStatus = nativeSurfaceClearOnly
+          ? 'native-webgpu-surface-consumer-debug-clear-only'
+          : null;
+        bridge.lastNativeSurfaceDebugSkippedDrawCount = nativeSurfaceClearOnly
+          ? opaqueDraws.length + transparentDraws.length
+          : null;
+        bridge.lastNativeSurfaceDebugClearValue = nativeSurfaceClearOnly
+          ? { ...SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE }
+          : null;
+        bridge.lastNativeContextReconfigured = nativeContextReconfigured;
+        bridge.lastRenderSkipStatus = null;
+        bridge.lastRenderSkipReason = null;
       const schroederProxyExecutor =
         bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE && !nativeSurfaceClearOnly
           ? refreshSchroederRenderProxyNativeExecutorForBridge(bridge, {
@@ -17536,41 +17587,41 @@ export function createSphPhaseScene(container, {
         bridge.lastSchroederRenderProxyNativeDrawInstanceCount = 0;
         bridge.schroederRenderProxyNativeCameraUpdateStatus = null;
       }
-	      const submittedDrawCount = nativeSurfaceClearOnly
+        const submittedDrawCount = nativeSurfaceClearOnly
         ? 0
         : opaqueDraws.length + transparentDraws.length + schroederProxyDrawCommandCount;
-	      const nativeSurfaceValidationCadence =
-	        resolveSphNativeWebGpuSurfaceValidationCadence({
-	          bridge,
-	          submittedDrawCount,
-	          debugClearOnly: nativeSurfaceClearOnly,
-	          bridgeFormat: bridge.format
-	        });
-	      bridge.nativeSurfaceValidationCadenceStatus = nativeSurfaceValidationCadence.status;
-	      bridge.nativeSurfaceValidationCadenceReason = nativeSurfaceValidationCadence.reason;
-	      bridge.nativeSurfaceValidationEncoderRequired =
-	        nativeSurfaceValidationCadence.validationEncoderRequired;
-	      bridge.nativeSurfaceValidationScope = nativeSurfaceValidationCadence.validationScope;
-	      bridge.nativeSurfaceReadbackSmokeValidationNeeded =
-	        nativeSurfaceValidationCadence.readbackSmokeValidationNeeded;
-	      bridge.nativeSurfaceOffscreenValidationEligible =
-	        nativeSurfaceValidationCadence.offscreenValidationEligible;
-	      bridge.nativeSurfaceOffscreenValidationNeeded =
-	        nativeSurfaceValidationCadence.offscreenValidationNeeded;
-	      bridge.nativeSurfaceOffscreenValidationSkippedReason =
-	        nativeSurfaceValidationCadence.offscreenValidationSkippedReason;
-	      const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
-	      const canvasTexture = bridge.context.getCurrentTexture();
-	      const canvasView = canvasTexture.createView();
-	      const opaquePass = encoder.beginRenderPass({
-	        colorAttachments: [{
-	          view: canvasView,
-	          clearValue: nativeSurfaceClearOnly
-	            ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE
-	            : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 0 }),
-	          loadOp: 'clear',
-	          storeOp: 'store'
-	        }],
+        const nativeSurfaceValidationCadence =
+          resolveSphNativeWebGpuSurfaceValidationCadence({
+            bridge,
+            submittedDrawCount,
+            debugClearOnly: nativeSurfaceClearOnly,
+            bridgeFormat: bridge.format
+          });
+        bridge.nativeSurfaceValidationCadenceStatus = nativeSurfaceValidationCadence.status;
+        bridge.nativeSurfaceValidationCadenceReason = nativeSurfaceValidationCadence.reason;
+        bridge.nativeSurfaceValidationEncoderRequired =
+          nativeSurfaceValidationCadence.validationEncoderRequired;
+        bridge.nativeSurfaceValidationScope = nativeSurfaceValidationCadence.validationScope;
+        bridge.nativeSurfaceReadbackSmokeValidationNeeded =
+          nativeSurfaceValidationCadence.readbackSmokeValidationNeeded;
+        bridge.nativeSurfaceOffscreenValidationEligible =
+          nativeSurfaceValidationCadence.offscreenValidationEligible;
+        bridge.nativeSurfaceOffscreenValidationNeeded =
+          nativeSurfaceValidationCadence.offscreenValidationNeeded;
+        bridge.nativeSurfaceOffscreenValidationSkippedReason =
+          nativeSurfaceValidationCadence.offscreenValidationSkippedReason;
+        const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
+        const canvasTexture = bridge.context.getCurrentTexture();
+        const canvasView = canvasTexture.createView();
+        const opaquePass = encoder.beginRenderPass({
+          colorAttachments: [{
+            view: canvasView,
+            clearValue: nativeSurfaceClearOnly
+              ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_CLEAR_SENTINEL_VALUE
+              : (bridge.backgroundClearValue || { r: 0, g: 0, b: 0, a: 0 }),
+            loadOp: 'clear',
+            storeOp: 'store'
+          }],
         depthStencilAttachment: depthView
           ? {
               view: depthView,
@@ -17579,14 +17630,14 @@ export function createSphPhaseScene(container, {
               depthStoreOp: 'store'
             }
           : undefined
-	      });
-	      opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
-	      opaquePass.setBindGroup(0, drawState.bindGroup);
-	      if (!nativeSurfaceClearOnly) {
-	        for (const draw of opaqueDraws) {
-	          opaquePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
-	        }
-	      }
+        });
+        opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
+        opaquePass.setBindGroup(0, drawState.bindGroup);
+        if (!nativeSurfaceClearOnly) {
+          for (const draw of opaqueDraws) {
+            opaquePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+          }
+        }
       let schroederProxySubmit = null;
       if (schroederProxyExecutor?.ready && !nativeSurfaceClearOnly) {
         const cameraUpdate = schroederProxyExecutor.updateCamera({
@@ -17606,14 +17657,14 @@ export function createSphPhaseScene(container, {
         bridge.lastSchroederRenderProxyNativeDrawInstanceCount =
           schroederProxySubmit.drawInstanceCount;
       }
-	      opaquePass.end();
-	      let transparentCompositeSubmitted = false;
-	      if (
-	        transparentDraws.length > 0
-	        && !nativeSurfaceClearOnly
-	        && bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	        && depthView
-	        && bridge.transparentOitPipeline
+        opaquePass.end();
+        let transparentCompositeSubmitted = false;
+        if (
+          transparentDraws.length > 0
+          && !nativeSurfaceClearOnly
+          && bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          && depthView
+          && bridge.transparentOitPipeline
         && bridge.oitCompositePipeline
         && bridge.oitCompositeBindGroupLayout
       ) {
@@ -17668,8 +17719,8 @@ export function createSphPhaseScene(container, {
           compositePass.end();
           transparentCompositeSubmitted = true;
         }
-	      } else if (transparentDraws.length > 0 && !nativeSurfaceClearOnly) {
-	        const transparentPass = encoder.beginRenderPass({
+        } else if (transparentDraws.length > 0 && !nativeSurfaceClearOnly) {
+          const transparentPass = encoder.beginRenderPass({
           colorAttachments: [{
             view: canvasView,
             loadOp: 'load',
@@ -17690,83 +17741,83 @@ export function createSphPhaseScene(container, {
         }
         transparentPass.end();
       }
-		      const nativeSurfacePixelValidationDrawCount = nativeSurfaceClearOnly
-		        ? 1
-		        : submittedDrawCount;
-		      const completeNativePixelValidation =
-		        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-		          ? beginSphNativeWebGpuSurfaceConsumerPixelValidation(
-		            bridge,
-		            encoder,
-		            {
-		              drawCount: nativeSurfacePixelValidationDrawCount,
-		              sourceTexture: canvasTexture
-		            }
-		          )
-		          : null;
-	      bridge.device.queue.submit([encoder.finish()]);
-	      trackResidentSurfaceDrawSubmitFence(bridge, {
-	        reason: 'resident-surface-draw-overlay-submit',
-	        renderStatus: nativeSurfaceClearOnly
-	          ? 'native-webgpu-surface-consumer-debug-clear-rendered'
-	          : (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	          ? 'native-webgpu-surface-consumer-rendered'
-	          : 'webgpu-overlay-rendered')
-	      });
-	      completeNativePixelValidation?.();
-	      if (
-	        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	        && nativeSurfaceValidationCadence.validationEncoderRequired
-	      ) {
-	        const validationEncoder = bridge.device.createCommandEncoder({
-	          label: 'ulg-sph-native-webgpu-surface-draw-validation'
-	        });
-	        const validationCompletions = [];
-	        if (nativeSurfaceValidationCadence.readbackSmokeValidationNeeded) {
-	          const completeNativeReadbackSmokeValidation =
-	            beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
-	          if (completeNativeReadbackSmokeValidation) {
-	            validationCompletions.push(completeNativeReadbackSmokeValidation);
-	          }
-	        }
-	        if (nativeSurfaceValidationCadence.offscreenValidationNeeded) {
-	          const completeNativeOffscreenValidation =
-	            beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
-	              bridge,
-	              validationEncoder,
-	              {
-	                drawCount: submittedDrawCount,
-	                opaqueDraws,
-	                transparentDraws,
+          const nativeSurfacePixelValidationDrawCount = nativeSurfaceClearOnly
+            ? 1
+            : submittedDrawCount;
+          const completeNativePixelValidation =
+            bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+              ? beginSphNativeWebGpuSurfaceConsumerPixelValidation(
+                bridge,
+                encoder,
+                {
+                  drawCount: nativeSurfacePixelValidationDrawCount,
+                  sourceTexture: canvasTexture
+                }
+              )
+              : null;
+        bridge.device.queue.submit([encoder.finish()]);
+        trackResidentSurfaceDrawSubmitFence(bridge, {
+          reason: 'resident-surface-draw-overlay-submit',
+          renderStatus: nativeSurfaceClearOnly
+            ? 'native-webgpu-surface-consumer-debug-clear-rendered'
+            : (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+            ? 'native-webgpu-surface-consumer-rendered'
+            : 'webgpu-overlay-rendered')
+        });
+        completeNativePixelValidation?.();
+        if (
+          bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          && nativeSurfaceValidationCadence.validationEncoderRequired
+        ) {
+          const validationEncoder = bridge.device.createCommandEncoder({
+            label: 'ulg-sph-native-webgpu-surface-draw-validation'
+          });
+          const validationCompletions = [];
+          if (nativeSurfaceValidationCadence.readbackSmokeValidationNeeded) {
+            const completeNativeReadbackSmokeValidation =
+              beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
+            if (completeNativeReadbackSmokeValidation) {
+              validationCompletions.push(completeNativeReadbackSmokeValidation);
+            }
+          }
+          if (nativeSurfaceValidationCadence.offscreenValidationNeeded) {
+            const completeNativeOffscreenValidation =
+              beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
+                bridge,
+                validationEncoder,
+                {
+                  drawCount: submittedDrawCount,
+                  opaqueDraws,
+                  transparentDraws,
                   schroederProxyExecutor
-	              }
-	            );
-	          if (completeNativeOffscreenValidation) {
-	            validationCompletions.push(completeNativeOffscreenValidation);
-	          }
-	        }
-	        if (validationCompletions.length > 0) {
-	          bridge.device.queue.submit([validationEncoder.finish()]);
-	          for (const completeValidation of validationCompletions) {
-	            completeValidation();
-	          }
-	          scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge);
-	        }
-	      }
-	      bridge.frameCount += 1;
-	      bridge.lastRenderStatus = nativeSurfaceClearOnly
-	        ? 'native-webgpu-surface-consumer-debug-clear-rendered'
-	        : (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-	        ? 'native-webgpu-surface-consumer-rendered'
-	        : 'webgpu-overlay-rendered');
-	      bridge.lastTransparentCompositeMode = nativeSurfaceClearOnly
-	        ? 'native-debug-clear-only'
-	        : (transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test');
-	      bridge.transparencyCompositeMode = bridge.lastTransparentCompositeMode;
-	      if (nativeSurfaceClearOnly) {
-	        bridge.lastOpaqueDrawCount = 0;
-	        bridge.lastTransparentDrawCount = 0;
-	      }
+                }
+              );
+            if (completeNativeOffscreenValidation) {
+              validationCompletions.push(completeNativeOffscreenValidation);
+            }
+          }
+          if (validationCompletions.length > 0) {
+            bridge.device.queue.submit([validationEncoder.finish()]);
+            for (const completeValidation of validationCompletions) {
+              completeValidation();
+            }
+            scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge);
+          }
+        }
+        bridge.frameCount += 1;
+        bridge.lastRenderStatus = nativeSurfaceClearOnly
+          ? 'native-webgpu-surface-consumer-debug-clear-rendered'
+          : (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? 'native-webgpu-surface-consumer-rendered'
+          : 'webgpu-overlay-rendered');
+        bridge.lastTransparentCompositeMode = nativeSurfaceClearOnly
+          ? 'native-debug-clear-only'
+          : (transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test');
+        bridge.transparencyCompositeMode = bridge.lastTransparentCompositeMode;
+        if (nativeSurfaceClearOnly) {
+          bridge.lastOpaqueDrawCount = 0;
+          bridge.lastTransparentDrawCount = 0;
+        }
       if (sphResidentSurfaceDraw) {
         sphResidentSurfaceDraw.renderBridgeFrameCount = bridge.frameCount;
         sphResidentSurfaceDraw.renderBridgeLastRenderStatus = bridge.lastRenderStatus;
@@ -17970,10 +18021,16 @@ export function createSphPhaseScene(container, {
       schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
     renderer.userData.schroederPhaseVolumeAssignmentOverlayFeedback =
       schroederPhaseVolumeAssignmentOverlayFeedbackSummary;
-    const schroederPhaseVolumeDiagnostics =
-      summarizeSchroederPhaseVolumeDiagnosticStatus(stepsExecution || step || null);
-    scene.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
-    renderer.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
+      const schroederPhaseVolumeDiagnostics =
+        summarizeSchroederPhaseVolumeDiagnosticStatus(stepsExecution || step || null);
+      if (stepsExecution) {
+        stepsExecution.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
+      }
+      if (step) {
+        step.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
+      }
+      scene.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
+      renderer.userData.schroederPhaseVolumeDiagnostics = schroederPhaseVolumeDiagnostics;
     const residentRenderSource = createResidentRenderSourceMetadata({
       residentSteps: stepsExecution,
       finalStep: step,
@@ -19800,6 +19857,9 @@ export function createSphPhaseScene(container, {
             activeNodeConsumerStatus: result.activeNodeConsumerStatus ?? null,
             activeNodeIndexStatus: result.activeNodeIndexStatus ?? null,
             activeNodeSortedIndexStatus: result.activeNodeSortedIndexStatus ?? null,
+            phaseVolumeMigrationStatus: result.phaseVolumeMigrationStatus ?? null,
+            phaseVolumeMigrationParticleCount:
+              result.phaseVolumeMigration?.particleCount ?? null,
             phaseVolumeLevelUpdateStatus: result.phaseVolumeLevelUpdateStatus ?? null,
             phaseVolumeLevelUpdateConsumerStatus:
               result.phaseVolumeLevelUpdateConsumerStatus ?? null,
@@ -19828,6 +19888,12 @@ export function createSphPhaseScene(container, {
               result.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
             phaseVolumeNextTickAssignmentOverlayConsumerStatus:
               result.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
+            phaseVolumeDiagnosticSummaryStatus:
+              result.phaseVolumeDiagnosticSummaryStatus ?? null,
+            phaseVolumeDiagnosticSummaryConsumerStatus:
+              result.phaseVolumeDiagnosticSummaryConsumerStatus ?? null,
+            phaseVolumeDiagnosticSummary:
+              result.phaseVolumeDiagnosticSummary ?? null,
             lawQueueStatus: result.lawQueueStatus ?? null,
             lawNeighborCandidateStatus: result.lawNeighborCandidateStatus ?? null,
             crossLevelCouplingStatus: result.crossLevelCouplingStatus ?? null,
@@ -19862,6 +19928,26 @@ export function createSphPhaseScene(container, {
             schroederResult.phaseVolumeAssignmentOverlayFeedback ?? null;
           step.schroederPhaseVolumeNextTickAssignmentOverlay =
             schroederResult.schroederPhaseVolumeNextTickAssignmentOverlay ?? null;
+          step.phaseVolumeMigration = schroederResult.phaseVolumeMigration ?? null;
+          step.schroederPhaseVolumeMigration = schroederResult.phaseVolumeMigration ?? null;
+          step.phaseVolumeMigrationStatus = schroederResult.phaseVolumeMigrationStatus ?? null;
+          step.phaseVolumeLevelUpdate = schroederResult.phaseVolumeLevelUpdate ?? null;
+          step.schroederPhaseVolumeLevelUpdate = schroederResult.phaseVolumeLevelUpdate ?? null;
+          step.phaseVolumeLevelUpdateStatus = schroederResult.phaseVolumeLevelUpdateStatus ?? null;
+          step.phaseVolumeNextTickAssignmentOverlay =
+            schroederResult.phaseVolumeNextTickAssignmentOverlay ?? null;
+          step.phaseVolumeNextTickAssignmentOverlayStatus =
+            schroederResult.phaseVolumeNextTickAssignmentOverlayStatus ?? null;
+          step.phaseVolumeNextTickAssignmentOverlayConsumerStatus =
+            schroederResult.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null;
+          step.phaseVolumeDiagnosticSummary =
+            schroederResult.phaseVolumeDiagnosticSummary ?? null;
+          step.schroederPhaseVolumeDiagnosticSummary =
+            schroederResult.phaseVolumeDiagnosticSummary ?? null;
+          step.phaseVolumeDiagnosticSummaryStatus =
+            schroederResult.phaseVolumeDiagnosticSummaryStatus ?? null;
+          step.schroederPhaseVolumeDiagnosticSummaryStatus =
+            schroederResult.phaseVolumeDiagnosticSummaryStatus ?? null;
           step.schroederPortableSummary = schroederResult.portableSummary ?? null;
           step.portableSummary = schroederResult.portableSummary ?? null;
           step.renderLod = schroederResult.portableSummary?.renderLod ?? null;
@@ -20090,7 +20176,7 @@ export function createSphPhaseScene(container, {
             phaseVolumeAssignmentOverlayFeedbackReady:
               finalPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true
           });
-          return {
+          const execution = {
             schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
             backend: finalStep?.backend || 'webgpu',
             status: 'resident-steps-executed',
@@ -20141,6 +20227,33 @@ export function createSphPhaseScene(container, {
             lawNeighborCandidates: finalSchroederResult?.lawNeighborCandidates ?? null,
             crossLevelCoupling: finalSchroederResult?.crossLevelCoupling ?? null,
             conservationSummary: finalSchroederResult?.conservationSummary ?? null,
+            phaseVolumeMigration: finalSchroederResult?.phaseVolumeMigration ?? null,
+            schroederPhaseVolumeMigration: finalSchroederResult?.phaseVolumeMigration ?? null,
+            phaseVolumeMigrationStatus:
+              finalSchroederResult?.phaseVolumeMigrationStatus ?? null,
+            phaseVolumeLevelUpdate: finalSchroederResult?.phaseVolumeLevelUpdate ?? null,
+            schroederPhaseVolumeLevelUpdate:
+              finalSchroederResult?.phaseVolumeLevelUpdate ?? null,
+            phaseVolumeLevelUpdateStatus:
+              finalSchroederResult?.phaseVolumeLevelUpdateStatus ?? null,
+            phaseVolumeLevelUpdateConsumerStatus:
+              finalSchroederResult?.phaseVolumeLevelUpdateConsumerStatus ?? null,
+            phaseVolumeNextTickAssignmentOverlay:
+              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlay ?? null,
+            phaseVolumeNextTickAssignmentOverlayStatus:
+              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
+            phaseVolumeNextTickAssignmentOverlayConsumerStatus:
+              finalSchroederResult?.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
+            phaseVolumeDiagnosticSummary:
+              finalSchroederResult?.phaseVolumeDiagnosticSummary ?? null,
+            schroederPhaseVolumeDiagnosticSummary:
+              finalSchroederResult?.phaseVolumeDiagnosticSummary ?? null,
+            phaseVolumeDiagnosticSummaryStatus:
+              finalSchroederResult?.phaseVolumeDiagnosticSummaryStatus ?? null,
+            schroederPhaseVolumeDiagnosticSummaryStatus:
+              finalSchroederResult?.phaseVolumeDiagnosticSummaryStatus ?? null,
+            phaseVolumeDiagnosticSummaryConsumerStatus:
+              finalSchroederResult?.phaseVolumeDiagnosticSummaryConsumerStatus ?? null,
             residentAuthorityLedgerStatus: finalStep?.residentAuthorityLedgerStatus ?? null,
             residentAuthorityFamilyOwners: finalStep?.residentAuthorityFamilyOwners || finalStep?.residentAuthoritySummary?.familyOwners || {},
             residentAuthorityWarnings: [...(finalStep?.residentAuthorityWarnings || [])],
@@ -20156,7 +20269,10 @@ export function createSphPhaseScene(container, {
             phaseChangeValidation: false,
             fullPhysicsValidation: false
           };
-        };
+          execution.schroederPhaseVolumeDiagnostics =
+            summarizeSchroederPhaseVolumeDiagnosticStatus(execution);
+          return execution;
+          };
         let execution = null;
         const kernelsStartedAtMs = nowMs();
         if (
@@ -22913,17 +23029,17 @@ export function createSphPhaseScene(container, {
     };
   }
 
-	  async function buildSphResidentSurfaceDrawBridge({
-	    device,
-	    renderFieldExecution,
-	    buildDrawMetadata = true,
+    async function buildSphResidentSurfaceDrawBridge({
+      device,
+      renderFieldExecution,
+      buildDrawMetadata = true,
         renderBridgeMode = null,
         materialProperties = currentMaterialProperties,
         rendererOwnedDevice = false
-	  } = {}) {
-	    let surfaceVerticesExecution = null;
-	    let surfaceDrawExecution = null;
-	    let retainSurfaceVerticesExecution = false;
+    } = {}) {
+      let surfaceVerticesExecution = null;
+      let surfaceDrawExecution = null;
+      let retainSurfaceVerticesExecution = false;
     try {
       const useThreeCompactVertexBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
       const useThreeWebGpuSurfaceBufferBridge = renderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
@@ -23069,120 +23185,120 @@ export function createSphPhaseScene(container, {
           });
         }
       });
-	      markSphResidentRenderProgress('surface-draw-vertices-complete', {
-	        stage: 'surface-vertices',
-	        surfaceCount: surfaceVerticesExecution.surfaceCount,
-	        totalFieldCells: surfaceVerticesExecution.totalFieldCells,
-	        maxVertexRows: surfaceVerticesExecution.maxVertexRows,
+        markSphResidentRenderProgress('surface-draw-vertices-complete', {
+          stage: 'surface-vertices',
+          surfaceCount: surfaceVerticesExecution.surfaceCount,
+          totalFieldCells: surfaceVerticesExecution.totalFieldCells,
+          maxVertexRows: surfaceVerticesExecution.maxVertexRows,
         fixedSlotVertexRowsByteLength: surfaceVerticesExecution.fixedSlotVertexRowsByteLength,
-	        queueCompletionStatus: surfaceVerticesExecution.queueCompletionStatus ?? null,
-	        queueCompletionMethod: surfaceVerticesExecution.queueCompletionMethod ?? null
-	      });
-	      if (!buildDrawMetadata) {
-	        retainSurfaceVerticesExecution = true;
-	        markSphResidentRenderProgress('surface-draw-metadata-deferred', {
-	          stage: 'surface-draw-metadata',
-	          surfaceCount: surfaceVerticesExecution.surfaceCount,
-	          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
-	            ?? surfaceVerticesExecution.maxVertexRows
-	            ?? null,
-	          reason: 'diagnostic retained surface vertex buffers without compact draw metadata readback'
-	        });
-	        const overlayPolicy = resolveSceneResidentSurfaceDrawOverlayPolicy();
-	        return {
-	          schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
-	          status: 'resident-surface-vertex-buffers-retained',
-	          reason: 'compact surface-draw metadata/readback deferred for diagnostic-only no-overlay refresh',
-	          overlayPolicy,
-	          overlayPolicyStatus: overlayPolicy?.status ?? null,
-	          overlayPolicyMode: overlayPolicy?.mode ?? null,
-	          sourceRenderFieldSchema: renderFieldExecution.schema,
-	          sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
-	          surfaceDrawSchema: null,
-	          sourceRenderFieldBackend: renderFieldExecution.backend,
-	          renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
-	          renderFieldBufferVolumeDescriptorStatus: renderFieldBufferVolumeDescriptorSummary.status,
-	          renderFieldBufferVolumeDescriptorCount: renderFieldBufferVolumeDescriptorSummary.descriptorCount,
-	          renderFieldBufferVolumeDescriptorReadyCount: renderFieldBufferVolumeDescriptorSummary.readyCount,
-	          renderFieldBufferVolumeDescriptorBlockedCount: renderFieldBufferVolumeDescriptorSummary.blockedCount,
-	          renderFieldBufferVolumeDescriptorNativeConsumerKind:
-	            renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind,
-	          renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
-	            renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
-	          renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
-	          sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
-	          surfaceDrawBackend: null,
-	          surfaceCount: surfaceVerticesExecution.surfaceCount,
-	          activeSurfaceCount: 0,
-	          vertexCount: 0,
-	          triangleCount: 0,
-	          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
-	            ?? surfaceVerticesExecution.maxVertexRows
-	            ?? 0,
-	          sourceVertexCounterMode: surfaceVerticesExecution.vertexCounterBufferRetained
-	            ? 'resident-vertex-counter'
-	            : null,
-	          sourceVertexCounterBufferBound: Boolean(surfaceVerticesExecution.vertexCounterBufferRetained),
-	          sourceVertexCounterBufferByteLength: surfaceVerticesExecution.vertexCounterBufferByteLength ?? 0,
-	          surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
-	          surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
-	          drawRowsBufferRetained: false,
-	          drawRowsBufferByteLength: 0,
-	          drawIndirectSchema: null,
-	          drawIndirectRowStrideUints: 0,
-	          drawIndirectRowsBufferRetained: false,
-	          drawIndirectRowsBufferByteLength: 0,
-	          compactedVertexRowsBufferRetained: false,
-	          compactedVertexRowsBufferByteLength: 0,
-	          residentBufferLeaseLedgerStatus: surfaceVerticesExecution.residentBufferLeaseLedgerStatus ?? null,
-	          residentBufferLeaseResourceCount: surfaceVerticesExecution.residentBufferLeaseResourceCount ?? 0,
-	          residentBufferLeaseActiveLeaseCount: surfaceVerticesExecution.residentBufferLeaseActiveLeaseCount ?? 0,
-	          residentBufferLeaseSummary: surfaceVerticesExecution.residentBufferLeaseSummary ?? null,
-	          readbackMode: surfaceVerticesExecution.readbackMode,
-	          surfaceDrawReadback: false,
-	          surfaceDrawSummaryReadback: false,
-	          surfaceDrawSummaryReadbackByteLength: 0,
-	          fullSurfaceDrawReadback: false,
-	          compactionMode: surfaceVerticesExecution.compactionMode,
-	          renderFieldBufferMode: 'released-after-surface-vertex-diagnostic',
-	          surfaceVertexBufferMode: 'retained-surface-vertex-diagnostic',
-	          surfaceDrawBufferMode: 'metadata-deferred',
-	          surfaceDrawInputBuffersReleased: true,
-	          visibleRendererBridge: 'diagnostic-vertex-buffers-no-overlay',
-	          visibleRenderSource: 'resident-surface-vertex-diagnostic-buffers',
-	          renderBridgeSchema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
-	          renderBridgeStatus: overlayPolicy?.status ?? null,
-	          renderBridgeReason: overlayPolicy?.reason || SPH_THREE_WEBGPU_BINDING_REASON,
-	          renderBridgeFrameCount: 0,
-	          renderBridgeLastRenderStatus: null,
-	          renderBridgeDrawOrderingPolicy: null,
-	          renderBridgeDrawOrderCount: 0,
-	          renderBridgeDrawOrderSurfaceIndices: [],
-	          renderBridgeDrawOrderIndirectOffsets: [],
-	          renderBridgeDepthPolicy: null,
-	          renderBridgeDepthAttachmentFormat: null,
-	          renderBridgeDepthAttachmentReady: false,
-	          renderBridgeTransparencyCompositeMode: null,
-	          renderBridgeOitAccumFormat: null,
-	          renderBridgeOitRevealFormat: null,
-	          renderBridgeOitTargetsReady: false,
-	          renderBridgeLastOpaqueDrawCount: 0,
-	          renderBridgeLastTransparentDrawCount: 0,
-	          renderBridgeOpticalRenderSource: null,
-	          renderBridgeOpticalRecordCount: 0,
-	          renderBridgeOpticalRecordStrideFloats: 0,
-	          renderBridgeOpticalSpectralSampleCount: 0,
-	          renderBridgeOpticalSpectralSampleStrideFloats: 0,
-	          renderBridgeTemporalSwapPolicy: null,
-	          renderBridgeRetainedPreviousOverlay: false,
-	          surfaceVertices: surfaceVerticesExecution,
-	          surfaceDraw: null,
-	          scientificValidation: false,
-	          sphValidation: false,
-	          surfaceExtractionValidation: false,
-	          fullPhysicsValidation: false
-	        };
-	      }
+          queueCompletionStatus: surfaceVerticesExecution.queueCompletionStatus ?? null,
+          queueCompletionMethod: surfaceVerticesExecution.queueCompletionMethod ?? null
+        });
+        if (!buildDrawMetadata) {
+          retainSurfaceVerticesExecution = true;
+          markSphResidentRenderProgress('surface-draw-metadata-deferred', {
+            stage: 'surface-draw-metadata',
+            surfaceCount: surfaceVerticesExecution.surfaceCount,
+            sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+              ?? surfaceVerticesExecution.maxVertexRows
+              ?? null,
+            reason: 'diagnostic retained surface vertex buffers without compact draw metadata readback'
+          });
+          const overlayPolicy = resolveSceneResidentSurfaceDrawOverlayPolicy();
+          return {
+            schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
+            status: 'resident-surface-vertex-buffers-retained',
+            reason: 'compact surface-draw metadata/readback deferred for diagnostic-only no-overlay refresh',
+            overlayPolicy,
+            overlayPolicyStatus: overlayPolicy?.status ?? null,
+            overlayPolicyMode: overlayPolicy?.mode ?? null,
+            sourceRenderFieldSchema: renderFieldExecution.schema,
+            sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
+            surfaceDrawSchema: null,
+            sourceRenderFieldBackend: renderFieldExecution.backend,
+            renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
+            renderFieldBufferVolumeDescriptorStatus: renderFieldBufferVolumeDescriptorSummary.status,
+            renderFieldBufferVolumeDescriptorCount: renderFieldBufferVolumeDescriptorSummary.descriptorCount,
+            renderFieldBufferVolumeDescriptorReadyCount: renderFieldBufferVolumeDescriptorSummary.readyCount,
+            renderFieldBufferVolumeDescriptorBlockedCount: renderFieldBufferVolumeDescriptorSummary.blockedCount,
+            renderFieldBufferVolumeDescriptorNativeConsumerKind:
+              renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind,
+            renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+              renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
+            renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
+            sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
+            surfaceDrawBackend: null,
+            surfaceCount: surfaceVerticesExecution.surfaceCount,
+            activeSurfaceCount: 0,
+            vertexCount: 0,
+            triangleCount: 0,
+            sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+              ?? surfaceVerticesExecution.maxVertexRows
+              ?? 0,
+            sourceVertexCounterMode: surfaceVerticesExecution.vertexCounterBufferRetained
+              ? 'resident-vertex-counter'
+              : null,
+            sourceVertexCounterBufferBound: Boolean(surfaceVerticesExecution.vertexCounterBufferRetained),
+            sourceVertexCounterBufferByteLength: surfaceVerticesExecution.vertexCounterBufferByteLength ?? 0,
+            surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
+            surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
+            drawRowsBufferRetained: false,
+            drawRowsBufferByteLength: 0,
+            drawIndirectSchema: null,
+            drawIndirectRowStrideUints: 0,
+            drawIndirectRowsBufferRetained: false,
+            drawIndirectRowsBufferByteLength: 0,
+            compactedVertexRowsBufferRetained: false,
+            compactedVertexRowsBufferByteLength: 0,
+            residentBufferLeaseLedgerStatus: surfaceVerticesExecution.residentBufferLeaseLedgerStatus ?? null,
+            residentBufferLeaseResourceCount: surfaceVerticesExecution.residentBufferLeaseResourceCount ?? 0,
+            residentBufferLeaseActiveLeaseCount: surfaceVerticesExecution.residentBufferLeaseActiveLeaseCount ?? 0,
+            residentBufferLeaseSummary: surfaceVerticesExecution.residentBufferLeaseSummary ?? null,
+            readbackMode: surfaceVerticesExecution.readbackMode,
+            surfaceDrawReadback: false,
+            surfaceDrawSummaryReadback: false,
+            surfaceDrawSummaryReadbackByteLength: 0,
+            fullSurfaceDrawReadback: false,
+            compactionMode: surfaceVerticesExecution.compactionMode,
+            renderFieldBufferMode: 'released-after-surface-vertex-diagnostic',
+            surfaceVertexBufferMode: 'retained-surface-vertex-diagnostic',
+            surfaceDrawBufferMode: 'metadata-deferred',
+            surfaceDrawInputBuffersReleased: true,
+            visibleRendererBridge: 'diagnostic-vertex-buffers-no-overlay',
+            visibleRenderSource: 'resident-surface-vertex-diagnostic-buffers',
+            renderBridgeSchema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
+            renderBridgeStatus: overlayPolicy?.status ?? null,
+            renderBridgeReason: overlayPolicy?.reason || SPH_THREE_WEBGPU_BINDING_REASON,
+            renderBridgeFrameCount: 0,
+            renderBridgeLastRenderStatus: null,
+            renderBridgeDrawOrderingPolicy: null,
+            renderBridgeDrawOrderCount: 0,
+            renderBridgeDrawOrderSurfaceIndices: [],
+            renderBridgeDrawOrderIndirectOffsets: [],
+            renderBridgeDepthPolicy: null,
+            renderBridgeDepthAttachmentFormat: null,
+            renderBridgeDepthAttachmentReady: false,
+            renderBridgeTransparencyCompositeMode: null,
+            renderBridgeOitAccumFormat: null,
+            renderBridgeOitRevealFormat: null,
+            renderBridgeOitTargetsReady: false,
+            renderBridgeLastOpaqueDrawCount: 0,
+            renderBridgeLastTransparentDrawCount: 0,
+            renderBridgeOpticalRenderSource: null,
+            renderBridgeOpticalRecordCount: 0,
+            renderBridgeOpticalRecordStrideFloats: 0,
+            renderBridgeOpticalSpectralSampleCount: 0,
+            renderBridgeOpticalSpectralSampleStrideFloats: 0,
+            renderBridgeTemporalSwapPolicy: null,
+            renderBridgeRetainedPreviousOverlay: false,
+            surfaceVertices: surfaceVerticesExecution,
+            surfaceDraw: null,
+            scientificValidation: false,
+            sphValidation: false,
+            surfaceExtractionValidation: false,
+            fullPhysicsValidation: false
+          };
+        }
       if (useEffectiveThreeCompactVertexBridge) {
         markSphResidentRenderProgress('surface-draw-metadata-skipped-three-compact', {
           stage: 'surface-draw-metadata',
@@ -23194,7 +23310,7 @@ export function createSphPhaseScene(container, {
         });
         surfaceDrawExecution = createSphSurfaceDrawExecutionFromSurfaceVertices(surfaceVerticesExecution);
       } else {
-	      markSphResidentRenderProgress('surface-draw-metadata-started', {
+        markSphResidentRenderProgress('surface-draw-metadata-started', {
           stage: 'surface-draw-metadata',
           surfaceCount: surfaceVerticesExecution.surfaceCount,
           sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
@@ -23517,28 +23633,28 @@ export function createSphPhaseScene(container, {
         renderBridgeDepthPolicy: renderBridge?.depthPolicy ?? null,
         renderBridgeDepthAttachmentFormat: renderBridge?.depthAttachmentFormat ?? null,
         renderBridgeDepthAttachmentReady: Boolean(renderBridge?.depthAttachmentReady),
-	        renderBridgeTransparencyCompositeMode: renderBridge?.lastTransparentCompositeMode
-	          || renderBridge?.transparencyCompositeMode
-	          || null,
+          renderBridgeTransparencyCompositeMode: renderBridge?.lastTransparentCompositeMode
+            || renderBridge?.transparencyCompositeMode
+            || null,
         renderBridgeOitAccumFormat: renderBridge?.oitAccumFormat ?? null,
         renderBridgeOitRevealFormat: renderBridge?.oitRevealFormat ?? null,
         renderBridgeOitTargetsReady: Boolean(renderBridge?.oitTargetsReady),
-	        renderBridgeLastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? 0,
-	        renderBridgeLastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? 0,
-	        renderBridgeNativeSurfaceDebugMode: renderBridge?.lastNativeSurfaceDebugMode
-	          || renderBridge?.nativeSurfaceDebugMode
-	          || 'none',
-	        renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null,
-		        renderBridgeNativeSurfaceDebugSkippedDrawCount:
-		          renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null,
-		        renderBridgeNativeSurfaceDebugClearValue: renderBridge?.lastNativeSurfaceDebugClearValue ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleaseStatus:
-		          renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleaseReason:
-		          renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleasePending:
-		          renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0,
-		        renderBridgeOpticalRenderSource: renderBridge?.opticalRenderSource ?? null,
+          renderBridgeLastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? 0,
+          renderBridgeLastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? 0,
+          renderBridgeNativeSurfaceDebugMode: renderBridge?.lastNativeSurfaceDebugMode
+            || renderBridge?.nativeSurfaceDebugMode
+            || 'none',
+          renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null,
+            renderBridgeNativeSurfaceDebugSkippedDrawCount:
+              renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null,
+            renderBridgeNativeSurfaceDebugClearValue: renderBridge?.lastNativeSurfaceDebugClearValue ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleaseStatus:
+              renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleaseReason:
+              renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleasePending:
+              renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0,
+            renderBridgeOpticalRenderSource: renderBridge?.opticalRenderSource ?? null,
         renderBridgeOpticalRecordCount: renderBridge?.opticalRecordCount ?? 0,
         renderBridgeOpticalRecordStrideFloats: renderBridge?.opticalRecordStrideFloats ?? 0,
         renderBridgeOpticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? 0,
@@ -23611,18 +23727,18 @@ export function createSphPhaseScene(container, {
         surfaceVerticesExecution,
         overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy()
       });
-	    } finally {
-	      if (!retainSurfaceVerticesExecution) {
-	        surfaceVerticesExecution?.releaseSurfaceVertexBufferLeases?.({
-	          status: 'released-after-surface-draw-metadata'
-	        });
-	        surfaceVerticesExecution?.destroySurfaceVertexBuffers?.({
-	          releaseLeases: true,
-	          reason: 'surface-draw-bridge-input-cleanup'
-	        });
-	      }
-	      renderFieldExecution?.releaseRenderFieldBufferLeases?.({
-	        status: 'released-after-surface-draw-bridge'
+      } finally {
+        if (!retainSurfaceVerticesExecution) {
+          surfaceVerticesExecution?.releaseSurfaceVertexBufferLeases?.({
+            status: 'released-after-surface-draw-metadata'
+          });
+          surfaceVerticesExecution?.destroySurfaceVertexBuffers?.({
+            releaseLeases: true,
+            reason: 'surface-draw-bridge-input-cleanup'
+          });
+        }
+        renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+          status: 'released-after-surface-draw-bridge'
       });
       renderFieldExecution?.destroyRenderFieldBuffers?.({
         releaseLeases: true,
@@ -24012,28 +24128,28 @@ export function createSphPhaseScene(container, {
         renderBridgeDepthPolicy: renderBridge?.depthPolicy ?? null,
         renderBridgeDepthAttachmentFormat: renderBridge?.depthAttachmentFormat ?? null,
         renderBridgeDepthAttachmentReady: Boolean(renderBridge?.depthAttachmentReady),
-	        renderBridgeTransparencyCompositeMode: renderBridge?.lastTransparentCompositeMode
-	          || renderBridge?.transparencyCompositeMode
-	          || null,
+          renderBridgeTransparencyCompositeMode: renderBridge?.lastTransparentCompositeMode
+            || renderBridge?.transparencyCompositeMode
+            || null,
         renderBridgeOitAccumFormat: renderBridge?.oitAccumFormat ?? null,
         renderBridgeOitRevealFormat: renderBridge?.oitRevealFormat ?? null,
         renderBridgeOitTargetsReady: Boolean(renderBridge?.oitTargetsReady),
-	        renderBridgeLastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? 0,
-	        renderBridgeLastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? 0,
-	        renderBridgeNativeSurfaceDebugMode: renderBridge?.lastNativeSurfaceDebugMode
-	          || renderBridge?.nativeSurfaceDebugMode
-	          || 'none',
-	        renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null,
-		        renderBridgeNativeSurfaceDebugSkippedDrawCount:
-		          renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null,
-		        renderBridgeNativeSurfaceDebugClearValue: renderBridge?.lastNativeSurfaceDebugClearValue ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleaseStatus:
-		          renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleaseReason:
-		          renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null,
-		        renderBridgeNativeSurfaceDeferredResourceReleasePending:
-		          renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0,
-		        renderBridgeOpticalRenderSource: renderBridge?.opticalRenderSource ?? null,
+          renderBridgeLastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? 0,
+          renderBridgeLastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? 0,
+          renderBridgeNativeSurfaceDebugMode: renderBridge?.lastNativeSurfaceDebugMode
+            || renderBridge?.nativeSurfaceDebugMode
+            || 'none',
+          renderBridgeNativeSurfaceDebugStatus: renderBridge?.lastNativeSurfaceDebugStatus ?? null,
+            renderBridgeNativeSurfaceDebugSkippedDrawCount:
+              renderBridge?.lastNativeSurfaceDebugSkippedDrawCount ?? null,
+            renderBridgeNativeSurfaceDebugClearValue: renderBridge?.lastNativeSurfaceDebugClearValue ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleaseStatus:
+              renderBridge?.nativeSurfaceDeferredResourceReleaseStatus ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleaseReason:
+              renderBridge?.nativeSurfaceDeferredResourceReleaseReason ?? null,
+            renderBridgeNativeSurfaceDeferredResourceReleasePending:
+              renderBridge?.nativeSurfaceDeferredResourceReleasePending ?? 0,
+            renderBridgeOpticalRenderSource: renderBridge?.opticalRenderSource ?? null,
         renderBridgeOpticalRecordCount: renderBridge?.opticalRecordCount ?? 0,
         renderBridgeOpticalRecordStrideFloats: renderBridge?.opticalRecordStrideFloats ?? 0,
         renderBridgeOpticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? 0,
@@ -25689,33 +25805,33 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.presentationWorkerRetainedOutputPresentationOnlyReadbackFree = Boolean(
             renderRowReadbackPlan.presentationWorkerRetainedOutputPresentationOnlyReadbackFree
           );
-		          nextResidentSurfaceDraw.renderRowsParticleScaleStability =
-		            renderRowsExecution.particleScaleStability ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleStabilityStatus =
-	            renderRowsExecution.particleScaleStability?.status ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCount =
-	            renderRowsExecution.particleScaleStability?.capAppliedCount ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCountKnown =
-	            renderRowsExecution.particleScaleStability?.capAppliedCountKnown
-	            ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null);
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed =
-	            renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed =
-	            renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed =
-	            renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusM =
-	            renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed =
-	            renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasParticleRadiusM =
-	            renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader =
-	            renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio =
-	            renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null;
-	          nextResidentSurfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio =
-	            renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null;
+              nextResidentSurfaceDraw.renderRowsParticleScaleStability =
+                renderRowsExecution.particleScaleStability ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleStabilityStatus =
+              renderRowsExecution.particleScaleStability?.status ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCount =
+              renderRowsExecution.particleScaleStability?.capAppliedCount ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleCapAppliedCountKnown =
+              renderRowsExecution.particleScaleStability?.capAppliedCountKnown
+              ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null);
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxRadiusGrowthRatioAllowed =
+              renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxVolumeRatioJAllowed =
+              renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed =
+              renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxSupportRadiusM =
+              renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed =
+              renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxGasParticleRadiusM =
+              renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleSupportRadiusPolicyAppliedInShader =
+              renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxRawRadiusGrowthRatio =
+              renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null;
+            nextResidentSurfaceDraw.renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio =
+              renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null;
             nextResidentSurfaceDraw.renderRowsDecodedMaxVolumeRatioJ =
               decodedRenderRowsSummary?.maxVolumeRatioJ ?? null;
             nextResidentSurfaceDraw.renderRowsDecodedVolumeRatioCapBoundary =
@@ -25724,7 +25840,7 @@ export function createSphPhaseScene(container, {
               decodedRenderRowsSummary?.volumeRatioCapBoundaryCount ?? null;
             nextResidentSurfaceDraw.renderRowsDecodedVolumeRatioCapBoundaryMaterialPhaseCounts =
               decodedRenderRowsSummary?.volumeRatioCapBoundaryMaterialPhaseCounts ?? null;
-	        } else if (
+          } else if (
           !shouldBuildRetainedSurfaceDrawDiagnostics
           && !renderFieldExecution?.renderFieldReadback
           && (renderFieldSurfaceSummary || renderFieldSurfaceSummarySkipped)
@@ -26099,10 +26215,10 @@ export function createSphPhaseScene(container, {
                 nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated
                 ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerRuntimeValidated
               ),
-	              nativeSurfaceConsumerPixelValidationStatus:
-	                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
-	                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
-	                ?? null,
+                nativeSurfaceConsumerPixelValidationStatus:
+                  nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
+                  ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
+                  ?? null,
               nativeSurfaceConsumerPixelValidationReason:
                 nextResidentSurfaceDraw.renderBridgePixelValidationReason
                 ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationReason
@@ -26602,35 +26718,35 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackRetainedPreviousBridge: Boolean(
           sphResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
         ),
-	        renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
-	        renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
-	        renderRowsParticleScaleStability: renderRowsExecution.particleScaleStability ?? null,
-	        renderRowsParticleScaleStabilityStatus:
-	          renderRowsExecution.particleScaleStability?.status ?? null,
-	        renderRowsParticleScaleCapAppliedCount:
-	          renderRowsExecution.particleScaleStability?.capAppliedCount ?? null,
-	        renderRowsParticleScaleCapAppliedCountKnown:
-	          renderRowsExecution.particleScaleStability?.capAppliedCountKnown
-	          ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null),
-	        renderRowsParticleScaleMaxRadiusGrowthRatioAllowed:
-	          renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null,
-	        renderRowsParticleScaleMaxVolumeRatioJAllowed:
-	          renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null,
-	        renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed:
-	          renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null,
-	        renderRowsParticleScaleMaxSupportRadiusM:
-	          renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null,
-	        renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed:
-	          renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null,
-	        renderRowsParticleScaleMaxGasParticleRadiusM:
-	          renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null,
-	        renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
-	          renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null,
-	        renderRowsParticleScaleMaxRawRadiusGrowthRatio:
-	          renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null,
-	        renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
-	          renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null,
-	        renderRowsDecodedSummary: decodedRenderRowsSummary,
+          renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
+          renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
+          renderRowsParticleScaleStability: renderRowsExecution.particleScaleStability ?? null,
+          renderRowsParticleScaleStabilityStatus:
+            renderRowsExecution.particleScaleStability?.status ?? null,
+          renderRowsParticleScaleCapAppliedCount:
+            renderRowsExecution.particleScaleStability?.capAppliedCount ?? null,
+          renderRowsParticleScaleCapAppliedCountKnown:
+            renderRowsExecution.particleScaleStability?.capAppliedCountKnown
+            ?? (renderRowsExecution.particleScaleStability?.capAppliedCount != null),
+          renderRowsParticleScaleMaxRadiusGrowthRatioAllowed:
+            renderRowsExecution.particleScaleStability?.maxRadiusGrowthRatioAllowed ?? null,
+          renderRowsParticleScaleMaxVolumeRatioJAllowed:
+            renderRowsExecution.particleScaleStability?.maxVolumeRatioJAllowed ?? null,
+          renderRowsParticleScaleMaxSupportRadiusSmoothingRatioAllowed:
+            renderRowsExecution.particleScaleStability?.maxSupportRadiusSmoothingRatioAllowed ?? null,
+          renderRowsParticleScaleMaxSupportRadiusM:
+            renderRowsExecution.particleScaleStability?.maxSupportRadiusM ?? null,
+          renderRowsParticleScaleMaxGasRadiusSmoothingRatioAllowed:
+            renderRowsExecution.particleScaleStability?.maxGasRadiusSmoothingRatioAllowed ?? null,
+          renderRowsParticleScaleMaxGasParticleRadiusM:
+            renderRowsExecution.particleScaleStability?.maxGasParticleRadiusM ?? null,
+          renderRowsParticleScaleSupportRadiusPolicyAppliedInShader:
+            renderRowsExecution.particleScaleStability?.supportRadiusPolicyAppliedInShader ?? null,
+          renderRowsParticleScaleMaxRawRadiusGrowthRatio:
+            renderRowsExecution.particleScaleStability?.maxRawRadiusGrowthRatio ?? null,
+          renderRowsParticleScaleMaxEffectiveRadiusGrowthRatio:
+            renderRowsExecution.particleScaleStability?.maxEffectiveRadiusGrowthRatio ?? null,
+          renderRowsDecodedSummary: decodedRenderRowsSummary,
         renderRowsDecodedMaterialPhaseCounts: decodedRenderRowsSummary?.materialPhaseCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainCounts: decodedRenderRowsSummary?.materialPhaseDomainCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainBounds: decodedRenderRowsSummary?.materialPhaseDomainBounds ?? null,
@@ -26720,32 +26836,32 @@ export function createSphPhaseScene(container, {
           && nextResidentSurfaceDraw.status !== 'resident-surface-draw-unavailable'
           && nextResidentSurfaceDraw.status !== 'resident-surface-draw-diagnostic-skipped'
         ),
-	        surfaceDrawDiagnosticsSkipped: Boolean(sphResidentSurfaceDraw?.diagnosticSkipped),
-	        surfaceDrawDiagnosticsSkipReason: sphResidentSurfaceDraw?.diagnosticSkipReason ?? null,
-	        surfaceDrawDiagnosticFieldCellCount: sphResidentSurfaceDraw?.diagnosticFieldCellCount ?? null,
-	        renderFieldBufferMode: sphResidentSurfaceDraw?.renderFieldBufferMode ?? null,
-	        surfaceDrawRenderFieldRowsBufferRetained: Boolean(
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferRetained
-	        ),
-	        surfaceDrawRenderFieldRowsBufferByteLength:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferByteLength ?? 0,
-	        surfaceDrawRenderFieldRowsBufferBorrowed:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferBorrowed ?? null,
-	        surfaceDrawRenderFieldRowsBufferReused:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferReused ?? null,
-	        surfaceDrawRenderFieldRowsBufferPoolStatus:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolStatus ?? null,
-	        surfaceDrawRenderFieldRowsBufferPoolReason:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReason ?? null,
-	        surfaceDrawRenderFieldRowsBufferPoolReused:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReused ?? null,
-	        surfaceDrawRenderFieldRowsBufferPoolByteLength:
-	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolByteLength ?? 0,
-	        surfaceDrawRenderFieldSurfaceBufferRetained: Boolean(
-	          sphResidentSurfaceDraw?.renderFieldSurfaceBufferRetained
-	        ),
-	        surfaceDrawRenderFieldSurfaceBufferByteLength:
-	          sphResidentSurfaceDraw?.renderFieldSurfaceBufferByteLength ?? 0,
+          surfaceDrawDiagnosticsSkipped: Boolean(sphResidentSurfaceDraw?.diagnosticSkipped),
+          surfaceDrawDiagnosticsSkipReason: sphResidentSurfaceDraw?.diagnosticSkipReason ?? null,
+          surfaceDrawDiagnosticFieldCellCount: sphResidentSurfaceDraw?.diagnosticFieldCellCount ?? null,
+          renderFieldBufferMode: sphResidentSurfaceDraw?.renderFieldBufferMode ?? null,
+          surfaceDrawRenderFieldRowsBufferRetained: Boolean(
+            sphResidentSurfaceDraw?.renderFieldRowsBufferRetained
+          ),
+          surfaceDrawRenderFieldRowsBufferByteLength:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferByteLength ?? 0,
+          surfaceDrawRenderFieldRowsBufferBorrowed:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferBorrowed ?? null,
+          surfaceDrawRenderFieldRowsBufferReused:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferReused ?? null,
+          surfaceDrawRenderFieldRowsBufferPoolStatus:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferPoolStatus ?? null,
+          surfaceDrawRenderFieldRowsBufferPoolReason:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReason ?? null,
+          surfaceDrawRenderFieldRowsBufferPoolReused:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReused ?? null,
+          surfaceDrawRenderFieldRowsBufferPoolByteLength:
+            sphResidentSurfaceDraw?.renderFieldRowsBufferPoolByteLength ?? 0,
+          surfaceDrawRenderFieldSurfaceBufferRetained: Boolean(
+            sphResidentSurfaceDraw?.renderFieldSurfaceBufferRetained
+          ),
+          surfaceDrawRenderFieldSurfaceBufferByteLength:
+            sphResidentSurfaceDraw?.renderFieldSurfaceBufferByteLength ?? 0,
         surfaceDrawRenderFieldBufferVolumeDescriptorSchema:
           sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorSchema ?? null,
         surfaceDrawRenderFieldBufferVolumeDescriptorStatus:

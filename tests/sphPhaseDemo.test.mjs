@@ -141,6 +141,7 @@ test('demo initial particle spacing preserves requested edges and derives materi
     spacing.particleSizePolicy.massModel,
     'phase-density-at-temperature-pressure * mechanicsRestVolumeM3'
   );
+  assert.match(spacing.particleSizePolicy.hierarchyPhaseVolumeReferenceMassModel, /condensed-phase-reference-density/);
   assert.equal(spacing.particleSizePolicy.phaseChangeVolumeModel, 'fixed-particle-count-no-automatic-gas-expansion');
   assert.match(spacing.particleSizePolicy.gasExpansionHandling, /species ledgers\/fields/);
   assert.equal(spacing.particleSizePolicy.dynamicPressureSupported, true);
@@ -389,6 +390,7 @@ test('demo initial particle spacing keeps counts fixed while material state chan
 
   const liquidDropParticle = liquidWater.state.particles.find((p) => p.role === 'drop');
   const liquidBaseParticle = liquidWater.state.particles.find((p) => p.role === 'base');
+  const hotVaporDropParticle = hotVapor.state.particles.find((p) => p.role === 'drop');
   assert.equal(liquidWater.initialParticleSpacing.matchingMaterialState, true);
   assert.equal(liquidWater.initialParticleSpacing.matchingMaterialStateSpacingUnified, true);
   assert.equal(liquidWater.initialParticleSpacing.drop.particlesPerEdge, 3);
@@ -410,6 +412,27 @@ test('demo initial particle spacing keeps counts fixed while material state chan
   assert.equal(hotVapor.initialParticleSpacing.drop.particlesPerEdge, liquidWater.initialParticleSpacing.drop.particlesPerEdge);
   assert.equal(hotVapor.initialParticleSpacing.drop.spacingM, liquidWater.initialParticleSpacing.drop.spacingM);
   assert.ok(hotVapor.initialParticleSpacing.drop.particleMassKg < liquidWater.initialParticleSpacing.drop.particleMassKg);
+  assert.equal(hotVapor.initialParticleSpacing.drop.phase, 'gas');
+  assert.ok(
+    hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceDensityKgPerM3
+    > hotVapor.initialParticleSpacing.drop.densityKgPerM3
+  );
+  assert.ok(
+    hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceMassKg
+    > hotVapor.initialParticleSpacing.drop.particleMassKg
+  );
+  assert.ok(hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceMassRatio > 100);
+  assert.match(
+    hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceDensitySource,
+    /condensed-phase-density/
+  );
+  near(
+    hotVaporDropParticle.phaseVolumeReferenceMassKg,
+    hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceMassKg,
+    hotVapor.initialParticleSpacing.drop.phaseVolumeReferenceMassKg * 1e-6
+  );
+  assert.ok(hotVaporDropParticle.phaseVolumeReferenceMassKg > hotVaporDropParticle.massKg);
+  near(liquidDropParticle.phaseVolumeReferenceMassKg, liquidDropParticle.massKg);
   assert.equal(fixed.initialParticleSpacing.status, 'fixed-requested-particles-per-edge-global-particle-volume');
   assert.equal(fixed.initialParticleSpacing.matchingMaterialState, false);
   assert.equal(fixed.initialParticleSpacing.matchingMaterialStateSpacingUnified, false);

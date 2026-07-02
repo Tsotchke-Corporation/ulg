@@ -7855,7 +7855,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let volume_ratio_j = max(mls_mpm_mechanics[mechanics_offset + 18u], 0.0);
   let rest_volume_m3 = max(mls_mpm_mechanics[mechanics_offset + 19u], 0.0);
   let mechanics_volume_m3 = rest_volume_m3 * max(volume_ratio_j, 0.000001);
-  var represented_volume_m3 = mechanics_volume_m3;
+  let phase_volume_reference_mass_kg = max(mls_mpm_mechanics[mechanics_offset + 31u], 0.0);
+  var density_represented_volume_m3 = 0.0;
+  if (ss_positive(phase_volume_reference_mass_kg) && ss_positive(rest_density_kg_per_m3)) {
+    density_represented_volume_m3 = phase_volume_reference_mass_kg / rest_density_kg_per_m3;
+  }
+  var represented_volume_m3 = max(mechanics_volume_m3, density_represented_volume_m3);
   if (!ss_positive(represented_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
     represented_volume_m3 = mass_kg / rest_density_kg_per_m3;
   }

@@ -262,7 +262,14 @@ Suggested schemas:
   reserved-identifier fix landed in `fa9aed0`; resident-authority publication
   for state-delta merge and phase-volume migration admissions, scene
   auto-publication, and browser proof without test-local admission descriptors
-  landed in `2aa8da6`.
+  landed in `2aa8da6`. The SS phase-volume reference-mass checkpoint reuses
+  mechanics row 31 for `phaseVolumeReferenceMassKg`, derives that mass from
+  condensed-phase density for expansive gas/plasma phases, feeds it into the
+  GPU level-assignment represented-volume path, publishes compact diagnostics
+  through resident same-level mechanics, and adds URL-scheduled browser
+  coverage showing H2O steam at about `680x` represented/rest volume, expected
+  level delta about `3.14`, particle-count growth `1x`, and no full particle
+  readback.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -456,8 +463,14 @@ Suggested schemas:
 4. Phase-volume migration:
    - use resident-authority-published phase-volume/state-delta admissions as
      the default scene/demo path;
-   - make water-to-steam expansion visibly migrate levels without particle
-     explosion;
+   - keep water-to-steam expansion visible in compact diagnostics without
+     particle explosion;
+   - resolve the remaining authority-ordering question: first-tick SS level
+     assignment now pre-levels vapor from `phaseVolumeReferenceMassKg`, so the
+     admitted phase-volume update can report expansion detected with
+     `phase-update-delta=0`; decide whether future authoritative level changes
+     should be gated before level assignment or remain a diagnostic/overlay
+     consumer on top of pre-leveled assignments;
    - preserve fine representation near surfaces, reactions, and walls.
 
 ## Acceptance Gates
@@ -499,14 +512,20 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS visible phase-volume level migration under
-authority admissions**:
+The next code slice on `SS` is **SS phase-volume authority ordering and
+aggregate-coherent level changes**:
 
-1. Drive a mounted water-to-steam case through URL/demo scheduling using the
-   resident-authority-published admissions, not page-evaluate fixtures.
-2. Verify compact diagnostics report expected positive level deltas,
-   stable/reduced particle count, and no full particle readback while the
-   following tick consumes the retained phase-volume overlay.
-3. Surface enough status-line/browser telemetry to distinguish real level
-   migration from an admitted-but-noop phase-volume update, while keeping raw
-   `GPUBuffer` handles same-device/local-only.
+1. Decide and implement the authority ordering for phase-volume scale changes:
+   either level assignment remains pre-leveled from `phaseVolumeReferenceMassKg`
+   and the admitted update is a descriptor/overlay confirmation, or the
+   migration overlay becomes the first stage allowed to change native levels.
+2. If authoritative update deltas are required, make the migration shader
+   compare target represented-volume level against a current/rest-volume source
+   level and keep the active-node overlay as the StateManager-admitted source of
+   truth for the following tick.
+3. Improve aggregate-node matching/coherence for water-to-steam target cells so
+   coherent bulk steam can produce coarsen rows instead of refine-required rows
+   when conservation residuals allow it.
+4. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
+   represented/rest volume > 100, particle growth <= 1, no full readback, and
+   status telemetry separating expansion detection from level-update deltas.

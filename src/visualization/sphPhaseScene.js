@@ -366,7 +366,20 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     || residentExecution?.phaseVolumeDiagnosticSummaryStatus
     || sourceSummary?.status
     || null;
-  if (!sourceSummary && !sourceStatus) return null;
+  const phaseVolumeAssignmentOverlayFeedback = summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
+    sourceStep?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || residentExecution?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || sourceStep?.phaseVolumeAssignmentOverlayFeedback
+      || residentExecution?.phaseVolumeAssignmentOverlayFeedback
+      || null
+  );
+  if (
+    !sourceSummary
+    && !sourceStatus
+    && phaseVolumeAssignmentOverlayFeedback.ready !== true
+  ) {
+    return null;
+  }
   const row = normalizeSchroederPhaseVolumeDiagnosticSummaryRow(sourceSummary);
   const activeUpdateCount = schroederPhaseVolumeDiagnosticCount(row, 'activeUpdateCount');
   const steamExpansionCandidateCount = schroederPhaseVolumeDiagnosticCount(row, 'steamExpansionCandidateCount');
@@ -416,19 +429,14 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
       ?? residentExecution?.phaseVolumeLevelUpdate?.retainedLevelUpdateBuffer
       ?? residentExecution?.phaseVolumeLevelUpdate?.levelUpdateBuffer
   );
-  const phaseVolumeAssignmentOverlayFeedback = summarizeSchroederPhaseVolumeAssignmentOverlayFeedback(
-    sourceStep?.schroederPhaseVolumeAssignmentOverlayFeedback
-      || residentExecution?.schroederPhaseVolumeAssignmentOverlayFeedback
-      || sourceStep?.phaseVolumeAssignmentOverlayFeedback
-      || residentExecution?.phaseVolumeAssignmentOverlayFeedback
-      || null
-  );
   const noFullParticleReadback = sourceSummary
     ? sourceSummary.fullParticleReadbackPerformed !== true && sourceSummary.fullReadbackPerformed !== true
     : null;
   const status = row
     ? 'schroeder-phase-volume-visible-diagnostics-ready'
-    : 'schroeder-phase-volume-visible-diagnostics-missing-summary-row';
+    : (phaseVolumeAssignmentOverlayFeedback.ready === true
+        ? 'schroeder-phase-volume-feedback-diagnostics-ready'
+        : 'schroeder-phase-volume-visible-diagnostics-missing-summary-row');
   return {
     schema: ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA,
     status,
@@ -12842,6 +12850,10 @@ export function createSphPhaseScene(container, {
     schroederPhaseVolumeAssignmentOverlayFeedbackStatus = null,
     schroederPhaseVolumeAssignmentOverlayFeedbackRowCount = 0,
     schroederPhaseVolumeAssignmentOverlayFeedbackGeneration = null,
+    schroederStateDeltaMergeAdmissionStatus = null,
+    schroederStateDeltaMergeAdmissionRowCount = 0,
+    schroederPhaseVolumeMigrationAdmissionStatus = null,
+    schroederPhaseVolumeMigrationAdmissionRowCount = 0,
     ...args
   } = {}) {
     const stepSignature = mlsMpmResidentStepSignatureFor(args);
@@ -12866,7 +12878,15 @@ export function createSphPhaseScene(container, {
       `ssPvFeedbackRows=${Math.max(0, Math.round(Number(
         schroederPhaseVolumeAssignmentOverlayFeedbackRowCount
       ) || 0))}`,
-      `ssPvFeedbackGeneration=${schroederPhaseVolumeAssignmentOverlayFeedbackGeneration ?? 'none'}`
+      `ssPvFeedbackGeneration=${schroederPhaseVolumeAssignmentOverlayFeedbackGeneration ?? 'none'}`,
+      `ssStateMergeAdmission=${schroederStateDeltaMergeAdmissionStatus || 'none'}`,
+      `ssStateMergeAdmissionRows=${Math.max(0, Math.round(Number(
+        schroederStateDeltaMergeAdmissionRowCount
+      ) || 0))}`,
+      `ssPvAdmission=${schroederPhaseVolumeMigrationAdmissionStatus || 'none'}`,
+      `ssPvAdmissionRows=${Math.max(0, Math.round(Number(
+        schroederPhaseVolumeMigrationAdmissionRowCount
+      ) || 0))}`
     ].join('|');
   }
 
@@ -19121,6 +19141,8 @@ export function createSphPhaseScene(container, {
     schroederEnableCrossLevelCoupling = true,
     schroederEnableLawQueue = true,
     schroederEnableLawNeighborCandidates = true,
+    schroederStateDeltaMergeAdmission = null,
+    schroederPhaseVolumeMigrationAdmission = null,
     thermalStepOptions: thermalStepOptionOverrides = null,
     contactKinematicsParticleBinMetadataReadback = false,
     reactionParticleBinMetadataReadback = false,
@@ -19191,6 +19213,34 @@ export function createSphPhaseScene(container, {
     const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
+    const requestedSchroederStateDeltaMergeAdmission =
+      requestedSchroederSimulation
+      && schroederStateDeltaMergeAdmission
+      && typeof schroederStateDeltaMergeAdmission === 'object'
+        ? schroederStateDeltaMergeAdmission
+        : null;
+    const requestedSchroederStateDeltaMergeAdmissionRowCount = Math.max(
+      0,
+      Math.round(Number(
+        requestedSchroederStateDeltaMergeAdmission?.schroederStateDeltaRowCount
+          ?? requestedSchroederStateDeltaMergeAdmission?.stateDeltaRowCount
+          ?? 0
+      ) || 0)
+    );
+    const requestedSchroederPhaseVolumeMigrationAdmission =
+      requestedSchroederSimulation
+      && schroederPhaseVolumeMigrationAdmission
+      && typeof schroederPhaseVolumeMigrationAdmission === 'object'
+        ? schroederPhaseVolumeMigrationAdmission
+        : null;
+    const requestedSchroederPhaseVolumeMigrationAdmissionRowCount = Math.max(
+      0,
+      Math.round(Number(
+        requestedSchroederPhaseVolumeMigrationAdmission?.schroederPhaseVolumeMigrationRowCount
+          ?? requestedSchroederPhaseVolumeMigrationAdmission?.migrationRowCount
+          ?? 0
+      ) || 0)
+    );
     const cachedSchroederPhaseVolumeAssignmentOverlayFeedback =
       requestedSchroederSimulation
       && schroederPhaseVolumeAssignmentOverlayFeedback?.ready === true
@@ -19275,7 +19325,15 @@ export function createSphPhaseScene(container, {
       schroederPhaseVolumeAssignmentOverlayFeedbackReady:
         cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready === true,
       schroederPhaseVolumeAssignmentOverlayFeedbackRows:
-        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount ?? 0
+        cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.levelUpdateRowCount ?? 0,
+      schroederStateDeltaMergeAdmissionStatus:
+        requestedSchroederStateDeltaMergeAdmission?.status ?? null,
+      schroederStateDeltaMergeAdmissionRows:
+        requestedSchroederStateDeltaMergeAdmissionRowCount,
+      schroederPhaseVolumeMigrationAdmissionStatus:
+        requestedSchroederPhaseVolumeMigrationAdmission?.status ?? null,
+      schroederPhaseVolumeMigrationAdmissionRows:
+        requestedSchroederPhaseVolumeMigrationAdmissionRowCount
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
@@ -19350,7 +19408,15 @@ export function createSphPhaseScene(container, {
       schroederPhaseVolumeAssignmentOverlayFeedbackGeneration:
         cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
           ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.residentExecutionGeneration
-          : null
+          : null,
+      schroederStateDeltaMergeAdmissionStatus:
+        requestedSchroederStateDeltaMergeAdmission?.status ?? null,
+      schroederStateDeltaMergeAdmissionRowCount:
+        requestedSchroederStateDeltaMergeAdmissionRowCount,
+      schroederPhaseVolumeMigrationAdmissionStatus:
+        requestedSchroederPhaseVolumeMigrationAdmission?.status ?? null,
+      schroederPhaseVolumeMigrationAdmissionRowCount:
+        requestedSchroederPhaseVolumeMigrationAdmissionRowCount
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
     const residentStepsStartedAtMs = nowMs();
@@ -19601,9 +19667,24 @@ export function createSphPhaseScene(container, {
             activeNodeConsumerStatus: result.activeNodeConsumerStatus ?? null,
             activeNodeIndexStatus: result.activeNodeIndexStatus ?? null,
             activeNodeSortedIndexStatus: result.activeNodeSortedIndexStatus ?? null,
+            phaseVolumeLevelUpdateStatus: result.phaseVolumeLevelUpdateStatus ?? null,
+            phaseVolumeLevelUpdateConsumerStatus:
+              result.phaseVolumeLevelUpdateConsumerStatus ?? null,
+            phaseVolumeLevelUpdateRetainedBuffer:
+              result.phaseVolumeLevelUpdateRetainedBuffer === true,
+            phaseVolumeLevelUpdateRowCount:
+              result.phaseVolumeLevelUpdateRowCount ?? 0,
             phaseVolumeAssignmentOverlayStatus: result.phaseVolumeAssignmentOverlayStatus ?? null,
             phaseVolumeAssignmentOverlayConsumerStatus:
               result.phaseVolumeAssignmentOverlayConsumerStatus ?? null,
+            phaseVolumeAssignmentOverlayEnabled:
+              result.phaseVolumeAssignmentOverlayEnabled === true,
+            phaseVolumeAssignmentOverlayIndexRequired:
+              result.phaseVolumeAssignmentOverlayIndexRequired === true,
+            phaseVolumeAssignmentOverlayIndexEnabled:
+              result.phaseVolumeAssignmentOverlayIndexEnabled === true,
+            phaseVolumeLevelSelectionSource:
+              result.phaseVolumeLevelSelectionSource ?? null,
             phaseVolumeAssignmentOverlayFeedbackStatus:
               result.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
             phaseVolumeAssignmentOverlayFeedbackReady:
@@ -19741,6 +19822,12 @@ export function createSphPhaseScene(container, {
               ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
               ...(stepPhaseVolumeAssignmentOverlay
                 ? { phaseVolumeAssignmentOverlay: stepPhaseVolumeAssignmentOverlay }
+                : {}),
+              ...(requestedSchroederStateDeltaMergeAdmission
+                ? { stateDeltaMergeAdmission: requestedSchroederStateDeltaMergeAdmission }
+                : {}),
+              ...(requestedSchroederPhaseVolumeMigrationAdmission
+                ? { phaseVolumeMigrationAdmission: requestedSchroederPhaseVolumeMigrationAdmission }
                 : {}),
               enablePortableSummary: requestedSchroederEnablePortableSummary,
               portableSummaryPeerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
@@ -20150,7 +20237,15 @@ export function createSphPhaseScene(container, {
             schroederPhaseVolumeAssignmentOverlayFeedbackGeneration:
               cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.ready
                 ? cachedSchroederPhaseVolumeAssignmentOverlayFeedbackSummary.residentExecutionGeneration
-                : null
+                : null,
+            schroederStateDeltaMergeAdmissionStatus:
+              requestedSchroederStateDeltaMergeAdmission?.status ?? null,
+            schroederStateDeltaMergeAdmissionRowCount:
+              requestedSchroederStateDeltaMergeAdmissionRowCount,
+            schroederPhaseVolumeMigrationAdmissionStatus:
+              requestedSchroederPhaseVolumeMigrationAdmission?.status ?? null,
+            schroederPhaseVolumeMigrationAdmissionRowCount:
+              requestedSchroederPhaseVolumeMigrationAdmissionRowCount
           }) !== signature
         ) {
           destroyMlsMpmResidentStepsBuffers(execution);
@@ -28554,6 +28649,9 @@ export function createSphPhaseScene(container, {
     },
     getSchroederPhaseVolumeDiagnostics() {
       return scene.userData.schroederPhaseVolumeDiagnostics || null;
+    },
+    getSchroederPhaseVolumeAssignmentOverlayFeedback() {
+      return scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback || null;
     },
     getSchroederRenderSource() {
       return scene.userData.schroederRenderSource || null;

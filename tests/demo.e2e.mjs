@@ -7705,6 +7705,171 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase Schroeder phase-volume feedback feeds following resident tick', async ({ page }) => {
+  test.setTimeout(240_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|too many warnings|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=450&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer&ss=1&schroederLevel=0&schroederPortableSummary=1&schroederActiveNodeIndex=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    return Boolean(
+      scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getMlsMpmGpuParticleState?.()?.schema
+      && typeof scene?.refreshMlsMpmResidentSteps === 'function'
+      && typeof scene?.getSchroederPhaseVolumeAssignmentOverlayFeedback === 'function'
+    );
+  }, null, { timeout: 180_000 });
+
+  const result = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const stateDeltaMergeAdmission = {
+      schema: 'peercompute.ulg.schroeder-state-delta-merge-admission.v0',
+      status: 'schroeder-state-delta-merge-admission-admitted',
+      stateDeltaMergeApproved: true,
+      outputFamilies: ['schroeder-hierarchy-state-delta'],
+      schroederStateDeltaRowCount: 1_000_000,
+      hotBufferKey: 'ulg:browser:state-delta-merge-admission',
+      sourceHotBufferKey: 'ulg:browser:state-delta-merge-admission',
+      committed: true
+    };
+    const admission = {
+      schema: 'peercompute.ulg.schroeder-phase-volume-migration-admission.v0',
+      status: 'schroeder-phase-volume-migration-admission-admitted',
+      phaseVolumeMigrationApproved: true,
+      outputFamilies: ['schroeder-phase-volume-migration'],
+      schroederPhaseVolumeMigrationRowCount: 1_000_000,
+      hotBufferKey: 'ulg:browser:phase-volume-admission',
+      sourceHotBufferKey: 'ulg:browser:phase-volume-admission',
+      committed: true
+    };
+    const commonOptions = {
+      preferWebGpu: true,
+      stepCount: 1,
+      readbackMode: 'no-full-readback',
+      compactSummaryScope: 'particle-visual',
+      force: true,
+      schroederSimulation: true,
+      schroederSelectedLevel: 0,
+      schroederEnablePortableSummary: true,
+      schroederEnableActiveNodeIndex: true,
+      schroederStateDeltaMergeAdmission: stateDeltaMergeAdmission,
+      schroederPhaseVolumeMigrationAdmission: admission
+    };
+    const first = await scene.refreshMlsMpmResidentSteps({
+      ...commonOptions,
+      continueFromResidentState: false
+    });
+    const firstFeedback = scene.getSchroederPhaseVolumeAssignmentOverlayFeedback?.();
+    const firstDiagnostics = scene.getSchroederPhaseVolumeDiagnostics?.();
+    const second = await scene.refreshMlsMpmResidentSteps({
+      ...commonOptions,
+      continueFromResidentState: true
+    });
+    overlay.__mlsMpmResidentSteps = second;
+    overlay.__mlsMpmResidentStep = second?.finalStep || null;
+    scene.refreshViewportAndOverlay?.({ reason: 'test-schroeder-phase-volume-feedback' });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const secondFeedback = scene.getSchroederPhaseVolumeAssignmentOverlayFeedback?.();
+    const secondDiagnostics = scene.getSchroederPhaseVolumeDiagnostics?.();
+    const statusText = overlay.querySelector('#sph-status')?.textContent || '';
+    return {
+      firstStatus: first?.status ?? null,
+      firstPhaseVolumeLevelUpdateStatus:
+        first?.schroederSameLevelMechanics?.phaseVolumeLevelUpdateStatus ?? null,
+      firstPhaseVolumeLevelUpdateRetainedBuffer:
+        first?.schroederSameLevelMechanics?.phaseVolumeLevelUpdateRetainedBuffer ?? null,
+      firstFeedbackStatus: firstFeedback?.status ?? null,
+      firstFeedbackReady: firstFeedback?.ready ?? null,
+      firstFeedbackRows: firstFeedback?.levelUpdateRowCount ?? null,
+      firstFeedbackRawGpuBufferTransferAllowed:
+        firstFeedback?.rawGpuBufferTransferAllowed ?? null,
+      firstDiagnosticFeedbackStatus:
+        firstDiagnostics?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
+      secondStatus: second?.status ?? null,
+      secondSourceMode: second?.residentSourceMode ?? null,
+      secondContinuedFromResidentState: second?.continuedFromResidentState ?? null,
+      secondNormalHotLoopReadbackFree: second?.normalHotLoopReadbackFree ?? null,
+      secondReadbackMode: second?.readbackMode ?? null,
+      secondSchroederStatus: second?.schroederSameLevelMechanics?.status ?? null,
+      secondPhaseVolumeAssignmentOverlayStatus:
+        second?.schroederSameLevelMechanics?.phaseVolumeAssignmentOverlayStatus ?? null,
+      secondPhaseVolumeAssignmentOverlayConsumerStatus:
+        second?.schroederSameLevelMechanics?.phaseVolumeAssignmentOverlayConsumerStatus ?? null,
+      secondPhaseVolumeAssignmentOverlayEnabled:
+        second?.schroederSameLevelMechanics?.phaseVolumeAssignmentOverlayEnabled ?? null,
+      secondPhaseVolumeAssignmentOverlayIndexRequired:
+        second?.schroederSameLevelMechanics?.phaseVolumeAssignmentOverlayIndexRequired ?? null,
+      secondPhaseVolumeAssignmentOverlayIndexEnabled:
+        second?.schroederSameLevelMechanics?.phaseVolumeAssignmentOverlayIndexEnabled ?? null,
+      secondPhaseVolumeLevelSelectionSource:
+        second?.schroederSameLevelMechanics?.phaseVolumeLevelSelectionSource ?? null,
+      secondPhaseVolumeNextTickAssignmentOverlayStatus:
+        second?.phaseVolumeNextTickAssignmentOverlayStatus
+          ?? second?.schroederSameLevelMechanics?.phaseVolumeNextTickAssignmentOverlayStatus
+          ?? null,
+      secondFeedbackStatus: secondFeedback?.status ?? null,
+      secondFeedbackReady: secondFeedback?.ready ?? null,
+      secondFeedbackRows: secondFeedback?.levelUpdateRowCount ?? null,
+      secondFeedbackRawGpuBufferTransferAllowed:
+        secondFeedback?.rawGpuBufferTransferAllowed ?? null,
+      secondDiagnosticFeedbackStatus:
+        secondDiagnostics?.phaseVolumeAssignmentOverlayFeedbackStatus ?? null,
+      secondDiagnosticFeedbackReady:
+        secondDiagnostics?.phaseVolumeAssignmentOverlayFeedbackReady ?? null,
+      statusTextIncludesFeedback:
+        statusText.includes('phase-feedback=ready')
+        && statusText.includes('phase-feedback-rows=')
+    };
+  });
+
+  expect(result.firstStatus).toBe('resident-steps-executed');
+  expect(result.firstPhaseVolumeLevelUpdateStatus)
+    .toBe('schroeder-phase-volume-level-update-submitted');
+  expect(result.firstPhaseVolumeLevelUpdateRetainedBuffer).toBe(true);
+  expect(result.firstFeedbackStatus)
+    .toBe('schroeder-phase-volume-assignment-overlay-feedback-ready');
+  expect(result.firstFeedbackReady).toBe(true);
+  expect(result.firstFeedbackRows).toBeGreaterThan(0);
+  expect(result.firstFeedbackRawGpuBufferTransferAllowed).toBe(false);
+  expect(result.firstDiagnosticFeedbackStatus)
+    .toBe('schroeder-phase-volume-assignment-overlay-feedback-ready');
+  expect(result.secondStatus).toBe('resident-steps-executed');
+  expect(result.secondSourceMode).toBe('previous-gpu-resident-output');
+  expect(result.secondContinuedFromResidentState).toBe(true);
+  expect(result.secondReadbackMode).toBe('no-full-readback');
+  expect(result.secondNormalHotLoopReadbackFree).toBe(true);
+  expect(result.secondSchroederStatus).toBe('schroeder-same-level-mechanics-submitted');
+  expect(result.secondPhaseVolumeAssignmentOverlayStatus)
+    .toBe('schroeder-phase-volume-level-update-assignment-overlay-ready');
+  expect(result.secondPhaseVolumeAssignmentOverlayConsumerStatus)
+    .toBe('phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection');
+  expect(result.secondPhaseVolumeAssignmentOverlayEnabled).toBe(true);
+  expect(result.secondPhaseVolumeLevelSelectionSource)
+    .toBe('state-manager-admitted-phase-volume-level-update');
+  if (result.secondPhaseVolumeAssignmentOverlayIndexRequired) {
+    expect(result.secondPhaseVolumeAssignmentOverlayIndexEnabled).toBe(true);
+  }
+  expect(result.secondFeedbackStatus)
+    .toBe('schroeder-phase-volume-assignment-overlay-feedback-ready');
+  expect(result.secondFeedbackReady).toBe(true);
+  expect(result.secondFeedbackRows).toBeGreaterThan(0);
+  expect(result.secondFeedbackRawGpuBufferTransferAllowed).toBe(false);
+  expect(result.secondDiagnosticFeedbackStatus)
+    .toBe('schroeder-phase-volume-assignment-overlay-feedback-ready');
+  expect(result.secondDiagnosticFeedbackReady).toBe(true);
+  expect(result.statusTextIncludesFeedback).toBe(true);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase URL Schroeder config drives native resident schedule', async ({ page }) => {
   test.setTimeout(240_000);
   const consoleIssues = [];

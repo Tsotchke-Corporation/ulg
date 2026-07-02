@@ -2867,6 +2867,11 @@ export async function mountSphPhaseDemoOverlay({
       ?? schroederRenderSource?.activeLeafProxyCount
       ?? schroederDrawSource?.activeLeafProxyCount
       ?? 0;
+    const phaseVolumeFeedback = residentSteps?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || residentSteps?.phaseVolumeAssignmentOverlayFeedback
+      || residentStep?.schroederPhaseVolumeAssignmentOverlayFeedback
+      || residentStep?.phaseVolumeAssignmentOverlayFeedback
+      || null;
     const drawBatchCount = schroederDrawSource?.drawBatchCount ?? 0;
     const retainedRefCount = residentSteps?.schroederLocalRetainedRenderBuffers?.retainedBufferRefs?.length
       ?? residentSteps?.localRetainedRenderBuffers?.retainedBufferRefs?.length
@@ -2887,6 +2892,9 @@ export async function mountSphPhaseDemoOverlay({
       `level=${selectedLevel ?? 'pending'}`,
       `dx=${Number.isFinite(nativeGridSpacingM) ? fmt(nativeGridSpacingM, 4) : 'pending'}m`,
       `leaves=${activeLeafProxyCount}`,
+      `phase-feedback=${phaseVolumeFeedback?.ready ? 'ready' : 'off'}`,
+      `phase-feedback-rows=${phaseVolumeFeedback?.levelUpdateRowCount ?? 0}`,
+      `phase-feedback-index=${phaseVolumeFeedback?.sparseOverlayIndexRequired ? 'required' : 'not-required'}`,
       `draw-batches=${drawBatchCount}`,
       `retained=${retainedRefCount}`,
       `native-draws=${nativeSubmitDrawCount}`,

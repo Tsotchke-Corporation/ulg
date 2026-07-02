@@ -11871,13 +11871,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let level_delta = level_update_rows[offset + 9u];
       let coarsen = level_update_rows[offset + 13u] > 0.0;
       let refine = level_update_rows[offset + 14u] > 0.0;
-      let coherent = level_update_rows[offset + 15u] > 0.0;
+      let coherent_update = level_update_rows[offset + 15u] > 0.0;
       let residual_issue = level_update_rows[offset + 16u] > 1.0;
       let phase_volume_ratio = level_update_rows[offset + 8u];
       active_count = active_count + 1.0;
       coarsen_count = coarsen_count + select(0.0, 1.0, coarsen);
       refine_count = refine_count + select(0.0, 1.0, refine);
-      coherent_count = coherent_count + select(0.0, 1.0, coherent);
+      coherent_count = coherent_count + select(0.0, 1.0, coherent_update);
       residual_issue_count = residual_issue_count + select(0.0, 1.0, residual_issue);
       min_source_level = min(min_source_level, source_level);
       max_source_level = max(max_source_level, source_level);
@@ -11903,7 +11903,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         level_update_rows[offset + 30u] > 0.0
       );
       visible_migration_count = visible_migration_count + select(0.0, 1.0, coarsen || refine);
-      aggregate_missing_count = aggregate_missing_count + select(0.0, 1.0, !coherent);
+      aggregate_missing_count = aggregate_missing_count + select(0.0, 1.0, !coherent_update);
       level_changed_count = level_changed_count + select(0.0, 1.0, abs(target_level - source_level) > 0.5);
     }
   }

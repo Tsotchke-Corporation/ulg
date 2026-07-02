@@ -310,6 +310,26 @@ export const SCHROEDER_LOCAL_LAW_QUEUE_MASK =
   SCHROEDER_LOCAL_LAW_REACTION_MASK
   | SCHROEDER_LOCAL_LAW_CONTACT_MASK
   | SCHROEDER_LOCAL_LAW_INTERFACE_MASK;
+export const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_AGGREGATE_MISSING_MASK = 1;
+export const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_RESIDUAL_MASK = 2;
+export const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_SPARSE_SURFACE_MASK = 4;
+export const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS = Object.freeze([
+  {
+    bit: SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_AGGREGATE_MISSING_MASK,
+    reason: 'aggregate-missing-or-interface-pressure'
+  },
+  {
+    bit: SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_RESIDUAL_MASK,
+    reason: 'conservation-residual-pressure'
+  },
+  {
+    bit: SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_SPARSE_SURFACE_MASK,
+    reason: 'sparse-surface-preserve-fine-pressure'
+  },
+  { bit: 8, reason: 'reaction-front-pressure-reserved' },
+  { bit: 16, reason: 'wall-boundary-pressure-reserved' },
+  { bit: 32, reason: 'shock-or-high-gradient-pressure-reserved' }
+]);
 export const DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET = 64;
 export const SCHROEDER_FAR_LAW_GRAVITY_MASK = 8;
 export const SCHROEDER_FAR_LAW_RADIATION_MASK = 16;
@@ -4746,6 +4766,8 @@ export function createSchroederPhaseVolumeMigrationPlan({
     phaseVolumeStatus: 'phase-volume-migration-planned',
     migrationMode: 'physical-volume-level-target-with-aggregate-coherence',
     aggregateCoherenceRequirement: 'retained-aggregate-node-buffer-consumed',
+    refinePressurePolicy: 'explicit-gpu-row-mask-before-any-split-merge-mutation',
+    refinePressureReasonBits: [...SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS],
     waterToSteamScaleStatus: 'water-to-steam-expansion-maps-to-coarser-levels-without-particle-multiplication',
     stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
     outputFamilies: [
@@ -5089,6 +5111,8 @@ export function createSchroederPhaseVolumeDiagnosticSummaryPlan({
     stateFamilyId: finiteNumber(stateFamilyId, 1),
     diagnosticStatus: 'phase-volume-diagnostics-ready',
     visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-ready',
+    refinePressurePolicy: 'compact-summary-count-and-reason-mask-no-particle-readback',
+    refinePressureReasonBits: [...SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS],
     readbackPolicy: 'compact-summary-only-no-particle-readback',
     outputFamilies: [
       'schroeder-phase-volume-diagnostics',
@@ -10091,6 +10115,8 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
       phaseVolumeStatus: 'phase-volume-migration-submitted',
       migrationMode: 'physical-volume-level-target-with-aggregate-coherence',
       aggregateCoherenceRequirement: 'retained-aggregate-node-buffer-consumed',
+      refinePressurePolicy: plan.refinePressurePolicy,
+      refinePressureReasonBits: [...SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS],
       conservativeTransferStatus: 'phase-volume-migration-submitted',
       stateMutationStatus: 'phase-volume-migration-buffer-submitted',
       stateAuthorityStatus: 'requires-state-manager-admission-for-authoritative-level-migration',
@@ -10394,6 +10420,8 @@ export async function runSchroederPhaseVolumeDiagnosticSummaryWebGpu({
       summaryRows,
       diagnosticStatus: 'phase-volume-diagnostics-submitted',
       visibleStressCaseStatus: 'water-to-steam-level-migration-diagnostics-submitted',
+      refinePressurePolicy: plan.refinePressurePolicy,
+      refinePressureReasonBits: [...SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS],
       conservativeTransferStatus: 'diagnostic-summary-only-no-conservative-transfer',
       stateMutationStatus: 'diagnostic-summary-only-no-state-mutation',
       stateAuthorityStatus: 'state-manager-admitted-level-update-source',
@@ -11838,6 +11866,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       phaseVolumeStatus: resolvedPhaseVolumeMigration.phaseVolumeStatus,
       migrationMode: resolvedPhaseVolumeMigration.migrationMode,
       aggregateCoherenceRequirement: resolvedPhaseVolumeMigration.aggregateCoherenceRequirement,
+      refinePressurePolicy: resolvedPhaseVolumeMigration.refinePressurePolicy,
+      refinePressureReasonBits: resolvedPhaseVolumeMigration.refinePressureReasonBits,
       phaseVolumeExpandThreshold: resolvedPhaseVolumeMigration.phaseVolumeExpandThreshold,
       coarsenLevelDeltaThreshold: resolvedPhaseVolumeMigration.coarsenLevelDeltaThreshold,
       conservativeTransferStatus: resolvedPhaseVolumeMigration.conservativeTransferStatus,
@@ -11891,6 +11921,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       summaryRowCount: resolvedPhaseVolumeDiagnosticSummary.summaryRowCount,
       diagnosticStatus: resolvedPhaseVolumeDiagnosticSummary.diagnosticStatus,
       visibleStressCaseStatus: resolvedPhaseVolumeDiagnosticSummary.visibleStressCaseStatus,
+      refinePressurePolicy: resolvedPhaseVolumeDiagnosticSummary.refinePressurePolicy,
+      refinePressureReasonBits: resolvedPhaseVolumeDiagnosticSummary.refinePressureReasonBits,
       readbackPolicy: resolvedPhaseVolumeDiagnosticSummary.readbackPolicy,
       compactSummaryReadbackPerformed: resolvedPhaseVolumeDiagnosticSummary.compactSummaryReadbackPerformed,
       retainedSummaryBuffer: Boolean(resolvedPhaseVolumeDiagnosticSummary.summaryBuffer),

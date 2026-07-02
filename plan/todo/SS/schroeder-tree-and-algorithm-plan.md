@@ -282,7 +282,12 @@ Suggested schemas:
   far-field hierarchy aggregate source. The URL H2O steam proof now requires
   positive coarsen-eligible and aggregate-coherent counts, zero refine-required
   rows, zero conservation residual issues, particle-count growth `1x`, and no
-  full readback.
+  full readback. The refine-pressure checkpoint keeps the 32-float row ABI but
+  replaces spare fields with a GPU-produced `refinePressureReasonMask` plus
+  compact summary `refinePressureCount/refinePressureReasonMask` fields. Coherent
+  bulk H2O steam remains coarsened only when the pressure mask is zero; aggregate
+  missing/interface, conservation residual, and sparse-surface preservation bits
+  now gate refine-required rows before any split/merge mutation path exists.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -525,16 +530,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume refine/split policy**:
+The next code slice on `SS` is **SS StateManager-admitted split/merge proposals**:
 
-1. Use compact target-aggregate and migration diagnostics to keep coherent bulk
-   phase expansion coarsened while preserving or refining particles near
-   surfaces, reactions, walls, shocks, and high-gradient regions.
-2. Add explicit surface/interface/refine pressure counters before any
-   split/merge mutation path, keeping mutation StateManager-admitted and
-   conservation-safe.
+1. Consume compact `refinePressureCount/refinePressureReasonMask` diagnostics
+   and retained migration rows to emit split/merge proposal rows without
+   mutating particle state.
+2. Require StateManager admission before any particle-count or represented-mass
+   mutation, with mass/momentum/energy continuity rows preserved for replay.
 3. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent
-   bulk, particle growth <= 1, no full readback, and status telemetry
-   separating expansion detection from level-update deltas.
+   bulk, refine-pressure count/mask 0 for coherent bulk, particle growth <= 1,
+   no full readback, and status telemetry separating expansion detection from
+   level-update deltas.

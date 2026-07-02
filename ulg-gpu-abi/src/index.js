@@ -1328,7 +1328,7 @@ export const SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT = Object.freeze([
   'chartId:f32',
   'migrationModeId:f32',
   'stateAdmissionRequired:f32',
-  'pad0:f32'
+  'refinePressureReasonMask:f32'
 ]);
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',
@@ -1362,7 +1362,7 @@ export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT = Object.freeze([
   'chartId:f32',
   'capacityStatus:f32',
   'stateAdmissionRequired:f32',
-  'pad0:f32'
+  'refinePressureReasonMask:f32'
 ]);
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freeze([
   'migrationRowCount:f32',
@@ -1395,8 +1395,8 @@ export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freez
   'phaseVolumeExpandThreshold:f32',
   'stateFamilyId:f32',
   'capacityStatus:f32',
-  'pad0:f32',
-  'pad1:f32'
+  'refinePressureCount:f32',
+  'refinePressureReasonMask:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

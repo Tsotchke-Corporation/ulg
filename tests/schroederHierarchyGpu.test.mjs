@@ -153,6 +153,7 @@ import {
   SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+  SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS,
   createSchroederActiveNodeIndexParamsArray,
   createSchroederActiveNodeIndexPlan,
   createSchroederActiveNodeListPlan,
@@ -729,6 +730,7 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length,
     SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS
   );
+  assert.equal(SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT[31], 'refinePressureReasonMask:f32');
   assert.equal(SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
@@ -760,6 +762,7 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length,
     SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
   );
+  assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT[31], 'refinePressureReasonMask:f32');
   assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
@@ -774,6 +777,8 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length,
     SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS
   );
+  assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT[30], 'refinePressureCount:f32');
+  assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT[31], 'refinePressureReasonMask:f32');
   assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
@@ -2316,6 +2321,8 @@ test('Schroeder phase-volume migration plan consumes aggregate nodes for water-t
   assert.equal(plan.phaseVolumeStatus, 'phase-volume-migration-planned');
   assert.equal(plan.migrationMode, 'physical-volume-level-target-with-aggregate-coherence');
   assert.equal(plan.aggregateCoherenceRequirement, 'retained-aggregate-node-buffer-consumed');
+  assert.equal(plan.refinePressurePolicy, 'explicit-gpu-row-mask-before-any-split-merge-mutation');
+  assert.deepEqual(plan.refinePressureReasonBits, SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS);
   assert.equal(
     plan.waterToSteamScaleStatus,
     'water-to-steam-expansion-maps-to-coarser-levels-without-particle-multiplication'
@@ -2447,6 +2454,8 @@ test('Schroeder phase-volume diagnostic summary plan reads compact admitted leve
   assert.equal(plan.outputCompaction, 'one-compact-phase-volume-diagnostic-summary-row');
   assert.equal(plan.diagnosticStatus, 'phase-volume-diagnostics-ready');
   assert.equal(plan.visibleStressCaseStatus, 'water-to-steam-level-migration-diagnostics-ready');
+  assert.equal(plan.refinePressurePolicy, 'compact-summary-count-and-reason-mask-no-particle-readback');
+  assert.deepEqual(plan.refinePressureReasonBits, SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS);
   assert.equal(plan.readbackPolicy, 'compact-summary-only-no-particle-readback');
   assert.equal(plan.summaryByteLength, 32 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(plan.gpuFirst, true);
@@ -5162,11 +5171,15 @@ test('Schroeder phase-volume migration consumes retained aggregate nodes without
   assert.equal(migration.phaseVolumeStatus, 'phase-volume-migration-submitted');
   assert.equal(migration.migrationMode, 'physical-volume-level-target-with-aggregate-coherence');
   assert.equal(migration.aggregateCoherenceRequirement, 'retained-aggregate-node-buffer-consumed');
+  assert.equal(migration.refinePressurePolicy, 'explicit-gpu-row-mask-before-any-split-merge-mutation');
+  assert.deepEqual(migration.refinePressureReasonBits, SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS);
   assert.equal(migration.conservativeTransferStatus, 'phase-volume-migration-submitted');
   assert.equal(migration.stateMutationStatus, 'phase-volume-migration-buffer-submitted');
   assert.equal(migration.stateAuthorityStatus, 'requires-state-manager-admission-for-authoritative-level-migration');
   assert.deepEqual(device.dispatches, [[3, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeMigrationParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('refine_pressure_reason_mask')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('sparse_surface_refine_pressure')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
@@ -5273,10 +5286,13 @@ test('Schroeder phase-volume diagnostic summary consumes admitted level updates 
   assert.equal(summary.summaryRows.length, 32);
   assert.equal(summary.diagnosticStatus, 'phase-volume-diagnostics-submitted');
   assert.equal(summary.visibleStressCaseStatus, 'water-to-steam-level-migration-diagnostics-submitted');
+  assert.equal(summary.refinePressurePolicy, 'compact-summary-count-and-reason-mask-no-particle-readback');
+  assert.deepEqual(summary.refinePressureReasonBits, SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS);
   assert.equal(summary.conservativeTransferStatus, 'diagnostic-summary-only-no-conservative-transfer');
   assert.equal(summary.stateMutationStatus, 'diagnostic-summary-only-no-state-mutation');
   assert.deepEqual(device.dispatches, [[1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeDiagnosticSummaryParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('refine_pressure_count')));
 });
 
 test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
@@ -6192,6 +6208,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.phaseVolumeMigration.phaseVolumeStatus, 'phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeMigration.migrationMode, 'physical-volume-level-target-with-aggregate-coherence');
   assert.equal(result.phaseVolumeMigration.aggregateCoherenceRequirement, 'retained-aggregate-node-buffer-consumed');
+  assert.equal(result.phaseVolumeMigration.refinePressurePolicy, 'explicit-gpu-row-mask-before-any-split-merge-mutation');
+  assert.deepEqual(result.phaseVolumeMigration.refinePressureReasonBits, SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS);
   assert.equal(result.phaseVolumeMigration.conservativeTransferStatus, 'phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeMigration.stateMutationStatus, 'phase-volume-migration-buffer-submitted');
   assert.equal(
@@ -6689,6 +6707,14 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     'water-to-steam-level-migration-diagnostics-submitted'
   );
   assert.equal(result.phaseVolumeDiagnosticSummary.summaryRows.length, 32);
+  assert.equal(
+    result.phaseVolumeDiagnosticSummary.refinePressurePolicy,
+    'compact-summary-count-and-reason-mask-no-particle-readback'
+  );
+  assert.deepEqual(
+    result.phaseVolumeDiagnosticSummary.refinePressureReasonBits,
+    SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS
+  );
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeTargetAggregateStatus, 'schroeder-phase-volume-target-aggregate-submitted');
   assert.equal(result.phaseVolumeTargetAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');

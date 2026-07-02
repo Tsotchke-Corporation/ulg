@@ -7942,6 +7942,12 @@ test('SPH phase URL Schroeder water-to-steam phase-volume diagnostics stay readb
         diagnostics?.aggregateCoherentCount ?? null,
       conservationResidualIssueCount:
         diagnostics?.conservationResidualIssueCount ?? null,
+      refinePressureCount:
+        diagnostics?.refinePressureCount ?? null,
+      refinePressureReasonMask:
+        diagnostics?.refinePressureReasonMask ?? null,
+      refinePressurePolicyStatus:
+        diagnostics?.refinePressurePolicyStatus ?? null,
       particleCountGrowthFactor:
         diagnostics?.particleCountGrowthFactor ?? null,
       noFullParticleReadback:
@@ -7974,6 +7980,9 @@ test('SPH phase URL Schroeder water-to-steam phase-volume diagnostics stay readb
   expect(result.aggregateCoherentCount).toBeGreaterThan(0);
   expect(result.refineRequiredCount).toBe(0);
   expect(result.conservationResidualIssueCount).toBe(0);
+  expect(result.refinePressureCount).toBe(0);
+  expect(result.refinePressureReasonMask).toBe(0);
+  expect(result.refinePressurePolicyStatus).toBe('phase-volume-refine-pressure-clear');
   expect(result.particleCountGrowthFactor).toBeLessThanOrEqual(1);
   expect(result.noFullParticleReadback).toBe(true);
   expect(result.statusTextIncludesPhaseTelemetry).toBe(true);

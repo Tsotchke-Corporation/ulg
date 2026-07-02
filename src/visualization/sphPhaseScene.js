@@ -197,6 +197,15 @@ const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
   ]))
 );
 
+const SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASONS = Object.freeze([
+  [1, 'aggregate-missing-or-interface-pressure'],
+  [2, 'conservation-residual-pressure'],
+  [4, 'sparse-surface-preserve-fine-pressure'],
+  [8, 'reaction-front-pressure-reserved'],
+  [16, 'wall-boundary-pressure-reserved'],
+  [32, 'shock-or-high-gradient-pressure-reserved']
+]);
+
 function normalizeHexColor(value) {
   const raw = String(value ?? '').trim();
   const six = raw.match(/^#?([0-9a-f]{6})$/i);
@@ -224,6 +233,14 @@ function schroederPhaseVolumeDiagnosticField(row, fieldName) {
 function schroederPhaseVolumeDiagnosticCount(row, fieldName) {
   const value = schroederPhaseVolumeDiagnosticField(row, fieldName);
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : null;
+}
+
+function schroederPhaseVolumeRefinePressureReasons(mask) {
+  const numericMask = Math.max(0, Math.round(Number(mask ?? 0)));
+  if (!Number.isFinite(numericMask) || numericMask === 0) return [];
+  return SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASONS
+    .filter(([bit]) => (numericMask & bit) !== 0)
+    .map(([, reason]) => reason);
 }
 
 function normalizeSchroederPhaseVolumeDiagnosticSummaryRow(summary = null) {
@@ -398,6 +415,9 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
   const maxPositiveLevelDelta = schroederPhaseVolumeDiagnosticField(row, 'maxPositiveLevelDelta');
   const totalRestVolumeM3 = schroederPhaseVolumeDiagnosticField(row, 'totalRestVolumeM3');
   const totalRepresentedVolumeM3 = schroederPhaseVolumeDiagnosticField(row, 'totalRepresentedVolumeM3');
+  const refinePressureCount = schroederPhaseVolumeDiagnosticCount(row, 'refinePressureCount');
+  const refinePressureReasonMask = schroederPhaseVolumeDiagnosticField(row, 'refinePressureReasonMask');
+  const refinePressureReasons = schroederPhaseVolumeRefinePressureReasons(refinePressureReasonMask);
   const selectedLevel = finiteNumberOrNull(
     sourceStep?.selectedLevel
       ?? sourceStep?.schroederSelectedLevel
@@ -530,6 +550,12 @@ export function summarizeSchroederPhaseVolumeDiagnosticStatus(residentExecution 
     aggregateCoherentCount: schroederPhaseVolumeDiagnosticCount(row, 'aggregateCoherentCount'),
     conservationResidualIssueCount:
       schroederPhaseVolumeDiagnosticCount(row, 'conservationResidualIssueCount'),
+    refinePressureCount,
+    refinePressureReasonMask,
+    refinePressureReasons,
+    refinePressurePolicyStatus: (refinePressureCount ?? 0) > 0
+      ? 'phase-volume-refine-pressure-detected'
+      : 'phase-volume-refine-pressure-clear',
     minSourceLevelId: activeUpdateCount > 0
       ? schroederPhaseVolumeDiagnosticField(row, 'minSourceLevelId')
       : null,

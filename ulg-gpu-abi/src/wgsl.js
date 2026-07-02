@@ -11665,7 +11665,8 @@ fn ss_pvm_write_row(
   conservation_residual_status: f32,
   chart_id: f32,
   migration_mode_id: f32,
-  state_admission_required: f32
+  state_admission_required: f32,
+  refine_pressure_reason_mask: f32
 ) {
   migration_rows[migration_offset + 0u] = f32(particle_index);
   migration_rows[migration_offset + 1u] = source_level;
@@ -11698,7 +11699,7 @@ fn ss_pvm_write_row(
   migration_rows[migration_offset + 28u] = chart_id;
   migration_rows[migration_offset + 29u] = migration_mode_id;
   migration_rows[migration_offset + 30u] = state_admission_required;
-  migration_rows[migration_offset + 31u] = 0.0;
+  migration_rows[migration_offset + 31u] = refine_pressure_reason_mask;
 }
 
 @compute @workgroup_size(64)
@@ -11760,7 +11761,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       0.0,
       chart_id,
       1.0,
-      1.0
+      1.0,
+      0.0
     );
     return;
   }
@@ -11807,8 +11809,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let aggregate_coherence_status = select(0.0, 1.0, aggregate_matched);
   let conservation_residual_status = select(2.0, 1.0, residual_ok);
   let delta_threshold = max(params.coarsen_level_delta_threshold, 0.0);
-  let coarsen = phase_expanded && level_delta >= delta_threshold && aggregate_matched && residual_ok;
-  let refine = phase_expanded && (!aggregate_matched || !residual_ok);
+  let missing_aggregate_refine_pressure = phase_expanded && !aggregate_matched;
+  let residual_refine_pressure = phase_expanded && aggregate_matched && !residual_ok;
+  let sparse_surface_refine_pressure = phase_expanded
+    && aggregate_matched
+    && residual_ok
+    && aggregate_match_count <= 1.0
+    && level_delta >= delta_threshold;
+  var refine_pressure_reason_mask_u32 = 0u;
+  if (missing_aggregate_refine_pressure) {
+    refine_pressure_reason_mask_u32 = refine_pressure_reason_mask_u32 | 1u;
+  }
+  if (residual_refine_pressure) {
+    refine_pressure_reason_mask_u32 = refine_pressure_reason_mask_u32 | 2u;
+  }
+  if (sparse_surface_refine_pressure) {
+    refine_pressure_reason_mask_u32 = refine_pressure_reason_mask_u32 | 4u;
+  }
+  let refine_pressure_reason_mask = f32(refine_pressure_reason_mask_u32);
+  let coarsen = phase_expanded
+    && level_delta >= delta_threshold
+    && aggregate_matched
+    && residual_ok
+    && refine_pressure_reason_mask_u32 == 0u;
+  let refine = phase_expanded && refine_pressure_reason_mask_u32 != 0u;
 
   var status = 1.0;
   if (phase_expanded) {
@@ -11855,7 +11879,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     conservation_residual_status,
     chart_id,
     1.0,
-    1.0
+    1.0,
+    refine_pressure_reason_mask
   );
 }
 `;
@@ -11919,6 +11944,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let refine_required = migration_rows[migration_offset + 23u];
   let aggregate_coherence_status = migration_rows[migration_offset + 25u];
   let conservation_residual_status = migration_rows[migration_offset + 26u];
+  let refine_pressure_reason_mask = migration_rows[migration_offset + 31u];
   var status = 1.0;
   if (coarsen_eligible > 0.0) {
     status = status + 2.0;
@@ -11964,7 +11990,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   level_update_rows[update_offset + 28u] = migration_rows[migration_offset + 28u];
   level_update_rows[update_offset + 29u] = 1.0;
   level_update_rows[update_offset + 30u] = 0.0;
-  level_update_rows[update_offset + 31u] = 0.0;
+  level_update_rows[update_offset + 31u] = refine_pressure_reason_mask;
 }
 `;
 
@@ -12026,6 +12052,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var visible_migration_count = 0.0;
   var aggregate_missing_count = 0.0;
   var level_changed_count = 0.0;
+  var refine_pressure_count = 0.0;
+  var refine_pressure_reason_mask = 0u;
 
   for (var row_index = 0u; row_index < params.level_update_row_count; row_index = row_index + 1u) {
     let offset = row_index * level_update_stride;
@@ -12038,6 +12066,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let coherent_update = level_update_rows[offset + 15u] > 0.0;
       let residual_issue = level_update_rows[offset + 16u] > 1.0;
       let phase_volume_ratio = level_update_rows[offset + 8u];
+      let row_refine_pressure_mask = u32(max(round(level_update_rows[offset + 31u]), 0.0));
       active_count = active_count + 1.0;
       coarsen_count = coarsen_count + select(0.0, 1.0, coarsen);
       refine_count = refine_count + select(0.0, 1.0, refine);
@@ -12069,6 +12098,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       visible_migration_count = visible_migration_count + select(0.0, 1.0, coarsen || refine);
       aggregate_missing_count = aggregate_missing_count + select(0.0, 1.0, !coherent_update);
       level_changed_count = level_changed_count + select(0.0, 1.0, abs(target_level - source_level) > 0.5);
+      refine_pressure_count = refine_pressure_count + select(0.0, 1.0, row_refine_pressure_mask != 0u);
+      refine_pressure_reason_mask = refine_pressure_reason_mask | row_refine_pressure_mask;
     }
   }
 
@@ -12109,7 +12140,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   summary_rows[summary_offset + 27u] = max(params.phase_volume_expand_threshold, 1.0);
   summary_rows[summary_offset + 28u] = params.state_family_id;
   summary_rows[summary_offset + 29u] = 1.0;
-  summary_rows[summary_offset + 30u] = 0.0;
-  summary_rows[summary_offset + 31u] = 0.0;
+  summary_rows[summary_offset + 30u] = refine_pressure_count;
+  summary_rows[summary_offset + 31u] = f32(refine_pressure_reason_mask);
 }
 `;

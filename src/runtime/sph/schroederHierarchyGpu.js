@@ -5,6 +5,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
+  SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -21,6 +22,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -30,6 +33,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  schroederHierarchyAggregateNodeReduceWgsl,
   schroederHierarchyAggregateWgsl,
   schroederActiveNodeListWgsl,
   schroederConservationSummaryWgsl,
@@ -61,6 +65,8 @@ export {
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -75,6 +81,7 @@ export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPL
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
+export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
@@ -83,6 +90,7 @@ export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
+export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
@@ -97,6 +105,7 @@ export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservat
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_MERGE_READBACK_MODE = 'full-cross-level-state-delta-merge-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-level-state-delta-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
+export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
 
 const DEFAULT_MIN_LEVEL = -8;
@@ -464,6 +473,31 @@ export function createSchroederHierarchyAggregateParamsArray({
   return buffer;
 }
 
+export function createSchroederHierarchyAggregateNodeParamsArray({
+  aggregateRowCount = 0,
+  aggregateStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+  aggregateNodeStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(aggregateRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    aggregateStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    aggregateNodeStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(16, 0, true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -658,6 +692,26 @@ function assertCrossLevelStateDeltaMergeInput(crossLevelStateDeltaMerge) {
   )));
   if (stride !== SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS) {
     throw new RangeError('Schroeder hierarchy aggregate requires the current merge row layout');
+  }
+}
+
+function assertHierarchyAggregateInput(hierarchyAggregate) {
+  if (
+    hierarchyAggregate?.schema !== ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA
+    && hierarchyAggregate?.schema !== ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA
+  ) {
+    throw new TypeError('Schroeder hierarchy aggregate-node reduction requires a Schroeder hierarchy aggregate input');
+  }
+  const aggregateRowCount = Math.max(0, Math.round(finiteNumber(hierarchyAggregate.aggregateRowCount, 0)));
+  if (aggregateRowCount <= 0) {
+    throw new RangeError('Schroeder hierarchy aggregate-node reduction requires at least one aggregate contribution row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregate.aggregateStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_FLOATS
+  )));
+  if (stride !== SCHROEDER_HIERARCHY_AGGREGATE_FLOATS) {
+    throw new RangeError('Schroeder hierarchy aggregate-node reduction requires the current aggregate contribution row layout');
   }
 }
 
@@ -919,6 +973,46 @@ export function createSchroederHierarchyAggregatePlan({
     stateMutationStatus: 'aggregate-contribution-materialization-planned',
     stateAuthorityStatus: 'state-manager-admitted-merge-buffer-source',
     conservativeTransferStatus: 'hierarchy-aggregate-contributions-ready',
+    conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederHierarchyAggregateNodePlan({
+  hierarchyAggregate
+} = {}) {
+  assertHierarchyAggregateInput(hierarchyAggregate);
+  const aggregateRowCount = Math.max(0, Math.round(finiteNumber(hierarchyAggregate.aggregateRowCount, 0)));
+  const aggregateNodeByteLength = Math.max(
+    4,
+    aggregateRowCount * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
+    status: 'schroeder-hierarchy-aggregate-node-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-hierarchy-aggregate-node-reduction',
+    sourceHierarchyAggregateSchema: hierarchyAggregate.schema,
+    sourceHierarchyAggregateStatus: hierarchyAggregate.status ?? null,
+    aggregateRowCount,
+    aggregateStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+    aggregateNodeRowLayout: [...SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT],
+    aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+    aggregateNodeStrideBytes: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    aggregateNodeByteLength,
+    outputCompaction: 'one-row-per-contribution-first-occurrence-nodes-active-duplicates-suppressed',
+    aggregateReductionStatus: 'exact-first-occurrence-global-scan',
+    aggregateReductionMode: 'gpu-exact-global-scan-o-n2',
+    capacityStatus: 'no-extra-capacity-required-output-row-per-input-row',
+    stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
+    outputFamilies: [SCHROEDER_STATE_DELTA_OUTPUT_FAMILY, 'schroeder-hierarchy-aggregate-nodes'],
+    stateMutationTarget: 'schroeder-retained-hierarchy-aggregate-node-buffer',
+    stateMutationStatus: 'aggregate-node-reduction-planned',
+    stateAuthorityStatus: 'state-manager-admitted-aggregate-contribution-source',
+    conservativeTransferStatus: 'hierarchy-aggregate-nodes-ready',
     conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
     gpuFirst: true,
     cpuReferenceRequired: false,
@@ -2146,6 +2240,139 @@ export async function runSchroederHierarchyAggregateWebGpu({
   }
 }
 
+export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
+  device,
+  hierarchyAggregate,
+  retainAggregateNodeBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederHierarchyAggregateNodeReductionWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederHierarchyAggregateNodePlan({ hierarchyAggregate });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedAggregateBuffer = hierarchyAggregate?.aggregateBuffer || null;
+  const aggregateRows = hierarchyAggregate?.aggregateRows instanceof Float32Array
+    ? hierarchyAggregate.aggregateRows
+    : null;
+  if (!borrowedAggregateBuffer && !(aggregateRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder hierarchy aggregate-node reduction requires a retained aggregate buffer or explicit rows');
+  }
+  const aggregateBuffer = borrowedAggregateBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-hierarchy-aggregate-node-in', aggregateRows);
+  const aggregateNodeBuffer = device.createBuffer({
+    label: 'ulg-schroeder-hierarchy-aggregate-nodes-out',
+    size: plan.aggregateNodeByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-hierarchy-aggregate-node-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-hierarchy-aggregate-node-readback',
+      size: plan.aggregateNodeByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedAggregateNodeBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederHierarchyAggregateNodeParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-reduction.v0',
+      label: 'ulg-schroeder-hierarchy-aggregate-node-reduction',
+      code: schroederHierarchyAggregateNodeReduceWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: aggregateBuffer } },
+        { binding: 1, resource: { buffer: aggregateNodeBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(aggregateNodeBuffer, 0, readBuffer, 0, plan.aggregateNodeByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let aggregateNodeRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      aggregateNodeRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.aggregateRowCount * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
+      hierarchyAggregateNodeSchema: plan.schema,
+      status: 'schroeder-hierarchy-aggregate-node-reduction-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedAggregateNodeBuffer: Boolean(retainAggregateNodeBuffer),
+      aggregateNodeBufferByteLength: plan.aggregateNodeByteLength,
+      aggregateNodeRows,
+      aggregateReductionStatus: 'exact-first-occurrence-global-scan',
+      aggregateReductionMode: 'gpu-exact-global-scan-o-n2',
+      capacityStatus: 'no-extra-capacity-required-output-row-per-input-row',
+      conservativeTransferStatus: 'hierarchy-aggregate-nodes-submitted',
+      stateMutationStatus: 'aggregate-node-buffer-submitted',
+      stateAuthorityStatus: 'state-manager-admitted-aggregate-nodes-materialized',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainAggregateNodeBuffer) {
+      result.aggregateNodeBuffer = aggregateNodeBuffer;
+      result.destroyAggregateNodeBuffer = () => aggregateNodeBuffer.destroy?.();
+      returnedRetainedAggregateNodeBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedAggregateBuffer) aggregateBuffer.destroy?.();
+      if (!retainAggregateNodeBuffer || !returnedRetainedAggregateNodeBuffer) aggregateNodeBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -2160,6 +2387,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   crossLevelStateDelta = null,
   crossLevelStateDeltaMerge = null,
   hierarchyAggregate = null,
+  hierarchyAggregateNode = null,
   stateDeltaMergeAdmission = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
@@ -2175,6 +2403,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableCrossLevelStateDelta = enableCrossLevelTransfer,
   enableCrossLevelStateDeltaMerge = Boolean(stateDeltaMergeAdmission),
   enableHierarchyAggregate = enableCrossLevelStateDeltaMerge,
+  enableHierarchyAggregateNodeReduction = enableHierarchyAggregate,
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -2190,6 +2419,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   crossLevelStateDeltaRunner = runSchroederCrossLevelStateDeltaWebGpu,
   crossLevelStateDeltaMergeRunner = runSchroederCrossLevelStateDeltaMergeWebGpu,
   hierarchyAggregateRunner = runSchroederHierarchyAggregateWebGpu,
+  hierarchyAggregateNodeReductionRunner = runSchroederHierarchyAggregateNodeReductionWebGpu,
   mergeEpoch = 0,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
@@ -2230,6 +2460,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof hierarchyAggregateRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a hierarchyAggregateRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && typeof hierarchyAggregateNodeReductionRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a hierarchyAggregateNodeReductionRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -2323,6 +2564,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainAggregateBuffer: true,
       readbackMode
     });
+  const resolvedHierarchyAggregateNode = !resolvedHierarchyAggregate || !enableHierarchyAggregateNodeReduction
+    ? null
+    : hierarchyAggregateNode || await hierarchyAggregateNodeReductionRunner({
+      device,
+      hierarchyAggregate: resolvedHierarchyAggregate,
+      retainAggregateNodeBuffer: true,
+      readbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -2345,6 +2594,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederCrossLevelStateDelta: resolvedCrossLevelStateDelta,
     schroederCrossLevelStateDeltaMerge: resolvedCrossLevelStateDeltaMerge,
     schroederHierarchyAggregate: resolvedHierarchyAggregate,
+    schroederHierarchyAggregateNode: resolvedHierarchyAggregateNode,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -2448,6 +2698,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedHierarchyAggregate.aggregateByteLength
         ?? 0
     } : null,
+    hierarchyAggregateNode: resolvedHierarchyAggregateNode ? {
+      schema: resolvedHierarchyAggregateNode.schema,
+      status: resolvedHierarchyAggregateNode.status,
+      aggregateRowCount: resolvedHierarchyAggregateNode.aggregateRowCount,
+      outputCompaction: resolvedHierarchyAggregateNode.outputCompaction,
+      aggregateReductionStatus: resolvedHierarchyAggregateNode.aggregateReductionStatus,
+      aggregateReductionMode: resolvedHierarchyAggregateNode.aggregateReductionMode,
+      capacityStatus: resolvedHierarchyAggregateNode.capacityStatus,
+      conservativeTransferStatus: resolvedHierarchyAggregateNode.conservativeTransferStatus,
+      stateMutationStatus: resolvedHierarchyAggregateNode.stateMutationStatus,
+      stateAuthorityStatus: resolvedHierarchyAggregateNode.stateAuthorityStatus,
+      retainedAggregateNodeBuffer: Boolean(resolvedHierarchyAggregateNode.aggregateNodeBuffer),
+      aggregateNodeBufferByteLength: resolvedHierarchyAggregateNode.aggregateNodeBufferByteLength
+        ?? resolvedHierarchyAggregateNode.aggregateNodeByteLength
+        ?? 0
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -2478,18 +2744,26 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? 'disabled-hierarchy-aggregate-materialization'
         : (resolvedCrossLevelStateDelta ? 'disabled-cross-level-state-delta-merge' : 'disabled-same-level-only-mechanics')
     ),
-    conservativeTransferStatus: resolvedHierarchyAggregate?.conservativeTransferStatus
+    hierarchyAggregateNodeStatus: resolvedHierarchyAggregateNode?.status ?? (
+      resolvedHierarchyAggregate
+        ? 'disabled-hierarchy-aggregate-node-reduction'
+        : (resolvedCrossLevelStateDeltaMerge ? 'disabled-hierarchy-aggregate-materialization' : 'disabled-same-level-only-mechanics')
+    ),
+    conservativeTransferStatus: resolvedHierarchyAggregateNode?.conservativeTransferStatus
+      ?? resolvedHierarchyAggregate?.conservativeTransferStatus
       ?? resolvedCrossLevelStateDeltaMerge?.conservativeTransferStatus
       ?? resolvedCrossLevelStateDelta?.conservativeTransferStatus
       ?? resolvedCrossLevelTransfer?.conservativeTransferStatus
       ?? resolvedConservationSummary?.conservativeTransferStatus
       ?? 'not-run',
-    stateMutationStatus: resolvedHierarchyAggregate?.stateMutationStatus
+    stateMutationStatus: resolvedHierarchyAggregateNode?.stateMutationStatus
+      ?? resolvedHierarchyAggregate?.stateMutationStatus
       ?? resolvedCrossLevelStateDeltaMerge?.stateMutationStatus
       ?? resolvedCrossLevelStateDelta?.stateMutationStatus
       ?? resolvedCrossLevelTransfer?.stateMutationStatus
       ?? 'not-run',
-    stateAuthorityStatus: resolvedHierarchyAggregate?.stateAuthorityStatus
+    stateAuthorityStatus: resolvedHierarchyAggregateNode?.stateAuthorityStatus
+      ?? resolvedHierarchyAggregate?.stateAuthorityStatus
       ?? resolvedCrossLevelStateDeltaMerge?.stateAuthorityStatus
       ?? resolvedCrossLevelStateDelta?.stateAuthorityStatus
       ?? 'not-run',

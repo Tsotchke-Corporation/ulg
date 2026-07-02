@@ -86,6 +86,8 @@ export const ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_SCHEMA = 'peercompute.u
 export const ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-cross-level-state-delta-merge-execution.v0';
 export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate.v0';
 export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate-execution.v0';
+export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate-node.v0';
+export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate-node-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -890,6 +892,40 @@ export const SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT = Object.freeze([
   'childLevelId:f32',
   'levelDelta:f32',
   'aggregateModeId:f32',
+  'admissionApproved:f32',
+  'pad0:f32'
+]);
+export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT = Object.freeze([
+  'targetAggregateKey:f32',
+  'levelId:f32',
+  'chartId:f32',
+  'status:f32',
+  'parentCellX:f32',
+  'parentCellY:f32',
+  'parentCellZ:f32',
+  'stateFamilyId:f32',
+  'massKg:f32',
+  'representedVolumeM3:f32',
+  'momentumXKgMPerS:f32',
+  'momentumYKgMPerS:f32',
+  'momentumZKgMPerS:f32',
+  'internalEnergyJ:f32',
+  'firstContributionIndex:f32',
+  'matchingContributionCount:f32',
+  'suppressedDuplicateCount:f32',
+  'massResidualKg:f32',
+  'volumeResidualM3:f32',
+  'momentumResidualXKgMPerS:f32',
+  'momentumResidualYKgMPerS:f32',
+  'momentumResidualZKgMPerS:f32',
+  'internalEnergyResidualJ:f32',
+  'mergeEpoch:f32',
+  'childLevelMin:f32',
+  'childLevelMax:f32',
+  'levelDeltaMax:f32',
+  'aggregateModeId:f32',
+  'reductionModeId:f32',
+  'capacityStatus:f32',
   'admissionApproved:f32',
   'pad0:f32'
 ]);

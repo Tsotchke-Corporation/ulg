@@ -1065,9 +1065,15 @@ export function resolveSchroederRenderProxyBackendSelection({
   const diagnosticLimit = Math.max(0, Math.round(Number(diagnosticMaxProxyCount) || 0));
   const diagnosticAllowed = Boolean(allowDiagnosticCpuProxy);
   const diagnosticWithinBudget = proxyCount <= diagnosticLimit;
-  const diagnosticReady = Boolean(inputReady && diagnosticAllowed && diagnosticWithinBudget);
+  const diagnosticExplicitlyRequested = preference === 'diagnostic-cpu';
+  const diagnosticReady = Boolean(
+    inputReady
+      && diagnosticExplicitlyRequested
+      && diagnosticAllowed
+      && diagnosticWithinBudget
+  );
   const nativeRequested = preference === 'auto' || preference === 'native-webgpu';
-  const diagnosticRequested = preference === 'auto' || preference === 'diagnostic-cpu';
+  const diagnosticRequested = diagnosticExplicitlyRequested;
 
   let selectedBackend = 'none';
   let status = 'blocked-schroeder-render-proxy-backend-source';
@@ -1160,14 +1166,25 @@ export function resolveSchroederRenderProxyBackendSelection({
     overlayRequired: false,
     fullParticleReadbackRequired: false,
     presentationOwnsPhysicsCadence: false,
-    diagnosticCpuProxyAdmitted: diagnosticSelected && diagnosticAllowed,
+    diagnosticCpuProxyExplicitlyRequested: diagnosticExplicitlyRequested,
+    diagnosticCpuProxyAllowedByPolicy: diagnosticAllowed,
+    diagnosticCpuProxyAdmitted: diagnosticSelected && diagnosticAllowed && diagnosticExplicitlyRequested,
     diagnosticCpuProxyReady: diagnosticSelected && diagnosticReady,
     diagnosticCpuProxyBudget: diagnosticLimit,
+    diagnosticCpuProxyBudgetSource: 'schroederRenderProxyDiagnosticMaxProxyCount',
     diagnosticCpuProxyWithinBudget: diagnosticWithinBudget,
+    diagnosticCpuProxyHotPathAllowed: false,
+    diagnosticCpuProxyMaterializationMode: diagnosticSelected
+      ? 'diagnostic-cpu-descriptor-proxy-metadata-only'
+      : null,
     diagnosticOnly: diagnosticSelected,
-    peerComputeHotPath: nativeSelected,
+    peerComputeHotPath: nativeSelected && backendReady,
     cpuGeometryMaterialized: false,
-    cpuGeometryMaterializationAdmitted: diagnosticSelected && diagnosticAllowed,
+    cpuGeometryMaterializationAdmitted:
+      diagnosticSelected && diagnosticAllowed && diagnosticExplicitlyRequested,
+    cpuGeometryMaterializationPolicy: diagnosticSelected
+      ? 'explicit-diagnostic-capped-metadata-only'
+      : 'disabled',
     closurePbrAvailable: Boolean(resolvedDrawSource.closurePbrAvailable),
     pbrMaterialSource: resolvedDrawSource.pbrMaterialSource ?? null,
     scientificValidation: false,
@@ -6519,8 +6536,22 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
     Boolean(metadata.schroederRenderProxyBackendSelection?.sameDeviceRetainedBufferBindingRequired);
   target.sourceSchroederRenderProxyBackendSameDeviceRetainedBufferBindingReady =
     Boolean(metadata.schroederRenderProxyBackendSelection?.sameDeviceRetainedBufferBindingReady);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyExplicitlyRequested =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyExplicitlyRequested);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyAllowedByPolicy =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyAllowedByPolicy);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyAdmitted =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyAdmitted);
   target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyReady =
     Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyReady);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyBudget =
+    metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyBudget ?? 0;
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyWithinBudget =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyWithinBudget);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyHotPathAllowed =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyHotPathAllowed);
+  target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyMaterializationMode =
+    metadata.schroederRenderProxyBackendSelection?.diagnosticCpuProxyMaterializationMode ?? null;
   target.sourceSchroederRenderProxyBackendDiagnosticOnly =
     Boolean(metadata.schroederRenderProxyBackendSelection?.diagnosticOnly);
   target.sourceSchroederRenderProxyBackendPeerComputeHotPath =
@@ -6531,6 +6562,12 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
     Boolean(metadata.schroederRenderProxyBackendSelection?.overlayRequired);
   target.sourceSchroederRenderProxyBackendFullParticleReadbackRequired =
     Boolean(metadata.schroederRenderProxyBackendSelection?.fullParticleReadbackRequired);
+  target.sourceSchroederRenderProxyBackendCpuGeometryMaterialized =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.cpuGeometryMaterialized);
+  target.sourceSchroederRenderProxyBackendCpuGeometryMaterializationAdmitted =
+    Boolean(metadata.schroederRenderProxyBackendSelection?.cpuGeometryMaterializationAdmitted);
+  target.sourceSchroederRenderProxyBackendCpuGeometryMaterializationPolicy =
+    metadata.schroederRenderProxyBackendSelection?.cpuGeometryMaterializationPolicy ?? null;
   target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
   target.sourceResidentRetentionReason = retentionReason ?? null;
   return target;

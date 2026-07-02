@@ -3351,6 +3351,25 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(pendingNativeBackend.nativeSubmitReady, true);
   assert.equal(pendingNativeBackend.visibleValidationReady, false);
 
+  const autoWithDiagnosticAdmitted = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    backendPreference: 'auto',
+    allowDiagnosticCpuProxy: true,
+    diagnosticMaxProxyCount: 20
+  });
+  assert.equal(
+    autoWithDiagnosticAdmitted.status,
+    'blocked-schroeder-render-proxy-backend-renderer-capability'
+  );
+  assert.equal(autoWithDiagnosticAdmitted.ready, false);
+  assert.equal(autoWithDiagnosticAdmitted.selectedBackend, 'native-webgpu-retained-proxy');
+  assert.equal(autoWithDiagnosticAdmitted.diagnosticCpuProxyExplicitlyRequested, false);
+  assert.equal(autoWithDiagnosticAdmitted.diagnosticCpuProxyAllowedByPolicy, true);
+  assert.equal(autoWithDiagnosticAdmitted.diagnosticCpuProxyAdmitted, false);
+  assert.equal(autoWithDiagnosticAdmitted.diagnosticCpuProxyReady, false);
+  assert.equal(autoWithDiagnosticAdmitted.diagnosticCpuProxyHotPathAllowed, false);
+  assert.equal(autoWithDiagnosticAdmitted.peerComputeHotPath, false);
+
   const diagnosticBackend = resolveSchroederRenderProxyBackendSelection({
     drawSource,
     backendPreference: 'diagnostic-cpu',
@@ -3362,9 +3381,42 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(diagnosticBackend.selectedBackend, 'diagnostic-cpu-descriptor-proxy');
   assert.equal(diagnosticBackend.diagnosticOnly, true);
   assert.equal(diagnosticBackend.peerComputeHotPath, false);
+  assert.equal(diagnosticBackend.diagnosticCpuProxyExplicitlyRequested, true);
+  assert.equal(diagnosticBackend.diagnosticCpuProxyAllowedByPolicy, true);
+  assert.equal(diagnosticBackend.diagnosticCpuProxyAdmitted, true);
   assert.equal(diagnosticBackend.cpuGeometryMaterialized, false);
   assert.equal(diagnosticBackend.cpuGeometryMaterializationAdmitted, true);
+  assert.equal(
+    diagnosticBackend.cpuGeometryMaterializationPolicy,
+    'explicit-diagnostic-capped-metadata-only'
+  );
+  assert.equal(
+    diagnosticBackend.diagnosticCpuProxyMaterializationMode,
+    'diagnostic-cpu-descriptor-proxy-metadata-only'
+  );
+  assert.equal(diagnosticBackend.diagnosticCpuProxyBudget, 20);
+  assert.equal(diagnosticBackend.diagnosticCpuProxyWithinBudget, true);
+  assert.equal(diagnosticBackend.diagnosticCpuProxyHotPathAllowed, false);
   assert.equal(diagnosticBackend.fullParticleReadbackRequired, false);
+
+  const overBudgetDiagnosticBackend = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    backendPreference: 'diagnostic-cpu',
+    allowDiagnosticCpuProxy: true,
+    diagnosticMaxProxyCount: 14
+  });
+  assert.equal(
+    overBudgetDiagnosticBackend.status,
+    'blocked-schroeder-render-proxy-backend-diagnostic-budget'
+  );
+  assert.equal(overBudgetDiagnosticBackend.ready, false);
+  assert.equal(overBudgetDiagnosticBackend.selectedBackend, 'diagnostic-cpu-descriptor-proxy');
+  assert.equal(overBudgetDiagnosticBackend.diagnosticCpuProxyExplicitlyRequested, true);
+  assert.equal(overBudgetDiagnosticBackend.diagnosticCpuProxyAdmitted, true);
+  assert.equal(overBudgetDiagnosticBackend.diagnosticCpuProxyReady, false);
+  assert.equal(overBudgetDiagnosticBackend.diagnosticCpuProxyWithinBudget, false);
+  assert.equal(overBudgetDiagnosticBackend.cpuGeometryMaterialized, false);
+  assert.equal(overBudgetDiagnosticBackend.peerComputeHotPath, false);
 
   const rawBlocked = resolveSchroederRenderProxyVisibleConsumer({
     proxyDescriptorPlan: proxyPlan,
@@ -3544,9 +3596,20 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(target.sourceSchroederRenderProxyBackendSelectionReady, false);
   assert.equal(target.sourceSchroederRenderProxyBackendSelected, 'native-webgpu-retained-proxy');
   assert.equal(target.sourceSchroederRenderProxyBackendNativeSubmitReady, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyExplicitlyRequested, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyAllowedByPolicy, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyAdmitted, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyReady, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyBudget, 256);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyWithinBudget, true);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyHotPathAllowed, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendDiagnosticCpuProxyMaterializationMode, null);
   assert.equal(target.sourceSchroederRenderProxyBackendFrameCopyReadbackRequired, false);
   assert.equal(target.sourceSchroederRenderProxyBackendOverlayRequired, false);
   assert.equal(target.sourceSchroederRenderProxyBackendFullParticleReadbackRequired, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendCpuGeometryMaterialized, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendCpuGeometryMaterializationAdmitted, false);
+  assert.equal(target.sourceSchroederRenderProxyBackendCpuGeometryMaterializationPolicy, 'disabled');
 });
 
 test('SPH scene builds Schroeder native proxy executor from same-device retained refs', () => {

@@ -23,6 +23,7 @@ import {
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
+  SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
@@ -79,6 +80,9 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
@@ -118,6 +122,7 @@ import {
   schroederPhaseVolumeDiagnosticSummaryWgsl,
   schroederPhaseVolumeLevelUpdateWgsl,
   schroederPhaseVolumeMigrationWgsl,
+  schroederPhaseVolumeSplitMergeApplyWgsl,
   schroederPhaseVolumeSplitMergeProposalWgsl,
   schroederPhaseVolumeTargetAggregateWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -184,6 +189,9 @@ export {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
@@ -227,6 +235,8 @@ export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS = SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
+export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS =
+  SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS =
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_INDEX_WORKGROUP_SIZE = 64;
@@ -255,6 +265,7 @@ export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_MIGRATION_WORKGROUP_SIZE = 64;
+export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_WORKGROUP_SIZE = 64;
 export const SCHROEDER_PHASE_VOLUME_ASSIGNMENT_OVERLAY_INDEX_MISSING_ROW = 0xffffffff;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
@@ -298,6 +309,8 @@ export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schr
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_READBACK_MODE =
   'full-schroeder-phase-volume-split-merge-proposal-readback';
+export const SCHROEDER_FULL_PHASE_VOLUME_SPLIT_MERGE_APPLY_READBACK_MODE =
+  'full-schroeder-phase-volume-split-merge-apply-readback';
 export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE = 'auto';
 export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE = 'exact-active-node-scan';
 export const SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE = 'bucketed-active-node-index';
@@ -401,6 +414,8 @@ const DEFAULT_COARSEN_LEVEL_DELTA_THRESHOLD = 1;
 const DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE = 1e-4;
 const SCHROEDER_STATE_DELTA_OUTPUT_FAMILY = 'schroeder-hierarchy-state-delta';
 const SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY = 'schroeder-hierarchy';
+const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_OUTPUT_FAMILY =
+  'schroeder-phase-volume-split-merge-apply';
 const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_OUTPUT_FAMILY =
   'schroeder-far-aggregate-force-application';
 const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_OUTPUT_FAMILY =
@@ -418,6 +433,13 @@ const SCHROEDER_PHASE_VOLUME_MIGRATION_ADMITTED_STATUSES = new Set([
   'schroeder-phase-volume-migration-admission-published',
   'schroeder-phase-volume-migration-admission-admitted',
   'worker-retained-schroeder-phase-volume-migration-output-admitted',
+  'accepted',
+  'admitted'
+]);
+const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMITTED_STATUSES = new Set([
+  'schroeder-phase-volume-split-merge-admission-published',
+  'schroeder-phase-volume-split-merge-admission-admitted',
+  'worker-retained-schroeder-phase-volume-split-merge-output-admitted',
   'accepted',
   'admitted'
 ]);
@@ -1720,6 +1742,38 @@ export function createSchroederPhaseVolumeSplitMergeProposalParamsArray({
   return buffer;
 }
 
+export function createSchroederPhaseVolumeSplitMergeApplyParamsArray({
+  proposalRowCount = 0,
+  proposalStrideFloats = SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+  applyStrideFloats = SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+  admissionApproved = false,
+  applyEpoch = 0,
+  stateFamilyId = 1,
+  residualTolerance = DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(proposalRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    proposalStrideFloats,
+    SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    applyStrideFloats,
+    SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS
+  ))), true);
+  view.setUint32(12, admissionApproved ? 1 : 0, true);
+  view.setFloat32(16, finiteNumber(applyEpoch, 0), true);
+  view.setFloat32(20, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(24, Math.max(0, finiteNumber(
+    residualTolerance,
+    DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE
+  )), true);
+  view.setFloat32(28, Math.max(0, finiteNumber(flags, 0)), true);
+  return buffer;
+}
+
 export function createSchroederPhaseVolumeDiagnosticSummaryParamsArray({
   levelUpdateRowCount = 0,
   levelUpdateStrideFloats = SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
@@ -2432,6 +2486,76 @@ export function schroederPhaseVolumeMigrationAdmissionAllowsApplication({
   };
 }
 
+function schroederPhaseVolumeSplitMergeAdmissionDescriptor(admission = null) {
+  if (!admission || typeof admission !== 'object') return null;
+  return admission.schroederPhaseVolumeSplitMergePublication
+    || admission.admittedSchroederPhaseVolumeSplitMergePublication
+    || admission.publication
+    || admission.descriptor
+    || admission;
+}
+
+export function schroederPhaseVolumeSplitMergeAdmissionAllowsApplication({
+  phaseVolumeSplitMergeAdmission = null,
+  phaseVolumeSplitMergeProposal = null,
+  proposalRowCount = 0
+} = {}) {
+  const descriptor = schroederPhaseVolumeSplitMergeAdmissionDescriptor(phaseVolumeSplitMergeAdmission);
+  const status = phaseVolumeSplitMergeAdmission?.status || descriptor?.status || null;
+  const descriptorStatus = descriptor?.status
+    || phaseVolumeSplitMergeAdmission?.publicationStatus
+    || phaseVolumeSplitMergeAdmission?.admittedStatus
+    || status;
+  const outputFamilies = Array.isArray(phaseVolumeSplitMergeAdmission?.outputFamilies)
+    ? phaseVolumeSplitMergeAdmission.outputFamilies
+    : (Array.isArray(descriptor?.outputFamilies) ? descriptor.outputFamilies : []);
+  const admittedRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      phaseVolumeSplitMergeAdmission?.schroederPhaseVolumeSplitMergeProposalRowCount
+        ?? descriptor?.schroederPhaseVolumeSplitMergeProposalRowCount
+        ?? phaseVolumeSplitMergeAdmission?.schroederPhaseVolumeSplitMergeRowCount
+        ?? descriptor?.schroederPhaseVolumeSplitMergeRowCount
+        ?? phaseVolumeSplitMergeAdmission?.proposalRowCount
+        ?? descriptor?.proposalRowCount,
+      proposalRowCount
+    ))
+  );
+  const requiredRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      phaseVolumeSplitMergeProposal?.migrationRowCount,
+      proposalRowCount
+    ))
+  );
+  const admissionApproved = phaseVolumeSplitMergeAdmission?.phaseVolumeSplitMergeApproved === true;
+  const descriptorAdmitted = SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMITTED_STATUSES.has(descriptorStatus)
+    || descriptor?.committed === true
+    || phaseVolumeSplitMergeAdmission?.committed === true;
+  const familyAccepted = outputFamilies.includes(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_OUTPUT_FAMILY);
+  const rowCountAccepted = admittedRowCount >= requiredRowCount || requiredRowCount === 0;
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+    status: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted
+      ? 'schroeder-phase-volume-split-merge-admission-approved'
+      : 'schroeder-phase-volume-split-merge-admission-blocked',
+    approved: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted,
+    admissionApproved,
+    descriptorAdmitted,
+    descriptorStatus,
+    familyAccepted,
+    rowCountAccepted,
+    proposalRowCount: admittedRowCount,
+    requiredProposalRowCount: requiredRowCount,
+    sourceHotBufferKey: phaseVolumeSplitMergeAdmission?.sourceHotBufferKey
+      || phaseVolumeSplitMergeAdmission?.hotBufferKey
+      || descriptor?.sourceHotBufferKey
+      || descriptor?.hotBufferKey
+      || null,
+    outputFamilies: [...outputFamilies]
+  };
+}
+
 function schroederFarAggregateForceApplicationAdmissionDescriptor(admission = null) {
   if (!admission || typeof admission !== 'object') return null;
   return admission.schroederFarAggregateForceApplicationPublication
@@ -3016,6 +3140,31 @@ function assertPhaseVolumeMigrationInput(phaseVolumeMigration) {
   )));
   if (stride !== SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS) {
     throw new RangeError('Schroeder phase-volume level update requires the current migration row layout');
+  }
+}
+
+function assertPhaseVolumeSplitMergeProposalInput(phaseVolumeSplitMergeProposal) {
+  if (
+    phaseVolumeSplitMergeProposal?.schema !== ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA
+    && phaseVolumeSplitMergeProposal?.schema !== ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_SCHEMA
+  ) {
+    throw new TypeError(
+      'Schroeder phase-volume split/merge apply requires a Schroeder split/merge proposal input'
+    );
+  }
+  const proposalRowCount = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeSplitMergeProposal.migrationRowCount,
+    0
+  )));
+  if (proposalRowCount <= 0) {
+    throw new RangeError('Schroeder phase-volume split/merge apply requires at least one proposal row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeSplitMergeProposal.proposalStrideFloats,
+    SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS
+  )));
+  if (stride !== SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS) {
+    throw new RangeError('Schroeder phase-volume split/merge apply requires the current proposal row layout');
   }
 }
 
@@ -4873,6 +5022,83 @@ export function createSchroederPhaseVolumeSplitMergeProposalPlan({
       'schroeder-phase-volume-split-merge-proposal',
       'schroeder-phase-volume-migration'
     ],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederPhaseVolumeSplitMergeApplyPlan({
+  phaseVolumeSplitMergeProposal,
+  phaseVolumeSplitMergeAdmission = null,
+  applyEpoch = phaseVolumeSplitMergeProposal?.proposalEpoch ?? 0,
+  stateFamilyId = phaseVolumeSplitMergeProposal?.stateFamilyId ?? 1,
+  residualTolerance = DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE
+} = {}) {
+  assertPhaseVolumeSplitMergeProposalInput(phaseVolumeSplitMergeProposal);
+  const proposalRowCount = Math.max(0, Math.round(finiteNumber(
+    phaseVolumeSplitMergeProposal.migrationRowCount,
+    0
+  )));
+  const admission = schroederPhaseVolumeSplitMergeAdmissionAllowsApplication({
+    phaseVolumeSplitMergeAdmission,
+    phaseVolumeSplitMergeProposal,
+    proposalRowCount
+  });
+  const applyByteLength = Math.max(
+    4,
+    proposalRowCount * SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA,
+    status: admission.approved
+      ? 'schroeder-phase-volume-split-merge-apply-plan-ready'
+      : 'schroeder-phase-volume-split-merge-apply-plan-blocked-admission-required',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-phase-volume-split-merge-apply',
+    sourcePhaseVolumeSplitMergeProposalSchema: phaseVolumeSplitMergeProposal.schema,
+    sourcePhaseVolumeSplitMergeProposalStatus: phaseVolumeSplitMergeProposal.status ?? null,
+    proposalRowCount,
+    proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+    applyRowLayout: [...SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT],
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
+    applyStrideBytes: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    applyByteLength,
+    outputCompaction: 'one-admitted-phase-volume-split-merge-apply-row-per-proposal-row',
+    admission,
+    phaseVolumeSplitMergeAdmissionSchema: admission.schema,
+    phaseVolumeSplitMergeAdmissionStatus: admission.status,
+    phaseVolumeSplitMergeAdmissionApproved: admission.approved,
+    phaseVolumeSplitMergeAdmissionSourceHotBufferKey: admission.sourceHotBufferKey,
+    stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    applyEpoch: finiteNumber(applyEpoch, 0),
+    residualTolerance: Math.max(0, finiteNumber(
+      residualTolerance,
+      DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE
+    )),
+    applyMode: 'state-manager-admitted-split-merge-intent',
+    particleStorageMutationStatus: admission.approved
+      ? 'deferred-to-state-manager-particle-storage-allocator'
+      : 'blocked-split-merge-admission-required',
+    conservationContinuityPolicy: 'proposal-momentum-energy-deltas-preserved-for-replay',
+    outputFamilies: [
+      SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_OUTPUT_FAMILY,
+      'schroeder-phase-volume-split-merge-proposal'
+    ],
+    stateMutationTarget: 'schroeder-retained-phase-volume-split-merge-apply-buffer',
+    conservativeTransferStatus: admission.approved
+      ? 'phase-volume-split-merge-apply-ready'
+      : 'phase-volume-split-merge-apply-blocked-admission-required',
+    stateMutationRequired: admission.approved,
+    stateMutationStatus: admission.approved
+      ? 'phase-volume-split-merge-apply-planned'
+      : 'blocked-phase-volume-split-merge-admission-required',
+    stateAuthorityStatus: admission.approved
+      ? 'state-manager-admission-present'
+      : 'requires-state-manager-admission-before-particle-count-mutation',
+    conservedQuantities: ['mass', 'represented-volume', 'momentum-delta', 'internal-energy-delta'],
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -10384,6 +10610,175 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   }
 }
 
+export async function runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+  device,
+  phaseVolumeSplitMergeProposal,
+  phaseVolumeSplitMergeAdmission = null,
+  applyEpoch = phaseVolumeSplitMergeProposal?.proposalEpoch ?? 0,
+  stateFamilyId = phaseVolumeSplitMergeProposal?.stateFamilyId ?? 1,
+  residualTolerance = DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE,
+  retainApplyBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError(
+      'runSchroederPhaseVolumeSplitMergeApplyWebGpu requires a WebGPU-like device with queue.writeBuffer'
+    );
+  }
+  const plan = createSchroederPhaseVolumeSplitMergeApplyPlan({
+    phaseVolumeSplitMergeProposal,
+    phaseVolumeSplitMergeAdmission,
+    applyEpoch,
+    stateFamilyId,
+    residualTolerance
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  if (!plan.phaseVolumeSplitMergeAdmissionApproved) {
+    return {
+      ...plan,
+      schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+      phaseVolumeSplitMergeApplySchema: plan.schema,
+      status: 'schroeder-phase-volume-split-merge-apply-blocked-admission-required',
+      backend: 'webgpu',
+      readbackMode,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedApplyBuffer: false,
+      applyBufferByteLength: 0,
+      applyRows: new Float32Array(),
+      conservativeTransferStatus: 'phase-volume-split-merge-apply-blocked-admission-required',
+      stateMutationRequired: false,
+      stateMutationStatus: 'blocked-phase-volume-split-merge-admission-required',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+
+  const borrowedProposalBuffer = phaseVolumeSplitMergeProposal?.proposalBuffer || null;
+  const proposalRows = phaseVolumeSplitMergeProposal?.proposalRows instanceof Float32Array
+    ? phaseVolumeSplitMergeProposal.proposalRows
+    : null;
+  if (!borrowedProposalBuffer && !(proposalRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder phase-volume split/merge apply requires a retained proposal buffer or explicit rows');
+  }
+  const proposalBuffer = borrowedProposalBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-split-merge-apply-in', proposalRows);
+  const applyBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-split-merge-apply-out',
+    size: plan.applyByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-phase-volume-split-merge-apply-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-phase-volume-split-merge-apply-readback',
+      size: plan.applyByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedApplyBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederPhaseVolumeSplitMergeApplyParamsArray({
+      ...plan,
+      admissionApproved: plan.phaseVolumeSplitMergeAdmissionApproved
+    }));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-phase-volume-split-merge-apply.v0',
+      label: 'ulg-schroeder-phase-volume-split-merge-apply',
+      code: schroederPhaseVolumeSplitMergeApplyWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: proposalBuffer } },
+        { binding: 1, resource: { buffer: applyBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.proposalRowCount / SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(applyBuffer, 0, readBuffer, 0, plan.applyByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let applyRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      applyRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.proposalRowCount * SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+      phaseVolumeSplitMergeApplySchema: plan.schema,
+      status: 'schroeder-phase-volume-split-merge-apply-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_PHASE_VOLUME_SPLIT_MERGE_APPLY_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedApplyBuffer: Boolean(retainApplyBuffer),
+      applyBufferByteLength: plan.applyByteLength,
+      applyRows,
+      conservativeTransferStatus: 'phase-volume-split-merge-apply-submitted',
+      stateMutationStatus: 'phase-volume-split-merge-apply-buffer-submitted',
+      stateAuthorityStatus: 'state-manager-admitted-phase-volume-split-merge-apply-materialized',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainApplyBuffer) {
+      result.applyBuffer = applyBuffer;
+      result.destroyApplyBuffer = () => applyBuffer.destroy?.();
+      returnedRetainedApplyBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedProposalBuffer) proposalBuffer.destroy?.();
+      if (!retainApplyBuffer || !returnedRetainedApplyBuffer) applyBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederPhaseVolumeLevelUpdateWebGpu({
   device,
   phaseVolumeMigration,
@@ -10720,6 +11115,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeTargetAggregateNode = null,
   phaseVolumeMigration = null,
   phaseVolumeSplitMergeProposal = null,
+  phaseVolumeSplitMergeApply = null,
   phaseVolumeAssignmentOverlay = null,
   phaseVolumeAssignmentOverlayIndex = null,
   phaseVolumeLevelUpdate = null,
@@ -10727,6 +11123,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   portableSummary = null,
   stateDeltaMergeAdmission = null,
   phaseVolumeMigrationAdmission = null,
+  phaseVolumeSplitMergeAdmission = null,
   farAggregateLawConsumerAdmission = null,
   farAggregateGasStateDeltaAdmission = null,
   farAggregateForceApplicationAdmission = null,
@@ -10775,6 +11172,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enablePhaseVolumeTargetAggregate = enablePhaseVolumeMigration,
   enablePhaseVolumeTargetAggregateNodeReduction = enablePhaseVolumeTargetAggregate,
   enablePhaseVolumeSplitMergeProposal = enablePhaseVolumeMigration,
+  enablePhaseVolumeSplitMergeApply = Boolean(phaseVolumeSplitMergeAdmission),
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
   enablePortableSummary = false,
@@ -10872,6 +11270,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeAssignmentOverlayIndexRunner = runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeSplitMergeProposalRunner = runSchroederPhaseVolumeSplitMergeProposalWebGpu,
+  phaseVolumeSplitMergeApplyRunner = runSchroederPhaseVolumeSplitMergeApplyWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   portableSummaryRunner = createSchroederPortableSummaryPlan,
@@ -11103,6 +11502,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   ) {
     throw new TypeError(
       'runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeSplitMergeProposalRunner function'
+    );
+  }
+  if (
+    enablePhaseVolumeMigration
+    && enablePhaseVolumeSplitMergeProposal
+    && enablePhaseVolumeSplitMergeApply
+    && typeof phaseVolumeSplitMergeApplyRunner !== 'function'
+  ) {
+    throw new TypeError(
+      'runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeSplitMergeApplyRunner function'
     );
   }
   if (
@@ -11519,6 +11928,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         readbackMode
       })
   );
+  const resolvedPhaseVolumeSplitMergeApply = phaseVolumeSplitMergeApply || (
+    !resolvedPhaseVolumeSplitMergeProposal || !enablePhaseVolumeSplitMergeApply
+      ? null
+      : await phaseVolumeSplitMergeApplyRunner({
+        device,
+        phaseVolumeSplitMergeProposal: resolvedPhaseVolumeSplitMergeProposal,
+        phaseVolumeSplitMergeAdmission,
+        applyEpoch: mergeEpoch,
+        stateFamilyId: 1,
+        residualTolerance: aggregateResidualTolerance,
+        retainApplyBuffer: true,
+        readbackMode
+      })
+  );
   const resolvedPhaseVolumeLevelUpdate = phaseVolumeLevelUpdate || (
     !resolvedPhaseVolumeMigration || !enablePhaseVolumeLevelUpdate
       ? null
@@ -11617,6 +12040,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederPhaseVolumeTargetAggregateNode: resolvedPhaseVolumeTargetAggregateNode,
     schroederPhaseVolumeMigration: resolvedPhaseVolumeMigration,
     schroederPhaseVolumeSplitMergeProposal: resolvedPhaseVolumeSplitMergeProposal,
+    schroederPhaseVolumeSplitMergeApply: resolvedPhaseVolumeSplitMergeApply,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
     schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
@@ -12158,6 +12582,25 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedPhaseVolumeSplitMergeProposal.proposalByteLength
         ?? 0
     } : null,
+    phaseVolumeSplitMergeApply: resolvedPhaseVolumeSplitMergeApply ? {
+      schema: resolvedPhaseVolumeSplitMergeApply.schema,
+      status: resolvedPhaseVolumeSplitMergeApply.status,
+      proposalRowCount: resolvedPhaseVolumeSplitMergeApply.proposalRowCount,
+      outputCompaction: resolvedPhaseVolumeSplitMergeApply.outputCompaction,
+      applyMode: resolvedPhaseVolumeSplitMergeApply.applyMode,
+      phaseVolumeSplitMergeAdmissionApproved:
+        resolvedPhaseVolumeSplitMergeApply.phaseVolumeSplitMergeAdmissionApproved,
+      particleStorageMutationStatus: resolvedPhaseVolumeSplitMergeApply.particleStorageMutationStatus,
+      conservationContinuityPolicy: resolvedPhaseVolumeSplitMergeApply.conservationContinuityPolicy,
+      conservativeTransferStatus: resolvedPhaseVolumeSplitMergeApply.conservativeTransferStatus,
+      stateMutationRequired: resolvedPhaseVolumeSplitMergeApply.stateMutationRequired === true,
+      stateMutationStatus: resolvedPhaseVolumeSplitMergeApply.stateMutationStatus,
+      stateAuthorityStatus: resolvedPhaseVolumeSplitMergeApply.stateAuthorityStatus,
+      retainedApplyBuffer: Boolean(resolvedPhaseVolumeSplitMergeApply.applyBuffer),
+      applyBufferByteLength: resolvedPhaseVolumeSplitMergeApply.applyBufferByteLength
+        ?? resolvedPhaseVolumeSplitMergeApply.applyByteLength
+        ?? 0
+    } : null,
     phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate ? {
       schema: resolvedPhaseVolumeLevelUpdate.schema,
       status: resolvedPhaseVolumeLevelUpdate.status,
@@ -12495,6 +12938,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       : (resolvedPhaseVolumeMigration
           ? 'disabled-phase-volume-split-merge-proposal'
           : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics')),
+    phaseVolumeSplitMergeApplyStatus: resolvedPhaseVolumeSplitMergeApply?.status ?? (
+      resolvedPhaseVolumeSplitMergeProposal
+        ? 'disabled-phase-volume-split-merge-admission-not-provided'
+        : (resolvedPhaseVolumeMigration
+          ? 'disabled-phase-volume-split-merge-proposal'
+          : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics'))
+    ),
+    phaseVolumeSplitMergeApplyConsumerStatus: resolvedPhaseVolumeSplitMergeApply
+      ? 'phase-volume-split-merge-apply-forwarded-to-resident-backend'
+      : (resolvedPhaseVolumeSplitMergeProposal
+          ? 'disabled-phase-volume-split-merge-admission-not-provided'
+          : (resolvedPhaseVolumeMigration
+            ? 'disabled-phase-volume-split-merge-proposal'
+            : (enablePhaseVolumeMigration ? 'disabled-phase-volume-migration' : 'disabled-same-level-only-mechanics'))),
     phaseVolumeLevelUpdateStatus: resolvedPhaseVolumeLevelUpdate?.status ?? (
       resolvedPhaseVolumeMigration
         ? 'disabled-phase-volume-level-update-admission-not-provided'
@@ -12539,6 +12996,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     renderLodStatus: resolvedPortableSummary?.renderLodStatus ?? 'disabled-schroeder-render-lod-summary',
     portableSummaryTransferMode: resolvedPortableSummary?.transferMode ?? null,
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
+      ?? resolvedPhaseVolumeSplitMergeApply?.conservativeTransferStatus
       ?? resolvedPhaseVolumeMigration?.conservativeTransferStatus
       ?? resolvedPhaseVolumeSplitMergeProposal?.conservativeTransferStatus
       ?? resolvedFarAggregateGasCellImport?.conservativeTransferStatus
@@ -12553,6 +13011,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ?? resolvedConservationSummary?.conservativeTransferStatus
       ?? 'not-run',
     stateMutationStatus: resolvedPhaseVolumeLevelUpdate?.stateMutationStatus
+      ?? resolvedPhaseVolumeSplitMergeApply?.stateMutationStatus
       ?? resolvedPhaseVolumeMigration?.stateMutationStatus
       ?? resolvedPhaseVolumeSplitMergeProposal?.stateMutationStatus
       ?? resolvedFarAggregateGasStateDelta?.stateMutationStatus
@@ -12565,6 +13024,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ?? resolvedCrossLevelTransfer?.stateMutationStatus
       ?? 'not-run',
     stateAuthorityStatus: resolvedPhaseVolumeLevelUpdate?.stateAuthorityStatus
+      ?? resolvedPhaseVolumeSplitMergeApply?.stateAuthorityStatus
       ?? resolvedPhaseVolumeMigration?.stateAuthorityStatus
       ?? resolvedFarAggregateGasStateDelta?.stateAuthorityStatus
       ?? resolvedFarAggregateForceApplication?.stateAuthorityStatus

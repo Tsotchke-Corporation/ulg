@@ -124,6 +124,12 @@ export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-phase-volume-split-merge-proposal.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA =
   'peercompute.ulg.schroeder-phase-volume-split-merge-proposal-execution.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-split-merge-admission.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-split-merge-apply.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-split-merge-apply-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA =
@@ -1401,6 +1407,40 @@ export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT = Object.fre
   'stateAdmissionRequired:f32',
   'mutationDeferred:f32',
   'capacityStatus:f32'
+]);
+export const SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'targetLevelId:f32',
+  'status:f32',
+  'applyModeId:f32',
+  'proposalModeId:f32',
+  'admissionApproved:f32',
+  'particleCountDelta:f32',
+  'sourceMassDeltaKg:f32',
+  'targetMassKg:f32',
+  'massResidualKg:f32',
+  'sourceVolumeDeltaM3:f32',
+  'targetRepresentedVolumeM3:f32',
+  'volumeResidualM3:f32',
+  'momentumDeltaXKgMPerS:f32',
+  'momentumDeltaYKgMPerS:f32',
+  'momentumDeltaZKgMPerS:f32',
+  'internalEnergyDeltaJ:f32',
+  'restVolumeM3:f32',
+  'representedVolumeM3:f32',
+  'phaseVolumeRatio:f32',
+  'aggregateNodeIndex:f32',
+  'aggregateMatchingContributionCount:f32',
+  'aggregateMassKg:f32',
+  'aggregateRepresentedVolumeM3:f32',
+  'aggregateMassResidualKg:f32',
+  'aggregateVolumeResidualM3:f32',
+  'sourceSupportRadiusM:f32',
+  'targetSupportRadiusM:f32',
+  'chartId:f32',
+  'applyEpoch:f32',
+  'stateFamilyId:f32'
 ]);
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freeze([
   'migrationRowCount:f32',

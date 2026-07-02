@@ -25,6 +25,7 @@ import {
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
+  SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
@@ -83,6 +84,9 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
@@ -157,6 +161,7 @@ import {
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
   SCHROEDER_PHASE_VOLUME_REFINE_PRESSURE_REASON_BITS,
+  SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS,
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
   createSchroederActiveNodeIndexParamsArray,
   createSchroederActiveNodeIndexPlan,
@@ -212,6 +217,8 @@ import {
   createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
   createSchroederPhaseVolumeMigrationPlan,
+  createSchroederPhaseVolumeSplitMergeApplyParamsArray,
+  createSchroederPhaseVolumeSplitMergeApplyPlan,
   createSchroederPhaseVolumeSplitMergeProposalParamsArray,
   createSchroederPhaseVolumeSplitMergeProposalPlan,
   createSchroederPhaseVolumeTargetAggregateParamsArray,
@@ -244,6 +251,7 @@ import {
   runSchroederLawQueueWebGpu,
   runSchroederLevelAssignmentWebGpu,
   runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
+  runSchroederPhaseVolumeSplitMergeApplyWebGpu,
   runSchroederPhaseVolumeLevelUpdateWebGpu,
   runSchroederPhaseVolumeMigrationWebGpu,
   runSchroederPhaseVolumeSplitMergeProposalWebGpu,
@@ -254,6 +262,7 @@ import {
   schroederFarAggregateForceApplicationAdmissionAllowsApplication,
   schroederGridSpacingForLevel,
   schroederPhaseVolumeMigrationAdmissionAllowsApplication,
+  schroederPhaseVolumeSplitMergeAdmissionAllowsApplication,
   schroederStateDeltaMergeAdmissionAllowsApplication
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -419,6 +428,22 @@ function approvedPhaseVolumeMigrationAdmission({
     phaseVolumeMigrationApproved: true,
     outputFamilies: ['schroeder-phase-volume-migration'],
     schroederPhaseVolumeMigrationRowCount: rowCount,
+    hotBufferKey,
+    sourceHotBufferKey: hotBufferKey,
+    committed: true
+  };
+}
+
+function approvedPhaseVolumeSplitMergeAdmission({
+  rowCount = 130,
+  hotBufferKey = 'ulg:test:schroeder-phase-volume-split-merge-admission-hot-buffer'
+} = {}) {
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-admission-admitted',
+    phaseVolumeSplitMergeApproved: true,
+    outputFamilies: ['schroeder-phase-volume-split-merge-apply'],
+    schroederPhaseVolumeSplitMergeProposalRowCount: rowCount,
     hotBufferKey,
     sourceHotBufferKey: hotBufferKey,
     committed: true
@@ -765,6 +790,26 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     'stateAdmissionRequired:f32'
   );
   assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-split-merge-admission.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-split-merge-apply.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-split-merge-apply-execution.v0'
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT.length,
+    SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT[7], 'particleCountDelta:f32');
+  assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT[31], 'stateFamilyId:f32');
+  assert.equal(SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
     'peercompute.ulg.schroeder-phase-volume-level-update.v0'
@@ -2468,6 +2513,90 @@ test('Schroeder phase-volume split/merge proposal plan is proposal-only before a
   assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS);
   assert.equal(view.getFloat32(16, true), 9);
+  assert.equal(view.getFloat32(20, true), 3);
+});
+
+test('Schroeder phase-volume split/merge admission gates apply rows', () => {
+  const phaseVolumeSplitMergeProposal = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-proposal-submitted',
+    migrationRowCount: 5,
+    proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+    proposalBuffer: { label: 'fake-phase-volume-split-merge-proposal-buffer' }
+  };
+  const blocked = schroederPhaseVolumeSplitMergeAdmissionAllowsApplication({
+    phaseVolumeSplitMergeAdmission: {
+      status: 'schroeder-phase-volume-split-merge-admission-admitted',
+      outputFamilies: ['other-family'],
+      phaseVolumeSplitMergeApproved: true,
+      schroederPhaseVolumeSplitMergeProposalRowCount: 5
+    },
+    phaseVolumeSplitMergeProposal,
+    proposalRowCount: 5
+  });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-phase-volume-split-merge-admission-blocked');
+  assert.equal(blocked.approved, false);
+  assert.equal(blocked.familyAccepted, false);
+
+  const approved = schroederPhaseVolumeSplitMergeAdmissionAllowsApplication({
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 5 }),
+    phaseVolumeSplitMergeProposal,
+    proposalRowCount: 5
+  });
+  assert.equal(approved.status, 'schroeder-phase-volume-split-merge-admission-approved');
+  assert.equal(approved.approved, true);
+  assert.equal(approved.familyAccepted, true);
+  assert.equal(approved.rowCountAccepted, true);
+});
+
+test('Schroeder phase-volume split/merge apply plan requires StateManager admission', () => {
+  const phaseVolumeSplitMergeProposal = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-proposal-submitted',
+    migrationRowCount: 130,
+    proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+    proposalEpoch: 7,
+    stateFamilyId: 3,
+    proposalBuffer: { label: 'fake-phase-volume-split-merge-proposal-buffer' }
+  };
+  const blocked = createSchroederPhaseVolumeSplitMergeApplyPlan({ phaseVolumeSplitMergeProposal });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-phase-volume-split-merge-apply-plan-blocked-admission-required');
+  assert.equal(blocked.phaseVolumeSplitMergeAdmissionApproved, false);
+  assert.equal(blocked.stateMutationRequired, false);
+  assert.equal(blocked.stateMutationStatus, 'blocked-phase-volume-split-merge-admission-required');
+
+  const approved = createSchroederPhaseVolumeSplitMergeApplyPlan({
+    phaseVolumeSplitMergeProposal,
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 130 }),
+    applyEpoch: 11,
+    residualTolerance: 1e-5
+  });
+  assert.equal(approved.status, 'schroeder-phase-volume-split-merge-apply-plan-ready');
+  assert.equal(approved.phaseVolumeSplitMergeAdmissionApproved, true);
+  assert.equal(approved.outputCompaction, 'one-admitted-phase-volume-split-merge-apply-row-per-proposal-row');
+  assert.equal(approved.applyMode, 'state-manager-admitted-split-merge-intent');
+  assert.equal(
+    approved.particleStorageMutationStatus,
+    'deferred-to-state-manager-particle-storage-allocator'
+  );
+  assert.equal(approved.stateMutationRequired, true);
+  assert.equal(approved.stateMutationStatus, 'phase-volume-split-merge-apply-planned');
+  assert.equal(approved.stateAuthorityStatus, 'state-manager-admission-present');
+  assert.equal(approved.applyByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+
+  const params = createSchroederPhaseVolumeSplitMergeApplyParamsArray({
+    ...approved,
+    admissionApproved: approved.phaseVolumeSplitMergeAdmissionApproved
+  });
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 32);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS);
+  assert.equal(view.getUint32(12, true), 1);
+  assert.equal(view.getFloat32(16, true), 11);
   assert.equal(view.getFloat32(20, true), 3);
 });
 
@@ -5344,6 +5473,90 @@ test('Schroeder phase-volume split/merge proposals consume retained migrations w
   );
 });
 
+test('Schroeder phase-volume split/merge apply blocks without admission and dispatches no work', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeSplitMergeProposal = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-proposal-submitted',
+    migrationRowCount: 130,
+    proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+    proposalBuffer: { label: 'retained-phase-volume-split-merge-proposal-buffer' }
+  };
+  const apply = await runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+    device,
+    phaseVolumeSplitMergeProposal
+  });
+
+  assert.equal(apply.schema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA);
+  assert.equal(apply.phaseVolumeSplitMergeApplySchema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA);
+  assert.equal(apply.status, 'schroeder-phase-volume-split-merge-apply-blocked-admission-required');
+  assert.equal(apply.phaseVolumeSplitMergeAdmissionApproved, false);
+  assert.equal(apply.retainedApplyBuffer, false);
+  assert.equal(apply.applyBufferByteLength, 0);
+  assert.equal(apply.applyRows.length, 0);
+  assert.equal(apply.stateMutationRequired, false);
+  assert.equal(apply.stateMutationStatus, 'blocked-phase-volume-split-merge-admission-required');
+  assert.deepEqual(device.dispatches, []);
+});
+
+test('Schroeder phase-volume split/merge apply consumes retained proposals after admission without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeSplitMergeProposal = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-split-merge-proposal-submitted',
+    migrationRowCount: 130,
+    proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
+    proposalEpoch: 11,
+    stateFamilyId: 4,
+    proposalBuffer: { label: 'retained-phase-volume-split-merge-proposal-buffer' }
+  };
+  const apply = await runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+    device,
+    phaseVolumeSplitMergeProposal,
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 130 }),
+    applyEpoch: 12,
+    stateFamilyId: 4,
+    residualTolerance: 1e-5
+  });
+
+  assert.equal(apply.schema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA);
+  assert.equal(apply.phaseVolumeSplitMergeApplySchema, ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_SCHEMA);
+  assert.equal(apply.status, 'schroeder-phase-volume-split-merge-apply-submitted');
+  assert.equal(
+    apply.sourcePhaseVolumeSplitMergeProposalSchema,
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA
+  );
+  assert.equal(apply.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(apply.fullReadbackPerformed, false);
+  assert.equal(apply.fullParticleReadbackPerformed, false);
+  assert.equal(apply.normalHotLoopReadbackFree, true);
+  assert.equal(apply.phaseVolumeSplitMergeAdmissionApproved, true);
+  assert.equal(apply.retainedApplyBuffer, true);
+  assert.ok(apply.applyBuffer);
+  assert.equal(apply.applyBuffer.destroyed, false);
+  assert.equal(apply.applyBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(apply.applyRows.length, 0);
+  assert.equal(apply.applyMode, 'state-manager-admitted-split-merge-intent');
+  assert.equal(
+    apply.particleStorageMutationStatus,
+    'deferred-to-state-manager-particle-storage-allocator'
+  );
+  assert.equal(apply.stateMutationRequired, true);
+  assert.equal(apply.stateMutationStatus, 'phase-volume-split-merge-apply-buffer-submitted');
+  assert.equal(
+    apply.stateAuthorityStatus,
+    'state-manager-admitted-phase-volume-split-merge-apply-materialized'
+  );
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => (
+    module.code.includes('SchroederPhaseVolumeSplitMergeApplyParams')
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('apply-readback')),
+    false
+  );
+});
+
 test('Schroeder phase-volume level update consumes retained migration rows after admission without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const phaseVolumeMigration = {
@@ -5451,6 +5664,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
       hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
       hasPhaseVolumeSplitMergeProposal: Boolean(options.schroederPhaseVolumeSplitMergeProposal),
+      hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
       hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
       hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
@@ -5518,6 +5732,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregateNode, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(result.phaseVolumeSplitMergeProposal, null);
+  assert.equal(result.phaseVolumeSplitMergeApply, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.phaseVolumeDiagnosticSummary, null);
@@ -5535,6 +5750,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.residentStep.hasHierarchyAggregateNode, false);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, false);
   assert.equal(result.residentStep.hasPhaseVolumeSplitMergeProposal, false);
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
   assert.equal(result.activeNodeConsumerStatus, 'active-node-list-forwarded-to-mls-mpm-p2g-g2p');
@@ -5550,6 +5766,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregateNodeStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeMigrationStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeSplitMergeProposalStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.phaseVolumeSplitMergeApplyStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-same-level-only-mechanics');
@@ -5587,6 +5804,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].schroederHierarchyAggregateNode, null);
   assert.equal(calls[0].schroederPhaseVolumeMigration, null);
   assert.equal(calls[0].schroederPhaseVolumeSplitMergeProposal, null);
+  assert.equal(calls[0].schroederPhaseVolumeSplitMergeApply, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
@@ -6280,6 +6498,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
         hasFarAggregateDiagnosticSummary: Boolean(options.schroederFarAggregateDiagnosticSummary),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
         hasPhaseVolumeSplitMergeProposal: Boolean(options.schroederPhaseVolumeSplitMergeProposal),
+        hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
         hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
       };
@@ -6367,6 +6586,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     result.phaseVolumeSplitMergeProposal.stateAuthorityStatus,
     'state-manager-admission-required-before-any-particle-count-mutation'
   );
+  assert.equal(result.phaseVolumeSplitMergeApply, null);
   assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeDiagnosticSummary, null);
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'schroeder-cross-level-state-delta-merge-submitted');
@@ -6392,6 +6612,14 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     result.phaseVolumeSplitMergeProposalConsumerStatus,
     'phase-volume-split-merge-proposal-forwarded-to-resident-backend'
   );
+  assert.equal(
+    result.phaseVolumeSplitMergeApplyStatus,
+    'disabled-phase-volume-split-merge-admission-not-provided'
+  );
+  assert.equal(
+    result.phaseVolumeSplitMergeApplyConsumerStatus,
+    'disabled-phase-volume-split-merge-admission-not-provided'
+  );
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-migration-submitted');
@@ -6405,6 +6633,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.residentStep.hasFarAggregateDiagnosticSummary, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeSplitMergeProposal, true);
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
   assert.equal(calls.length, 1);
@@ -6440,6 +6669,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     calls[0].schroederPhaseVolumeSplitMergeProposal.schema,
     ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA
   );
+  assert.equal(calls[0].schroederPhaseVolumeSplitMergeApply, null);
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
@@ -6518,6 +6748,78 @@ test('Schroeder same-level mechanics forwards admitted far-force application del
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederFarAggregateForceApplicationParams')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('force-application-readback')),
+    false
+  );
+});
+
+test('Schroeder same-level mechanics forwards admitted phase-volume split/merge apply intents', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
+    phaseVolumeSplitMergeAdmission: approvedPhaseVolumeSplitMergeAdmission({ rowCount: 3 }),
+    mergeEpoch: 13,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
+        hasPhaseVolumeSplitMergeProposal: Boolean(options.schroederPhaseVolumeSplitMergeProposal),
+        hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+      };
+    }
+  });
+
+  assert.equal(result.phaseVolumeMigration.retainedMigrationBuffer, true);
+  assert.equal(result.phaseVolumeSplitMergeProposal.retainedProposalBuffer, true);
+  assert.equal(result.phaseVolumeSplitMergeApply.retainedApplyBuffer, true);
+  assert.equal(result.phaseVolumeSplitMergeApply.proposalRowCount, 3);
+  assert.equal(result.phaseVolumeSplitMergeApply.outputCompaction, 'one-admitted-phase-volume-split-merge-apply-row-per-proposal-row');
+  assert.equal(result.phaseVolumeSplitMergeApply.applyMode, 'state-manager-admitted-split-merge-intent');
+  assert.equal(result.phaseVolumeSplitMergeApply.phaseVolumeSplitMergeAdmissionApproved, true);
+  assert.equal(
+    result.phaseVolumeSplitMergeApply.particleStorageMutationStatus,
+    'deferred-to-state-manager-particle-storage-allocator'
+  );
+  assert.equal(result.phaseVolumeSplitMergeApply.stateMutationRequired, true);
+  assert.equal(result.phaseVolumeSplitMergeApply.stateMutationStatus, 'phase-volume-split-merge-apply-buffer-submitted');
+  assert.equal(
+    result.phaseVolumeSplitMergeApply.stateAuthorityStatus,
+    'state-manager-admitted-phase-volume-split-merge-apply-materialized'
+  );
+  assert.equal(result.phaseVolumeLevelUpdate, null);
+  assert.equal(result.phaseVolumeSplitMergeApplyStatus, 'schroeder-phase-volume-split-merge-apply-submitted');
+  assert.equal(
+    result.phaseVolumeSplitMergeApplyConsumerStatus,
+    'phase-volume-split-merge-apply-forwarded-to-resident-backend'
+  );
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
+  assert.equal(result.conservativeTransferStatus, 'phase-volume-split-merge-apply-submitted');
+  assert.equal(result.stateMutationStatus, 'phase-volume-split-merge-apply-buffer-submitted');
+  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-phase-volume-split-merge-apply-materialized');
+  assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeProposal, true);
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederPhaseVolumeSplitMergeApply.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA
+  );
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(device.dispatches.length, 19);
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('split-merge-apply-readback')),
     false
   );
 });
@@ -6832,6 +7134,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
         hasFarAggregateDiagnosticSummary: Boolean(options.schroederFarAggregateDiagnosticSummary),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
         hasPhaseVolumeSplitMergeProposal: Boolean(options.schroederPhaseVolumeSplitMergeProposal),
+        hasPhaseVolumeSplitMergeApply: Boolean(options.schroederPhaseVolumeSplitMergeApply),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
         hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
       };
@@ -6844,6 +7147,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   assert.equal(result.phaseVolumeSplitMergeProposal.migrationRowCount, 3);
   assert.equal(result.phaseVolumeSplitMergeProposal.proposalMode, 'proposal-only-no-particle-mutation');
   assert.equal(result.phaseVolumeSplitMergeProposal.stateMutationRequired, false);
+  assert.equal(result.phaseVolumeSplitMergeApply, null);
   assert.equal(result.phaseVolumeTargetAggregate.retainedAggregateBuffer, true);
   assert.equal(result.phaseVolumeTargetAggregate.aggregateSourceMode, 'phase-volume-target-level-assignment');
   assert.equal(result.phaseVolumeTargetAggregateNode.retainedAggregateNodeBuffer, true);
@@ -6889,6 +7193,10 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     result.phaseVolumeSplitMergeProposalStatus,
     'schroeder-phase-volume-split-merge-proposal-submitted'
   );
+  assert.equal(
+    result.phaseVolumeSplitMergeApplyStatus,
+    'disabled-phase-volume-split-merge-admission-not-provided'
+  );
   assert.equal(result.phaseVolumeTargetAggregateStatus, 'schroeder-phase-volume-target-aggregate-submitted');
   assert.equal(result.phaseVolumeTargetAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
@@ -6907,6 +7215,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   assert.equal(result.residentStep.hasFarAggregateDiagnosticSummary, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeSplitMergeProposal, true);
+  assert.equal(result.residentStep.hasPhaseVolumeSplitMergeApply, false);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, true);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, true);
   assert.equal(calls.length, 1);
@@ -6918,6 +7227,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     calls[0].schroederPhaseVolumeSplitMergeProposal.schema,
     ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_EXECUTION_SCHEMA
   );
+  assert.equal(calls[0].schroederPhaseVolumeSplitMergeApply, null);
   assert.equal(
     calls[0].schroederFarAggregateCandidates.schema,
     ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA

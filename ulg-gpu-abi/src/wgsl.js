@@ -12003,6 +12003,132 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederPhaseVolumeSplitMergeApplyWgsl = `
+struct SchroederPhaseVolumeSplitMergeApplyParams {
+  proposal_row_count: u32,
+  proposal_stride: u32,
+  apply_stride: u32,
+  admission_approved: u32,
+  apply_epoch: f32,
+  state_family_id: f32,
+  residual_tolerance: f32,
+  flags: f32,
+};
+
+@group(0) @binding(0) var<storage, read> proposal_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> apply_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeSplitMergeApplyParams;
+
+const SCHROEDER_PVSMA_PROPOSAL_STRIDE: u32 = 32u;
+const SCHROEDER_PVSMA_APPLY_STRIDE: u32 = 32u;
+
+fn ss_pvsma_active_proposal(proposal_offset: u32) -> bool {
+  let status = proposal_rows[proposal_offset + 3u];
+  return status > 0.0 && status < 32.0 && params.admission_approved > 0u;
+}
+
+fn ss_pvsma_write_empty(apply_offset: u32, proposal_offset: u32, status: f32) {
+  apply_rows[apply_offset + 0u] = proposal_rows[proposal_offset + 0u];
+  apply_rows[apply_offset + 1u] = proposal_rows[proposal_offset + 1u];
+  apply_rows[apply_offset + 2u] = proposal_rows[proposal_offset + 2u];
+  apply_rows[apply_offset + 3u] = status;
+  for (var column = 4u; column < SCHROEDER_PVSMA_APPLY_STRIDE; column = column + 1u) {
+    apply_rows[apply_offset + column] = 0.0;
+  }
+  apply_rows[apply_offset + 6u] = f32(params.admission_approved);
+  apply_rows[apply_offset + 30u] = params.apply_epoch;
+  apply_rows[apply_offset + 31u] = params.state_family_id;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.proposal_row_count) {
+    return;
+  }
+
+  let proposal_stride = max(params.proposal_stride, SCHROEDER_PVSMA_PROPOSAL_STRIDE);
+  let apply_stride = max(params.apply_stride, SCHROEDER_PVSMA_APPLY_STRIDE);
+  let proposal_offset = row_index * proposal_stride;
+  let apply_offset = row_index * apply_stride;
+
+  if (!ss_pvsma_active_proposal(proposal_offset)) {
+    ss_pvsma_write_empty(apply_offset, proposal_offset, 32.0);
+    return;
+  }
+
+  let proposal_mode_id = proposal_rows[proposal_offset + 4u];
+  let coarsen_eligible = proposal_rows[proposal_offset + 5u] > 0.0;
+  let refine_required = proposal_rows[proposal_offset + 6u] > 0.0;
+  let rest_volume_m3 = proposal_rows[proposal_offset + 8u];
+  let represented_volume_m3 = proposal_rows[proposal_offset + 9u];
+  let phase_volume_ratio = proposal_rows[proposal_offset + 10u];
+  let level_delta = proposal_rows[proposal_offset + 11u];
+  let aggregate_matching_count = max(proposal_rows[proposal_offset + 13u], 1.0);
+  let aggregate_mass_kg = proposal_rows[proposal_offset + 14u];
+  let aggregate_volume_m3 = proposal_rows[proposal_offset + 15u];
+  let aggregate_mass_residual_kg = proposal_rows[proposal_offset + 16u];
+  let aggregate_volume_residual_m3 = proposal_rows[proposal_offset + 17u];
+  let residual_issue =
+    abs(aggregate_mass_residual_kg) > params.residual_tolerance
+    || abs(aggregate_volume_residual_m3) > params.residual_tolerance;
+
+  var status = 1.0 + 8.0;
+  if (coarsen_eligible) {
+    status = status + 2.0;
+  }
+  if (refine_required) {
+    status = status + 4.0;
+  }
+  if (residual_issue) {
+    status = status + 16.0;
+  }
+
+  let coarsen_delta = 1.0 - aggregate_matching_count;
+  let refine_delta = max(1.0, ceil(abs(level_delta))) - 1.0;
+  let particle_count_delta = select(
+    select(0.0, coarsen_delta, coarsen_eligible),
+    refine_delta,
+    refine_required
+  );
+  let target_mass_kg = select(represented_volume_m3, aggregate_mass_kg, coarsen_eligible);
+  let target_volume_m3 = select(represented_volume_m3, aggregate_volume_m3, coarsen_eligible);
+
+  apply_rows[apply_offset + 0u] = proposal_rows[proposal_offset + 0u];
+  apply_rows[apply_offset + 1u] = proposal_rows[proposal_offset + 1u];
+  apply_rows[apply_offset + 2u] = proposal_rows[proposal_offset + 2u];
+  apply_rows[apply_offset + 3u] = status;
+  apply_rows[apply_offset + 4u] = proposal_mode_id;
+  apply_rows[apply_offset + 5u] = proposal_mode_id;
+  apply_rows[apply_offset + 6u] = f32(params.admission_approved);
+  apply_rows[apply_offset + 7u] = particle_count_delta;
+  apply_rows[apply_offset + 8u] = 0.0;
+  apply_rows[apply_offset + 9u] = target_mass_kg;
+  apply_rows[apply_offset + 10u] = aggregate_mass_residual_kg;
+  apply_rows[apply_offset + 11u] = 0.0;
+  apply_rows[apply_offset + 12u] = target_volume_m3;
+  apply_rows[apply_offset + 13u] = aggregate_volume_residual_m3;
+  apply_rows[apply_offset + 14u] = proposal_rows[proposal_offset + 18u];
+  apply_rows[apply_offset + 15u] = proposal_rows[proposal_offset + 19u];
+  apply_rows[apply_offset + 16u] = proposal_rows[proposal_offset + 20u];
+  apply_rows[apply_offset + 17u] = proposal_rows[proposal_offset + 21u];
+  apply_rows[apply_offset + 18u] = rest_volume_m3;
+  apply_rows[apply_offset + 19u] = represented_volume_m3;
+  apply_rows[apply_offset + 20u] = phase_volume_ratio;
+  apply_rows[apply_offset + 21u] = proposal_rows[proposal_offset + 12u];
+  apply_rows[apply_offset + 22u] = aggregate_matching_count;
+  apply_rows[apply_offset + 23u] = aggregate_mass_kg;
+  apply_rows[apply_offset + 24u] = aggregate_volume_m3;
+  apply_rows[apply_offset + 25u] = aggregate_mass_residual_kg;
+  apply_rows[apply_offset + 26u] = aggregate_volume_residual_m3;
+  apply_rows[apply_offset + 27u] = proposal_rows[proposal_offset + 22u];
+  apply_rows[apply_offset + 28u] = proposal_rows[proposal_offset + 23u];
+  apply_rows[apply_offset + 29u] = proposal_rows[proposal_offset + 26u];
+  apply_rows[apply_offset + 30u] = params.apply_epoch;
+  apply_rows[apply_offset + 31u] = params.state_family_id;
+}
+`;
+
 export const schroederPhaseVolumeLevelUpdateWgsl = `
 struct SchroederPhaseVolumeLevelUpdateParams {
   migration_row_count: u32,

@@ -537,14 +537,25 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS StateManager-admitted split/merge apply**:
+Completed in this slice:
 
-1. Add an admission object for retained split/merge proposal rows and keep it
-   descriptor-only/same-device until StateManager accepts the proposal family.
-2. Add a retained apply-plan/execution artifact that can materialize particle
-   count/represented-mass changes only after admission, with continuity rows
-   preserved for replay.
-3. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
+1. Added `peercompute.ulg.schroeder-phase-volume-split-merge-admission.v0`
+   and retained GPU `schroeder-phase-volume-split-merge-apply` rows gated by
+   StateManager admission.
+2. Added split/merge apply plans, params, WGSL, WebGPU execution, same-level
+   mechanics forwarding, and status telemetry. The stage preserves
+   mass/represented-volume intent, particle-count deltas, and proposal
+   momentum/internal-energy continuity rows without CPU readback.
+3. Kept actual particle storage resizing deferred to a future StateManager
+   allocator so proposal/apply rows cannot silently mutate particle buffers.
+
+The next code slice on `SS` is **SS particle-storage allocator admission**:
+
+1. Add a retained allocator plan that consumes admitted split/merge apply rows
+   and produces same-device particle-slot allocation/free-list intents.
+2. Keep storage mutation fail-closed until the StateManager admits target
+   particle-state/mechanics/thermo families and buffer capacity.
+3. Preserve the URL-scheduled H2O steam proof: expected level delta > 2,
    observed admitted update delta > 0, represented/rest volume > 100,
    coarsen/aggregate-coherent counts > 0, refine-required count 0 for coherent
    bulk, refine-pressure count/mask 0 for coherent bulk, particle growth <= 1,

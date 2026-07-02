@@ -2632,8 +2632,17 @@ function schroederPortableRetainedRef({
   strideFloats = 0,
   byteLength = 0,
   retained = false,
-  role = null
+  role = null,
+  retainedBufferRef = null
 } = {}) {
+  const resolvedFamily = String(family || '').trim();
+  const resolvedRole = String(role || '').trim();
+  const resolvedRetainedBufferRef = retainedBufferRef
+    || artifact?.retainedBufferRef
+    || artifact?.resourceKey
+    || (retained && resolvedFamily
+      ? `${resolvedFamily}:${resolvedRole || 'default'}`
+      : null);
   return {
     family,
     role,
@@ -2643,7 +2652,88 @@ function schroederPortableRetainedRef({
     strideFloats: Math.max(0, Math.round(finiteNumber(strideFloats, 0))),
     byteLength: Math.max(0, Math.round(finiteNumber(byteLength, 0))),
     retained: Boolean(retained),
+    retainedBufferRef: resolvedRetainedBufferRef,
     transferMode: 'descriptor-only-no-raw-gpubuffer-transfer'
+  };
+}
+
+function schroederLocalRetainedRenderBufferDescriptor({
+  family,
+  role,
+  artifact = null,
+  buffer = null,
+  rowCount = 0,
+  strideFloats = 0,
+  byteLength = 0
+} = {}) {
+  if (!buffer) return null;
+  const retainedRef = schroederPortableRetainedRef({
+    family,
+    role,
+    artifact,
+    rowCount,
+    strideFloats,
+    byteLength,
+    retained: true
+  });
+  return {
+    ...retainedRef,
+    buffer,
+    gpuBuffer: buffer,
+    resourceKey: retainedRef.retainedBufferRef,
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    transferMode: 'same-device-local-resolver-no-peer-transfer'
+  };
+}
+
+function createSchroederLocalRetainedRenderBufferResolverSummary({
+  activeNodeList = null,
+  hierarchyAggregateNode = null
+} = {}) {
+  const buffers = [
+    schroederLocalRetainedRenderBufferDescriptor({
+      family: 'schroeder-active-node-list',
+      role: 'render-lod-leaf-source',
+      artifact: activeNodeList,
+      buffer: activeNodeList?.activeNodeBuffer || null,
+      rowCount: activeNodeList?.activeCandidateCount ?? activeNodeList?.particleCount,
+      strideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+      byteLength: activeNodeList?.activeNodeBufferByteLength ?? activeNodeList?.activeNodeByteLength
+    }),
+    schroederLocalRetainedRenderBufferDescriptor({
+      family: 'schroeder-hierarchy-aggregate-node',
+      role: 'coherent-aggregate-render-proxy-source',
+      artifact: hierarchyAggregateNode,
+      buffer: hierarchyAggregateNode?.aggregateNodeBuffer || null,
+      rowCount: hierarchyAggregateNode?.aggregateNodeCount ?? hierarchyAggregateNode?.aggregateRowCount,
+      strideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+      byteLength: hierarchyAggregateNode?.aggregateNodeBufferByteLength
+        ?? hierarchyAggregateNode?.aggregateNodeByteLength
+    })
+  ].filter(Boolean);
+  return {
+    schema: 'peercompute.ulg.schroeder-local-retained-render-buffer-resolver.v0',
+    status: buffers.length > 0
+      ? 'schroeder-local-retained-render-buffers-ready'
+      : 'schroeder-local-retained-render-buffers-empty',
+    source: 'same-device-schroeder-execution-artifacts',
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferRequired: false,
+    frameCopyReadbackRequired: false,
+    fullParticleReadbackRequired: false,
+    bufferCount: buffers.length,
+    retainedBufferRefs: buffers.map((entry) => entry.retainedBufferRef),
+    buffers,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
   };
 }
 
@@ -6163,6 +6253,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       baseGridSpacingM: plan.baseGridSpacingM,
       peerComputeUseCase: portableSummaryPeerComputeUseCase
     });
+  const resolvedLocalRetainedRenderBuffers = createSchroederLocalRetainedRenderBufferResolverSummary({
+    activeNodeList: resolvedActiveNodeList,
+    hierarchyAggregateNode: resolvedHierarchyAggregateNode
+  });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -6208,6 +6302,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     readbackMode,
     fullParticleReadbackPerformed: false,
     normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
+    localRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
+    schroederLocalRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,
     levelAssignment: {
       schema: resolvedLevelAssignment.schema,
       status: resolvedLevelAssignment.status,

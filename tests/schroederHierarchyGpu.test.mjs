@@ -1713,6 +1713,14 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.lawNeighborCandidateCount, 9);
   assert.equal(plan.retainedRefCount, 7);
   assert.equal(plan.retainedBufferRefCount, 7);
+  assert.equal(
+    plan.retainedRefs.find((entry) => entry.family === 'schroeder-active-node-list')?.retainedBufferRef,
+    'schroeder-active-node-list:render-lod-leaf-source'
+  );
+  assert.equal(
+    plan.retainedRefs.find((entry) => entry.family === 'schroeder-hierarchy-aggregate-node')?.retainedBufferRef,
+    'schroeder-hierarchy-aggregate-node:coherent-aggregate-render-proxy-source'
+  );
   assert.equal(plan.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
   assert.equal(plan.renderLod.status, 'schroeder-render-lod-summary-planned');
   assert.equal(plan.renderLod.activeLeafProxyCount, 3);
@@ -3043,6 +3051,22 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.normalHotLoopReadbackFree, true);
   assert.equal(result.levelAssignment.retainedAssignmentBuffer, true);
   assert.equal(result.activeNodeList.retainedActiveNodeBuffer, true);
+  assert.equal(
+    result.localRetainedRenderBuffers.schema,
+    'peercompute.ulg.schroeder-local-retained-render-buffer-resolver.v0'
+  );
+  assert.equal(result.localRetainedRenderBuffers.status, 'schroeder-local-retained-render-buffers-ready');
+  assert.equal(result.localRetainedRenderBuffers.sameDeviceOnly, true);
+  assert.equal(result.localRetainedRenderBuffers.peerComputePortable, false);
+  assert.equal(result.localRetainedRenderBuffers.rawGpuBufferTransferAllowed, false);
+  assert.equal(result.localRetainedRenderBuffers.frameCopyReadbackRequired, false);
+  assert.equal(result.localRetainedRenderBuffers.fullParticleReadbackRequired, false);
+  assert.deepEqual(result.localRetainedRenderBuffers.retainedBufferRefs, [
+    'schroeder-active-node-list:render-lod-leaf-source'
+  ]);
+  assert.equal(result.localRetainedRenderBuffers.buffers[0].retainedBufferRef, 'schroeder-active-node-list:render-lod-leaf-source');
+  assert.ok(result.localRetainedRenderBuffers.buffers[0].buffer);
+  assert.equal(result.localRetainedRenderBuffers.buffers[0].transferMode, 'same-device-local-resolver-no-peer-transfer');
   assert.equal(result.lawQueue.retainedLawQueueBuffer, true);
   assert.equal(result.lawQueue.activeNodeCount, 3);
   assert.equal(result.lawQueue.lawQueueStatus, 'local-law-queues-submitted');
@@ -3182,8 +3206,16 @@ test('Schroeder same-level mechanics can emit portable render LOD summary', asyn
   assert.equal(result.portableSummary.retainedRefCount, 2);
   assert.equal(result.portableSummary.retainedBufferRefCount, 2);
   assert.equal(result.portableSummary.retainedRefs.length, 2);
+  assert.equal(
+    result.portableSummary.retainedRefs[0].retainedBufferRef,
+    'schroeder-level-assignment:native-scale-classification'
+  );
   assert.equal(result.portableSummary.retainedRefs[1].family, 'schroeder-active-node-list');
   assert.equal(result.portableSummary.retainedRefs[1].role, 'render-lod-leaf-source');
+  assert.equal(
+    result.portableSummary.retainedRefs[1].retainedBufferRef,
+    'schroeder-active-node-list:render-lod-leaf-source'
+  );
   assert.equal(result.portableSummary.retainedRefs[1].transferMode, 'descriptor-only-no-raw-gpubuffer-transfer');
   assert.equal(Object.hasOwn(result.portableSummary.retainedRefs[1], 'buffer'), false);
   assert.equal(Object.hasOwn(result.portableSummary.retainedRefs[1], 'gpuBuffer'), false);
@@ -3208,6 +3240,12 @@ test('Schroeder same-level mechanics can emit portable render LOD summary', asyn
   assert.equal(result.residentStep.portableSummaryTransferMode, 'peercompute-portable-summary-descriptors');
   assert.equal(result.residentStep.renderLodStatus, 'schroeder-render-lod-summary-planned');
   assert.equal(result.residentStep.retainedRefCount, 2);
+  assert.equal(
+    result.localRetainedRenderBuffers.retainedBufferRefs[0],
+    'schroeder-active-node-list:render-lod-leaf-source'
+  );
+  assert.ok(result.localRetainedRenderBuffers.buffers[0].buffer);
+  assert.equal(result.localRetainedRenderBuffers.buffers[0].gpuBuffer, result.localRetainedRenderBuffers.buffers[0].buffer);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].schroederPortableSummary.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
   assert.equal(calls[0].schroederPortableSummary.renderLod.activeLeafProxyCount, 3);

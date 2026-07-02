@@ -893,7 +893,10 @@ export function createSchroederRenderProxyDrawSource({
     || resolveSchroederRenderProxyVisibleConsumer({ proxyDescriptorPlan: plan });
   const descriptors = Array.isArray(plan.descriptors) ? plan.descriptors : [];
   const drawableDescriptors = descriptors.filter((descriptor) => descriptor?.drawableProxy);
-  const missingSourceRefs = drawableDescriptors.filter((descriptor) => !descriptor.sourceRef?.retained);
+  const missingSourceRefs = drawableDescriptors.filter((descriptor) => (
+    !descriptor.sourceRef?.retained
+    || !descriptor.sourceRef?.retainedBufferRef
+  ));
   const sourceRefsReady = missingSourceRefs.length === 0;
   const inputReady = Boolean(
     plan.status === 'schroeder-render-proxy-descriptors-ready'

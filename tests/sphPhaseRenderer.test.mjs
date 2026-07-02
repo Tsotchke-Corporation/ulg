@@ -3661,6 +3661,38 @@ test('SPH scene blocks Schroeder native proxy executor without same-device retai
   assert.equal(missingRetainedSource.fullParticleReadbackRequired, false);
 });
 
+test('SPH scene blocks Schroeder proxy draw source with keyless retained refs', () => {
+  const keyedFixture = schroederPortableSummaryFixture();
+  const portableSummary = schroederPortableSummaryFixture({
+    retainedRefs: keyedFixture.retainedRefs.map(({ retainedBufferRef, ...entry }) => entry)
+  });
+  const source = createSchroederRenderSourceMetadata({
+    schroederPortableSummary: portableSummary,
+    source: 'unit-test-keyless-retained-refs'
+  });
+  assert.equal(source.status, 'schroeder-render-source-local-observation-ready');
+  assert.equal(source.activeLeafSourceRef.retained, true);
+  assert.equal(source.activeLeafSourceRef.retainedBufferRef, null);
+
+  const proxyPlan = createSchroederRenderProxyDescriptorPlan({ schroederRenderSource: source });
+  const proxyConsumer = resolveSchroederRenderProxyVisibleConsumer({
+    proxyDescriptorPlan: proxyPlan
+  });
+  const drawSource = createSchroederRenderProxyDrawSource({
+    proxyDescriptorPlan: proxyPlan,
+    visibleConsumer: proxyConsumer
+  });
+  assert.equal(drawSource.status, 'blocked-schroeder-render-proxy-draw-source');
+  assert.equal(drawSource.sourceRefsReady, false);
+  assert.equal(drawSource.missingSourceRefCount, 2);
+  assert.equal(drawSource.drawBatchCount, 0);
+  assert.equal(drawSource.blocker, 'schroeder-render-proxy-draw-source-missing-retained-source-ref');
+
+  const backendSelection = resolveSchroederRenderProxyBackendSelection({ drawSource });
+  assert.equal(backendSelection.status, 'blocked-schroeder-render-proxy-backend-source');
+  assert.equal(backendSelection.ready, false);
+});
+
 test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {
   const portableSummary = schroederPortableSummaryFixture({
     retainedRefs: [

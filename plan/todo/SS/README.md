@@ -203,8 +203,12 @@ Landed checkpoints:
     deltas now publish replay-ready compact SS summaries/render LOD without raw
     `GPUBuffer` handles, and the resident authority host exposes a replay
     descriptor helper.
+54. `ff29727` exposes bucket-first traversal/index policy telemetry so auto mode
+    explicitly keeps the retained bucket index as the small-scene/default GPU
+    index and records the sorted/radix escalation trigger only when forced by
+    PeerCompute/traversal policy or justified by compact diagnostics.
 
 Next implementation queue:
 
-1. Keep the bucket index as the small-scene/default first GPU index and use
-   compact diagnostics to escalate only when configured or justified.
+1. Re-scan the SS and legacy todo sources for the next unlanded architecture
+   slice.

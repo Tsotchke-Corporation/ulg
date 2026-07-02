@@ -35425,3 +35425,30 @@ Next:
 
 - Keep the bucket index as the small-scene/default first GPU index and use
   compact diagnostics to escalate only when configured or justified.
+
+## 2026-07-01 AKDT - SS Bucket-First Traversal Policy Telemetry
+
+Status:
+
+- Added explicit bucket-first/default traversal telemetry to
+  `createSchroederLawNeighborTraversalPolicy`: default index mode,
+  bucket-first flag, sorted/radix escalation allowance, and escalation trigger.
+- Added matching sorted-index selection telemetry: default index mode,
+  bucket-first flag, sorted/radix build trigger, and policy allowance.
+- Auto mode now remains visibly bucket-first for small/default scenes until a
+  PeerCompute/traversal force setting or compact law-neighbor diagnostics
+  justifies sorted/radix escalation. This is an exposed contract, not a hidden
+  assumption.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `66/66`
+  passing.
+
+Next:
+
+- Re-scan `plan/todo/SS` and retained legacy todo sources for the next unlanded
+  GPU-first architecture slice.

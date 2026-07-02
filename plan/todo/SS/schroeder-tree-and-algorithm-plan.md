@@ -327,7 +327,8 @@ Suggested schemas:
   performance benchmark landed in `6fa1fec`; diagnostic CPU proxy selection was
   restricted to explicit admitted, under-budget, metadata-only diagnostic use
   in `fc99828`; descriptor-only SS portable-summary replay descriptors and
-  seeds landed in `f26f895`.
+  seeds landed in `f26f895`; bucket-first traversal/index policy telemetry
+  landed in `ff29727`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -388,10 +389,10 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS traversal/index policy hardening for
-configured live runs**:
+The next code slice on `SS` is **SS todo rescan and next architecture slice
+selection**:
 
-1. Keep the bucket index as the small-scene/default first GPU index and use
-   compact diagnostics to escalate only when configured or justified.
-2. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
-   owner of physics cadence or state authority.
+1. Re-scan `plan/todo/SS` and retained legacy todo sources for the next
+   unlanded slice.
+2. Prefer GPU-first SS work that advances live behavior or PeerCompute
+   boundaries over adding more diagnostic-only scaffolding.

@@ -50,6 +50,8 @@ import {
   resolveSchroederRenderProxyVisibleConsumer,
   createSchroederRenderProxyDrawSource,
   resolveSchroederRenderProxyBackendSelection,
+  createSchroederRenderProxyLocalRetainedBufferResolver,
+  createSchroederRenderProxyNativeCameraUniformPayload,
   createSchroederRenderProxyNativeWebGpuExecutor,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
@@ -3554,6 +3556,7 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
     backendSelection: nativeBackend,
     device,
     format: 'rgba8unorm',
+    depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
     retainedBufferResolver,
     source: 'unit-test'
   });
@@ -3562,6 +3565,7 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
   assert.equal(executor.status, 'schroeder-render-proxy-native-executor-ready');
   assert.equal(executor.ready, true);
   assert.equal(executor.selectedBackend, 'native-webgpu-retained-proxy');
+  assert.equal(executor.depthFormat, SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT);
   assert.equal(executor.rawGpuBufferBinding, true);
   assert.equal(executor.rawGpuBufferTransferRequired, false);
   assert.equal(executor.frameCopyReadbackRequired, false);
@@ -3587,6 +3591,8 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
   assert.equal(calls.bindGroupLayouts.length, 1);
   assert.equal(calls.pipelineLayouts.length, 1);
   assert.equal(calls.pipelines.length, 1);
+  assert.equal(calls.pipelines[0].depthStencil.format, SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT);
+  assert.equal(calls.pipelines[0].depthStencil.depthWriteEnabled, false);
   assert.equal(calls.bindGroups.length, 2);
   assert.equal(calls.writes.length, 2);
   assert.equal(calls.writes[0].data[0], 12);
@@ -3595,6 +3601,26 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
   assert.equal(calls.writes[1].data[0], 3);
   assert.equal(calls.writes[1].data[1], SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS);
   assert.equal(calls.writes[1].data[2], 1);
+
+  const beforeCameraWrites = calls.writes.length;
+  const cameraUpdate = executor.updateCamera({
+    viewProjection: { elements: Array.from({ length: 16 }, (_, index) => index + 1) },
+    viewportWidth: 800,
+    viewportHeight: 600,
+    nativeGridSpacingM: 0.25
+  });
+  assert.equal(cameraUpdate.status, 'schroeder-render-proxy-native-camera-uniform-updated');
+  assert.equal(cameraUpdate.byteLength, SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(cameraUpdate.viewportWidth, 800);
+  assert.equal(cameraUpdate.viewportHeight, 600);
+  assert.equal(cameraUpdate.nativeGridSpacingM, 0.25);
+  assert.equal(calls.writes.length, beforeCameraWrites + 1);
+  assert.equal(calls.writes.at(-1).buffer, executor.cameraBuffer);
+  assert.equal(calls.writes.at(-1).data[0], 1);
+  assert.equal(calls.writes.at(-1).data[15], 16);
+  assert.equal(calls.writes.at(-1).data[16], 800);
+  assert.equal(calls.writes.at(-1).data[17], 600);
+  assert.equal(calls.writes.at(-1).data[20], 0.25);
 
   const passCalls = [];
   const pass = {
@@ -3620,6 +3646,99 @@ test('SPH scene builds Schroeder native proxy executor from same-device retained
     passCalls.filter((call) => call.type === 'draw').map((call) => [call.vertexCount, call.instanceCount]),
     [[6, 12], [6, 3]]
   );
+});
+
+test('SPH scene builds local retained resolver for Schroeder same-device render buffers', () => {
+  const activeBuffer = { label: 'active-node-gpu-buffer' };
+  const aggregateBuffer = { label: 'aggregate-node-gpu-buffer' };
+  const local = createSchroederRenderProxyLocalRetainedBufferResolver({
+    residentExecution: {
+      localRetainedRenderBuffers: {
+        schema: 'peercompute.ulg.schroeder-local-retained-render-buffer-resolver.v0',
+        status: 'schroeder-local-retained-render-buffer-resolver-ready',
+        buffers: [
+          {
+            retainedBufferRef: 'active-node-list:test',
+            buffer: activeBuffer,
+            rowCount: 12,
+            strideFloats: SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
+            byteLength: 12 * SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            status: 'retained-buffer-ready'
+          },
+          {
+            resourceKey: 'aggregate-node:test',
+            gpuBuffer: aggregateBuffer,
+            rowCount: 3,
+            strideFloats: SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
+            byteLength: 3 * SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            status: 'retained-buffer-ready'
+          },
+          {
+            retainedBufferRef: 'ignored-keyless-buffer'
+          }
+        ]
+      }
+    },
+    source: 'unit-test'
+  });
+
+  assert.equal(local.schema, 'peercompute.ulg.sph-scene-schroeder-render-proxy-local-retained-buffer-resolver.v0');
+  assert.equal(local.status, 'schroeder-render-proxy-local-retained-buffer-resolver-ready');
+  assert.equal(local.ready, true);
+  assert.equal(local.source, 'unit-test');
+  assert.equal(local.sameDeviceOnly, true);
+  assert.equal(local.peerComputePortable, false);
+  assert.equal(local.descriptorOnlyPeerComputeHandoff, true);
+  assert.equal(local.rawGpuBufferTransferAllowed, false);
+  assert.equal(local.rawGpuBufferTransferRequired, false);
+  assert.equal(local.frameCopyReadbackRequired, false);
+  assert.equal(local.fullParticleReadbackRequired, false);
+  assert.equal(local.retainedBufferRefCount, 2);
+  assert.deepEqual(local.retainedBufferRefs, ['active-node-list:test', 'aggregate-node:test']);
+  assert.equal(local.retainedBufferResolver.get('active-node-list:test').buffer, activeBuffer);
+  assert.equal(local.retainedBufferResolver.get('aggregate-node:test').buffer, aggregateBuffer);
+  assert.equal(
+    local.retainedBufferResolver.get('aggregate-node:test').strideFloats,
+    SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS
+  );
+
+  const empty = createSchroederRenderProxyLocalRetainedBufferResolver();
+  assert.equal(empty.status, 'blocked-schroeder-render-proxy-local-retained-buffer-resolver-empty');
+  assert.equal(empty.ready, false);
+  assert.equal(empty.retainedBufferRefCount, 0);
+});
+
+test('SPH scene builds Schroeder native camera uniform payload', () => {
+  const payload = createSchroederRenderProxyNativeCameraUniformPayload({
+    viewProjection: { elements: Array.from({ length: 16 }, (_, index) => index + 1) },
+    viewportWidth: 640.4,
+    viewportHeight: 479.6,
+    nativeGridSpacingM: 0.25,
+    gridBiasM: 1.5,
+    mode: 2
+  });
+
+  assert.equal(payload.length, SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS);
+  assert.equal(payload[0], 1);
+  assert.equal(payload[15], 16);
+  assert.equal(payload[16], 640);
+  assert.equal(payload[17], 480);
+  assert.equal(payload[19], 2);
+  assert.equal(payload[20], 0.25);
+  assert.equal(payload[21], 1.5);
+
+  const identity = createSchroederRenderProxyNativeCameraUniformPayload({
+    viewportWidth: 0,
+    viewportHeight: -4,
+    nativeGridSpacingM: -1
+  });
+  assert.equal(identity[0], 1);
+  assert.equal(identity[5], 1);
+  assert.equal(identity[10], 1);
+  assert.equal(identity[15], 1);
+  assert.equal(identity[16], 1);
+  assert.equal(identity[17], 1);
+  assert.equal(identity[20], 1);
 });
 
 test('SPH scene blocks Schroeder native proxy executor without same-device retained buffers', () => {

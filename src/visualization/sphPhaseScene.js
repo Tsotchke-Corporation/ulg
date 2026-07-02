@@ -1210,11 +1210,99 @@ function resolveSchroederNativeProxyRetainedBuffer({
   };
 }
 
+export function createSchroederRenderProxyLocalRetainedBufferResolver({
+  residentExecution = null,
+  finalStep = null,
+  localRetainedRenderBuffers = null,
+  source = 'resident-render-refresh'
+} = {}) {
+  const localSource = localRetainedRenderBuffers
+    || residentExecution?.localRetainedRenderBuffers
+    || residentExecution?.schroederLocalRetainedRenderBuffers
+    || finalStep?.localRetainedRenderBuffers
+    || finalStep?.schroederLocalRetainedRenderBuffers
+    || null;
+  const buffers = Array.isArray(localSource?.buffers) ? localSource.buffers : [];
+  const retainedBufferResolver = new Map();
+  for (const entry of buffers) {
+    const retainedBufferRef = entry?.retainedBufferRef || entry?.resourceKey || null;
+    const buffer = entry?.buffer || entry?.gpuBuffer || null;
+    if (!retainedBufferRef || !buffer) continue;
+    retainedBufferResolver.set(retainedBufferRef, {
+      buffer,
+      gpuBuffer: buffer,
+      byteLength: entry.byteLength,
+      rowCount: entry.rowCount,
+      strideFloats: entry.strideFloats,
+      status: entry.status,
+      resourceKey: retainedBufferRef
+    });
+  }
+  return {
+    schema: 'peercompute.ulg.sph-scene-schroeder-render-proxy-local-retained-buffer-resolver.v0',
+    status: retainedBufferResolver.size > 0
+      ? 'schroeder-render-proxy-local-retained-buffer-resolver-ready'
+      : 'blocked-schroeder-render-proxy-local-retained-buffer-resolver-empty',
+    source,
+    inputSchema: localSource?.schema ?? null,
+    inputStatus: localSource?.status ?? null,
+    ready: retainedBufferResolver.size > 0,
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferRequired: false,
+    frameCopyReadbackRequired: false,
+    fullParticleReadbackRequired: false,
+    retainedBufferRefCount: retainedBufferResolver.size,
+    retainedBufferRefs: [...retainedBufferResolver.keys()],
+    retainedBufferResolver,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function createSchroederRenderProxyNativeCameraUniformPayload({
+  viewProjection = null,
+  viewportWidth = 1,
+  viewportHeight = 1,
+  nativeGridSpacingM = 1,
+  gridBiasM = 0,
+  mode = 0
+} = {}) {
+  const payload = new Float32Array(SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS);
+  const elements = viewProjection?.elements || viewProjection;
+  if (elements && typeof elements.length === 'number' && elements.length >= 16) {
+    for (let i = 0; i < 16; i += 1) {
+      payload[i] = Number.isFinite(Number(elements[i])) ? Number(elements[i]) : 0;
+    }
+  } else {
+    payload[0] = 1;
+    payload[5] = 1;
+    payload[10] = 1;
+    payload[15] = 1;
+  }
+  payload[16] = Math.max(1, Math.round(Number(viewportWidth) || 1));
+  payload[17] = Math.max(1, Math.round(Number(viewportHeight) || 1));
+  payload[18] = 0;
+  payload[19] = Number.isFinite(Number(mode)) ? Number(mode) : 0;
+  payload[20] = Number.isFinite(Number(nativeGridSpacingM)) && Number(nativeGridSpacingM) > 0
+    ? Number(nativeGridSpacingM)
+    : 1;
+  payload[21] = Number.isFinite(Number(gridBiasM)) ? Number(gridBiasM) : 0;
+  payload[22] = 0;
+  payload[23] = 0;
+  return payload;
+}
+
 export function createSchroederRenderProxyNativeWebGpuExecutor({
   drawSource = null,
   backendSelection = null,
   device = null,
   format = null,
+  depthFormat = null,
   retainedBufferResolver = null,
   cameraBuffer = null,
   source = 'resident-render-refresh'
@@ -1274,6 +1362,7 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     || !device?.createRenderPipeline
     || !device?.createBuffer
     || !device?.createBindGroup
+    || !device.queue?.writeBuffer
   ) {
     return {
       ...base,
@@ -1394,7 +1483,14 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     primitive: {
       topology: 'triangle-list',
       cullMode: 'none'
-    }
+    },
+    ...(depthFormat ? {
+      depthStencil: {
+        format: depthFormat,
+        depthWriteEnabled: false,
+        depthCompare: 'less-equal'
+      }
+    } : {})
   });
   const resolvedCameraBuffer = cameraBuffer || device.createBuffer({
     label: 'ulg-schroeder-render-proxy-native-camera',
@@ -1421,7 +1517,7 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     payload[5] = color[0];
     payload[6] = color[1];
     payload[7] = color[2];
-    device.queue?.writeBuffer?.(batchParamsBuffer, 0, payload);
+    device.queue.writeBuffer(batchParamsBuffer, 0, payload);
     const bindGroup = device.createBindGroup({
       label: `ulg-schroeder-render-proxy-native-bind-group-${index}`,
       layout: bindGroupLayout,
@@ -1455,6 +1551,7 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     blocker: null,
     ready: true,
     format,
+    depthFormat: depthFormat || null,
     module,
     bindGroupLayout,
     pipelineLayout,
@@ -1469,6 +1566,31 @@ export function createSchroederRenderProxyNativeWebGpuExecutor({
     sameDeviceRetainedBufferBindingReady: true,
     rawGpuBufferBinding: true,
     rawGpuBufferTransferRequired: false,
+    updateCamera({
+      viewProjection = null,
+      viewportWidth = 1,
+      viewportHeight = 1,
+      nativeGridSpacingM = resolvedDrawSource.nativeGridSpacingM ?? 1,
+      gridBiasM = 0,
+      mode = 0
+    } = {}) {
+      const payload = createSchroederRenderProxyNativeCameraUniformPayload({
+        viewProjection,
+        viewportWidth,
+        viewportHeight,
+        nativeGridSpacingM,
+        gridBiasM,
+        mode
+      });
+      device.queue.writeBuffer(resolvedCameraBuffer, 0, payload);
+      return {
+        status: 'schroeder-render-proxy-native-camera-uniform-updated',
+        byteLength: payload.byteLength,
+        viewportWidth: payload[16],
+        viewportHeight: payload[17],
+        nativeGridSpacingM: payload[20]
+      };
+    },
     execute(pass) {
       if (!pass?.setPipeline || !pass?.setBindGroup || !pass?.draw) {
         throw new Error('Schroeder native proxy executor requires a GPURenderPassEncoder-like pass');
@@ -6597,6 +6719,37 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
 	    || null;
 	  target.renderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
 	  target.renderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+  target.renderBridgeSchroederRenderProxyLocalResolverStatus =
+    bridge.schroederRenderProxyLocalResolverStatus
+    ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
+    ?? null;
+  target.renderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount =
+    bridge.schroederRenderProxyLocalResolverRetainedBufferRefCount
+    ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.retainedBufferRefCount
+    ?? 0;
+  target.renderBridgeSchroederRenderProxyNativeExecutorStatus =
+    bridge.schroederRenderProxyNativeExecutorStatus
+    ?? bridge.schroederRenderProxyNativeExecutor?.status
+    ?? null;
+  target.renderBridgeSchroederRenderProxyNativeExecutorReady =
+    Boolean(
+      bridge.schroederRenderProxyNativeExecutorReady
+      ?? bridge.schroederRenderProxyNativeExecutor?.ready
+    );
+  target.renderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount =
+    bridge.schroederRenderProxyNativeExecutorDrawCommandCount
+    ?? bridge.schroederRenderProxyNativeExecutor?.drawCommands?.length
+    ?? 0;
+  target.renderBridgeSchroederRenderProxyNativeExecutorDrawInstanceCount =
+    bridge.schroederRenderProxyNativeExecutorDrawInstanceCount ?? 0;
+  target.renderBridgeSchroederRenderProxyNativeCameraUpdateStatus =
+    bridge.schroederRenderProxyNativeCameraUpdateStatus ?? null;
+  target.renderBridgeSchroederRenderProxyNativeLastSubmitStatus =
+    bridge.lastSchroederRenderProxyNativeSubmitStatus ?? null;
+  target.renderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount =
+    bridge.lastSchroederRenderProxyNativeDrawCommandCount ?? 0;
+  target.renderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount =
+    bridge.lastSchroederRenderProxyNativeDrawInstanceCount ?? 0;
 	  target.renderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
 	    || bridge.nativeSurfaceDebugMode
 	    || 'none';
@@ -6719,6 +6872,37 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
 	    || null;
 	  target.surfaceDrawRenderBridgeLastOpaqueDrawCount = bridge.lastOpaqueDrawCount ?? 0;
 	  target.surfaceDrawRenderBridgeLastTransparentDrawCount = bridge.lastTransparentDrawCount ?? 0;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus =
+    bridge.schroederRenderProxyLocalResolverStatus
+    ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.status
+    ?? null;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount =
+    bridge.schroederRenderProxyLocalResolverRetainedBufferRefCount
+    ?? bridge.schroederRenderProxyLocalRetainedBufferResolver?.retainedBufferRefCount
+    ?? 0;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorStatus =
+    bridge.schroederRenderProxyNativeExecutorStatus
+    ?? bridge.schroederRenderProxyNativeExecutor?.status
+    ?? null;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorReady =
+    Boolean(
+      bridge.schroederRenderProxyNativeExecutorReady
+      ?? bridge.schroederRenderProxyNativeExecutor?.ready
+    );
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount =
+    bridge.schroederRenderProxyNativeExecutorDrawCommandCount
+    ?? bridge.schroederRenderProxyNativeExecutor?.drawCommands?.length
+    ?? 0;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorDrawInstanceCount =
+    bridge.schroederRenderProxyNativeExecutorDrawInstanceCount ?? 0;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeCameraUpdateStatus =
+    bridge.schroederRenderProxyNativeCameraUpdateStatus ?? null;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitStatus =
+    bridge.lastSchroederRenderProxyNativeSubmitStatus ?? null;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount =
+    bridge.lastSchroederRenderProxyNativeDrawCommandCount ?? 0;
+  target.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount =
+    bridge.lastSchroederRenderProxyNativeDrawInstanceCount ?? 0;
 	  target.surfaceDrawRenderBridgeNativeSurfaceDebugMode = bridge.lastNativeSurfaceDebugMode
 	    || bridge.nativeSurfaceDebugMode
 	    || 'none';
@@ -12261,6 +12445,175 @@ export function createSphPhaseScene(container, {
     );
   }
 
+  function schroederRenderProxyNativeExecutorDrawInstanceCount(executor) {
+    return Array.isArray(executor?.drawCommands)
+      ? executor.drawCommands.reduce(
+        (sum, command) => sum + Math.max(0, Math.round(Number(command?.drawInstanceCount) || 0)),
+        0
+      )
+      : 0;
+  }
+
+  function schroederRenderProxyNativeExecutorSignature({
+    drawSource = null,
+    backendSelection = null,
+    localResolver = null,
+    bridge = null
+  } = {}) {
+    const resolvedDrawSource = drawSource?.schroederRenderProxyDrawSource || drawSource || null;
+    const selection = backendSelection?.schroederRenderProxyBackendSelection || backendSelection || null;
+    const drawBatches = Array.isArray(resolvedDrawSource?.drawBatches)
+      ? resolvedDrawSource.drawBatches
+      : [];
+    const retainedRefs = Array.isArray(localResolver?.retainedBufferRefs)
+      ? localResolver.retainedBufferRefs
+      : [];
+    const retainedBufferResolver = localResolver?.retainedBufferResolver || null;
+    const retainedRefSignature = retainedRefs.map((ref) => {
+      const entry = retainedBufferResolver instanceof Map
+        ? retainedBufferResolver.get(ref)
+        : retainedBufferResolver?.[ref];
+      return [
+        ref,
+        entry?.rowCount ?? '',
+        entry?.strideFloats ?? '',
+        entry?.byteLength ?? ''
+      ].join(':');
+    }).join(',');
+    const drawBatchSignature = drawBatches.map((batch) => [
+      batch?.proxyClass ?? '',
+      batch?.proxyRole ?? '',
+      batch?.proxyCount ?? '',
+      batch?.nativeGridSpacingM ?? '',
+      batch?.sourceRef?.retainedBufferRef ?? '',
+      batch?.sourceRef?.rowCount ?? '',
+      batch?.sourceRef?.strideFloats ?? '',
+      batch?.sourceRef?.byteLength ?? ''
+    ].join(':')).join('|');
+    return [
+      bridge?.rendererBridge ?? '',
+      bridge?.format ?? '',
+      mlsMpmResidentExecutionGeneration,
+      mlsMpmResidentStepsSignature ?? '',
+      mlsMpmResidentStepSignature ?? '',
+      resolvedDrawSource?.status ?? '',
+      resolvedDrawSource?.drawBatchCount ?? 0,
+      resolvedDrawSource?.drawableProxyCount ?? 0,
+      resolvedDrawSource?.nativeGridSpacingM ?? '',
+      selection?.status ?? '',
+      selection?.selectedBackend ?? '',
+      selection?.nativeSubmitReady === true ? 'submit-ready' : 'submit-blocked',
+      localResolver?.status ?? '',
+      retainedRefSignature,
+      drawBatchSignature
+    ].join('||');
+  }
+
+  function publishSchroederRenderProxyNativeExecutorBridgeDiagnostics(
+    bridge,
+    {
+      localResolver = bridge?.schroederRenderProxyLocalRetainedBufferResolver || null,
+      backendSelection = bridge?.schroederRenderProxyBackendSelection || null,
+      executor = bridge?.schroederRenderProxyNativeExecutor || null
+    } = {}
+  ) {
+    if (!bridge) return;
+    bridge.schroederRenderProxyLocalResolverStatus = localResolver?.status ?? null;
+    bridge.schroederRenderProxyLocalResolverRetainedBufferRefCount =
+      localResolver?.retainedBufferRefCount ?? 0;
+    bridge.schroederRenderProxyBackendSelection = backendSelection || null;
+    bridge.schroederRenderProxyBackendSelectionStatus = backendSelection?.status ?? null;
+    bridge.schroederRenderProxyBackendSelectionReady = Boolean(backendSelection?.ready);
+    bridge.schroederRenderProxyNativeExecutorStatus = executor?.status ?? null;
+    bridge.schroederRenderProxyNativeExecutorReady = Boolean(executor?.ready);
+    bridge.schroederRenderProxyNativeExecutorDrawCommandCount = Array.isArray(executor?.drawCommands)
+      ? executor.drawCommands.length
+      : 0;
+    bridge.schroederRenderProxyNativeExecutorDrawInstanceCount =
+      schroederRenderProxyNativeExecutorDrawInstanceCount(executor);
+  }
+
+  function refreshSchroederRenderProxyNativeExecutorForBridge(bridge, {
+    surfaceDraw = sphResidentSurfaceDraw,
+    reason = 'native-surface-render-pass'
+  } = {}) {
+    if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      return null;
+    }
+    const drawSource =
+      scene.userData.schroederRenderProxyDrawSource
+      || renderer.userData?.schroederRenderProxyDrawSource
+      || bridge.schroederRenderProxyDrawSource
+      || surfaceDraw?.schroederRenderProxyDrawSource
+      || null;
+    bridge.schroederRenderProxyDrawSource = drawSource;
+    const localResolver = createSchroederRenderProxyLocalRetainedBufferResolver({
+      residentExecution: mlsMpmResidentSteps,
+      finalStep: mlsMpmResidentSteps?.finalStep || mlsMpmResidentStep || null,
+      source: reason
+    });
+    bridge.schroederRenderProxyLocalRetainedBufferResolver = localResolver;
+    const rendererCapability = resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+      bridge,
+      surfaceDraw
+    });
+    const backendSelection = resolveSchroederRenderProxyBackendSelection({
+      drawSource,
+      rendererCapability,
+      renderBridgeMode: bridge.rendererBridge,
+      renderBridgeStatus: bridge.status,
+      pixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
+      source: reason
+    });
+    bridge.schroederRenderProxyBackendSelection = backendSelection;
+    scene.userData.schroederRenderProxyBackendSelection = backendSelection;
+    renderer.userData.schroederRenderProxyBackendSelection = backendSelection;
+
+    const signature = schroederRenderProxyNativeExecutorSignature({
+      drawSource,
+      backendSelection,
+      localResolver,
+      bridge
+    });
+    const previousExecutor = bridge.schroederRenderProxyNativeExecutor || null;
+    if (
+      previousExecutor?.ready
+      && bridge.schroederRenderProxyNativeExecutorSignature === signature
+      && bridge.schroederRenderProxyNativeExecutorDevice === bridge.device
+      && bridge.schroederRenderProxyNativeExecutorFormat === bridge.format
+    ) {
+      bridge.schroederRenderProxyNativeExecutorReused = true;
+      publishSchroederRenderProxyNativeExecutorBridgeDiagnostics(bridge, {
+        localResolver,
+        backendSelection,
+        executor: previousExecutor
+      });
+      return previousExecutor;
+    }
+
+    const executor = createSchroederRenderProxyNativeWebGpuExecutor({
+      drawSource,
+      backendSelection,
+      device: bridge.device,
+      format: bridge.format,
+      depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+      retainedBufferResolver: localResolver.retainedBufferResolver,
+      cameraBuffer: previousExecutor?.cameraBuffer || null,
+      source: reason
+    });
+    bridge.schroederRenderProxyNativeExecutor = executor;
+    bridge.schroederRenderProxyNativeExecutorSignature = signature;
+    bridge.schroederRenderProxyNativeExecutorDevice = bridge.device;
+    bridge.schroederRenderProxyNativeExecutorFormat = bridge.format;
+    bridge.schroederRenderProxyNativeExecutorReused = false;
+    publishSchroederRenderProxyNativeExecutorBridgeDiagnostics(bridge, {
+      localResolver,
+      backendSelection,
+      executor
+    });
+    return executor;
+  }
+
   function retainedPreviousSurfaceDrawOverlay(surfaceDraw, renderBridge, reason) {
     if (!surfaceDraw || !hasVisibleResidentSurfaceDrawBridge(renderBridge)) return surfaceDraw;
     return {
@@ -13529,7 +13882,8 @@ export function createSphPhaseScene(container, {
     {
       drawCount = 0,
       opaqueDraws = [],
-      transparentDraws = []
+      transparentDraws = [],
+      schroederProxyExecutor = null
     } = {}
   ) {
     if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return null;
@@ -13627,6 +13981,14 @@ export function createSphPhaseScene(container, {
         for (const draw of transparentDraws) {
           validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }
+      }
+      if (schroederProxyExecutor?.ready) {
+        const proxySubmit = schroederProxyExecutor.execute(validationPass);
+        bridge.lastSchroederRenderProxyNativeOffscreenValidationSubmitStatus = proxySubmit.status;
+        bridge.lastSchroederRenderProxyNativeOffscreenValidationDrawCommandCount =
+          proxySubmit.drawCommandCount;
+        bridge.lastSchroederRenderProxyNativeOffscreenValidationDrawInstanceCount =
+          proxySubmit.drawInstanceCount;
       }
       validationPass.end();
       encoder.copyTextureToBuffer(
@@ -16296,7 +16658,26 @@ export function createSphPhaseScene(container, {
 	      bridge.lastNativeContextReconfigured = nativeContextReconfigured;
 	      bridge.lastRenderSkipStatus = null;
 	      bridge.lastRenderSkipReason = null;
-	      const submittedDrawCount = nativeSurfaceClearOnly ? 0 : opaqueDraws.length + transparentDraws.length;
+      const schroederProxyExecutor =
+        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE && !nativeSurfaceClearOnly
+          ? refreshSchroederRenderProxyNativeExecutorForBridge(bridge, {
+            surfaceDraw: sphResidentSurfaceDraw,
+            reason: 'native-surface-render-pass'
+          })
+          : null;
+      const schroederProxyDrawCommandCount =
+        !nativeSurfaceClearOnly && schroederProxyExecutor?.ready && Array.isArray(schroederProxyExecutor.drawCommands)
+          ? schroederProxyExecutor.drawCommands.length
+          : 0;
+      if (!schroederProxyExecutor?.ready) {
+        bridge.lastSchroederRenderProxyNativeSubmitStatus = schroederProxyExecutor?.status ?? null;
+        bridge.lastSchroederRenderProxyNativeDrawCommandCount = 0;
+        bridge.lastSchroederRenderProxyNativeDrawInstanceCount = 0;
+        bridge.schroederRenderProxyNativeCameraUpdateStatus = null;
+      }
+	      const submittedDrawCount = nativeSurfaceClearOnly
+        ? 0
+        : opaqueDraws.length + transparentDraws.length + schroederProxyDrawCommandCount;
 	      const nativeSurfaceValidationCadence =
 	        resolveSphNativeWebGpuSurfaceValidationCadence({
 	          bridge,
@@ -16345,6 +16726,25 @@ export function createSphPhaseScene(container, {
 	          opaquePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
 	        }
 	      }
+      let schroederProxySubmit = null;
+      if (schroederProxyExecutor?.ready && !nativeSurfaceClearOnly) {
+        const cameraUpdate = schroederProxyExecutor.updateCamera({
+          viewProjection,
+          viewportWidth: bridge.canvas?.width || 1,
+          viewportHeight: bridge.canvas?.height || 1,
+          nativeGridSpacingM:
+            bridge.schroederRenderProxyDrawSource?.nativeGridSpacingM
+            ?? scene.userData.schroederRenderProxyDrawSource?.nativeGridSpacingM
+            ?? 1
+        });
+        bridge.schroederRenderProxyNativeCameraUpdateStatus = cameraUpdate.status;
+        schroederProxySubmit = schroederProxyExecutor.execute(opaquePass);
+        bridge.lastSchroederRenderProxyNativeSubmitStatus = schroederProxySubmit.status;
+        bridge.lastSchroederRenderProxyNativeDrawCommandCount =
+          schroederProxySubmit.drawCommandCount;
+        bridge.lastSchroederRenderProxyNativeDrawInstanceCount =
+          schroederProxySubmit.drawInstanceCount;
+      }
 	      opaquePass.end();
 	      let transparentCompositeSubmitted = false;
 	      if (
@@ -16476,7 +16876,8 @@ export function createSphPhaseScene(container, {
 	              {
 	                drawCount: submittedDrawCount,
 	                opaqueDraws,
-	                transparentDraws
+	                transparentDraws,
+                  schroederProxyExecutor
 	              }
 	            );
 	          if (completeNativeOffscreenValidation) {

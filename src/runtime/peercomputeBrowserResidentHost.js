@@ -88,6 +88,10 @@ export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-admission.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE =
   'ulg-schroeder-portable-summary-admissions';
+export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
+  'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
+export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
+  'peercompute.ulg.schroeder-portable-summary-replay-seed.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
 export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0';
@@ -2749,6 +2753,146 @@ function validateSchroederPortableSummaryAdmissionInput(portableSummary = null) 
   };
 }
 
+function blockedSchroederPortableSummaryReplayDescriptor({
+  reason = 'schroeder-portable-summary-admission-required',
+  hotBufferKey = null,
+  cacheKey = null,
+  stateKey = null,
+  source = 'state-manager-schroeder-portable-summary-replay'
+} = {}) {
+  return {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA,
+    status: 'blocked-schroeder-portable-summary-replay-descriptor',
+    ready: false,
+    reason,
+    source,
+    hotBufferKey,
+    cacheKey,
+    stateKey,
+    sourceMode: 'state-manager-admitted-schroeder-portable-summary-descriptor',
+    replayMode: 'blocked',
+    descriptorOnlyPeerComputeHandoff: false,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    fullParticleReadbackRequired: false,
+    crossPeerReplayReady: false,
+    crossPeerReplayStatus: 'blocked-schroeder-portable-summary-replay-descriptor',
+    crossPeerReplayBlocker: reason,
+    authoritativeStateMutation: false,
+    replaySeed: null,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function buildSchroederPortableSummaryReplayDescriptor({
+  portableSummary = null,
+  validation = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  summaryHash = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-portable-summary',
+  sourceStage = 'schroeder-same-level-mechanics',
+  admissionStatus = 'schroeder-portable-summary-admitted',
+  committedAt = null,
+  source = 'state-manager-schroeder-portable-summary-replay'
+} = {}) {
+  const resolvedValidation = validation || validateSchroederPortableSummaryAdmissionInput(portableSummary);
+  if (!resolvedValidation.accepted) {
+    return blockedSchroederPortableSummaryReplayDescriptor({
+      reason: resolvedValidation.reason || 'schroeder-portable-summary-invalid-for-replay',
+      hotBufferKey,
+      cacheKey,
+      stateKey,
+      source
+    });
+  }
+  const renderLod = resolvedValidation.renderLod || portableSummary?.renderLod || null;
+  const retainedRefs = cloneSerializableValue(resolvedValidation.retainedRefs || []);
+  const outputFamilies = uniqueStringList(resolvedValidation.outputFamilies || []);
+  const replaySeed = {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA,
+    status: 'schroeder-portable-summary-replay-seed-ready',
+    source,
+    sourceMode: 'descriptor-seed-no-raw-gpubuffer-transfer',
+    cacheKey,
+    stateKey,
+    hotBufferKey,
+    summaryHash,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    portableSummary: cloneSerializableValue(portableSummary),
+    renderLod: cloneSerializableValue(renderLod),
+    retainedRefs,
+    outputFamilies,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    fullParticleReadbackRequired: false,
+    authoritativeStateMutation: false
+  };
+  return {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA,
+    status: 'schroeder-portable-summary-replay-descriptor-ready',
+    ready: true,
+    source,
+    cacheKey,
+    stateKey,
+    hotBufferKey,
+    summaryHash,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    admissionStatus,
+    committedAt,
+    sourceMode: 'state-manager-admitted-schroeder-portable-summary-descriptor',
+    replayMode: 'descriptor-seed-no-raw-gpubuffer-transfer',
+    acceptedReplayPayloadModes: [
+      'descriptor-seed-no-raw-gpubuffer-transfer',
+      'portable-summary-snapshot-no-raw-gpubuffer-transfer'
+    ],
+    descriptorOnlyPeerComputeHandoff: true,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    portableState: true,
+    portableSnapshotRequired: false,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    fullParticleReadbackRequired: false,
+    fullParticleReadbackAvoided: true,
+    crossPeerReplayReady: true,
+    crossPeerReplayStatus: 'schroeder-portable-summary-descriptor-seed-ready-for-replay',
+    crossPeerReplayBlocker: null,
+    authoritativeStateMutation: false,
+    outputFamilies,
+    retainedRefs,
+    retainedRefCount: Math.max(0, Math.round(finiteSeedNumber(
+      portableSummary?.retainedRefCount,
+      retainedRefs.length
+    ))),
+    retainedBufferRefCount: Math.max(0, Math.round(finiteSeedNumber(
+      portableSummary?.retainedBufferRefCount,
+      0
+    ))),
+    renderLod: cloneSerializableValue(renderLod),
+    activeLeafProxyCount: Math.max(0, Math.round(finiteSeedNumber(renderLod?.activeLeafProxyCount, 0))),
+    aggregateProxyCount: Math.max(0, Math.round(finiteSeedNumber(renderLod?.aggregateProxyCount, 0))),
+    lawQueueProxyCount: Math.max(0, Math.round(finiteSeedNumber(renderLod?.lawQueueProxyCount, 0))),
+    nativeGridSpacingM: Number.isFinite(Number(renderLod?.nativeGridSpacingM))
+      ? Number(renderLod.nativeGridSpacingM)
+      : null,
+    geometryPolicy: renderLod?.geometryPolicy || null,
+    opticalPolicy: renderLod?.opticalPolicy || null,
+    replaySeed,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 export function admitSchroederPortableSummary({
   stateManager = null,
   nodeKernel = null,
@@ -2853,6 +2997,20 @@ export function admitSchroederPortableSummary({
     retainedBufferRefCount: portableSummary.retainedBufferRefCount,
     renderLod: validation.renderLod
   });
+  const replayDescriptor = buildSchroederPortableSummaryReplayDescriptor({
+    portableSummary,
+    validation,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    summaryHash,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    admissionStatus: 'schroeder-portable-summary-admitted',
+    committedAt,
+    source: 'state-manager-admitted-schroeder-portable-summary'
+  });
   const hotBufferRecord = {
     ...base,
     status: 'schroeder-portable-summary-hot-buffer-source-stored',
@@ -2867,7 +3025,9 @@ export function admitSchroederPortableSummary({
     copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
     portableSummary: cloneSerializableValue(portableSummary),
     renderLod: cloneSerializableValue(validation.renderLod),
-    retainedRefs: cloneSerializableValue(validation.retainedRefs)
+    retainedRefs: cloneSerializableValue(validation.retainedRefs),
+    schroederPortableSummaryReplayDescriptor: replayDescriptor,
+    replayDescriptor
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
@@ -2893,7 +3053,9 @@ export function admitSchroederPortableSummary({
     copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
     portableSummary: cloneSerializableValue(portableSummary),
     renderLod: cloneSerializableValue(validation.renderLod),
-    retainedRefs: cloneSerializableValue(validation.retainedRefs)
+    retainedRefs: cloneSerializableValue(validation.retainedRefs),
+    schroederPortableSummaryReplayDescriptor: replayDescriptor,
+    replayDescriptor
   };
   const commitDelta = {
     taskId: deltaTaskId,
@@ -2912,6 +3074,82 @@ export function admitSchroederPortableSummary({
     commitDeltaScope: deltaScope,
     commitDeltaTimestamp: committedAt
   };
+}
+
+export function createSchroederPortableSummaryReplayDescriptor({
+  stateManager = null,
+  admission = null,
+  hotBufferKey = null,
+  source = 'state-manager-schroeder-portable-summary-replay'
+} = {}) {
+  const resolvedHotBufferKey = normalizeString(
+    hotBufferKey || admission?.hotBufferKey || admission?.sourceHotBufferKey,
+    null
+  );
+  let sourceRecord = null;
+  if (resolvedHotBufferKey && stateManager?.getHotBuffer) {
+    sourceRecord = stateManager.getHotBuffer(resolvedHotBufferKey) || null;
+  }
+  const sourcePayload = sourceRecord || admission || null;
+  if (!sourcePayload || typeof sourcePayload !== 'object') {
+    return blockedSchroederPortableSummaryReplayDescriptor({
+      reason: resolvedHotBufferKey
+        ? 'schroeder-portable-summary-hot-buffer-not-found'
+        : 'schroeder-portable-summary-admission-required',
+      hotBufferKey: resolvedHotBufferKey,
+      source
+    });
+  }
+  const existing = sourcePayload.schroederPortableSummaryReplayDescriptor
+    || sourcePayload.replayDescriptor
+    || null;
+  if (
+    existing?.schema === ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA
+    && existing?.status === 'schroeder-portable-summary-replay-descriptor-ready'
+  ) {
+    return cloneSerializableValue({
+      ...existing,
+      source,
+      sourceHotBufferStatus: sourceRecord?.status || null,
+      sourceAdmissionStatus: admission?.status || sourcePayload.status || null
+    });
+  }
+  const portableSummary = sourcePayload.portableSummary || admission?.portableSummary || null;
+  const retainedRefs = Array.isArray(sourcePayload.retainedRefs)
+    ? sourcePayload.retainedRefs
+    : (Array.isArray(portableSummary?.retainedRefs) ? portableSummary.retainedRefs : []);
+  const renderLod = sourcePayload.renderLod || portableSummary?.renderLod || admission?.renderLod || null;
+  const replayPortableSummary = portableSummary && typeof portableSummary === 'object'
+    ? {
+      ...portableSummary,
+      renderLod,
+      retainedRefs
+    }
+    : null;
+  const validation = validateSchroederPortableSummaryAdmissionInput(replayPortableSummary);
+  if (!validation.accepted) {
+    return blockedSchroederPortableSummaryReplayDescriptor({
+      reason: validation.reason || 'schroeder-portable-summary-invalid-for-replay',
+      hotBufferKey: resolvedHotBufferKey,
+      cacheKey: sourcePayload.cacheKey || admission?.cacheKey || null,
+      stateKey: sourcePayload.stateKey || admission?.stateKey || null,
+      source
+    });
+  }
+  return buildSchroederPortableSummaryReplayDescriptor({
+    portableSummary: replayPortableSummary,
+    validation,
+    cacheKey: sourcePayload.cacheKey || admission?.cacheKey || null,
+    stateKey: sourcePayload.stateKey || admission?.stateKey || null,
+    hotBufferKey: sourcePayload.hotBufferKey || resolvedHotBufferKey,
+    summaryHash: sourcePayload.summaryHash || admission?.summaryHash || null,
+    sourceTaskId: sourcePayload.sourceTaskId || admission?.sourceTaskId || null,
+    sourceNodeId: sourcePayload.sourceNodeId || admission?.sourceNodeId || 'schroeder-portable-summary',
+    sourceStage: sourcePayload.sourceStage || admission?.sourceStage || 'schroeder-same-level-mechanics',
+    admissionStatus: admission?.status || sourcePayload.status || null,
+    committedAt: sourcePayload.committedAt || admission?.committedAt || null,
+    source
+  });
 }
 
 export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
@@ -6237,6 +6475,12 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    createSchroederPortableSummaryReplayDescriptor(options = {}) {
+      return createSchroederPortableSummaryReplayDescriptor({
+        stateManager,
+        ...options
+      });
+    },
     refreshWorkerRetainedMechanicsPublicationHotBuffers(options = {}) {
       return refreshUlgSphMlsMpmHotBuffersFromWorkerRetainedMechanicsPublication({
         stateManager,
@@ -7043,6 +7287,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.admitPresentationWorkerRetainedStatePromotionCandidate === 'function',
     residentSchroederPortableSummaryAdmissionReady:
       typeof host?.admitSchroederPortableSummary === 'function',
+    residentSchroederPortableSummaryReplayDescriptorReady:
+      typeof host?.createSchroederPortableSummaryReplayDescriptor === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:
       typeof host?.refreshWorkerRetainedMechanicsPublicationHotBuffers === 'function',
     residentWorkerRetainedContinuationPlannerReady: typeof host?.planWorkerRetainedContinuation === 'function',

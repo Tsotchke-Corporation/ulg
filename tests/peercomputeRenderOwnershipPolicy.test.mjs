@@ -11,6 +11,9 @@ import {
   ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
   admitSchroederPortableSummary,
+  createSchroederPortableSummaryReplayDescriptor,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA,
   summarizePeerComputeResidentAuthorityHost
 } from '../src/runtime/peercomputeBrowserResidentHost.js';
 import {
@@ -487,17 +490,82 @@ test('Schroeder portable summary admission commits descriptor-only render LOD st
   assert.equal(admission.aggregateProxyCount, 3);
   assert.equal(admission.lawQueueProxyCount, 5);
   assert.equal(admission.commitDeltaScope, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
+  assert.equal(
+    admission.schroederPortableSummaryReplayDescriptor.schema,
+    ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA
+  );
+  assert.equal(
+    admission.schroederPortableSummaryReplayDescriptor.status,
+    'schroeder-portable-summary-replay-descriptor-ready'
+  );
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.ready, true);
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.replayMode, 'descriptor-seed-no-raw-gpubuffer-transfer');
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.crossPeerReplayReady, true);
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.rawGpuBufferTransferAllowed, false);
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.rawGpuBufferTransferDetected, false);
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.fullParticleReadbackRequired, false);
+  assert.equal(admission.schroederPortableSummaryReplayDescriptor.authoritativeStateMutation, false);
+  assert.equal(
+    admission.schroederPortableSummaryReplayDescriptor.replaySeed.schema,
+    ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA
+  );
+  assert.equal(
+    admission.schroederPortableSummaryReplayDescriptor.replaySeed.status,
+    'schroeder-portable-summary-replay-seed-ready'
+  );
+  assert.notEqual(
+    admission.schroederPortableSummaryReplayDescriptor.replaySeed.portableSummary,
+    portableSummary
+  );
+  assert.equal(
+    admission.schroederPortableSummaryReplayDescriptor.replaySeed.retainedRefs.some((ref) => (
+      Object.hasOwn(ref, 'buffer') || Object.hasOwn(ref, 'gpuBuffer')
+    )),
+    false
+  );
 
   const hotRecord = stateManager.getHotBuffer(admission.hotBufferKey);
   assert.equal(hotRecord.status, 'schroeder-portable-summary-hot-buffer-source-stored');
   assert.equal(hotRecord.copyMode, 'descriptor-only-no-raw-gpubuffer-transfer');
   assert.equal(hotRecord.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+  assert.equal(
+    hotRecord.schroederPortableSummaryReplayDescriptor.schema,
+    ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA
+  );
   const warmDelta = stateManager.getWarmDeltas(ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE)[
     admission.commitDeltaTaskId
   ];
   assert.equal(warmDelta.payload.status, 'schroeder-portable-summary-admitted');
   assert.equal(warmDelta.payload.hotBufferKey, admission.hotBufferKey);
   assert.equal(warmDelta.payload.renderLod.activeLeafProxyCount, 12);
+  assert.equal(
+    warmDelta.payload.schroederPortableSummaryReplayDescriptor.replaySeed.renderLod.activeLeafProxyCount,
+    12
+  );
+
+  const replayDescriptor = createSchroederPortableSummaryReplayDescriptor({
+    stateManager,
+    hotBufferKey: admission.hotBufferKey
+  });
+  assert.equal(replayDescriptor.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA);
+  assert.equal(replayDescriptor.status, 'schroeder-portable-summary-replay-descriptor-ready');
+  assert.equal(replayDescriptor.hotBufferKey, admission.hotBufferKey);
+  assert.equal(replayDescriptor.cacheKey, 'ulg:test:schroeder-portable-summary');
+  assert.equal(replayDescriptor.stateKey, 'ulg:test:schroeder-state');
+  assert.equal(replayDescriptor.replaySeed.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+  assert.equal(replayDescriptor.acceptedReplayPayloadModes.includes('descriptor-seed-no-raw-gpubuffer-transfer'), true);
+  assert.equal(replayDescriptor.acceptedReplayPayloadModes.includes('portable-summary-snapshot-no-raw-gpubuffer-transfer'), true);
+
+  const missingReplayDescriptor = createSchroederPortableSummaryReplayDescriptor({
+    stateManager,
+    hotBufferKey: 'missing-schroeder-summary'
+  });
+  assert.equal(
+    missingReplayDescriptor.status,
+    'blocked-schroeder-portable-summary-replay-descriptor'
+  );
+  assert.equal(missingReplayDescriptor.ready, false);
+  assert.equal(missingReplayDescriptor.reason, 'schroeder-portable-summary-hot-buffer-not-found');
 
   const rejected = admitSchroederPortableSummary({
     stateManager,
@@ -576,4 +644,5 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipSchroederRenderLodAggregateProxyCount, 3);
   assert.equal(summary.renderOwnershipSchroederRenderLodFullParticleReadbackAvoided, true);
   assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, false);
+  assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, false);
 });

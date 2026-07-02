@@ -80,6 +80,8 @@ import {
   ULG_REMOTE_TASK_GRAPH_STATE_SEED_PAYLOAD_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3453,6 +3455,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationRefreshReady, true);
   assert.equal(summary.residentWorkerRetainedContinuationPlannerReady, true);
   assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, true);
+  assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, true);
 
   const schroederPortableSummary = {
     schema: ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
@@ -3522,6 +3525,20 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     host.stateManager.getHotBuffer(schroederAdmission.hotBufferKey).copyMode,
     'descriptor-only-no-raw-gpubuffer-transfer'
   );
+  assert.equal(typeof host.createSchroederPortableSummaryReplayDescriptor, 'function');
+  const schroederReplayDescriptor = host.createSchroederPortableSummaryReplayDescriptor({
+    hotBufferKey: schroederAdmission.hotBufferKey
+  });
+  assert.equal(schroederReplayDescriptor.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA);
+  assert.equal(schroederReplayDescriptor.status, 'schroeder-portable-summary-replay-descriptor-ready');
+  assert.equal(schroederReplayDescriptor.ready, true);
+  assert.equal(schroederReplayDescriptor.hotBufferKey, schroederAdmission.hotBufferKey);
+  assert.equal(schroederReplayDescriptor.replayMode, 'descriptor-seed-no-raw-gpubuffer-transfer');
+  assert.equal(schroederReplayDescriptor.rawGpuBufferTransferAllowed, false);
+  assert.equal(schroederReplayDescriptor.rawGpuBufferTransferDetected, false);
+  assert.equal(schroederReplayDescriptor.replaySeed.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA);
+  assert.equal(schroederReplayDescriptor.replaySeed.renderLod.activeLeafProxyCount, 8);
+  assert.equal(schroederReplayDescriptor.replaySeed.authoritativeStateMutation, false);
 
   const candidate = {
     schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',

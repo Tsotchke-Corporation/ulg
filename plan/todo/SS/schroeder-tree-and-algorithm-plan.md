@@ -249,7 +249,10 @@ Suggested schemas:
   retained level-update rows and same-level orchestration handoff landed in
   `ab1ec57`; compact GPU diagnostic summaries over admitted level updates
   landed in `3295777`; visible water-to-steam scene/status wiring landed in
-  `dd3e928`.
+  `dd3e928`; same-level/render phase-volume visibility diagnostics, admitted
+  level-update consumer status, selected-level source, represented/rest volume
+  ratio, expected level delta, and particle-count growth status landed in
+  `f74c836`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -485,14 +488,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume migration visibility and
-level-update consumption**:
+The next code slice on `SS` is **SS phase-volume level-update assignment
+overlay**:
 
-1. Trace admitted retained phase-volume level-update rows from the SS path into
-   the same-level mechanics/render summaries as the current native level source,
-   without falling back to full particle readback.
-2. Add compact scene/demo diagnostics that compare material-derived support,
-   represented volume, phase, and selected SS level for water-to-steam cases.
-3. Add a replay-style fixture showing a `~700x` water-to-steam volume expansion
-   migrates about three hierarchy levels without increasing particle count,
-   while preserving fine representation near surfaces/reaction fronts.
+1. Treat StateManager-admitted retained phase-volume level-update rows as a
+   GPU-resident assignment overlay for active-node/law-queue selection, instead
+   of only forwarding them as diagnostics.
+2. Keep the overlay descriptor-only across PeerCompute boundaries and same-lane
+   retained on the hot path; no full particle readback and no raw `GPUBuffer`
+   transfer.
+3. Add focused fixtures proving water-to-steam target levels can drive active
+   node selection without particle-count growth, while fallback paths remain
+   explicit when the admitted level-update rows are absent.

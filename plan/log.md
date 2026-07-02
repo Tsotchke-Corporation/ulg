@@ -35169,3 +35169,41 @@ Next:
   when the native surface bridge is ready.
 - Submit its draw commands inside the live native surface render pass after
   writing scene camera uniforms.
+
+## 2026-07-01 AKDT - SS Native Retained-Proxy Render-Pass Submission
+
+Status:
+
+- Wired the SS native retained-proxy executor into the live
+  `native-webgpu-surface-consumer` render path.
+- Added a scene-local retained-buffer resolver bridge that consumes current SS
+  same-device execution buffers without publishing raw `GPUBuffer` handles as
+  portable PeerCompute state.
+- Recomputed SS proxy backend selection at render-pass time from the active
+  native surface capability instead of relying on stale publish-time readiness.
+- Reused/rebuilt the executor by bridge/device/format, resident execution
+  generation, retained refs, and draw-source counts.
+- Added live camera/viewport uniform updates before proxy submission.
+- Submitted SS active-leaf/coherent-aggregate proxy splats inside the native
+  surface opaque pass, not through a detached overlay or frame-copy-back path.
+- Added depth-compatible native proxy pipelines and offscreen validation
+  submission so proxy draws are included in native-surface validation.
+- Published bridge/render-state diagnostics for local resolver status, native
+  executor status/readiness, draw command/instance counts, camera updates, and
+  last proxy submit status.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `89/89` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `82/82` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Live-validate the native SS proxy render-pass path through the browser and
+  performance harness.
+- Keep diagnostic CPU proxy geometry capped, explicit, and outside the
+  PeerCompute hot path.

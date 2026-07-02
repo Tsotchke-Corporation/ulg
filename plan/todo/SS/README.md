@@ -165,11 +165,18 @@ Landed checkpoints:
     and adds a same-device-only local retained render-buffer resolver on SS
     execution results, so the native proxy executor can bind live retained
     buffers without making raw `GPUBuffer` handles portable PeerCompute state.
+47. `6fc8f85` wires the SS native retained-proxy executor into the live native
+    WebGPU surface render pass. The bridge now resolves same-device local SS
+    buffers, rebuilds/reuses the proxy executor by resident generation and
+    retained refs, writes camera/viewport uniforms from the scene camera, and
+    submits active-leaf/coherent-aggregate proxy splats inside the main native
+    pass with diagnostics for resolver, executor, camera update, and submit
+    counts.
 
 Next implementation queue:
 
-1. Submit the native WebGPU retained-proxy executor inside the live native
-   surface render pass with camera uniforms sourced from the scene camera.
+1. Run/live-validate the native SS proxy pass through the browser/performance
+   harness and expose any missing proxy draw telemetry needed for debugging.
 2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
 3. Keep the bucket index as the small-scene/default first GPU index and use

@@ -315,7 +315,8 @@ Suggested schemas:
   in `5b54457`; proxy backend selection landed in `4316da6`; the native
   retained-proxy WebGPU executor landed in `bdc48a5`; deterministic retained
   descriptor keys and the same-device-only local render-buffer resolver landed
-  in `50337ae`.
+  in `50337ae`; live native-surface render-pass submission with camera uniforms
+  and bridge diagnostics landed in `6fc8f85`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -323,8 +324,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - submit the native WebGPU retained-proxy executor inside the live native
-     surface render bridge with camera uniforms sourced from the scene camera;
+   - live-validate the native WebGPU retained-proxy executor in the browser and
+     performance harness, including resolver/executor/camera/submit telemetry;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep diagnostic CPU proxy geometry explicit, capped, and outside the
      PeerCompute hot path;
@@ -381,15 +382,14 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS native retained-proxy render-pass
-submission**:
+The next code slice on `SS` is **SS native retained-proxy live validation and
+telemetry hardening**:
 
-1. Use the same-device retained-buffer resolver from current SS execution
-   results when creating/updating the bridge executor.
-2. Update camera/viewport uniforms from the live scene camera before each draw
-   pass.
-3. Submit executor draw commands inside the native surface path, not as a
-   detached overlay or frame-copy path.
-4. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
-5. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
+1. Exercise the live native surface path through the browser/performance harness
+   and confirm SS proxy draw commands submit without overlay or frame-copy
+   fallback.
+2. Surface any missing resolver/executor/camera/submit status in the existing
+   render-state telemetry.
+3. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
+4. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.

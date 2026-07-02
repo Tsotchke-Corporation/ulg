@@ -266,16 +266,19 @@ Suggested schemas:
   landed in `126f5d1`, replacing the source-index candidate window while
   leaving sorted/radix tree indexing as future work. Direct retained candidate
   consumption in reaction proposal and pressure/interface contact-kinematics
-  kernels landed in `a6315c1`.
+  kernels landed in `a6315c1`. Retained per-particle source-span rows for
+  candidate lookup landed in `c22ed0a`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
 - Current caveat: reaction and pressure/interface contact now consume
   traversal-backed candidate artifacts as authoritative input. The candidate
-  producer still walks active-node tile overlaps with an unsorted broad phase,
-  and the reaction consumer scans retained candidate rows because the producer
-  does not yet emit sorted per-source offsets.
+  producer emits retained source-span rows so reaction avoids whole-buffer
+  candidate scans when spans are present. The producer still walks active-node
+  tile overlaps with an unsorted broad phase, and pressure/interface
+  contact-kinematics still needs a spatial/interface index rather than only a
+  source-particle span.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -293,8 +296,6 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - add sorted/radix source offsets for retained SS neighbor-candidate rows so
-     consumers address compact per-source spans instead of scanning all rows;
    - replace the unsorted active-node broad phase with sorted/radix SS tree
      indexing when candidate counts make it necessary;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
@@ -348,14 +349,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS sorted candidate indexing and active-node
+The next code slice on `SS` is **SS sorted active-node indexing and active-node
 mechanics consumption**:
 
-1. Emit sorted/radix candidate source offsets so reaction/contact/interface
-   consumers can avoid whole-buffer candidate scans.
-2. Add sorted/radix active-node indexing once direct consumers expose candidate
+1. Add sorted/radix active-node indexing once direct consumers expose candidate
    count or throughput pressure.
-3. Consume retained active-node rows directly inside same-level P2G/G2P instead
+2. Consume retained active-node rows directly inside same-level P2G/G2P instead
    of only filtering by level assignment.
-4. Keep all new outputs GPU-resident, no-full-readback, and
+3. Keep all new outputs GPU-resident, no-full-readback, and
    StateManager-admission-aware.

@@ -34544,3 +34544,38 @@ Next:
   reaction/contact consumers can address per-source spans instead of scanning
   all retained candidate rows.
 - Then consume retained SS active-node rows directly inside same-level P2G/G2P.
+
+## 2026-07-01 AKDT - SS Source-Span Candidate Indexing
+
+Status:
+
+- Added the retained `SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT` ABI row:
+  source particle, candidate offset, candidate count, and status.
+- Extended the law-neighbor candidate WebGPU pass to emit a retained
+  source-span buffer beside the retained candidate buffer, using the existing
+  law-queue row grouping without full readback.
+- Fixed the law-neighbor candidate params uniform allocation from `32` to `48`
+  bytes to match the existing packed params payload.
+- Routed SPH reaction proposal generation through retained source spans when
+  present, keeping the whole-candidate-row scan as a compatibility fallback.
+- Adjusted reaction and pressure/interface direct-candidate paths so retained
+  candidate rows carry law eligibility, while old law-queue index gates remain
+  for particle-bin/all-scan fallbacks.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check src/runtime/sph/sphReactionGpuKernel.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --check tests/sphReactionGpuKernel.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with `160/160` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Replace the unsorted active-node broad phase with a sorted/radix SS tree index
+  once candidate count or throughput pressure requires it.
+- Consume retained SS active-node rows directly inside same-level P2G/G2P.

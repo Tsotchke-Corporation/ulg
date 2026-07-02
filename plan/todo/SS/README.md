@@ -96,13 +96,13 @@ Landed checkpoints:
 27. `a6315c1` binds traversal-backed law-neighbor candidate rows directly into
     reaction proposal and pressure/interface contact-kinematics kernels as
     authoritative retained GPU input.
+28. `c22ed0a` adds retained particle source-span rows beside law-neighbor
+    candidate rows, fixes the candidate params buffer size, and routes reaction
+    proposal scans through per-source candidate spans when present.
 
 Next implementation queue:
 
-1. Replace the candidate-row scan fallback with sorted/radix source offsets so
-   reaction/contact consumers can address per-source candidate spans without
-   scanning all retained rows.
-2. Replace the unsorted active-node broad phase with a sorted/radix SS tree
+1. Replace the unsorted active-node broad phase with a sorted/radix SS tree
    index when candidate counts become the next bottleneck.
-3. Consume retained SS active-node rows directly inside same-level P2G/G2P.
-4. Add render LOD and PeerCompute portable SS summaries.
+2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
+3. Add render LOD and PeerCompute portable SS summaries.

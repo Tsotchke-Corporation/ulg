@@ -13286,3 +13286,115 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   fine_grid[fine_offset + 3u] = fine_grid[fine_offset + 3u] + delta.z;
 }
 `;
+
+export const schroederParticleStorageCountSummaryWgsl = `
+struct SchroederParticleStorageCountSummaryParams {
+  materialization_row_count: u32,
+  materialization_stride: u32,
+  source_particle_count: u32,
+  flags: u32,
+};
+
+@group(0) @binding(0) var<storage, read> materialization_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> summary_row: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederParticleStorageCountSummaryParams;
+
+const SCHROEDER_PSC_WORKGROUP_SIZE: u32 = 64u;
+
+var<workgroup> wg_admitted_rows: array<f32, 64>;
+var<workgroup> wg_written_target: array<f32, 64>;
+var<workgroup> wg_appended_target: array<f32, 64>;
+var<workgroup> wg_freed_source: array<f32, 64>;
+var<workgroup> wg_source_mass: array<f32, 64>;
+var<workgroup> wg_target_mass: array<f32, 64>;
+var<workgroup> wg_mass_residual_max: array<f32, 64>;
+var<workgroup> wg_blocked_rows: array<f32, 64>;
+
+// Reduces admitted particle-storage materialization rows into one compact
+// count summary. The authoritative count delta is append-only: written
+// target slots at or beyond the source particle count extend the live
+// range, while freed source slots become zero-mass holes until a future
+// compaction pass exists, so they never shrink the count here.
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
+  let local_index = local_id.x;
+  let stride = max(params.materialization_stride, 32u);
+
+  var admitted_rows = 0.0;
+  var written_target = 0.0;
+  var appended_target = 0.0;
+  var freed_source = 0.0;
+  var source_mass = 0.0;
+  var target_mass = 0.0;
+  var mass_residual_max = 0.0;
+  var blocked_rows = 0.0;
+  for (var row = local_index; row < params.materialization_row_count; row = row + SCHROEDER_PSC_WORKGROUP_SIZE) {
+    let offset = row * stride;
+    let status = materialization_rows[offset + 3u];
+    let admitted = materialization_rows[offset + 6u];
+    if (status <= 0.0 || status >= 32.0 || admitted <= 0.0) {
+      blocked_rows = blocked_rows + 1.0;
+      continue;
+    }
+    admitted_rows = admitted_rows + 1.0;
+    let written_start = materialization_rows[offset + 12u];
+    let written_count = max(materialization_rows[offset + 13u], 0.0);
+    let freed_count = max(materialization_rows[offset + 15u], 0.0);
+    written_target = written_target + written_count;
+    if (written_count > 0.0 && written_start >= f32(params.source_particle_count)) {
+      appended_target = appended_target + written_count;
+    }
+    freed_source = freed_source + freed_count;
+    source_mass = source_mass + max(materialization_rows[offset + 16u], 0.0);
+    target_mass = target_mass + max(materialization_rows[offset + 17u], 0.0);
+    mass_residual_max = max(mass_residual_max, abs(materialization_rows[offset + 18u]));
+  }
+
+  wg_admitted_rows[local_index] = admitted_rows;
+  wg_written_target[local_index] = written_target;
+  wg_appended_target[local_index] = appended_target;
+  wg_freed_source[local_index] = freed_source;
+  wg_source_mass[local_index] = source_mass;
+  wg_target_mass[local_index] = target_mass;
+  wg_mass_residual_max[local_index] = mass_residual_max;
+  wg_blocked_rows[local_index] = blocked_rows;
+  workgroupBarrier();
+
+  if (local_index == 0u) {
+    var sum_admitted = 0.0;
+    var sum_written = 0.0;
+    var sum_appended = 0.0;
+    var sum_freed = 0.0;
+    var sum_source_mass = 0.0;
+    var sum_target_mass = 0.0;
+    var max_mass_residual = 0.0;
+    var sum_blocked = 0.0;
+    for (var index = 0u; index < SCHROEDER_PSC_WORKGROUP_SIZE; index = index + 1u) {
+      sum_admitted = sum_admitted + wg_admitted_rows[index];
+      sum_written = sum_written + wg_written_target[index];
+      sum_appended = sum_appended + wg_appended_target[index];
+      sum_freed = sum_freed + wg_freed_source[index];
+      sum_source_mass = sum_source_mass + wg_source_mass[index];
+      sum_target_mass = sum_target_mass + wg_target_mass[index];
+      max_mass_residual = max(max_mass_residual, wg_mass_residual_max[index]);
+      sum_blocked = sum_blocked + wg_blocked_rows[index];
+    }
+    summary_row[0] = f32(params.materialization_row_count);
+    summary_row[1] = sum_admitted;
+    summary_row[2] = sum_written;
+    summary_row[3] = sum_appended;
+    summary_row[4] = sum_freed;
+    summary_row[5] = sum_appended;
+    summary_row[6] = sum_source_mass;
+    summary_row[7] = sum_target_mass;
+    summary_row[8] = max_mass_residual;
+    summary_row[9] = sum_blocked;
+    summary_row[10] = f32(params.source_particle_count);
+    summary_row[11] = f32(params.source_particle_count) + sum_appended;
+    summary_row[12] = 0.0;
+    summary_row[13] = 0.0;
+    summary_row[14] = 1.0;
+    summary_row[15] = f32(params.flags);
+  }
+}
+`;

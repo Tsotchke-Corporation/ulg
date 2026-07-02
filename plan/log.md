@@ -36282,3 +36282,63 @@ Next (Phase 1 slice 3):
 - One admitted split/merge that changes live particle count by an explicit
   `admittedParticleCountDelta` derived from a compact split/merge diagnostic
   readback, with mass conserved.
+
+## 2026-07-02 AKDT - SS Admitted Split Count Mutation (Phase 1 Slice 3)
+
+Third physics-first slice: an admitted split actually changes the live
+particle count through an explicit, GPU-reduced count delta, closing the
+loop the storage slices left open.
+
+New module `src/runtime/sph/schroederParticleStorageCountGpu.js` plus ABI
+schema `peercompute.ulg.schroeder-particle-storage-count-summary.v0` and a
+16-float summary row layout:
+
+- `runSchroederParticleStorageCountSummaryWebGpu` reduces admitted retained
+  materialization rows into one compact row: admitted/blocked row counts,
+  written/appended target slots, freed source slots, source/target mass
+  intents, max mass residual, and the derived `admittedParticleCountDelta`
+  and `authoritativeParticleCount`. The single row is the only readback.
+- Count policy is explicitly `append-only-freed-slots-await-compaction`:
+  written target slots at or beyond the source count extend the live range;
+  freed source slots become zero-mass holes and never shrink the count until
+  a compaction pass exists. Merges therefore remain count-neutral for now.
+
+Adoption wiring: `createSchroederParticleStorageAdoption` (now exported for
+proofs) consumes `admittedParticleCountDelta` from the materialization
+result, so `authoritativeParticleCount = sourceParticleCount + delta` with
+`outputParticleCapacity` kept separate — the semantics fixed in the Phase 0
+checkpoint now have a real producer.
+
+New Playwright proof `Schroeder admitted split materializes appended
+particles and grows the adopted count with mass conserved`:
+
+- Builds packed source particles and StateManager-style admitted
+  slot-assignment rows for one split (source particle 0 -> two half-mass
+  children appended at slots 3-4, source slot 0 freed), runs the real GPU
+  materialization kernel, the real GPU count reduction, and storage adoption.
+- Gates: admitted rows 3, appended slots 2, freed slots 1, delta exactly +2,
+  authoritative count exactly 5, adoption adopted with count 5 and capacity
+  6, and mass conservation read from the adopted state buffer (freed slot 0
+  mass 0, children at 1.0 kg each, live-range total equal to the source
+  total within 1e-5).
+
+Validation:
+
+- PASS: `node --test tests/schroederParticleStorageCountGpu.test.mjs` `4/4`.
+- PASS: targeted Playwright admitted-split proof `1/1` (5.5s).
+- PASS: `npm test` `962/965`, `3` skipped.
+- PASS: `git diff --check`.
+
+Phase 1 of `plan/todo/SS/fable-plan-2026-07-02.md` is now complete: a real
+adjacent-level conservative coupling operator with numeric gates, a
+two-level co-simulation through the production kernels, and an admitted
+split that mutates live particle count with mass conserved.
+
+Next:
+
+- Wire the count summary into same-level SS orchestration so scene-scheduled
+  splits produce the delta automatically (currently the proof invokes the
+  reducer explicitly against retained rows).
+- Free-slot compaction so admitted merges can shrink the count.
+- Then resume the deferred distribution work (portable rematerializer,
+  worker-owned adopted-storage consumption) on top of proven physics.

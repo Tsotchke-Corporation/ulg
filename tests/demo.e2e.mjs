@@ -11876,3 +11876,225 @@ test('Schroeder two-level co-simulation couples real P2G grids and preserves a c
       .toBeLessThan(5e-4 * Math.max(1, Math.abs(expectedCoarseMomentum)));
   }
 });
+
+test('Schroeder admitted split materializes appended particles and grows the adopted count with mass conserved', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await import('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const SLOT_FLOATS = abi.SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT.length;
+    const sourceParticleCount = 3;
+    const massKg = 2.0;
+    const state = new Float32Array(sourceParticleCount * 8);
+    const thermo = new Float32Array(sourceParticleCount * 12);
+    const mechanics = new Float32Array(sourceParticleCount * MECHANICS_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const s = index * 8;
+      state[s] = 1 + index * 0.5;
+      state[s + 1] = 1.5;
+      state[s + 2] = 2;
+      state[s + 3] = massKg;
+      state[s + 4] = 0.25;
+      state[s + 5] = -0.5;
+      state[s + 6] = 0.75;
+      state[s + 7] = 1;
+      thermo[index * 12 + 2] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = massKg / 1000;
+      mechanics[m + 20] = 0;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      smoothingLengthM: 0.5,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: 1e-4,
+      mechanics
+    };
+
+    // Admitted slot assignment for one split: source particle 0 becomes two
+    // half-mass children appended at slots 3 and 4, and source slot 0 is
+    // freed (zero-mass hole awaiting compaction). Rows for particles 1 and 2
+    // are keep rows with no slot movement.
+    const outputParticleCapacity = 6;
+    const rowCount = 3;
+    const slotAssignmentRows = new Float32Array(rowCount * SLOT_FLOATS);
+    const writeRow = (row, values) => {
+      const offset = row * SLOT_FLOATS;
+      for (const [column, value] of Object.entries(values)) {
+        slotAssignmentRows[offset + Number(column)] = value;
+      }
+    };
+    // status=3 (active+applied), admission=1; split row assigns targets 3..4
+    // with per-child target mass massKg/2, frees source slot 0.
+    writeRow(0, {
+      0: 0,
+      3: 3,
+      6: 1,
+      7: 2,
+      9: 3,
+      10: 2,
+      11: 0,
+      12: 1,
+      19: massKg / 2,
+      22: (massKg / 2) / 1000,
+      29: 1,
+      30: 7,
+      31: 1
+    });
+    writeRow(1, { 0: 1, 3: 3, 6: 1, 9: -1, 11: -1, 29: 1, 30: 7, 31: 1 });
+    writeRow(2, { 0: 2, 3: 3, 6: 1, 9: -1, 11: -1, 29: 1, 30: 7, 31: 1 });
+    const particleStorageSlotAssignment = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA,
+      status: 'schroeder-particle-storage-slot-assignment-submitted',
+      allocationRowCount: rowCount,
+      slotAssignmentStrideFloats: SLOT_FLOATS,
+      slotAssignmentRows,
+      freeListCapacity: outputParticleCapacity,
+      assignmentEpoch: 1,
+      stateFamilyId: 1
+    };
+    const particleStorageMaterializationAdmission = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+      status: 'schroeder-particle-storage-materialization-admission-admitted',
+      particleStorageMaterializationApproved: true,
+      slotAssignmentDescriptorApproved: true,
+      outputFamilies: ['schroeder-particle-storage-materialization'],
+      targetStateFamilies: [
+        'sph-particle-state',
+        'mls-mpm-particle-mechanics',
+        'sph-particle-thermo'
+      ],
+      schroederParticleStorageMaterializationRowCount: rowCount,
+      requiredParticleCapacity: outputParticleCapacity,
+      hotBufferKey: 'ulg:test:ss-split-materialization-admission',
+      sourceHotBufferKey: 'ulg:test:ss-split-materialization-admission',
+      committed: true
+    };
+
+    // Real GPU materialization of the split.
+    const materialization = await hierarchy.runSchroederParticleStorageMaterializationWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      particleStorageSlotAssignment,
+      particleStorageMaterializationAdmission,
+      outputParticleCapacity
+    });
+
+    // Real GPU count reduction over the retained materialization rows.
+    const countSummary = await countModule.runSchroederParticleStorageCountSummaryWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+    materialization.admittedParticleCountDelta = countSummary.admittedParticleCountDelta;
+
+    // Storage adoption consumes the materialization plus the explicit
+    // admitted count delta from the compact GPU reduction.
+    const adoptionResult = stepModule.createSchroederParticleStorageAdoption({
+      schroederParticleStorageMaterialization: materialization,
+      sphParticleState,
+      mlsMpmParticleState
+    });
+
+    // Mass conservation: read the adopted SPH state buffer (small diagnostic
+    // scene) and total the live range masses.
+    const stateFloats = outputParticleCapacity * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(materialization.particleStateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const adoptedState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    const liveCount = countSummary.authoritativeParticleCount;
+    let adoptedMass = 0;
+    const slotMasses = [];
+    for (let index = 0; index < liveCount; index += 1) {
+      const slotMass = adoptedState[index * 8 + 3];
+      slotMasses.push(slotMass);
+      adoptedMass += slotMass;
+    }
+
+    materialization.destroyParticleBuffers?.();
+    materialization.destroyMaterializationBuffer?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      materializationStatus: materialization.status,
+      countSummaryStatus: countSummary.status,
+      countSummary: countSummary.countSummary,
+      admittedParticleCountDelta: countSummary.admittedParticleCountDelta,
+      authoritativeParticleCount: countSummary.authoritativeParticleCount,
+      adoptionStatus: adoptionResult?.status ?? null,
+      adoptionAdopted: adoptionResult?.adopted === true,
+      adoptionAuthoritativeParticleCount: adoptionResult?.authoritativeParticleCount ?? null,
+      adoptionOutputParticleCapacity: adoptionResult?.outputParticleCapacity ?? null,
+      adoptionAdmittedParticleCountDelta: adoptionResult?.admittedParticleCountDelta ?? null,
+      sourceParticleCount,
+      sourceMassTotal: sourceParticleCount * massKg,
+      adoptedMass,
+      slotMasses
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+  expect(result.countSummaryStatus).toBe('schroeder-particle-storage-count-summary-submitted');
+
+  // The admitted split changes the live particle count by an explicit,
+  // GPU-reduced delta: +2 children appended, 1 source slot freed
+  // (append-only until compaction), so 3 -> 5.
+  expect(result.countSummary.admittedRowCount).toBe(3);
+  expect(result.countSummary.appendedTargetSlotCount).toBe(2);
+  expect(result.countSummary.freedSourceSlotCount).toBe(1);
+  expect(result.admittedParticleCountDelta).toBe(2);
+  expect(result.authoritativeParticleCount).toBe(5);
+
+  // Storage adoption consumes the explicit delta: the authoritative count
+  // grows by exactly the admitted amount while capacity stays separate.
+  expect(result.adoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.adoptionAdopted).toBe(true);
+  expect(result.adoptionAdmittedParticleCountDelta).toBe(2);
+  expect(result.adoptionAuthoritativeParticleCount).toBe(5);
+  expect(result.adoptionOutputParticleCapacity).toBe(6);
+
+  // Mass conservation across the split: freed source slot holds zero mass,
+  // both children hold half the source mass, untouched particles keep
+  // theirs, so the live-range total equals the source total.
+  expect(result.slotMasses.length).toBe(5);
+  expect(result.slotMasses[0]).toBe(0);
+  expect(Math.abs(result.slotMasses[3] - 1.0)).toBeLessThan(1e-6);
+  expect(Math.abs(result.slotMasses[4] - 1.0)).toBeLessThan(1e-6);
+  expect(Math.abs(result.adoptedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+});

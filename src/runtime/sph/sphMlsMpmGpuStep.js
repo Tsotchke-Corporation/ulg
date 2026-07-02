@@ -5360,7 +5360,7 @@ function retainedSchroederParticleStorageMaterializationBuffers(schroederParticl
   };
 }
 
-function createSchroederParticleStorageAdoption({
+export function createSchroederParticleStorageAdoption({
   schroederParticleStorageMaterialization = null,
   sphParticleState = null,
   mlsMpmParticleState = null

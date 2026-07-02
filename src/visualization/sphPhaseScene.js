@@ -11,6 +11,7 @@ import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA
@@ -54,14 +55,20 @@ import {
   MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_FINAL_ONLY,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
+  MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY,
   MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE,
+  cloneMlsMpmParticleStateForNext,
+  cloneSphParticleStateForNext,
+  destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   normalizeMlsMpmActiveGridPlanRefreshMode,
   normalizeMlsMpmResidentCompactSummaryMode,
+  retainedContinuationBuffersFromUploads,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   submitMlsMpmResidentStepsComputeTask
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import { runSchroederSameLevelMechanicsWebGpu } from '../runtime/sph/schroederHierarchyGpu.js';
 import {
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
@@ -474,6 +481,11 @@ export function createSchroederRenderSourceMetadata({
       || renderLod?.fullParticleReadbackRequired === true
       || policy.schroederRenderLodFullParticleReadbackRequired === true
   );
+  const policyPresentationReadyVeto = Boolean(
+    policy.schroederRenderLodPresentationReady === false
+    && !portablePresent
+    && !renderLodPresent
+  );
   const presentationReady = Boolean(
     renderLodPresent
       && portableSchemaAccepted
@@ -481,7 +493,7 @@ export function createSchroederRenderSourceMetadata({
       && descriptorOnlyTransfer
       && !rawGpuBufferTransferDetected
       && !fullParticleReadbackRequired
-      && policy.schroederRenderLodPresentationReady !== false
+      && !policyPresentationReadyVeto
   );
   const admissionStatus = schroederPortableSummaryAdmission?.status || null;
   const admissionPublished = Boolean(
@@ -12045,6 +12057,15 @@ export function createSphPhaseScene(container, {
     compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
     compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
+    schroederSimulation = false,
+    schroederSelectedLevel = 0,
+    schroederMinLevel = null,
+    schroederMaxLevel = null,
+    schroederTileCellCount = null,
+    schroederEnablePortableSummary = false,
+    schroederEnableActiveNodeIndex = false,
+    schroederEnableActiveNodeSortedIndex = false,
+    schroederLawNeighborTraversalPolicyMode = null,
     ...args
   } = {}) {
     const stepSignature = mlsMpmResidentStepSignatureFor(args);
@@ -12055,7 +12076,16 @@ export function createSphPhaseScene(container, {
       Boolean(retainIntermediateSteps),
       normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
       normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
-      residentSourceMode
+      residentSourceMode,
+      `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
+      `ssLevel=${Math.round(Number(schroederSelectedLevel) || 0)}`,
+      `ssMin=${schroederMinLevel ?? 'default'}`,
+      `ssMax=${schroederMaxLevel ?? 'default'}`,
+      `ssTile=${schroederTileCellCount ?? 'default'}`,
+      `ssPortable=${Boolean(schroederEnablePortableSummary) ? 1 : 0}`,
+      `ssIndex=${Boolean(schroederEnableActiveNodeIndex) ? 1 : 0}`,
+      `ssSorted=${Boolean(schroederEnableActiveNodeSortedIndex) ? 1 : 0}`,
+      `ssTraversal=${schroederLawNeighborTraversalPolicyMode || 'default'}`
     ].join('|');
   }
 
@@ -18231,6 +18261,22 @@ export function createSphPhaseScene(container, {
     activeGridDispatchPlanRefreshMode = null,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined,
+    schroederSimulation = false,
+    schroederSelectedLevel = 0,
+    schroederBaseGridSpacingM = null,
+    schroederMinLevel = null,
+    schroederMaxLevel = null,
+    schroederTileCellCount = null,
+    schroederEnablePortableSummary = true,
+    schroederPortableSummaryPeerComputeUseCase = 'scene-native-schroeder-render-lod',
+    schroederEnableActiveNodeIndex = false,
+    schroederEnableActiveNodeSortedIndex = false,
+    schroederActiveNodeSortedIndexPolicyMode = undefined,
+    schroederLawNeighborTraversalPolicyMode = undefined,
+    schroederLawNeighborCandidateReadbackMode = null,
+    schroederEnableCrossLevelCoupling = true,
+    schroederEnableLawQueue = true,
+    schroederEnableLawNeighborCandidates = true,
     thermalStepOptions: thermalStepOptionOverrides = null,
     contactKinematicsParticleBinMetadataReadback = false,
     reactionParticleBinMetadataReadback = false,
@@ -18282,6 +18328,25 @@ export function createSphPhaseScene(container, {
       fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
     );
     const requestedMeasureFusedSequenceQueueFence = Boolean(measureFusedSequenceQueueFence);
+    const requestedSchroederSimulation = Boolean(schroederSimulation);
+    const requestedSchroederSelectedLevel = Math.round(Number(schroederSelectedLevel) || 0);
+    const requestedSchroederBaseGridSpacingM = Number.isFinite(Number(schroederBaseGridSpacingM))
+      && Number(schroederBaseGridSpacingM) > 0
+      ? Number(schroederBaseGridSpacingM)
+      : gridSpacingM;
+    const requestedSchroederMinLevel = Number.isFinite(Number(schroederMinLevel))
+      ? Math.round(Number(schroederMinLevel))
+      : null;
+    const requestedSchroederMaxLevel = Number.isFinite(Number(schroederMaxLevel))
+      ? Math.round(Number(schroederMaxLevel))
+      : null;
+    const requestedSchroederTileCellCount = Number.isFinite(Number(schroederTileCellCount))
+      && Number(schroederTileCellCount) > 0
+      ? Math.max(1, Math.round(Number(schroederTileCellCount)))
+      : null;
+    const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
+    const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
+    const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
     const requestedContactKinematicsParticleBinMetadataReadback = Boolean(
       contactKinematicsParticleBinMetadataReadback
     );
@@ -18343,7 +18408,12 @@ export function createSphPhaseScene(container, {
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
       reactionParticleBinMetadataReadback:
-        requestedReactionParticleBinMetadataReadback
+        requestedReactionParticleBinMetadataReadback,
+      schroederSimulation: requestedSchroederSimulation,
+      schroederSelectedLevel: requestedSchroederSelectedLevel,
+      schroederPortableSummaryEnabled: requestedSchroederEnablePortableSummary,
+      schroederActiveNodeIndexEnabled: requestedSchroederEnableActiveNodeIndex,
+      schroederActiveNodeSortedIndexEnabled: requestedSchroederEnableActiveNodeSortedIndex
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
@@ -18397,7 +18467,16 @@ export function createSphPhaseScene(container, {
       reactionParticleBinMetadataReadback:
         requestedReactionParticleBinMetadataReadback,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
-      activeGridSafetyCells: normalizedActiveGridSafetyCells
+      activeGridSafetyCells: normalizedActiveGridSafetyCells,
+      schroederSimulation: requestedSchroederSimulation,
+      schroederSelectedLevel: requestedSchroederSelectedLevel,
+      schroederMinLevel: requestedSchroederMinLevel,
+      schroederMaxLevel: requestedSchroederMaxLevel,
+      schroederTileCellCount: requestedSchroederTileCellCount,
+      schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
+      schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
+      schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
+      schroederLawNeighborTraversalPolicyMode
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
     const residentStepsStartedAtMs = nowMs();
@@ -18634,12 +18713,274 @@ export function createSphPhaseScene(container, {
           activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
           activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
+        const compactSchroederSameLevelMechanicsForScene = (result = null) => {
+          if (!result) return null;
+          return {
+            schema: result.schema ?? null,
+            status: result.status ?? null,
+            backend: result.backend ?? null,
+            readbackMode: result.readbackMode ?? null,
+            selectedLevel: result.selectedLevel ?? null,
+            mechanicsGridSpacingM: result.mechanicsGridSpacingM ?? null,
+            nativeGridSpacingM: result.nativeGridSpacingM ?? null,
+            normalHotLoopReadbackFree: result.normalHotLoopReadbackFree === true,
+            activeNodeConsumerStatus: result.activeNodeConsumerStatus ?? null,
+            activeNodeIndexStatus: result.activeNodeIndexStatus ?? null,
+            activeNodeSortedIndexStatus: result.activeNodeSortedIndexStatus ?? null,
+            lawQueueStatus: result.lawQueueStatus ?? null,
+            lawNeighborCandidateStatus: result.lawNeighborCandidateStatus ?? null,
+            crossLevelCouplingStatus: result.crossLevelCouplingStatus ?? null,
+            conservativeTransferStatus: result.conservativeTransferStatus ?? null,
+            stateMutationStatus: result.stateMutationStatus ?? null,
+            stateAuthorityStatus: result.stateAuthorityStatus ?? null,
+            portableSummaryStatus: result.portableSummaryStatus ?? result.portableSummary?.status ?? null,
+            renderLodStatus: result.renderLodStatus ?? result.portableSummary?.renderLodStatus ?? null,
+            localRetainedRenderBufferStatus:
+              result.localRetainedRenderBuffers?.status
+              ?? result.schroederLocalRetainedRenderBuffers?.status
+              ?? null,
+            localRetainedRenderBufferRefCount:
+              result.localRetainedRenderBuffers?.retainedBufferRefCount
+              ?? result.schroederLocalRetainedRenderBuffers?.retainedBufferRefCount
+              ?? 0,
+            fullParticleReadbackRequired: result.fullParticleReadbackRequired === true,
+            fullPhysicsValidation: false
+          };
+        };
+        const attachSchroederSceneStepArtifacts = (step, schroederResult) => {
+          if (!step || !schroederResult) return step;
+          const compact = compactSchroederSameLevelMechanicsForScene(schroederResult);
+          step.schroederSimulation = true;
+          step.schroederSameLevelMechanics = compact;
+          step.schroederSameLevelMechanicsStatus = compact?.status ?? null;
+          step.schroederLevelAssignment = schroederResult.levelAssignment ?? null;
+          step.schroederActiveNodeList = schroederResult.activeNodeList ?? null;
+          step.schroederLawQueue = schroederResult.lawQueue ?? null;
+          step.schroederLawNeighborCandidates = schroederResult.lawNeighborCandidates ?? null;
+          step.schroederPortableSummary = schroederResult.portableSummary ?? null;
+          step.portableSummary = schroederResult.portableSummary ?? null;
+          step.renderLod = schroederResult.portableSummary?.renderLod ?? null;
+          step.localRetainedRenderBuffers = schroederResult.localRetainedRenderBuffers ?? null;
+          step.schroederLocalRetainedRenderBuffers =
+            schroederResult.schroederLocalRetainedRenderBuffers
+            || schroederResult.localRetainedRenderBuffers
+            || null;
+          return step;
+        };
+        const runSchroederSceneResidentSteps = async (baseOptions) => {
+          const count = normalizedStepCount;
+          let currentSphParticleState = baseOptions.sphParticleState;
+          let currentMlsMpmParticleState = baseOptions.mlsMpmParticleState;
+          let currentSphParticleUpload = baseOptions.sphParticleUpload ?? null;
+          let currentMlsMpmParticleUpload = baseOptions.mlsMpmParticleUpload ?? null;
+          let currentResidentProductMass =
+            baseOptions.residentProductMass
+            ?? baseOptions.nextParticleUploads?.residentProductMass
+            ?? null;
+          let currentSourceSlot = currentSphParticleUpload?.slot ?? 0;
+          let finalStep = null;
+          let finalSchroederResult = null;
+          const retainedSteps = [];
+          const stepSummaries = [];
+          const schroederStepSummaries = [];
+          markResidentStepsProgress('resident-steps-schroeder-sequence-started', {
+            stepCount: count,
+            selectedLevel: requestedSchroederSelectedLevel,
+            baseGridSpacingM: requestedSchroederBaseGridSpacingM
+          });
+          for (let index = 0; index < count; index += 1) {
+            const summarizeStep = requestedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+              && (
+                requestedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY
+                || index === count - 1
+              );
+            markResidentStepsProgress('resident-steps-schroeder-step-started', {
+              stepIndex: index,
+              selectedLevel: requestedSchroederSelectedLevel,
+              summarizeStep
+            });
+            const residentStepOptions = {
+              ...baseOptions,
+              sphParticleState: currentSphParticleState,
+              mlsMpmParticleState: currentMlsMpmParticleState,
+              sphParticleUpload: currentSphParticleUpload,
+              mlsMpmParticleUpload: currentMlsMpmParticleUpload,
+              residentProductMass: currentResidentProductMass,
+              sourceSlot: currentSourceSlot,
+              compactSummaryScope: requestedCompactSummaryScope,
+              sequenceIndex: index,
+              sequenceStepCount: count,
+              onResidentStageProgress(progress = {}) {
+                markResidentStepsProgress(progress.status || 'resident-steps-schroeder-inner-progress', {
+                  innerProgress: progress,
+                  currentStage: progress.stage ?? null,
+                  stepIndex: progress.stepIndex ?? progress.sequenceIndex ?? index,
+                  stageElapsedMs: progress.elapsedMs ?? null
+                });
+              }
+            };
+            if (!summarizeStep) residentStepOptions.summaryRunner = null;
+            const schroederResult = await runSchroederSameLevelMechanicsWebGpu({
+              device: resolvedDeviceResult.device,
+              sphParticleState: currentSphParticleState,
+              mlsMpmParticleState: currentMlsMpmParticleState,
+              sphParticleUpload: currentSphParticleUpload,
+              mlsMpmParticleUpload: currentMlsMpmParticleUpload,
+              selectedLevel: requestedSchroederSelectedLevel,
+              baseGridSpacingM: requestedSchroederBaseGridSpacingM,
+              ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
+              ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
+              ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
+              enablePortableSummary: requestedSchroederEnablePortableSummary,
+              portableSummaryPeerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              enableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
+              enableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
+              ...(schroederActiveNodeSortedIndexPolicyMode !== undefined
+                ? { activeNodeSortedIndexPolicyMode: schroederActiveNodeSortedIndexPolicyMode }
+                : {}),
+              ...(schroederLawNeighborTraversalPolicyMode !== undefined
+                ? { lawNeighborTraversalPolicyMode: schroederLawNeighborTraversalPolicyMode }
+                : {}),
+              lawNeighborCandidateReadbackMode: schroederLawNeighborCandidateReadbackMode,
+              enableCrossLevelCoupling: Boolean(schroederEnableCrossLevelCoupling),
+              enableLawQueue: Boolean(schroederEnableLawQueue),
+              enableLawNeighborCandidates: Boolean(schroederEnableLawNeighborCandidates),
+              boxDimsM: dims,
+              dt: effectiveDt,
+              gravityMPerS2: effectiveGravity,
+              cflFactor,
+              readbackMode: requestedReadbackMode,
+              residentStepRunner: runMlsMpmResidentStepWithOptionalWebGpu,
+              residentStepOptions
+            });
+            const step = attachSchroederSceneStepArtifacts(schroederResult.residentStep, schroederResult);
+            if (!step) {
+              throw new Error('Schroeder same-level scene runner did not return a resident step');
+            }
+            step.sequenceIndex = index;
+            step.schroederSequenceIndex = index;
+            step.schroederSequenceStepCount = count;
+            const compactSchroederStep = compactSchroederSameLevelMechanicsForScene(schroederResult);
+            stepSummaries.push({
+              index,
+              backend: step.backend,
+              status: step.status,
+              stageStatus: { ...(step.stageStatus || {}) },
+              stageBackends: { ...(step.stageBackends || {}) },
+              readbackMode: step.readbackMode ?? null,
+              schroederSimulation: true,
+              schroederStatus: compactSchroederStep?.status ?? null,
+              schroederSelectedLevel: compactSchroederStep?.selectedLevel ?? null,
+              schroederRenderLodStatus: compactSchroederStep?.renderLodStatus ?? null,
+              schroederLocalRetainedRenderBufferStatus:
+                compactSchroederStep?.localRetainedRenderBufferStatus ?? null
+            });
+            schroederStepSummaries.push(compactSchroederStep);
+            markResidentStepsProgress('resident-steps-schroeder-step-complete', {
+              stepIndex: index,
+              backend: step.backend,
+              stageTiming: step.stageTiming || null,
+              schroederStatus: compactSchroederStep?.status ?? null,
+              renderLodStatus: compactSchroederStep?.renderLodStatus ?? null
+            });
+            const carriedResidentProductMass =
+              step.nextParticleUploads?.residentProductMass
+              ?? step.residentProductMass
+              ?? null;
+            if (finalStep && !retainIntermediateSteps) {
+              destroyMlsMpmResidentStepBuffers(finalStep, {
+                preserveResidentProductMass: carriedResidentProductMass,
+                preserveResidentProductMassHandles: [
+                  step.inputResidentProductMass,
+                  step.emittedResidentProductMass,
+                  carriedResidentProductMass
+                ].filter(Boolean),
+                destroyInputResidentProductMass: true,
+                preserveBuffers: retainedContinuationBuffersFromUploads(step.nextParticleUploads)
+              });
+            } else if (finalStep) {
+              retainedSteps.push(finalStep);
+            }
+            finalStep = step;
+            finalSchroederResult = schroederResult;
+            currentSphParticleState = cloneSphParticleStateForNext(currentSphParticleState, step);
+            currentMlsMpmParticleState = cloneMlsMpmParticleStateForNext(currentMlsMpmParticleState, step);
+            currentSphParticleUpload = step.nextParticleUploads?.sphParticleUpload ?? null;
+            currentMlsMpmParticleUpload = step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
+            currentResidentProductMass = carriedResidentProductMass;
+            currentSourceSlot = step.particlePingPong?.nextSlot ?? (currentSourceSlot === 0 ? 1 : 0);
+          }
+          const compactFinalSchroeder = compactSchroederSameLevelMechanicsForScene(finalSchroederResult);
+          markResidentStepsProgress('resident-steps-schroeder-sequence-complete', {
+            completedStepCount: stepSummaries.length,
+            backend: finalStep?.backend || 'webgpu',
+            schroederStatus: compactFinalSchroeder?.status ?? null,
+            renderLodStatus: compactFinalSchroeder?.renderLodStatus ?? null
+          });
+          return {
+            schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+            backend: finalStep?.backend || 'webgpu',
+            status: 'resident-steps-executed',
+            schroederSimulation: true,
+            schroederSameLevelSequenceStatus: 'schroeder-same-level-resident-steps-executed',
+            schroederSameLevelMechanics: compactFinalSchroeder,
+            schroederSameLevelMechanicsSummaries: schroederStepSummaries,
+            stepCount: count,
+            completedStepCount: stepSummaries.length,
+            compactSummaryMode: requestedCompactSummaryMode,
+            compactSummaryScope: requestedCompactSummaryScope,
+            activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
+            retainIntermediateSteps,
+            retainedIntermediateStepCount: retainedSteps.length,
+            retainedSteps,
+            finalStep,
+            stepSummaries,
+            nextSphParticleState: currentSphParticleState,
+            nextMlsMpmParticleState: currentMlsMpmParticleState,
+            nextParticleUploads: finalStep?.nextParticleUploads ?? null,
+            nextResidentProductMass: currentResidentProductMass,
+            nextParticleBufferMode: finalStep?.nextParticleBufferMode ?? 'not-available',
+            readbackMode: finalStep?.readbackMode ?? requestedReadbackMode,
+            normalHotLoopReadbackFree: Boolean(finalStep?.normalHotLoopReadbackFree),
+            renderStateReadbackAvailable: finalStep?.renderStateReadbackAvailable ?? false,
+            portableSummary: finalSchroederResult?.portableSummary ?? null,
+            renderLod: finalSchroederResult?.portableSummary?.renderLod ?? null,
+            localRetainedRenderBuffers: finalSchroederResult?.localRetainedRenderBuffers ?? null,
+            schroederLocalRetainedRenderBuffers:
+              finalSchroederResult?.schroederLocalRetainedRenderBuffers
+              || finalSchroederResult?.localRetainedRenderBuffers
+              || null,
+            levelAssignment: finalSchroederResult?.levelAssignment ?? null,
+            activeNodeList: finalSchroederResult?.activeNodeList ?? null,
+            activeNodeIndex: finalSchroederResult?.activeNodeIndex ?? null,
+            activeNodeSortedIndex: finalSchroederResult?.activeNodeSortedIndex ?? null,
+            lawQueue: finalSchroederResult?.lawQueue ?? null,
+            lawNeighborCandidates: finalSchroederResult?.lawNeighborCandidates ?? null,
+            crossLevelCoupling: finalSchroederResult?.crossLevelCoupling ?? null,
+            conservationSummary: finalSchroederResult?.conservationSummary ?? null,
+            residentAuthorityLedgerStatus: finalStep?.residentAuthorityLedgerStatus ?? null,
+            residentAuthorityFamilyOwners: finalStep?.residentAuthorityFamilyOwners || finalStep?.residentAuthoritySummary?.familyOwners || {},
+            residentAuthorityWarnings: [...(finalStep?.residentAuthorityWarnings || [])],
+            residentAuthorityBlockers: [...(finalStep?.residentAuthorityBlockers || [])],
+            residentBufferLeaseLedgerStatus: finalStep?.residentBufferLeaseLedgerStatus ?? null,
+            residentBufferLeaseResourceCount: finalStep?.residentBufferLeaseResourceCount ?? 0,
+            residentBufferLeaseActiveLeaseCount: finalStep?.residentBufferLeaseActiveLeaseCount ?? 0,
+            residentBufferLeaseWarnings: [...(finalStep?.residentBufferLeaseWarnings || [])],
+            residentBufferLeaseBlockers: [...(finalStep?.residentBufferLeaseBlockers || [])],
+            gpuAuthoritativeState: false,
+            scientificValidation: false,
+            sphValidation: false,
+            phaseChangeValidation: false,
+            fullPhysicsValidation: false
+          };
+        };
         let execution = null;
         const kernelsStartedAtMs = nowMs();
         if (
           computeManager
           && typeof computeManager.submitTask === 'function'
           && requestedResidentComputeManagerMode !== 'direct'
+          && !requestedSchroederSimulation
         ) {
           const continuationTaskStateKey = continueFromResidentState
             ? (mlsMpmResidentSteps?.computeManagerTask?.stateKey
@@ -18750,9 +19091,13 @@ export function createSphPhaseScene(container, {
             stateManagerCommitStatus: stateManagerCommit?.status ?? null
           });
         } else {
-          execution = await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
+          execution = requestedSchroederSimulation
+            ? await runSchroederSceneResidentSteps(residentStepsOptions)
+            : await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
         }
-        execution.residentComputeManagerMode = requestedResidentComputeManagerMode;
+        execution.residentComputeManagerMode = requestedSchroederSimulation
+          ? 'direct-schroeder-scene'
+          : requestedResidentComputeManagerMode;
         execution.residentComputeManagerActive = Boolean(execution.computeManagerTask);
         residentStepsMarkStage('kernelsWallMs', kernelsStartedAtMs);
         markResidentStepsProgress('resident-steps-kernels-complete', {
@@ -18821,7 +19166,16 @@ export function createSphPhaseScene(container, {
             reactionParticleBinMetadataReadback:
               requestedReactionParticleBinMetadataReadback,
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
-            activeGridSafetyCells: normalizedActiveGridSafetyCells
+            activeGridSafetyCells: normalizedActiveGridSafetyCells,
+            schroederSimulation: requestedSchroederSimulation,
+            schroederSelectedLevel: requestedSchroederSelectedLevel,
+            schroederMinLevel: requestedSchroederMinLevel,
+            schroederMaxLevel: requestedSchroederMaxLevel,
+            schroederTileCellCount: requestedSchroederTileCellCount,
+            schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
+            schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
+            schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
+            schroederLawNeighborTraversalPolicyMode
           }) !== signature
         ) {
           destroyMlsMpmResidentStepsBuffers(execution);

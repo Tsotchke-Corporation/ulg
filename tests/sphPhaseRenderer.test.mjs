@@ -3448,6 +3448,30 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
     'native-webgpu-retained-proxy'
   );
 
+  const localObservationMetadata = createResidentRenderSourceMetadata({
+    residentSteps: {
+      signature: 'scene-local-steps-with-schroeder-summary',
+      residentExecutionGeneration: 13,
+      currentResidentExecutionGeneration: 13,
+      nextSphParticleState: { step: 9, time: 0.045, particleCount: 128 },
+      portableSummary
+    },
+    renderOwnershipPolicy: {
+      schroederRenderLodPresentationReady: false,
+      schroederRenderLodStatus: 'disabled-schroeder-render-lod-summary'
+    },
+    source: 'resident-render-refresh'
+  });
+  assert.equal(
+    localObservationMetadata.schroederRenderSource.status,
+    'schroeder-render-source-local-observation-ready'
+  );
+  assert.equal(localObservationMetadata.schroederRenderSource.renderLodPresentationReady, true);
+  assert.equal(
+    localObservationMetadata.schroederRenderProxyDrawSource.status,
+    'schroeder-render-proxy-draw-source-ready'
+  );
+
   const target = {};
   applyResidentRenderSourceMetadata(target, metadata);
   assert.equal(target.sourceSchroederRenderSourceSchema, ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA);

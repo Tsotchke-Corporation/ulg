@@ -14436,7 +14436,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   }
 }
 
-function retainedContinuationBuffersFromUploads(nextParticleUploads = null) {
+export function retainedContinuationBuffersFromUploads(nextParticleUploads = null) {
   return [
     nextParticleUploads?.sphParticleUpload?.stateBuffer,
     nextParticleUploads?.sphParticleUpload?.thermoBuffer,
@@ -14445,7 +14445,7 @@ function retainedContinuationBuffersFromUploads(nextParticleUploads = null) {
   ].filter(Boolean);
 }
 
-function cloneSphParticleStateForNext(source, step) {
+export function cloneSphParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   const reactionResult = step.reactionStep?.result || step.reactionStep;
   const thermalResult = step.thermalStep?.result || step.thermalStep;
@@ -14480,7 +14480,7 @@ function cloneSphParticleStateForNext(source, step) {
   };
 }
 
-function cloneMlsMpmParticleStateForNext(source, step) {
+export function cloneMlsMpmParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   const reactionResult = step.reactionStep?.result || step.reactionStep;
   return {

@@ -10,6 +10,7 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
@@ -31,6 +32,9 @@ import {
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
@@ -48,6 +52,7 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_NO_FULL_READBACK_MODE,
+  SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
   createSchroederActiveNodeListPlan,
   createSchroederActiveNodeParamsArray,
@@ -67,6 +72,8 @@ import {
   createSchroederHierarchyAggregatePlan,
   createSchroederLevelAssignmentParamsArray,
   createSchroederLevelAssignmentPlan,
+  createSchroederPhaseVolumeLevelUpdateParamsArray,
+  createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
   createSchroederPhaseVolumeMigrationPlan,
   createSchroederSameLevelMechanicsPlan,
@@ -81,9 +88,11 @@ import {
   runSchroederHierarchyAggregateNodeReductionWebGpu,
   runSchroederHierarchyAggregateWebGpu,
   runSchroederLevelAssignmentWebGpu,
+  runSchroederPhaseVolumeLevelUpdateWebGpu,
   runSchroederPhaseVolumeMigrationWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
   schroederGridSpacingForLevel,
+  schroederPhaseVolumeMigrationAdmissionAllowsApplication,
   schroederStateDeltaMergeAdmissionAllowsApplication
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
 import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -224,6 +233,22 @@ function approvedStateDeltaMergeAdmission({
   };
 }
 
+function approvedPhaseVolumeMigrationAdmission({
+  rowCount = 130,
+  hotBufferKey = 'ulg:test:schroeder-phase-volume-admission-hot-buffer'
+} = {}) {
+  return {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-admission-admitted',
+    phaseVolumeMigrationApproved: true,
+    outputFamilies: ['schroeder-phase-volume-migration'],
+    schroederPhaseVolumeMigrationRowCount: rowCount,
+    hotBufferKey,
+    sourceHotBufferKey: hotBufferKey,
+    committed: true
+  };
+}
+
 test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA, 'peercompute.ulg.schroeder-level-assignment.v0');
   assert.equal(
@@ -322,6 +347,24 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS
   );
   assert.equal(SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-migration-admission.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-level-update.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0'
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length,
+    SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS
+  );
+  assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
     ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -761,6 +804,84 @@ test('Schroeder phase-volume migration plan consumes aggregate nodes for water-t
   assert.equal(view.getFloat32(48, true), 1);
   assert.equal(view.getFloat32(52, true), 3);
   assert.equal(view.getFloat32(56, true), 11);
+});
+
+test('Schroeder phase-volume migration admission gates authoritative level updates', () => {
+  const phaseVolumeMigration = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-submitted',
+    particleCount: 5,
+    migrationStrideFloats: SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+    migrationBuffer: { label: 'fake-phase-volume-migration-buffer' }
+  };
+  const blocked = schroederPhaseVolumeMigrationAdmissionAllowsApplication({
+    phaseVolumeMigrationAdmission: {
+      status: 'schroeder-phase-volume-migration-admission-admitted',
+      outputFamilies: ['other-family'],
+      phaseVolumeMigrationApproved: true,
+      schroederPhaseVolumeMigrationRowCount: 5
+    },
+    phaseVolumeMigration,
+    migrationRowCount: 5
+  });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-phase-volume-migration-admission-blocked');
+  assert.equal(blocked.approved, false);
+  assert.equal(blocked.familyAccepted, false);
+
+  const approved = schroederPhaseVolumeMigrationAdmissionAllowsApplication({
+    phaseVolumeMigrationAdmission: approvedPhaseVolumeMigrationAdmission({ rowCount: 5 }),
+    phaseVolumeMigration,
+    migrationRowCount: 5
+  });
+  assert.equal(approved.status, 'schroeder-phase-volume-migration-admission-approved');
+  assert.equal(approved.approved, true);
+  assert.equal(approved.familyAccepted, true);
+  assert.equal(approved.rowCountAccepted, true);
+});
+
+test('Schroeder phase-volume level update plan requires StateManager admission', () => {
+  const phaseVolumeMigration = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-submitted',
+    particleCount: 130,
+    migrationStrideFloats: SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+    migrationBuffer: { label: 'fake-phase-volume-migration-buffer' }
+  };
+  const blocked = createSchroederPhaseVolumeLevelUpdatePlan({ phaseVolumeMigration });
+  assert.equal(blocked.schema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA);
+  assert.equal(blocked.status, 'schroeder-phase-volume-level-update-plan-blocked-admission-required');
+  assert.equal(blocked.phaseVolumeMigrationAdmissionApproved, false);
+  assert.equal(blocked.stateMutationStatus, 'blocked-phase-volume-level-update-admission-required');
+
+  const approved = createSchroederPhaseVolumeLevelUpdatePlan({
+    phaseVolumeMigration,
+    phaseVolumeMigrationAdmission: approvedPhaseVolumeMigrationAdmission({ rowCount: 130 }),
+    migrationEpoch: 7
+  });
+  assert.equal(approved.status, 'schroeder-phase-volume-level-update-plan-ready');
+  assert.equal(approved.phaseVolumeMigrationAdmissionApproved, true);
+  assert.equal(approved.outputCompaction, 'one-admitted-phase-volume-level-update-row-per-migration-row');
+  assert.deepEqual(approved.outputFamilies, [
+    'schroeder-hierarchy-state-delta',
+    'schroeder-phase-volume-migration',
+    'schroeder-phase-volume-level-update'
+  ]);
+  assert.equal(approved.stateFamily, 'schroeder-hierarchy');
+  assert.equal(approved.stateMutationStatus, 'phase-volume-level-update-planned');
+  assert.equal(approved.stateAuthorityStatus, 'state-manager-admission-present');
+  assert.equal(approved.levelUpdateByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+
+  const params = createSchroederPhaseVolumeLevelUpdateParamsArray({
+    ...approved,
+    admissionApproved: approved.phaseVolumeMigrationAdmissionApproved
+  });
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), 130);
+  assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS);
+  assert.equal(view.getUint32(12, true), 1);
+  assert.equal(view.getFloat32(20, true), 7);
 });
 
 test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
@@ -1279,6 +1400,75 @@ test('Schroeder phase-volume migration consumes retained aggregate nodes without
   );
 });
 
+test('Schroeder phase-volume level update blocks without admission and dispatches no work', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeMigration = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-submitted',
+    particleCount: 130,
+    migrationStrideFloats: SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+    migrationBuffer: { label: 'retained-phase-volume-migration-buffer' }
+  };
+  const update = await runSchroederPhaseVolumeLevelUpdateWebGpu({
+    device,
+    phaseVolumeMigration
+  });
+
+  assert.equal(update.schema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA);
+  assert.equal(update.phaseVolumeLevelUpdateSchema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA);
+  assert.equal(update.status, 'schroeder-phase-volume-level-update-blocked-admission-required');
+  assert.equal(update.phaseVolumeMigrationAdmissionApproved, false);
+  assert.equal(update.retainedLevelUpdateBuffer, false);
+  assert.equal(update.levelUpdateBufferByteLength, 0);
+  assert.equal(update.levelUpdateRows.length, 0);
+  assert.equal(update.conservativeTransferStatus, 'phase-volume-level-update-blocked-admission-required');
+  assert.equal(update.stateMutationStatus, 'blocked-phase-volume-level-update-admission-required');
+  assert.deepEqual(device.dispatches, []);
+});
+
+test('Schroeder phase-volume level update consumes retained migration rows after admission without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const phaseVolumeMigration = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-migration-submitted',
+    particleCount: 130,
+    migrationStrideFloats: SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+    migrationBuffer: { label: 'retained-phase-volume-migration-buffer' }
+  };
+  const update = await runSchroederPhaseVolumeLevelUpdateWebGpu({
+    device,
+    phaseVolumeMigration,
+    phaseVolumeMigrationAdmission: approvedPhaseVolumeMigrationAdmission({ rowCount: 130 }),
+    migrationEpoch: 11
+  });
+
+  assert.equal(update.schema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA);
+  assert.equal(update.phaseVolumeLevelUpdateSchema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA);
+  assert.equal(update.status, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(update.sourcePhaseVolumeMigrationSchema, ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA);
+  assert.equal(update.phaseVolumeMigrationAdmissionApproved, true);
+  assert.equal(update.phaseVolumeMigrationAdmissionStatus, 'schroeder-phase-volume-migration-admission-approved');
+  assert.equal(update.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(update.fullReadbackPerformed, false);
+  assert.equal(update.fullParticleReadbackPerformed, false);
+  assert.equal(update.normalHotLoopReadbackFree, true);
+  assert.equal(update.retainedLevelUpdateBuffer, true);
+  assert.ok(update.levelUpdateBuffer);
+  assert.equal(update.levelUpdateBuffer.destroyed, false);
+  assert.equal(update.levelUpdateBufferByteLength, 130 * 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(update.levelUpdateRows.length, 0);
+  assert.equal(update.outputCompaction, 'one-admitted-phase-volume-level-update-row-per-migration-row');
+  assert.equal(update.conservativeTransferStatus, 'phase-volume-level-update-submitted');
+  assert.equal(update.stateMutationStatus, 'phase-volume-level-update-buffer-submitted');
+  assert.equal(update.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');
+  assert.deepEqual(device.dispatches, [[3, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederPhaseVolumeLevelUpdateParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
 test('Schroeder same-level mechanics runs SS prepasses before dense resident backend', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -1299,6 +1489,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
       hasHierarchyAggregate: Boolean(options.schroederHierarchyAggregate),
       hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
       hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
+      hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
       fuseNoFullResidentMechanics: options.fuseNoFullResidentMechanics
     };
   };
@@ -1338,6 +1529,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregate, null);
   assert.equal(result.hierarchyAggregateNode, null);
   assert.equal(result.phaseVolumeMigration, null);
+  assert.equal(result.phaseVolumeLevelUpdate, null);
+  assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(result.residentStep.hasCrossLevelCoupling, true);
   assert.equal(result.residentStep.hasConservationSummary, true);
@@ -1347,6 +1540,7 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.residentStep.hasHierarchyAggregate, false);
   assert.equal(result.residentStep.hasHierarchyAggregateNode, false);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, false);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(result.activeNodeConsumerStatus, 'planned-not-yet-consumed-by-mls-mpm-kernels');
   assert.equal(
     result.crossLevelCouplingStatus,
@@ -1359,6 +1553,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(result.hierarchyAggregateStatus, 'disabled-cross-level-state-delta-merge');
   assert.equal(result.hierarchyAggregateNodeStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.phaseVolumeMigrationStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-same-level-only-mechanics');
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-same-level-only-mechanics');
   assert.equal(result.conservativeTransferStatus, 'state-delta-ready-pending-admission');
   assert.equal(result.stateMutationStatus, 'pending-state-delta-submitted-awaiting-admission');
   assert.equal(result.stateAuthorityStatus, 'requires-state-manager-admission-before-authoritative-merge');
@@ -1376,6 +1572,8 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
   assert.equal(calls[0].schroederHierarchyAggregate, null);
   assert.equal(calls[0].schroederHierarchyAggregateNode, null);
   assert.equal(calls[0].schroederPhaseVolumeMigration, null);
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.equal(calls[0].fuseNoFullResidentMechanics, true);
   assert.equal(calls[0].fuseNoFullResidentMechanicsActiveGrid, true);
   assert.deepEqual(
@@ -1406,7 +1604,8 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
         hasCrossLevelStateDeltaMerge: Boolean(options.schroederCrossLevelStateDeltaMerge),
         hasHierarchyAggregate: Boolean(options.schroederHierarchyAggregate),
         hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
-        hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration)
+        hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
       };
     }
   });
@@ -1441,10 +1640,12 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     result.phaseVolumeMigration.stateAuthorityStatus,
     'requires-state-manager-admission-for-authoritative-level-migration'
   );
+  assert.equal(result.phaseVolumeLevelUpdate, null);
   assert.equal(result.crossLevelStateDeltaMergeStatus, 'schroeder-cross-level-state-delta-merge-submitted');
   assert.equal(result.hierarchyAggregateStatus, 'schroeder-hierarchy-aggregate-submitted');
   assert.equal(result.hierarchyAggregateNodeStatus, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.conservativeTransferStatus, 'phase-volume-migration-submitted');
   assert.equal(result.stateMutationStatus, 'phase-volume-migration-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'requires-state-manager-admission-for-authoritative-level-migration');
@@ -1452,6 +1653,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.residentStep.hasHierarchyAggregate, true);
   assert.equal(result.residentStep.hasHierarchyAggregateNode, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].schroederCrossLevelStateDeltaMerge.schema,
@@ -1469,9 +1671,65 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     calls[0].schroederPhaseVolumeMigration.schema,
     ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA
   );
+  assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
   assert.deepEqual(
     device.dispatches,
     [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+  );
+});
+
+test('Schroeder same-level mechanics can apply admitted phase-volume level updates before resident backend', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    stateDeltaMergeAdmission: approvedStateDeltaMergeAdmission({ rowCount: 3 }),
+    phaseVolumeMigrationAdmission: approvedPhaseVolumeMigrationAdmission({ rowCount: 3 }),
+    mergeEpoch: 12,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+      };
+    }
+  });
+
+  assert.equal(result.phaseVolumeMigration.retainedMigrationBuffer, true);
+  assert.equal(result.phaseVolumeLevelUpdate.retainedLevelUpdateBuffer, true);
+  assert.equal(result.phaseVolumeLevelUpdate.migrationRowCount, 3);
+  assert.equal(result.phaseVolumeLevelUpdate.outputCompaction, 'one-admitted-phase-volume-level-update-row-per-migration-row');
+  assert.equal(result.phaseVolumeLevelUpdate.phaseVolumeMigrationAdmissionApproved, true);
+  assert.equal(result.phaseVolumeLevelUpdate.conservativeTransferStatus, 'phase-volume-level-update-submitted');
+  assert.equal(result.phaseVolumeLevelUpdate.stateMutationStatus, 'phase-volume-level-update-buffer-submitted');
+  assert.equal(
+    result.phaseVolumeLevelUpdate.stateAuthorityStatus,
+    'state-manager-admitted-phase-volume-level-update-materialized'
+  );
+  assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(result.conservativeTransferStatus, 'phase-volume-level-update-submitted');
+  assert.equal(result.stateMutationStatus, 'phase-volume-level-update-buffer-submitted');
+  assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');
+  assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, true);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederPhaseVolumeLevelUpdate.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA
+  );
+  assert.deepEqual(
+    device.dispatches,
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 

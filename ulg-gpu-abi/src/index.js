@@ -90,6 +90,9 @@ export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA = 'peercompute.ulg.sc
 export const ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-hierarchy-aggregate-node-execution.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-migration.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-migration-execution.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-migration-admission.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary.v0';
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
@@ -962,6 +965,40 @@ export const SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT = Object.freeze([
   'migrationEpoch:f32',
   'chartId:f32',
   'migrationModeId:f32',
+  'stateAdmissionRequired:f32',
+  'pad0:f32'
+]);
+export const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'targetLevelId:f32',
+  'status:f32',
+  'sourceSupportRadiusM:f32',
+  'targetSupportRadiusM:f32',
+  'restVolumeM3:f32',
+  'representedVolumeM3:f32',
+  'phaseVolumeRatio:f32',
+  'levelDelta:f32',
+  'phaseId:f32',
+  'materialId:f32',
+  'aggregateNodeIndex:f32',
+  'coarsenEligible:f32',
+  'refineRequired:f32',
+  'aggregateCoherenceStatus:f32',
+  'conservationResidualStatus:f32',
+  'admissionApproved:f32',
+  'migrationEpoch:f32',
+  'stateFamilyId:f32',
+  'sourceGridSpacingM:f32',
+  'targetGridSpacingM:f32',
+  'aggregateMassKg:f32',
+  'aggregateRepresentedVolumeM3:f32',
+  'aggregateMassResidualKg:f32',
+  'aggregateVolumeResidualM3:f32',
+  'updateModeId:f32',
+  'phaseVolumeModeId:f32',
+  'chartId:f32',
+  'capacityStatus:f32',
   'stateAdmissionRequired:f32',
   'pad0:f32'
 ]);

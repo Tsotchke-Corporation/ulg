@@ -253,7 +253,9 @@ Suggested schemas:
   level-update consumer status, selected-level source, represented/rest volume
   ratio, expected level delta, and particle-count growth status landed in
   `f74c836`; row-aligned retained phase-volume level-update assignment overlays
-  for active-node level selection landed in `3257cf4`.
+  for active-node level selection landed in `3257cf4`; sparse source-particle
+  overlay indexing and same-level next-tick overlay descriptors landed in
+  `4a4e6f0`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -445,10 +447,8 @@ Suggested schemas:
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 4. Phase-volume migration:
-   - extend row-aligned admitted retained level-update overlays to sparse
-     source-particle indexed overlays;
-   - feed admitted current-step level-update overlays into the next resident
-     tick through same-lane StateManager/authority handoff;
+   - wire same-level next-tick overlay descriptors into the scene/resident
+     authority scheduler as the following resident tick's active-node overlay;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
@@ -492,17 +492,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS sparse phase-volume overlay indexing and
-next-tick feedback**:
+The next code slice on `SS` is **SS phase-volume overlay feedback into mounted
+resident scheduling**:
 
-1. Build a retained GPU source-particle index for admitted phase-volume
-   level-update rows so active-node selection can consume sparse migration
-   overlays without assuming one row per particle.
-2. Promote the current-step retained level-update overlay through the
-   same-lane StateManager/authority handoff as the next resident tick's
-   active-node assignment overlay; do not retroactively rebuild active nodes in
-   the same tick unless a later explicit two-pass policy opts in.
-3. Add focused fixtures for both expansion/coarsening and
-   condensation/refinement so target support/level rows can grow or shrink
-   active-node coverage without full particle readback or raw `GPUBuffer`
-   transfer across PeerCompute boundaries.
+1. Cache `phaseVolumeNextTickAssignmentOverlay` and its retained source refs in
+   the same-device scene/resident authority state after a same-level run
+   produces admitted level-update rows.
+2. Feed that cached descriptor into the next scheduled
+   `runSchroederSameLevelMechanicsWebGpu` call as `phaseVolumeAssignmentOverlay`
+   plus a retained sparse index when required; do not post raw `GPUBuffer`
+   handles across PeerCompute or worker boundaries.
+3. Add browser/demo-facing diagnostics proving a current water-to-steam level
+   update becomes active-node selection input on the following tick while
+   sparse/row-aligned fallback statuses remain explicit.

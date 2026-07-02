@@ -53,10 +53,11 @@ Landed checkpoints:
     represented volume, momentum, and internal energy.
 11. `c0b980f` adds GPU-resident pending cross-level state-delta rows for
     conservative source/target transfer application.
+12. `60a63c2` adds StateManager-admission gating and retained merge buffers for
+    cross-level state deltas.
 
 Next implementation queue:
 
-1. Add StateManager-admitted authoritative merge for pending cross-level
-   state-delta rows.
+1. Materialize admitted merge rows into SS-owned hierarchy aggregate state.
 2. Promote water-to-steam phase-volume migration into a visible SS stress case.
 3. Route reaction/contact/interface work queues through SS active nodes.

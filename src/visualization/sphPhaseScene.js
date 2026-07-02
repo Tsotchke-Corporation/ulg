@@ -8,6 +8,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
@@ -162,6 +164,14 @@ export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DRAW_SOURCE_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-draw-source.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-proxy-backend-selection.v0';
+export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-render-proxy-native-executor.v0';
+export const SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS =
+  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
+export const SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS =
+  SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
+export const SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS = 24;
+export const SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS = 8;
 
 const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
   Object.fromEntries(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.map((entry, index) => [
@@ -1149,6 +1159,328 @@ export function resolveSchroederRenderProxyBackendSelection({
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
+  };
+}
+
+function schroederNativeProxyBatchKindId(proxyClass = '') {
+  return String(proxyClass || '').toLowerCase() === 'coherent-aggregate' ? 1 : 0;
+}
+
+function schroederNativeProxyBatchStrideFloats(batch = {}) {
+  const explicit = Math.max(0, Math.round(Number(batch?.sourceRef?.strideFloats) || 0));
+  if (explicit > 0) return explicit;
+  return schroederNativeProxyBatchKindId(batch.proxyClass) === 1
+    ? SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS
+    : SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS;
+}
+
+function schroederNativeProxyBatchColor(proxyClass = '') {
+  return schroederNativeProxyBatchKindId(proxyClass) === 1
+    ? [0.78, 0.84, 1.0]
+    : [0.25, 0.76, 1.0];
+}
+
+function resolveSchroederNativeProxyRetainedBuffer({
+  retainedBufferResolver = null,
+  sourceRef = null,
+  batch = null
+} = {}) {
+  if (!sourceRef?.retainedBufferRef) return null;
+  let resolved = null;
+  if (typeof retainedBufferResolver === 'function') {
+    resolved = retainedBufferResolver(sourceRef.retainedBufferRef, { sourceRef, batch });
+  } else if (retainedBufferResolver instanceof Map) {
+    resolved = retainedBufferResolver.get(sourceRef.retainedBufferRef);
+  } else if (retainedBufferResolver && typeof retainedBufferResolver === 'object') {
+    resolved = retainedBufferResolver[sourceRef.retainedBufferRef] || null;
+  }
+  if (!resolved) return null;
+  const buffer = resolved.buffer || resolved.gpuBuffer || null;
+  if (!buffer) return null;
+  return {
+    buffer,
+    byteLength: Math.max(0, Math.round(Number(resolved.byteLength ?? sourceRef.byteLength) || 0)),
+    rowCount: Math.max(0, Math.round(Number(resolved.rowCount ?? sourceRef.rowCount) || 0)),
+    strideFloats: Math.max(0, Math.round(Number(resolved.strideFloats ?? sourceRef.strideFloats) || 0)),
+    sourceStatus: resolved.status || null,
+    resourceKey: resolved.resourceKey || sourceRef.retainedBufferRef
+  };
+}
+
+export function createSchroederRenderProxyNativeWebGpuExecutor({
+  drawSource = null,
+  backendSelection = null,
+  device = null,
+  format = null,
+  retainedBufferResolver = null,
+  cameraBuffer = null,
+  source = 'resident-render-refresh'
+} = {}) {
+  const resolvedDrawSource = drawSource?.schroederRenderProxyDrawSource || drawSource || null;
+  const selection = backendSelection?.schroederRenderProxyBackendSelection || backendSelection || null;
+  const drawBatches = Array.isArray(resolvedDrawSource?.drawBatches)
+    ? resolvedDrawSource.drawBatches
+    : [];
+  const nativeBackendSelected = selection?.selectedBackend === 'native-webgpu-retained-proxy';
+  const nativeSubmitReady = selection?.nativeSubmitReady === true;
+  const base = {
+    schema: ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA,
+    source,
+    inputDrawSourceSchema: resolvedDrawSource?.schema ?? null,
+    inputDrawSourceStatus: resolvedDrawSource?.status ?? null,
+    backendSelectionSchema: selection?.schema ?? null,
+    backendSelectionStatus: selection?.status ?? null,
+    selectedBackend: selection?.selectedBackend ?? null,
+    drawBatchCount: drawBatches.length,
+    drawableProxyCount: resolvedDrawSource?.drawableProxyCount ?? 0,
+    nativeSubmitReady,
+    nativeBackendSelected,
+    frameCopyReadbackRequired: false,
+    overlayRequired: false,
+    fullParticleReadbackRequired: false,
+    rawGpuBufferTransferRequired: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    presentationOwnsPhysicsCadence: false,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (!resolvedDrawSource || resolvedDrawSource.status !== 'schroeder-render-proxy-draw-source-ready') {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-draw-source',
+      blocker: resolvedDrawSource?.blocker || resolvedDrawSource?.status || 'schroeder-render-proxy-draw-source-not-ready',
+      ready: false,
+      drawCommands: []
+    };
+  }
+  if (!nativeBackendSelected || !nativeSubmitReady) {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-backend',
+      blocker: selection?.blocker || selection?.status || 'native-webgpu-retained-proxy-backend-not-ready',
+      ready: false,
+      drawCommands: []
+    };
+  }
+  if (
+    !device?.createShaderModule
+    || !device?.createBindGroupLayout
+    || !device?.createPipelineLayout
+    || !device?.createRenderPipeline
+    || !device?.createBuffer
+    || !device?.createBindGroup
+  ) {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-device',
+      blocker: 'same-device WebGPU render pipeline/device APIs are required',
+      ready: false,
+      drawCommands: []
+    };
+  }
+  if (!format) {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-format',
+      blocker: 'native SS proxy executor requires a target color format',
+      ready: false,
+      drawCommands: []
+    };
+  }
+  if (
+    typeof retainedBufferResolver !== 'function'
+    && !(retainedBufferResolver instanceof Map)
+    && !(retainedBufferResolver && typeof retainedBufferResolver === 'object')
+  ) {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-buffer-resolver',
+      blocker: 'same-device retained buffer resolver is required',
+      ready: false,
+      drawCommands: []
+    };
+  }
+
+  const resolvedBatches = [];
+  const missingSourceRefs = [];
+  for (const batch of drawBatches) {
+    const resolved = resolveSchroederNativeProxyRetainedBuffer({
+      retainedBufferResolver,
+      sourceRef: batch.sourceRef,
+      batch
+    });
+    if (!resolved?.buffer) {
+      missingSourceRefs.push(batch.sourceRef?.retainedBufferRef || batch.proxyClass || 'unknown');
+      continue;
+    }
+    const strideFloats = resolved.strideFloats || schroederNativeProxyBatchStrideFloats(batch);
+    const proxyCount = Math.max(0, Math.round(Number(batch.proxyCount) || resolved.rowCount || 0));
+    const rowCount = Math.max(0, Math.min(
+      proxyCount,
+      resolved.rowCount || batch.sourceRef?.rowCount || proxyCount
+    ));
+    if (rowCount <= 0) continue;
+    resolvedBatches.push({
+      batch,
+      resolved,
+      proxyKindId: schroederNativeProxyBatchKindId(batch.proxyClass),
+      strideFloats,
+      rowCount
+    });
+  }
+  if (missingSourceRefs.length > 0 || resolvedBatches.length === 0) {
+    return {
+      ...base,
+      status: 'blocked-schroeder-render-proxy-native-executor-retained-source',
+      blocker: 'all native SS proxy draw batches require same-device retained GPU buffers',
+      ready: false,
+      missingSourceRefCount: missingSourceRefs.length || drawBatches.length,
+      missingSourceRefs,
+      drawCommands: []
+    };
+  }
+
+  const module = device.createShaderModule({
+    label: 'ulg-schroeder-render-proxy-native',
+    code: SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL
+  });
+  const bindGroupLayout = device.createBindGroupLayout({
+    label: 'ulg-schroeder-render-proxy-native-bind-group-layout',
+    entries: [
+      {
+        binding: 0,
+        visibility: GPU_SHADER_STAGE.VERTEX,
+        buffer: { type: 'read-only-storage' }
+      },
+      {
+        binding: 1,
+        visibility: GPU_SHADER_STAGE.VERTEX,
+        buffer: { type: 'uniform' }
+      },
+      {
+        binding: 2,
+        visibility: GPU_SHADER_STAGE.VERTEX,
+        buffer: { type: 'uniform' }
+      }
+    ]
+  });
+  const pipelineLayout = device.createPipelineLayout({
+    label: 'ulg-schroeder-render-proxy-native-pipeline-layout',
+    bindGroupLayouts: [bindGroupLayout]
+  });
+  const pipeline = device.createRenderPipeline({
+    label: 'ulg-schroeder-render-proxy-native-pipeline',
+    layout: pipelineLayout,
+    vertex: {
+      module,
+      entryPoint: 'vs_main'
+    },
+    fragment: {
+      module,
+      entryPoint: 'fs_main',
+      targets: [{
+        format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+        }
+      }]
+    },
+    primitive: {
+      topology: 'triangle-list',
+      cullMode: 'none'
+    }
+  });
+  const resolvedCameraBuffer = cameraBuffer || device.createBuffer({
+    label: 'ulg-schroeder-render-proxy-native-camera',
+    size: SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const drawCommands = resolvedBatches.map((entry, index) => {
+    const batchParamsBuffer = device.createBuffer({
+      label: `ulg-schroeder-render-proxy-native-batch-${index}`,
+      size: SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const color = schroederNativeProxyBatchColor(entry.batch.proxyClass);
+    const nativeGridSpacingM = Number.isFinite(Number(entry.batch.nativeGridSpacingM))
+      ? Number(entry.batch.nativeGridSpacingM)
+      : 1;
+    const radiusPx = entry.proxyKindId === 1 ? 10 : 7;
+    const payload = new Float32Array(SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS);
+    payload[0] = entry.rowCount;
+    payload[1] = entry.strideFloats;
+    payload[2] = entry.proxyKindId;
+    payload[3] = radiusPx;
+    payload[4] = nativeGridSpacingM;
+    payload[5] = color[0];
+    payload[6] = color[1];
+    payload[7] = color[2];
+    device.queue?.writeBuffer?.(batchParamsBuffer, 0, payload);
+    const bindGroup = device.createBindGroup({
+      label: `ulg-schroeder-render-proxy-native-bind-group-${index}`,
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: entry.resolved.buffer } },
+        { binding: 1, resource: { buffer: resolvedCameraBuffer } },
+        { binding: 2, resource: { buffer: batchParamsBuffer } }
+      ]
+    });
+    return {
+      batchIndex: index,
+      proxyClass: entry.batch.proxyClass,
+      proxyRole: entry.batch.proxyRole,
+      sourceRef: entry.batch.sourceRef,
+      retainedBufferRef: entry.batch.sourceRef?.retainedBufferRef ?? null,
+      retainedBuffer: entry.resolved.buffer,
+      retainedBufferByteLength: entry.resolved.byteLength,
+      rowCount: entry.rowCount,
+      strideFloats: entry.strideFloats,
+      proxyKindId: entry.proxyKindId,
+      batchParamsBuffer,
+      bindGroup,
+      drawVertexCount: 6,
+      drawInstanceCount: entry.rowCount,
+      drawMethod: 'draw-instanced-proxy-splats'
+    };
+  });
+  return {
+    ...base,
+    status: 'schroeder-render-proxy-native-executor-ready',
+    blocker: null,
+    ready: true,
+    format,
+    module,
+    bindGroupLayout,
+    pipelineLayout,
+    pipeline,
+    cameraBuffer: resolvedCameraBuffer,
+    cameraBufferOwned: !cameraBuffer,
+    cameraUniformFloats: SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS,
+    batchUniformFloats: SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS,
+    drawCommands,
+    resolvedBatchCount: drawCommands.length,
+    missingSourceRefCount: 0,
+    sameDeviceRetainedBufferBindingReady: true,
+    rawGpuBufferBinding: true,
+    rawGpuBufferTransferRequired: false,
+    execute(pass) {
+      if (!pass?.setPipeline || !pass?.setBindGroup || !pass?.draw) {
+        throw new Error('Schroeder native proxy executor requires a GPURenderPassEncoder-like pass');
+      }
+      pass.setPipeline(pipeline);
+      for (const command of drawCommands) {
+        pass.setBindGroup(0, command.bindGroup);
+        pass.draw(command.drawVertexCount, command.drawInstanceCount);
+      }
+      return {
+        status: 'schroeder-render-proxy-native-executor-submitted-to-pass',
+        drawCommandCount: drawCommands.length,
+        drawInstanceCount: drawCommands.reduce((sum, command) => sum + command.drawInstanceCount, 0)
+      };
+    }
   };
 }
 
@@ -4948,6 +5280,109 @@ fn vs_main(
   out.position = clip;
   out.quad_uv = corner;
   out.color = render_row_color(row1, row2);
+  return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.quad_uv, in.quad_uv);
+  if (r2 > 1.0) {
+    discard;
+  }
+  let edge = 1.0 - smoothstep(0.72, 1.0, r2);
+  return vec4<f32>(in.color.rgb * in.color.a * edge, in.color.a * edge);
+}
+`;
+
+export const SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL = `
+struct CameraUniform {
+  view_projection: mat4x4<f32>,
+  viewport_radius_mode: vec4<f32>,
+  grid_scale_bias: vec4<f32>,
+};
+
+struct BatchUniform {
+  row_count_stride_kind_radius: vec4<f32>,
+  native_grid_spacing_and_color: vec4<f32>,
+};
+
+struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) quad_uv: vec2<f32>,
+  @location(1) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> proxy_rows: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> camera_data: CameraUniform;
+@group(0) @binding(2) var<uniform> batch_data: BatchUniform;
+
+fn row_vec4(row_index: u32, slot_index: u32) -> vec4<f32> {
+  let stride_vec4 = max(1u, u32(batch_data.row_count_stride_kind_radius.y) / 4u);
+  return proxy_rows[row_index * stride_vec4 + slot_index];
+}
+
+fn proxy_position_m(row_index: u32) -> vec3<f32> {
+  let proxy_kind = batch_data.row_count_stride_kind_radius.z;
+  if (proxy_kind < 0.5) {
+    return row_vec4(row_index, 3u).xyz;
+  }
+  let aggregate_cell = row_vec4(row_index, 1u).xyz;
+  let spacing = max(batch_data.native_grid_spacing_and_color.x, camera_data.grid_scale_bias.x);
+  return aggregate_cell * max(spacing, 0.000001) + vec3<f32>(camera_data.grid_scale_bias.y);
+}
+
+fn proxy_radius_px(row_index: u32) -> f32 {
+  let base_radius = max(batch_data.row_count_stride_kind_radius.w, 1.0);
+  let proxy_kind = batch_data.row_count_stride_kind_radius.z;
+  if (proxy_kind < 0.5) {
+    let support_radius_m = max(row_vec4(row_index, 2u).y, 0.000001);
+    return clamp(base_radius * sqrt(support_radius_m / max(camera_data.grid_scale_bias.x, 0.000001)), 2.0, 28.0);
+  }
+  let represented_volume = max(row_vec4(row_index, 2u).y, 0.000001);
+  return clamp(base_radius * pow(represented_volume, 1.0 / 6.0), 3.0, 36.0);
+}
+
+fn quad_corner(vertex_index: u32) -> vec2<f32> {
+  var corners = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(1.0, -1.0),
+    vec2<f32>(-1.0, 1.0),
+    vec2<f32>(-1.0, 1.0),
+    vec2<f32>(1.0, -1.0),
+    vec2<f32>(1.0, 1.0)
+  );
+  return corners[vertex_index % 6u];
+}
+
+@vertex
+fn vs_main(
+  @builtin(vertex_index) vertex_index: u32,
+  @builtin(instance_index) instance_index: u32
+) -> VertexOut {
+  let row_count = u32(batch_data.row_count_stride_kind_radius.x);
+  var clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  let corner = quad_corner(vertex_index);
+  if (instance_index < row_count) {
+    let position_m = proxy_position_m(instance_index);
+    clip = camera_data.view_projection * vec4<f32>(position_m, 1.0);
+    clip.z = clip.z * 0.5 + clip.w * 0.5;
+    let viewport = max(camera_data.viewport_radius_mode.xy, vec2<f32>(1.0, 1.0));
+    let radius_px = proxy_radius_px(instance_index);
+    let pixel_scale = vec2<f32>(2.0 / viewport.x, 2.0 / viewport.y);
+    clip.xy = clip.xy + corner * pixel_scale * radius_px * clip.w;
+    if (clip.w <= 0.0) {
+      clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+    }
+  }
+  var out: VertexOut;
+  out.position = clip;
+  out.quad_uv = corner;
+  out.color = vec4<f32>(
+    batch_data.native_grid_spacing_and_color.y,
+    batch_data.native_grid_spacing_and_color.z,
+    batch_data.native_grid_spacing_and_color.w,
+    0.82
+  );
   return out;
 }
 

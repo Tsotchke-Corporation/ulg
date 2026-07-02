@@ -23,6 +23,12 @@ import {
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_VISIBLE_CONSUMER_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DRAW_SOURCE_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_BACKEND_SELECTION_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA,
+  SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL,
+  SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
+  SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
+  SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS,
+  SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -44,6 +50,7 @@ import {
   resolveSchroederRenderProxyVisibleConsumer,
   createSchroederRenderProxyDrawSource,
   resolveSchroederRenderProxyBackendSelection,
+  createSchroederRenderProxyNativeWebGpuExecutor,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
@@ -183,6 +190,107 @@ function schroederPortableSummaryFixture(overrides = {}) {
     fullParticleReadbackRequired: false,
     ...overrides
   };
+}
+
+function createSchroederNativeProxyFixture() {
+  const portableSummary = schroederPortableSummaryFixture();
+  const admission = {
+    schema: 'peercompute.ulg.schroeder-portable-summary-admission.v0',
+    status: 'schroeder-portable-summary-admission-published',
+    scope: 'ulg-schroeder-portable-summary-admissions',
+    stateKey: 'schroeder-summary:test-state',
+    cacheKey: 'schroeder-summary:test-cache',
+    hotBufferKey: 'schroeder-summary:test-hot',
+    portableSummary,
+    renderLod: portableSummary.renderLod
+  };
+  const renderSource = createSchroederRenderSourceMetadata({
+    residentExecution: {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+      status: 'resident-steps-executed',
+      portableSummary
+    },
+    schroederPortableSummaryAdmission: admission,
+    source: 'resident-step-publication'
+  });
+  const proxyPlan = createSchroederRenderProxyDescriptorPlan({
+    schroederRenderSource: renderSource
+  });
+  const proxyConsumer = resolveSchroederRenderProxyVisibleConsumer({
+    proxyDescriptorPlan: proxyPlan
+  });
+  const drawSource = createSchroederRenderProxyDrawSource({
+    proxyDescriptorPlan: proxyPlan,
+    visibleConsumer: proxyConsumer
+  });
+  const nativeBackend = resolveSchroederRenderProxyBackendSelection({
+    drawSource,
+    rendererCapability: {
+      schema: 'peercompute.ulg.sph-extension-surface-renderer-capability.v0',
+      status: 'native-webgpu-surface-consumer-supported',
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerPixelValidationStatus: 'passed'
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'passed'
+  });
+  return { drawSource, nativeBackend, portableSummary, proxyPlan, proxyConsumer };
+}
+
+function createFakeSchroederProxyRenderDevice() {
+  const calls = {
+    shaderModules: [],
+    bindGroupLayouts: [],
+    pipelineLayouts: [],
+    pipelines: [],
+    buffers: [],
+    bindGroups: [],
+    writes: []
+  };
+  const device = {
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        calls.writes.push({
+          buffer,
+          offset,
+          data: Array.from(data || [])
+        });
+      }
+    },
+    createShaderModule(desc) {
+      const result = { type: 'shaderModule', ...desc };
+      calls.shaderModules.push(result);
+      return result;
+    },
+    createBindGroupLayout(desc) {
+      const result = { type: 'bindGroupLayout', ...desc };
+      calls.bindGroupLayouts.push(result);
+      return result;
+    },
+    createPipelineLayout(desc) {
+      const result = { type: 'pipelineLayout', ...desc };
+      calls.pipelineLayouts.push(result);
+      return result;
+    },
+    createRenderPipeline(desc) {
+      const result = { type: 'renderPipeline', ...desc };
+      calls.pipelines.push(result);
+      return result;
+    },
+    createBuffer(desc) {
+      const result = { type: 'buffer', ...desc };
+      calls.buffers.push(result);
+      return result;
+    },
+    createBindGroup(desc) {
+      const result = { type: 'bindGroup', ...desc };
+      calls.bindGroups.push(result);
+      return result;
+    }
+  };
+  return { device, calls };
 }
 
 test('SPH scene background color defaults to sky blue and normalizes URL hex values', () => {
@@ -3413,6 +3521,144 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(target.sourceSchroederRenderProxyBackendFrameCopyReadbackRequired, false);
   assert.equal(target.sourceSchroederRenderProxyBackendOverlayRequired, false);
   assert.equal(target.sourceSchroederRenderProxyBackendFullParticleReadbackRequired, false);
+});
+
+test('SPH scene builds Schroeder native proxy executor from same-device retained refs', () => {
+  const { drawSource, nativeBackend } = createSchroederNativeProxyFixture();
+  const { device, calls } = createFakeSchroederProxyRenderDevice();
+  const activeBuffer = { label: 'active-node-gpu-buffer' };
+  const aggregateBuffer = { label: 'aggregate-node-gpu-buffer' };
+  const retainedBufferResolver = new Map([
+    [
+      'active-node-list:test',
+      {
+        buffer: activeBuffer,
+        rowCount: 12,
+        strideFloats: SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS,
+        byteLength: 12 * SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+      }
+    ],
+    [
+      'aggregate-node:test',
+      {
+        buffer: aggregateBuffer,
+        rowCount: 3,
+        strideFloats: SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS,
+        byteLength: 3 * SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+      }
+    ]
+  ]);
+
+  const executor = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    retainedBufferResolver,
+    source: 'unit-test'
+  });
+
+  assert.equal(executor.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_NATIVE_EXECUTOR_SCHEMA);
+  assert.equal(executor.status, 'schroeder-render-proxy-native-executor-ready');
+  assert.equal(executor.ready, true);
+  assert.equal(executor.selectedBackend, 'native-webgpu-retained-proxy');
+  assert.equal(executor.rawGpuBufferBinding, true);
+  assert.equal(executor.rawGpuBufferTransferRequired, false);
+  assert.equal(executor.frameCopyReadbackRequired, false);
+  assert.equal(executor.overlayRequired, false);
+  assert.equal(executor.fullParticleReadbackRequired, false);
+  assert.equal(executor.descriptorOnlyPeerComputeHandoff, true);
+  assert.equal(executor.cameraUniformFloats, SPH_SCHROEDER_RENDER_PROXY_NATIVE_CAMERA_FLOATS);
+  assert.equal(executor.batchUniformFloats, SPH_SCHROEDER_RENDER_PROXY_NATIVE_BATCH_FLOATS);
+  assert.equal(executor.drawCommands.length, 2);
+  assert.equal(executor.drawCommands[0].retainedBuffer, activeBuffer);
+  assert.equal(executor.drawCommands[0].retainedBufferRef, 'active-node-list:test');
+  assert.equal(executor.drawCommands[0].strideFloats, SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS);
+  assert.equal(executor.drawCommands[0].drawVertexCount, 6);
+  assert.equal(executor.drawCommands[0].drawInstanceCount, 12);
+  assert.equal(executor.drawCommands[1].retainedBuffer, aggregateBuffer);
+  assert.equal(executor.drawCommands[1].retainedBufferRef, 'aggregate-node:test');
+  assert.equal(executor.drawCommands[1].strideFloats, SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS);
+  assert.equal(executor.drawCommands[1].drawInstanceCount, 3);
+  assert.match(SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL, /proxy_rows/);
+  assert.match(SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL, /row_vec4\(row_index, 3u\)/);
+  assert.equal(calls.shaderModules.length, 1);
+  assert.equal(calls.shaderModules[0].code, SPH_SCHROEDER_RENDER_PROXY_NATIVE_WGSL);
+  assert.equal(calls.bindGroupLayouts.length, 1);
+  assert.equal(calls.pipelineLayouts.length, 1);
+  assert.equal(calls.pipelines.length, 1);
+  assert.equal(calls.bindGroups.length, 2);
+  assert.equal(calls.writes.length, 2);
+  assert.equal(calls.writes[0].data[0], 12);
+  assert.equal(calls.writes[0].data[1], SPH_SCHROEDER_RENDER_PROXY_ACTIVE_NODE_FLOATS);
+  assert.equal(calls.writes[0].data[2], 0);
+  assert.equal(calls.writes[1].data[0], 3);
+  assert.equal(calls.writes[1].data[1], SPH_SCHROEDER_RENDER_PROXY_AGGREGATE_NODE_FLOATS);
+  assert.equal(calls.writes[1].data[2], 1);
+
+  const passCalls = [];
+  const pass = {
+    setPipeline(pipeline) {
+      passCalls.push({ type: 'setPipeline', pipeline });
+    },
+    setBindGroup(index, bindGroup) {
+      passCalls.push({ type: 'setBindGroup', index, bindGroup });
+    },
+    draw(vertexCount, instanceCount) {
+      passCalls.push({ type: 'draw', vertexCount, instanceCount });
+    }
+  };
+  const submitted = executor.execute(pass);
+  assert.equal(submitted.status, 'schroeder-render-proxy-native-executor-submitted-to-pass');
+  assert.equal(submitted.drawCommandCount, 2);
+  assert.equal(submitted.drawInstanceCount, 15);
+  assert.equal(passCalls[0].type, 'setPipeline');
+  assert.equal(passCalls[0].pipeline, executor.pipeline);
+  assert.equal(passCalls[1].type, 'setBindGroup');
+  assert.equal(passCalls[1].bindGroup, executor.drawCommands[0].bindGroup);
+  assert.deepEqual(
+    passCalls.filter((call) => call.type === 'draw').map((call) => [call.vertexCount, call.instanceCount]),
+    [[6, 12], [6, 3]]
+  );
+});
+
+test('SPH scene blocks Schroeder native proxy executor without same-device retained buffers', () => {
+  const { drawSource, nativeBackend } = createSchroederNativeProxyFixture();
+  const { device } = createFakeSchroederProxyRenderDevice();
+
+  const missingResolver = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm'
+  });
+  assert.equal(
+    missingResolver.status,
+    'blocked-schroeder-render-proxy-native-executor-buffer-resolver'
+  );
+  assert.equal(missingResolver.ready, false);
+  assert.equal(missingResolver.rawGpuBufferTransferRequired, false);
+  assert.equal(missingResolver.overlayRequired, false);
+
+  const missingRetainedSource = createSchroederRenderProxyNativeWebGpuExecutor({
+    drawSource,
+    backendSelection: nativeBackend,
+    device,
+    format: 'rgba8unorm',
+    retainedBufferResolver: new Map()
+  });
+  assert.equal(
+    missingRetainedSource.status,
+    'blocked-schroeder-render-proxy-native-executor-retained-source'
+  );
+  assert.equal(missingRetainedSource.ready, false);
+  assert.equal(missingRetainedSource.missingSourceRefCount, 2);
+  assert.deepEqual(
+    missingRetainedSource.missingSourceRefs,
+    ['active-node-list:test', 'aggregate-node:test']
+  );
+  assert.equal(missingRetainedSource.frameCopyReadbackRequired, false);
+  assert.equal(missingRetainedSource.fullParticleReadbackRequired, false);
 });
 
 test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {

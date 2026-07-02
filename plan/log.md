@@ -35069,3 +35069,34 @@ Next:
 - Native WebGPU retained-buffer consumption is architecturally cleaner, but it
   needs an explicit renderer capability/admission gate before raw buffer
   drawing is enabled.
+
+## 2026-07-01 AKDT - SS Proxy Backend Selection
+
+Status:
+
+- Added `sph-scene-schroeder-render-proxy-backend-selection`.
+- Native SS proxy drawing is selected only when the draw source is ready, a
+  same-device no-readback renderer capability is present, and a Three WebGPU or
+  native WebGPU surface bridge is bound.
+- Native WebGPU can report submit-ready before visible validation, then
+  visible-ready after pixel or resident-device validation passes.
+- Diagnostic CPU descriptor proxy admission is explicit, bounded, and marked
+  outside the PeerCompute hot path.
+- Resident render-source metadata/apply and scene/renderer `userData` now carry
+  backend selection next to the SS draw source.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `84/84` passing.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `166/166` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Implement the native WebGPU retained-proxy draw executor for selected SS
+  active-leaf/coherent-aggregate batches.
+- Keep the diagnostic CPU proxy path capped and visibly diagnostic, not a
+  primary PeerCompute hot path.

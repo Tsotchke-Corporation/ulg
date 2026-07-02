@@ -312,7 +312,7 @@ Suggested schemas:
   source metadata materialization landed in `df261c7`; compact render proxy
   descriptor plans landed in `24ecd87`; renderer-visible proxy consumer binding
   landed in `9b31697`; descriptor-batched proxy draw-source contracts landed
-  in `5b54457`.
+  in `5b54457`; proxy backend selection landed in `4316da6`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -320,9 +320,11 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - turn descriptor-batched active-node leaf / coherent aggregate proxy draw
-     sources into an actual renderer backend path;
+   - implement the native WebGPU retained-proxy draw executor for selected
+     active-node leaf / coherent aggregate batches;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
+   - keep diagnostic CPU proxy geometry explicit, capped, and outside the
+     PeerCompute hot path;
    - publish compact SS summaries across PeerCompute/StateManager boundaries as
      descriptors, seeds, or snapshots rather than raw browser `GPUBuffer`
      handles.
@@ -376,12 +378,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS proxy draw backend selection**:
+The next code slice on `SS` is **SS native retained-proxy draw executor**:
 
-1. Choose the first backend to consume `schroederRenderProxyDrawSource`.
-2. Native WebGPU descriptor consumption is the preferred SS-aligned target, but
-   it needs a renderer capability/admission contract before binding raw buffers.
-3. A diagnostic CPU-materialized proxy can be used only if it is clearly marked
-   diagnostic and does not become the hot path.
+1. Build a native WebGPU executor/shader path for selected
+   `schroederRenderProxyBackendSelection` batches.
+2. Consume same-device retained SS source refs only after backend selection is
+   native-submit-ready; do not require frame-copy or full-particle readback.
+3. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
 4. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.

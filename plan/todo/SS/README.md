@@ -152,13 +152,16 @@ Landed checkpoints:
     selects active-leaf/coherent-aggregate retained sources, and draw batches
     stay descriptor-batched with no raw `GPUBuffer` binding, frame-copy
     readback, CPU geometry materialization, or overlay requirement.
+44. `4316da6` adds SS proxy backend selection: native WebGPU retained-proxy
+    draw is selected only with same-device renderer capability and a bound
+    surface consumer, while diagnostic CPU proxy geometry remains explicit,
+    capped, and outside the PeerCompute hot path.
 
 Next implementation queue:
 
-1. Turn the descriptor-batched SS proxy draw source into an actual renderer
-   backend path.
-2. Decide whether the first backend should be native WebGPU descriptor
-   consumption, a strictly diagnostic CPU-materialized proxy, or an explicit
-   same-device raw-buffer capability gate.
+1. Implement the native WebGPU retained-proxy draw executor for selected SS
+   active-leaf/coherent-aggregate batches.
+2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
+   not a replacement hot path.
 3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

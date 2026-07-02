@@ -307,7 +307,8 @@ Suggested schemas:
   retained far-force application delta rows landed in `f91259b`; resident
   SPH-state fusion of admitted far-force deltas landed in `ed15162`;
   StateManager-admitted read-only radiation/plasma/gas-summary consumer rows
-  landed in `4a586fc`.
+  landed in `4a586fc`; compact diagnostics over those law-consumer rows landed
+  in `35779c2`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -323,7 +324,9 @@ Suggested schemas:
   rows into a retained resident SPH state buffer after G2P without default full
   particle readback. `4a586fc` adds the first read-only law-consumer adapter
   rows for radiation, plasma/electromagnetic approximation, and gas-summary
-  proxies. Those rows are not yet authoritative state mutations.
+  proxies. `35779c2` compacts those rows into retained pressure/exposure
+  diagnostics for admission/policy decisions. Those rows are not yet
+  authoritative state mutations.
 
 ### Slice 8: Render And Distribution
 
@@ -357,8 +360,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - decide which law-consumer outputs remain read-only compact summaries and
-     which require a future admitted state-delta mutation path;
+   - use compact law-consumer pressure/exposure diagnostics to decide which
+     outputs remain read-only summaries and which require a future admitted
+     state-delta mutation path;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -419,9 +423,9 @@ Suggested schemas:
 
 The next code slice on `SS` is **far-field consumer authority policy**:
 
-1. Decide whether any admitted law-consumer row should produce an authoritative
-   state delta, or whether the next step should widen read-only compact
-   summaries first.
+1. Decide whether any admitted law-consumer diagnostic pressure signal should
+   produce an authoritative state delta, or whether the next step should widen
+   read-only compact summaries first.
 2. Preserve the current fail-closed behavior: summaries and diagnostics may be
    read-only, but state mutation requires explicit admission and retained delta
    rows.

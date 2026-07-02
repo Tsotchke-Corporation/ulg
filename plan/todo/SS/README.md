@@ -238,11 +238,16 @@ Landed checkpoints:
     diagnostics, emits read-only radiation/plasma/gas-summary proxy rows,
     forwards the retained descriptor through same-level/resident paths, and
     publishes descriptor-only portable refs without mutating particle state.
+61. `35779c2` adds compact retained far-aggregate law-consumer diagnostic
+    summaries. The pass reduces admitted read-only radiation/plasma/gas-summary
+    consumer rows into one pressure/exposure summary row, forwards it through
+    same-level/resident and portable descriptor paths, and keeps the state
+    mutation boundary closed.
 
 Next implementation queue:
 
-1. Continue Slice 7 by deciding whether a far-field consumer should remain
-   read-only summary plumbing or graduate into a new admitted state-delta path.
+1. Continue Slice 7 by using compact law-consumer diagnostics to decide whether
+   any far-field consumer should graduate into a new admitted state-delta path.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

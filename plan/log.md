@@ -35671,3 +35671,39 @@ Next:
 
 - Re-scan `plan/todo/SS` and retained legacy todo sources for the next unlanded
   GPU-first architecture slice.
+
+## 2026-07-01 AKDT - SS Far-Aggregate Law-Consumer Diagnostics
+
+Status:
+
+- Added compact retained
+  `peercompute.ulg.schroeder-far-aggregate-law-consumer-diagnostic-summary.v0`
+  rows over admitted read-only far-aggregate law-consumer outputs.
+- Added a WGSL diagnostic reducer and WebGPU runner that consumes retained
+  radiation/plasma/gas-summary consumer rows, reports pressure/exposure extrema,
+  emitted/enabled masks, source rows, and compact status in one retained summary
+  row.
+- Threaded the diagnostic summary through same-level orchestration, resident
+  backend options, portable descriptor summaries, render LOD counts, and
+  status telemetry without opening a new authoritative state-mutation path.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test --test-name-pattern "far-aggregate law consumer|portable summary" tests/schroederHierarchyGpu.test.mjs`
+  with `7/7` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `83/83`
+  passing.
+- PASS: `node --test tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `165/165` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Use the compact law-consumer diagnostic row to choose the next far-field
+  authority boundary: either keep radiation/plasma/gas-summary consumers
+  read-only for another slice, or add a StateManager-admitted state-delta path
+  for a specific far-field consumer.

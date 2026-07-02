@@ -35092,6 +35092,7 @@ Validation:
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `84/84` passing.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
   with `166/166` passing.
+- PASS: `npm test` with `862/865` passing and `3` skipped.
 - PASS: `git diff --check`.
 
 Next:

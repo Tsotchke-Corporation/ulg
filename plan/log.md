@@ -34835,3 +34835,32 @@ Next:
   sequence batches.
 - Start shaping SS render LOD and portable PeerCompute summaries once the
   multi-step mechanics handoff is in place.
+
+## 2026-07-01 AKDT - SS Fused Sequence Active-Node Filtering
+
+Status:
+
+- Forwarded retained Schroeder level assignments, selected level, and
+  active-node lists into the one-submit fused MLS-MPM resident sequence.
+- Reused the existing fused Schroeder binding helpers so P2G/G2P sequence
+  params and bind groups now consume retained filters instead of dummy rows.
+- Extended the same handoff into the thermal sidecar direct-runner mechanics
+  path.
+- Preserved borrowed-buffer ownership: retained Schroeder buffers are not
+  destroyed by fused-sequence cleanup.
+- Sequence summaries now expose Schroeder level/active-node filter metadata on
+  P2G, G2P, stage timing, and the fused-sequence summary object.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `74/74` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/schroederHierarchyGpu.test.mjs` with `109/109` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `856` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Keep sorted/radix escalation diagnostic-driven for small scenes.
+- Start SS render LOD and PeerCompute portable summary work.

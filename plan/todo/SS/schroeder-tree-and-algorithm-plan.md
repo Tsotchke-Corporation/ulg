@@ -220,9 +220,10 @@ Suggested schemas:
 - Preserve no-full-readback resident operation.
 - Report active level, native `dx`, tile count, particle count, and fallback
   status.
-- Current caveat: active-node tiles are planned and exposed, but same-level
-  mechanics still uses dense resident MLS-MPM dispatch over the selected level;
-  active-node consumption inside P2G/G2P remains future work.
+- Current status: same-level mechanics forwards retained active-node lists into
+  fused single-step and one-submit fused multi-step MLS-MPM resident mechanics.
+  P2G/G2P consume the retained filters without full particle readback, including
+  the thermal sidecar direct-runner path.
 
 ### Slice 4: Adjacent-Level Conservative Coupling
 
@@ -316,9 +317,7 @@ Suggested schemas:
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
    - direct retained active-node filtering is now landed for fused single-step
-     P2G/G2P mechanics;
-   - extend the same direct filtering to fused multi-step sequence batches when
-     SS begins scheduling multi-level mechanics through that path;
+     and one-submit fused multi-step P2G/G2P mechanics;
    - keep fused no-full active-grid behavior readback-free and avoid
      presentation-owned physics cadence.
 3. Phase-volume migration:

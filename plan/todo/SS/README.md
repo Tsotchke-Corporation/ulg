@@ -124,11 +124,12 @@ Landed checkpoints:
 36. `f29951e` wires sorted/radix index construction into traversal policy and
     PeerCompute-style use-case config: disabled, auto, force, and
     diagnostic-driven selection are now explicit in same-level summaries.
+37. `43b6809` carries retained Schroeder level and active-node filters into
+    one-submit fused MLS-MPM resident sequences, including thermal sidecar
+    direct-runner mechanics, without borrowing-buffer cleanup regressions.
 
 Next implementation queue:
 
 1. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.
-2. Extend active-node mechanics filtering to the fused multi-step sequence when
-   SS schedules multi-level batches through that path.
-3. Add render LOD and PeerCompute portable SS summaries.
+2. Add render LOD and PeerCompute portable SS summaries.

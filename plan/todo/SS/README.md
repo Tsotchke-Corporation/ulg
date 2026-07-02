@@ -118,11 +118,14 @@ Landed checkpoints:
     diagnostics, separates applied bucket/exact traversal from recommended
     sorted/radix traversal, and lets same-level use cases configure compact
     law-neighbor diagnostics separately from mechanics readback.
+35. `f48631f` adds a retained sorted/radix active-node index, consumes it in
+    law-neighbor traversal ahead of the bucket index, and exposes it as an
+    opt-in same-level orchestration artifact without adding particle readback.
 
 Next implementation queue:
 
-1. Implement the actual sorted/radix active-node index path selected by
-   traversal policy; do not leave it as a policy-only placeholder.
+1. Wire traversal policy and PeerCompute use-case config into automatic
+   sorted/radix index construction, while keeping explicit opt-in available.
 2. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.
 3. Extend active-node mechanics filtering to the fused multi-step sequence when

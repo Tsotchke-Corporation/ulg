@@ -34768,3 +34768,37 @@ Next:
   traversal policy, without adding CPU tree ceremony or full particle readback.
 - Preserve the bucket index as the small-scene/default path until diagnostics or
   PeerCompute use-case config requires sorted/radix.
+
+## 2026-07-01 AKDT - SS Sorted Active-Node Index
+
+Status:
+
+- Added retained `schroeder-active-node-sorted-index` ABI schemas and a
+  GPU-first WGSL pipeline for clear, count, prefix, and scatter passes over
+  active-node tile anchors.
+- Law-neighbor traversal now consumes sorted/radix active-node ranges before
+  trying the bounded bucket index and exact non-index fallback.
+- Same-level mechanics can build the sorted index as an opt-in retained
+  prepass and forward it to law-neighbor traversal and the resident backend.
+- The policy/status layer now distinguishes supplied sorted/radix availability
+  from the bucket-only mode, while leaving automatic escalation as the next
+  implementation slice.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `59/59` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs` with `118/118` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `850` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Wire traversal policy and PeerCompute use-case config into automatic
+  sorted/radix index construction, keeping bucket traversal as the small-scene
+  default.
+- Extend retained active-node mechanics filtering into fused multi-step
+  sequence batches.

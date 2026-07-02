@@ -85,10 +85,14 @@ Landed checkpoints:
 23. `b1b2206` gates pressure/interface contact-kinematics candidate particles
     with retained `schroederLawQueue` rows and threads the queue through the
     pressure/interface stage task.
+24. `ae7f7d3` adds retained GPU `schroeder-law-neighbor-candidate` rows, a
+    no-full-readback WebGPU producer, and same-level orchestration forwarding to
+    the resident backend.
 
 Next implementation queue:
 
-1. Replace queue-gated fixed bin/all-scan law enumeration with a dedicated SS
-   queue-neighbor kernel.
+1. Replace the bounded queue-neighbor window with true Schroeder active-node /
+   tree traversal and then feed those rows directly into reaction/contact/
+   interface consumers.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

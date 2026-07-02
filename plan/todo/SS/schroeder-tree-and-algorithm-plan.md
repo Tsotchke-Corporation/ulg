@@ -259,15 +259,16 @@ Suggested schemas:
   Same-level mechanics orchestration and resident backend forwarding landed in
   `8491fb5`. SPH reaction proposal gating over retained queue rows landed in
   `6e275e0`. Pressure/interface contact-kinematics queue gating landed in
-  `b1b2206`.
+  `b1b2206`. Retained GPU `schroeder-law-neighbor-candidate` rows and
+  same-level orchestration forwarding landed in `ae7f7d3`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
 - Current caveat: reaction and pressure/interface contact now consume queue
-  eligibility gates, but still use the existing particle-bin/all-scan neighbor
-  enumeration behind those gates. A dedicated queue-neighbor kernel remains
-  future work.
+  eligibility gates. A first GPU-resident queue-neighbor producer exists, but it
+  is a bounded source-window enumerator; true active-node/tree traversal and
+  direct consumer replacement remain future work.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -285,8 +286,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - replace reaction/contact/interface queue-gated particle-bin/all-scan
-     neighbor enumeration with a dedicated SS queue-neighbor kernel;
+   - replace the bounded queue-neighbor window with true active-node/tree
+     traversal over SS rows;
+   - route retained SS neighbor-candidate rows into reaction/contact/interface
+     consumers in place of particle-bin/all-scan enumeration;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -338,14 +341,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS law work queues/contact-interface
-consumers**:
+The next code slice on `SS` is **SS active-node/tree neighbor traversal and
+mechanics consumption**:
 
-1. Add a dedicated SS queue-neighbor kernel so reaction/contact/interface no
-   longer depend on fixed particle-bin/all-particle enumeration after the queue
-   gate.
-2. Preserve pressure/interface same-device retained-buffer checks and stage-task
-   pass-through while moving enumeration to SS rows.
-3. Preserve existing strict reaction discovery and exact small-scene behavior as
-   validation anchors, not as the hot path.
-4. Keep queue outputs GPU-resident and StateManager-admission-aware.
+1. Replace the bounded law-neighbor candidate source-window with SS active-node
+   / tree traversal that respects support-inflated level tiles.
+2. Feed retained law-neighbor candidate rows into reaction/contact/interface
+   consumers so the fixed particle-bin/all-particle enumeration can become a
+   diagnostic fallback.
+3. Consume retained active-node rows directly inside same-level P2G/G2P instead
+   of only filtering by level assignment.
+4. Keep all new outputs GPU-resident, no-full-readback, and
+   StateManager-admission-aware.

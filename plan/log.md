@@ -34405,3 +34405,37 @@ Next:
 - Build the dedicated SS queue-neighbor kernel for reaction/contact/interface
   candidate enumeration.
 - After that, move to direct active-node consumption inside same-level P2G/G2P.
+
+## 2026-07-01 AKDT - SS Law Neighbor Candidate Kernel
+
+Status:
+
+- Added the first retained GPU `schroeder-law-neighbor-candidate` artifact:
+  schemas, 16-float row layout, WGSL kernel, JS plan/params packing, and a
+  no-full-readback WebGPU runner.
+- Same-level SS orchestration now runs the law-neighbor candidate producer after
+  the retained law queue and forwards `schroederLawNeighborCandidates` to the
+  resident backend, with an independent per-use-case disable switch.
+- The first kernel is intentionally a bounded queue-window enumerator. It
+  materializes resident candidate rows and host contracts now; replacing the
+  window with true active-node/tree traversal is the next architecture slice.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `42/42`
+  passing.
+- PASS: `node --test tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with
+  `20/20` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Replace bounded source-window neighbor enumeration with true SS active-node /
+  tree traversal over support-inflated level tiles.
+- Route retained law-neighbor candidate rows into reaction/contact/interface
+  consumers so their fixed particle-bin/all-scan paths become diagnostic
+  fallbacks.
+- Consume retained SS active-node rows directly inside same-level P2G/G2P.

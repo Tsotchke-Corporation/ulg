@@ -67,11 +67,13 @@ Landed checkpoints:
 17. `3295777` adds compact GPU phase-volume diagnostic summaries over admitted
     level updates, including water-to-steam scale migration counters without
     full particle readback.
+18. `dd3e928` publishes compact SS phase-volume diagnostic summaries through the
+    scene/status path so water-to-steam level migration can be observed without
+    particle readback.
 
 Next implementation queue:
 
-1. Wire compact SS phase-volume diagnostic summaries into the visible
-   water-to-steam scene/status path.
-2. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
+1. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
    or bucket reduction once the node contract is consumed by later slices.
-3. Route reaction/contact/interface work queues through SS active nodes.
+2. Route reaction/contact/interface work queues through SS active nodes.
+3. Consume retained SS active-node rows directly inside same-level P2G/G2P.

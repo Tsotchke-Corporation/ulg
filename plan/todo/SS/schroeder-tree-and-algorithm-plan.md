@@ -244,7 +244,8 @@ Suggested schemas:
   assignments and aggregate nodes landed in `730f2ff`; StateManager-admitted
   retained level-update rows and same-level orchestration handoff landed in
   `ab1ec57`; compact GPU diagnostic summaries over admitted level updates
-  landed in `3295777`; visible water-to-steam scene/status wiring is next.
+  landed in `3295777`; visible water-to-steam scene/status wiring landed in
+  `dd3e928`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -273,15 +274,14 @@ Suggested schemas:
 
 ## Current Implementation Queue
 
-1. Conservative cross-level state mutation:
-   - consume adjacent-level admitted state-delta merge rows and aggregate
-     contribution rows;
-   - consume retained SS aggregate-node rows built from exact GPU duplicate-key
-     summation;
+1. Scalable aggregate-node reduction:
    - replace exact O(n^2) node reduction with sort/radix or bucket reduction
      before scaling beyond diagnostic row counts;
-   - summarize residual counters across mass, volume, momentum, and energy;
-   - fail closed when parent/child level metadata is missing.
+   - preserve the current aggregate-node row contract consumed by
+     phase-volume migration;
+   - keep duplicate-key mass, represented volume, momentum, and internal-energy
+     summation GPU-resident;
+   - retain compact overflow/capacity diagnostics instead of full row readback.
 2. Phase-volume migration:
    - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
@@ -331,17 +331,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **visible phase-volume migration diagnostics**:
+The next code slice on `SS` is **scalable aggregate-node reduction**:
 
-1. Decode compact admitted level-update summaries without full particle
-   readback.
-2. Surface water-to-steam SS diagnostics: target level counts,
-   coarsen/refine counters, aggregate coherence counters, and conservation
-   residual counters.
-3. Feed those diagnostics into the visible stress-case status path so a 700x
-   expansion can be observed as level migration rather than particle-count
-   explosion.
-4. Preserve fine representation near surfaces, reactions, walls, and large
-   pressure/interface gradients.
-5. Keep the exact aggregate-node reducer as a correctness-first bridge; replace
-   it with sort/radix or bucket reduction before scale testing.
+1. Keep the existing exact aggregate-node reducer as the correctness contract.
+2. Add a GPU-friendly bucket or radix reduction plan that can replace the
+   O(n^2) duplicate-key scan for larger aggregate contribution counts.
+3. Preserve retained aggregate-node buffers and compact diagnostics as the
+   consumer-facing contract for phase-volume migration and later law queues.
+4. Fail closed on capacity overflow, out-of-range level keys, or missing
+   parent/child metadata.

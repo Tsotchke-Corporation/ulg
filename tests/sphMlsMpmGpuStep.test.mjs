@@ -18,10 +18,12 @@ import {
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -45,6 +47,7 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
   ULG_SCHROEDER_FAR_FORCE_DELTA_FUSION_EXECUTION_SCHEMA,
   createSchroederFarForceDeltaFusionParamsArray,
   ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
@@ -2114,6 +2117,96 @@ test('MLS-MPM resident step carries admitted Schroeder gas state deltas as retai
   assert.equal(step.diagnostics.schroederFarAggregateGasStateDeltaTargetStateFamily, 'gas-pressure');
   assert.equal(step.diagnostics.schroederFarAggregateGasStateDeltaPressureInterfaceImportRequired, true);
   assert.equal(step.diagnostics.schroederFarAggregateGasStateDeltaBufferRetained, true);
+});
+
+test('MLS-MPM resident step carries Schroeder gas-cell imports as retained pressure descriptors', async () => {
+  const { tracker, sourceThermoBuffer, options } = noFullReadbackResidentStepFixture();
+  const gpuResidentLaneManager = fakeGpuResidentLaneManager();
+  const gasPressureCellsBuffer = tracker.buffer('schroeder-gas-pressure-cells');
+  const gasCellStride = SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT.length;
+  assert.equal(gasCellStride, SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS);
+  const schroederFarAggregateGasCellImport = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+    backend: 'webgpu',
+    status: 'schroeder-far-aggregate-gas-cell-import-submitted',
+    readbackMode: 'no-full-readback',
+    normalHotLoopReadbackFree: true,
+    fullParticleReadbackPerformed: false,
+    gasPressureCellRowCount: 1,
+    pressureInterfaceGasPressureCellRowCount: 1,
+    gasPressureCellRowStrideFloats: gasCellStride,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasCellStride,
+    gasPressureCellRowByteLength: gasCellStride * Float32Array.BYTES_PER_ELEMENT,
+    pressureInterfaceGasPressureCellRowByteLength: gasCellStride * Float32Array.BYTES_PER_ELEMENT,
+    pressureInterfaceImportReady: true,
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'structured-gas-cell-grid',
+    retainedGasCellFieldSourceReady: true,
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    localPressureGradientReady: false,
+    localPressureGradientStatus: 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+    gasPressureCellsBuffer
+  };
+
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...options,
+    gpuResidentLaneManager,
+    gpuResidentLaneId: 'ulg:test:sph-resident',
+    gpuResidentLaneStateKey: 'ulg:test:sph-resident-state',
+    gpuResidentLaneDomainKey: 'ulg:test-domain',
+    schroederFarAggregateGasCellImport
+  });
+
+  assert.equal(step.schroederFarAggregateGasCellImport, schroederFarAggregateGasCellImport);
+  assert.equal(step.schroederFarAggregateGasCellImportStatus, 'schroeder-far-aggregate-gas-cell-import-submitted');
+  assert.equal(step.schroederFarAggregateGasCellImportPressureInterfaceImportReady, true);
+  assert.equal(step.schroederFarAggregateGasCellImportRetainedSourceReady, true);
+  assert.equal(step.schroederFarAggregateGasCellImportRowCount, 1);
+  assert.equal(step.schroederFarAggregateGasCellImportBufferRetained, true);
+  assert.equal(
+    step.schroederFarAggregateGasCellImportBufferByteLength,
+    gasCellStride * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    step.schroederFarAggregateGasCellImportPressureFieldMode,
+    'local-gas-cell-pressure-gradient'
+  );
+  assert.equal(
+    step.schroederFarAggregateGasCellImportPressureFieldResolution,
+    'structured-gas-cell-grid'
+  );
+  assert.deepEqual(
+    step.schroederFarAggregateGasCellImportRetainedGasPressureBufferRefs,
+    ['resident-gas-pressure-cells-buffer']
+  );
+  assert.equal(step.schroederFarAggregateGasCellImportLocalPressureGradientReady, false);
+  assert.equal(
+    step.schroederFarAggregateGasCellImportLocalPressureGradientStatus,
+    'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read'
+  );
+  assert.equal(
+    step.stageStatus.schroederFarAggregateGasCellImport,
+    'schroeder-far-aggregate-gas-cell-import-submitted'
+  );
+  assert.equal(step.stageBackends.schroederFarAggregateGasCellImport, 'webgpu');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'g2p-state-unread');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'g2p-mechanics-unread');
+  assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
+  assert.equal(
+    step.diagnostics.schroederFarAggregateGasCellImportStatus,
+    'schroeder-far-aggregate-gas-cell-import-submitted'
+  );
+  assert.equal(step.diagnostics.schroederFarAggregateGasCellImportPressureInterfaceImportReady, true);
+  assert.equal(step.diagnostics.schroederFarAggregateGasCellImportRetainedSourceReady, true);
+  assert.equal(step.diagnostics.schroederFarAggregateGasCellImportBufferRetained, true);
+  assert.equal(step.diagnostics.schroederFarAggregateGasCellImportLocalPressureGradientReady, false);
+  assert.ok(step.gpuResidentLaneRetainedBufferRefs.includes('resident-gas-pressure-cells-buffer'));
+  assert.ok(
+    gpuResidentLaneManager.calls.complete[0].options.retainedBufferRefs.includes(
+      'resident-gas-pressure-cells-buffer'
+    )
+  );
 });
 
 test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', async () => {

@@ -96,6 +96,8 @@ export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_AUTHORITY_POLICY_SCHEMA = 
 export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-state-delta-admission.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-cell-import.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-gas-cell-import-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-admission.v0';
@@ -1034,6 +1036,20 @@ export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT = Object.freeze(
   'conservationModeId:f32',
   'pad0:f32',
   'pad1:f32'
+]);
+export const SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT = Object.freeze([
+  'gridIndexX:f32',
+  'gridIndexY:f32',
+  'gridIndexZ:f32',
+  'status:f32',
+  'centerXM:f32',
+  'centerYM:f32',
+  'centerZM:f32',
+  'pressurePa:f32',
+  'pressureGradientXPaPerM:f32',
+  'pressureGradientYPaPerM:f32',
+  'pressureGradientZPaPerM:f32',
+  'volumeM3:f32'
 ]);
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

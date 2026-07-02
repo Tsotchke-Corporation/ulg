@@ -10863,6 +10863,126 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateGasCellImportWgsl = `
+struct SchroederFarAggregateGasCellImportParams {
+  gas_state_delta_row_count: u32,
+  gas_state_delta_stride: u32,
+  force_summary_row_count: u32,
+  force_summary_stride: u32,
+  gas_cell_stride: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  default_cell_volume_m3: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  target_family_id: f32,
+};
+
+@group(0) @binding(0) var<storage, read> gas_state_delta_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> force_summary_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> gas_cell_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederFarAggregateGasCellImportParams;
+
+const SCHROEDER_DEFAULT_GAS_CELL_IMPORT_DELTA_STRIDE: u32 = 32u;
+const SCHROEDER_DEFAULT_GAS_CELL_IMPORT_FORCE_SUMMARY_STRIDE: u32 = 32u;
+const SCHROEDER_DEFAULT_GAS_CELL_IMPORT_PRESSURE_CELL_STRIDE: u32 = 12u;
+
+fn ss_gas_cell_write_empty(cell_offset: u32) {
+  gas_cell_rows[cell_offset + 0u] = 0.0;
+  gas_cell_rows[cell_offset + 1u] = 0.0;
+  gas_cell_rows[cell_offset + 2u] = 0.0;
+  gas_cell_rows[cell_offset + 3u] = 0.0;
+  gas_cell_rows[cell_offset + 4u] = 0.0;
+  gas_cell_rows[cell_offset + 5u] = 0.0;
+  gas_cell_rows[cell_offset + 6u] = 0.0;
+  gas_cell_rows[cell_offset + 7u] = 0.0;
+  gas_cell_rows[cell_offset + 8u] = 0.0;
+  gas_cell_rows[cell_offset + 9u] = 0.0;
+  gas_cell_rows[cell_offset + 10u] = 0.0;
+  gas_cell_rows[cell_offset + 11u] = 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.gas_state_delta_row_count) {
+    return;
+  }
+
+  let delta_stride = max(
+    params.gas_state_delta_stride,
+    SCHROEDER_DEFAULT_GAS_CELL_IMPORT_DELTA_STRIDE
+  );
+  let force_stride = max(
+    params.force_summary_stride,
+    SCHROEDER_DEFAULT_GAS_CELL_IMPORT_FORCE_SUMMARY_STRIDE
+  );
+  let cell_stride = max(
+    params.gas_cell_stride,
+    SCHROEDER_DEFAULT_GAS_CELL_IMPORT_PRESSURE_CELL_STRIDE
+  );
+  let delta_offset = row_index * delta_stride;
+  let cell_offset = row_index * cell_stride;
+
+  let status = gas_state_delta_rows[delta_offset + 27u];
+  let pressure_import_required = gas_state_delta_rows[delta_offset + 28u] > 0.0;
+  let admission_approved = gas_state_delta_rows[delta_offset + 18u] > 0.0;
+  let mutation_required = gas_state_delta_rows[delta_offset + 19u] > 0.0;
+  let full_readback_required = gas_state_delta_rows[delta_offset + 20u] > 0.0;
+  let gas_pressure = max(gas_state_delta_rows[delta_offset + 6u], 0.0);
+  let represented_volume = max(
+    gas_state_delta_rows[delta_offset + 10u],
+    max(params.default_cell_volume_m3, 0.0)
+  );
+
+  if (
+    status <= 0.0
+    || status >= 96.0
+    || !pressure_import_required
+    || !admission_approved
+    || !mutation_required
+    || full_readback_required
+    || gas_pressure <= 0.0
+    || represented_volume <= 0.0
+  ) {
+    ss_gas_cell_write_empty(cell_offset);
+    return;
+  }
+
+  let consumer_row_index = u32(max(gas_state_delta_rows[delta_offset + 24u], 0.0));
+  var force_row_index = row_index;
+  if (consumer_row_index < params.force_summary_row_count) {
+    force_row_index = consumer_row_index;
+  }
+  if (force_row_index >= params.force_summary_row_count) {
+    ss_gas_cell_write_empty(cell_offset);
+    return;
+  }
+  let force_offset = force_row_index * force_stride;
+  let source_position = vec3<f32>(
+    force_summary_rows[force_offset + 24u],
+    force_summary_rows[force_offset + 25u],
+    force_summary_rows[force_offset + 26u]
+  );
+  let source_level = max(gas_state_delta_rows[delta_offset + 1u], 0.0);
+  let source_chart = max(gas_state_delta_rows[delta_offset + 2u], 0.0);
+
+  gas_cell_rows[cell_offset + 0u] = gas_state_delta_rows[delta_offset + 0u];
+  gas_cell_rows[cell_offset + 1u] = source_level;
+  gas_cell_rows[cell_offset + 2u] = source_chart;
+  gas_cell_rows[cell_offset + 3u] = 1.0;
+  gas_cell_rows[cell_offset + 4u] = source_position.x;
+  gas_cell_rows[cell_offset + 5u] = source_position.y;
+  gas_cell_rows[cell_offset + 6u] = source_position.z;
+  gas_cell_rows[cell_offset + 7u] = gas_pressure;
+  gas_cell_rows[cell_offset + 8u] = 0.0;
+  gas_cell_rows[cell_offset + 9u] = 0.0;
+  gas_cell_rows[cell_offset + 10u] = 0.0;
+  gas_cell_rows[cell_offset + 11u] = represented_volume;
+}
+`;
+
 export const schroederFarAggregateForceApplicationWgsl = `
 struct SchroederFarAggregateForceApplicationParams {
   particle_count: u32,

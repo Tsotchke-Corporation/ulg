@@ -10,6 +10,7 @@ import {
   SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT,
@@ -49,6 +50,8 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
@@ -98,6 +101,7 @@ import {
   schroederFarAggregateDiagnosticSummaryWgsl,
   schroederFarAggregateForceApplicationWgsl,
   schroederFarAggregateForceSummaryWgsl,
+  schroederFarAggregateGasCellImportWgsl,
   schroederFarAggregateGasStateDeltaWgsl,
   schroederFarAggregateLawConsumerDiagnosticSummaryWgsl,
   schroederFarAggregateLawConsumerWgsl,
@@ -143,6 +147,8 @@ export {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
@@ -190,6 +196,8 @@ export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS =
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS =
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS =
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS =
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_FLOATS =
@@ -217,6 +225,7 @@ export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_WORKGROUP_SIZE = 64;
+export const SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_WORKGROUP_SIZE = 64;
@@ -254,6 +263,8 @@ export const SCHROEDER_FULL_FAR_AGGREGATE_FORCE_APPLICATION_READBACK_MODE =
 export const SCHROEDER_FULL_FAR_AGGREGATE_FORCE_SUMMARY_READBACK_MODE = 'full-schroeder-far-aggregate-force-summary-readback';
 export const SCHROEDER_FULL_FAR_AGGREGATE_GAS_STATE_DELTA_READBACK_MODE =
   'full-schroeder-far-aggregate-gas-state-delta-readback';
+export const SCHROEDER_FULL_FAR_AGGREGATE_GAS_CELL_IMPORT_READBACK_MODE =
+  'full-schroeder-far-aggregate-gas-cell-import-readback';
 export const SCHROEDER_COMPACT_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_READBACK_MODE =
   'compact-schroeder-far-aggregate-law-consumer-diagnostic-summary-readback';
 export const SCHROEDER_FULL_FAR_AGGREGATE_LAW_CONSUMER_READBACK_MODE =
@@ -331,6 +342,8 @@ export const SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_STATE_DELTA_OUTPUT_FAMILY =
   'schroeder-far-aggregate-law-consumer-state-delta';
 export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_OUTPUT_FAMILY =
   'schroeder-far-aggregate-gas-state-delta';
+export const SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY =
+  'resident-gas-pressure';
 export const SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_TARGET_FAMILY = 'gas-pressure';
 
 const DEFAULT_MIN_LEVEL = -8;
@@ -1184,6 +1197,44 @@ export function createSchroederFarAggregateGasStateDeltaParamsArray({
   view.setFloat32(52, finiteNumber(stateFamilyId, 1), true);
   view.setFloat32(56, finiteNumber(targetFamilyId, 1), true);
   view.setFloat32(60, 0, true);
+  return buffer;
+}
+
+export function createSchroederFarAggregateGasCellImportParamsArray({
+  gasStateDeltaRowCount = 0,
+  gasStateDeltaStrideFloats = SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS,
+  forceSummaryRowCount = 0,
+  forceSummaryStrideFloats = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+  gasCellStrideFloats = SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+  flags = 0,
+  defaultCellVolumeM3 = 0,
+  queueEpoch = 0,
+  stateFamilyId = 1,
+  targetFamilyId = 1
+} = {}) {
+  const buffer = new ArrayBuffer(48);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(gasStateDeltaRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    gasStateDeltaStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(forceSummaryRowCount, 0))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    forceSummaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(16, Math.max(1, Math.round(finiteNumber(
+    gasCellStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS
+  ))), true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  view.setFloat32(32, Math.max(0, finiteNumber(defaultCellVolumeM3, 0)), true);
+  view.setFloat32(36, finiteNumber(queueEpoch, 0), true);
+  view.setFloat32(40, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(44, finiteNumber(targetFamilyId, 1), true);
   return buffer;
 }
 
@@ -2738,6 +2789,23 @@ function assertFarAggregateGasStateDeltaInput(farAggregateGasStateDelta) {
   }
 }
 
+function assertFarAggregateGasCellImportInput({
+  farAggregateGasStateDelta,
+  farAggregateForceSummary
+} = {}) {
+  assertFarAggregateGasStateDeltaInput(farAggregateGasStateDelta);
+  assertFarAggregateForceSummaryInput(farAggregateForceSummary);
+  if (farAggregateGasStateDelta.farAggregateGasStateDeltaAdmissionApproved !== true) {
+    throw new RangeError('Schroeder far-aggregate gas-cell import requires an admitted gas state-delta');
+  }
+  if (farAggregateGasStateDelta.pressureInterfaceImportRequired !== true) {
+    throw new RangeError('Schroeder far-aggregate gas-cell import requires pressure-interface import intent');
+  }
+  if (farAggregateGasStateDelta.fullParticleReadbackRequired === true) {
+    throw new RangeError('Schroeder far-aggregate gas-cell import cannot require full particle readback');
+  }
+}
+
 function schroederLawConsumerDiagnosticSummaryRows(farAggregateLawConsumerDiagnosticSummary = null) {
   const rows = farAggregateLawConsumerDiagnosticSummary?.lawConsumerDiagnosticSummaryRows
     ?? farAggregateLawConsumerDiagnosticSummary?.diagnosticSummaryRows
@@ -4195,6 +4263,100 @@ export function createSchroederFarAggregateGasStateDeltaPlan({
   };
 }
 
+export function createSchroederFarAggregateGasCellImportPlan({
+  farAggregateGasStateDelta,
+  farAggregateForceSummary,
+  defaultCellVolumeM3 = 0,
+  queueEpoch = farAggregateGasStateDelta?.queueEpoch ?? farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateGasStateDelta?.stateFamilyId ?? 1,
+  targetFamilyId = farAggregateGasStateDelta?.targetFamilyId ?? 1
+} = {}) {
+  assertFarAggregateGasCellImportInput({ farAggregateGasStateDelta, farAggregateForceSummary });
+  const gasStateDeltaRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateGasStateDelta.gasStateDeltaRowCount
+      ?? farAggregateGasStateDelta.stateDeltaRowCount,
+    0
+  )));
+  const forceSummaryRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateForceSummary.forceSummaryRowCount ?? farAggregateForceSummary.activeNodeCount,
+    0
+  )));
+  const gasCellRowByteLength = Math.max(
+    4,
+    gasStateDeltaRowCount
+      * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  );
+  const retainedGasPressureBufferRefs = ['resident-gas-pressure-cells-buffer'];
+  const retainedGasCellFieldSource = {
+    schema: 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0',
+    status: 'pressure-interface-retained-gas-cell-field-source-ready',
+    sourceHotBufferKey: farAggregateGasStateDelta.farAggregateGasStateDeltaAdmissionSourceHotBufferKey ?? null,
+    sourceTaskId: null,
+    sourceStage: 'schroederFarAggregateGasCellImport',
+    retainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefs: [],
+    pressureInterfaceGasPressureCellRowCount: gasStateDeltaRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+    pressureInterfaceGasPressureCellRowByteLength: gasCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'structured-gas-cell-grid',
+    sourceFamilies: [SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY],
+    consumerAccessProtocol: 'same-device-retained-buffer-ref',
+    stateManagerAdmissionRequired: true,
+    cpuSnapshotRequiredForPortableImport: true
+  };
+  return {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
+    status: 'schroeder-far-aggregate-gas-cell-import-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-far-aggregate-gas-cell-import',
+    sourceFarAggregateGasStateDeltaSchema: farAggregateGasStateDelta.schema,
+    sourceFarAggregateGasStateDeltaStatus: farAggregateGasStateDelta.status ?? null,
+    sourceFarAggregateForceSummarySchema: farAggregateForceSummary.schema,
+    sourceFarAggregateForceSummaryStatus: farAggregateForceSummary.status ?? null,
+    gasStateDeltaRowCount,
+    gasStateDeltaStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS,
+    forceSummaryRowCount,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    gasPressureCellRowLayout: [...SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT],
+    pressureInterfaceGasPressureCellRowLayout: [...SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT],
+    gasPressureCellRowCount: gasStateDeltaRowCount,
+    pressureInterfaceGasPressureCellRowCount: gasStateDeltaRowCount,
+    gasPressureCellRowStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+    pressureInterfaceGasPressureCellRowStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+    gasPressureCellRowByteLength: gasCellRowByteLength,
+    pressureInterfaceGasPressureCellRowByteLength: gasCellRowByteLength,
+    defaultCellVolumeM3: Math.max(0, finiteNumber(defaultCellVolumeM3, 0)),
+    queueEpoch: finiteNumber(queueEpoch, 0),
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    targetFamilyId: finiteNumber(targetFamilyId, 1),
+    targetStateFamily: SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_TARGET_FAMILY,
+    outputCompaction: 'one-pressure-interface-gas-cell-row-per-admitted-gas-state-delta-row',
+    pressureInterfaceImportReady: true,
+    pressureInterfaceImportRequired: true,
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'structured-gas-cell-grid',
+    localPressureGradientReady: false,
+    localPressureGradientStatus: 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+    conservativeTransferStatus: 'retained-gas-pressure-cells-ready-for-pressure-interface',
+    retainedGasPressureBufferRefs,
+    retainedGasCellFieldSource,
+    retainedGasCellFieldSourceSchema: retainedGasCellFieldSource.schema,
+    retainedGasCellFieldSourceStatus: retainedGasCellFieldSource.status,
+    retainedGasCellFieldSourceReady: true,
+    outputFamilies: [SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY],
+    stateMutationRequired: false,
+    stateMutationStatus: 'admitted-gas-pressure-deltas-materialized-as-retained-pressure-cells',
+    stateAuthorityStatus: 'state-manager-admitted-gas-delta-materialized-for-pressure-interface',
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
 export function createSchroederFarAggregateForceApplicationPlan({
   farAggregateForceSummary,
   farAggregateDiagnosticSummary = null,
@@ -4668,6 +4830,7 @@ export function createSchroederPortableSummaryPlan({
   farAggregateLawConsumerDiagnosticSummary = null,
   farAggregateLawConsumerAuthorityPolicy = null,
   farAggregateGasStateDelta = null,
+  farAggregateGasCellImport = null,
   farAggregateForceApplication = null,
   hierarchyAggregateNode = null,
   conservationSummary = null,
@@ -4694,6 +4857,14 @@ export function createSchroederPortableSummaryPlan({
     assertFarAggregateLawConsumerDiagnosticSummaryInput(farAggregateLawConsumerDiagnosticSummary);
   }
   if (farAggregateGasStateDelta) assertFarAggregateGasStateDeltaInput(farAggregateGasStateDelta);
+  if (farAggregateGasCellImport) {
+    if (
+      farAggregateGasCellImport.schema !== ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA
+      && farAggregateGasCellImport.schema !== ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA
+    ) {
+      throw new TypeError('Schroeder portable summary requires a Schroeder far-aggregate gas-cell import input');
+    }
+  }
   if (farAggregateForceApplication) assertFarAggregateForceApplicationInput(farAggregateForceApplication);
   if (hierarchyAggregateNode) assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
 
@@ -4737,6 +4908,11 @@ export function createSchroederPortableSummaryPlan({
     farAggregateGasStateDelta?.gasStateDeltaRowCount
       ?? farAggregateGasStateDelta?.stateDeltaRowCount
       ?? farAggregateGasStateDelta?.lawConsumerRowCount,
+    0
+  )));
+  const farAggregateGasCellImportCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateGasCellImport?.pressureInterfaceGasPressureCellRowCount
+      ?? farAggregateGasCellImport?.gasPressureCellRowCount,
     0
   )));
   const farAggregateForceApplicationCount = Math.max(0, Math.round(finiteNumber(
@@ -4871,6 +5047,22 @@ export function createSchroederPortableSummaryPlan({
         || farAggregateGasStateDelta.stateDeltaBuffer
       )
     }) : null,
+    farAggregateGasCellImport ? schroederPortableRetainedRef({
+      family: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY,
+      role: 'retained-pressure-interface-gas-cell-rows',
+      artifact: farAggregateGasCellImport,
+      rowCount: farAggregateGasCellImportCount,
+      strideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+      byteLength: farAggregateGasCellImport.pressureInterfaceGasPressureCellRowByteLength
+        ?? farAggregateGasCellImport.gasPressureCellRowByteLength,
+      retained: Boolean(
+        farAggregateGasCellImport.gasPressureCellsBuffer
+        || farAggregateGasCellImport.pressureInterfaceGasPressureCellsBuffer
+      ),
+      retainedBufferRef: farAggregateGasCellImport.retainedGasPressureBufferRefs?.[0]
+        || farAggregateGasCellImport.retainedGasCellFieldSource?.retainedGasPressureBufferRefs?.[0]
+        || null
+    }) : null,
     farAggregateForceApplication ? schroederPortableRetainedRef({
       family: 'schroeder-far-aggregate-force-application',
       role: 'admitted-far-field-force-application-deltas',
@@ -4931,6 +5123,7 @@ export function createSchroederPortableSummaryPlan({
     farAggregateLawConsumerCount,
     farAggregateLawConsumerDiagnosticSummaryCount,
     farAggregateGasStateDeltaCount,
+    farAggregateGasCellImportCount,
     farAggregateForceApplicationCount,
     phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
     opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
@@ -4961,6 +5154,7 @@ export function createSchroederPortableSummaryPlan({
     farAggregateLawConsumerCount,
     farAggregateLawConsumerDiagnosticSummaryCount,
     farAggregateGasStateDeltaCount,
+    farAggregateGasCellImportCount,
     farAggregateForceApplicationCount,
     retainedRefs,
     retainedRefCount: retainedRefs.length,
@@ -8495,6 +8689,229 @@ export async function runSchroederFarAggregateGasStateDeltaWebGpu({
   }
 }
 
+function gasCellFieldSnapshotFromSchroederRows(rows, rowStrideFloats = SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS) {
+  if (!(rows instanceof Float32Array) || rows.length <= 0) return null;
+  const stride = Math.max(1, Math.round(finiteNumber(rowStrideFloats, SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS)));
+  const cells = [];
+  for (let offset = 0, index = 0; offset + 11 < rows.length; offset += stride, index += 1) {
+    const status = rows[offset + 3];
+    const pressurePa = rows[offset + 7];
+    if (!(status > 0) || !(pressurePa >= 0)) continue;
+    cells.push({
+      index,
+      gridIndex: [
+        Math.max(0, Math.round(finiteNumber(rows[offset], 0))),
+        Math.max(0, Math.round(finiteNumber(rows[offset + 1], 0))),
+        Math.max(0, Math.round(finiteNumber(rows[offset + 2], 0)))
+      ],
+      centerM: [
+        finiteNumber(rows[offset + 4], 0),
+        finiteNumber(rows[offset + 5], 0),
+        finiteNumber(rows[offset + 6], 0)
+      ],
+      pressurePa,
+      pressureGradientPaPerM: [
+        finiteNumber(rows[offset + 8], 0),
+        finiteNumber(rows[offset + 9], 0),
+        finiteNumber(rows[offset + 10], 0)
+      ],
+      volumeM3: Math.max(0, finiteNumber(rows[offset + 11], 0)),
+      status: 'local-gas-pressure-cell-ready'
+    });
+  }
+  if (cells.length <= 0) return null;
+  return {
+    schema: 'peercompute.ulg.sph-local-pressure-gradient-field.v0',
+    status: 'gas-cell-pressure-field-ready',
+    source: 'schroeder-far-aggregate-gas-cell-import',
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'structured-gas-cell-grid',
+    pressureGradientStatus: 'schroeder-far-aggregate-gas-pressure-cells-materialized',
+    localPressureGradientReady: true,
+    localPressureGradientStatus: 'local-pressure-gradient-ready',
+    localPressureGradientValidation: false,
+    cells
+  };
+}
+
+export async function runSchroederFarAggregateGasCellImportWebGpu({
+  device,
+  farAggregateGasStateDelta,
+  farAggregateForceSummary,
+  defaultCellVolumeM3 = 0,
+  queueEpoch = farAggregateGasStateDelta?.queueEpoch ?? farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateGasStateDelta?.stateFamilyId ?? 1,
+  targetFamilyId = farAggregateGasStateDelta?.targetFamilyId ?? 1,
+  retainGasPressureCellsBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederFarAggregateGasCellImportWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederFarAggregateGasCellImportPlan({
+    farAggregateGasStateDelta,
+    farAggregateForceSummary,
+    defaultCellVolumeM3,
+    queueEpoch,
+    stateFamilyId,
+    targetFamilyId
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedGasStateDeltaBuffer =
+    farAggregateGasStateDelta?.gasStateDeltaBuffer || farAggregateGasStateDelta?.stateDeltaBuffer || null;
+  const gasStateDeltaRows = farAggregateGasStateDelta?.gasStateDeltaRows instanceof Float32Array
+    ? farAggregateGasStateDelta.gasStateDeltaRows
+    : (farAggregateGasStateDelta?.stateDeltaRows instanceof Float32Array
+        ? farAggregateGasStateDelta.stateDeltaRows
+        : null);
+  const borrowedForceSummaryBuffer = farAggregateForceSummary?.forceSummaryBuffer || null;
+  const forceSummaryRows = farAggregateForceSummary?.forceSummaryRows instanceof Float32Array
+    ? farAggregateForceSummary.forceSummaryRows
+    : null;
+  if (!borrowedGasStateDeltaBuffer && !(gasStateDeltaRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate gas-cell import requires a retained gas state-delta buffer or explicit rows');
+  }
+  if (!borrowedForceSummaryBuffer && !(forceSummaryRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate gas-cell import requires a retained force-summary buffer or explicit rows');
+  }
+
+  const gasStateDeltaBuffer = borrowedGasStateDeltaBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-gas-cell-import-delta-in', gasStateDeltaRows);
+  const forceSummaryBuffer = borrowedForceSummaryBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-gas-cell-import-force-summary-in', forceSummaryRows);
+  const gasPressureCellsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-gas-cell-import-pressure-cells-out',
+    size: plan.gasPressureCellRowByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsArray = createSchroederFarAggregateGasCellImportParamsArray({
+    ...plan,
+    defaultCellVolumeM3: plan.defaultCellVolumeM3
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-gas-cell-import-params',
+    size: paramsArray.byteLength,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-far-aggregate-gas-cell-import-readback',
+      size: plan.gasPressureCellRowByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedGasPressureCellsBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-far-aggregate-gas-cell-import.v0',
+      label: 'ulg-schroeder-far-aggregate-gas-cell-import',
+      code: schroederFarAggregateGasCellImportWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform')
+      ]
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: gasStateDeltaBuffer } },
+        { binding: 1, resource: { buffer: forceSummaryBuffer } },
+        { binding: 2, resource: { buffer: gasPressureCellsBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.gasPressureCellRowCount / SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(
+        gasPressureCellsBuffer,
+        0,
+        readBuffer,
+        0,
+        plan.gasPressureCellRowByteLength
+      );
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let gasPressureCellRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      gasPressureCellRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.gasPressureCellRowCount * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS
+      );
+      readBuffer.unmap();
+    }
+    const gasCellFieldSnapshot = gasCellFieldSnapshotFromSchroederRows(
+      gasPressureCellRows,
+      SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS
+    );
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+      farAggregateGasCellImportSchema: plan.schema,
+      status: 'schroeder-far-aggregate-gas-cell-import-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_FAR_AGGREGATE_GAS_CELL_IMPORT_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      gasPressureCellRows,
+      gasPressureCellRowsBufferRetained: Boolean(retainGasPressureCellsBuffer),
+      pressureInterfaceGasPressureCellRowsBufferRetained: Boolean(retainGasPressureCellsBuffer),
+      gasCellFieldSnapshot,
+      gasCellField: gasCellFieldSnapshot,
+      localPressureGradientReady: gasCellFieldSnapshot?.localPressureGradientReady === true,
+      localPressureGradientStatus: gasCellFieldSnapshot
+        ? 'local-pressure-gradient-ready'
+        : 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+      pressureInterfaceImportReady: true,
+      retainedSourceFamilies: [SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY],
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainGasPressureCellsBuffer) {
+      result.gasPressureCellsBuffer = gasPressureCellsBuffer;
+      result.pressureInterfaceGasPressureCellsBuffer = gasPressureCellsBuffer;
+      result.destroyGasPressureCellsBuffer = () => gasPressureCellsBuffer.destroy?.();
+      returnedRetainedGasPressureCellsBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedGasStateDeltaBuffer) gasStateDeltaBuffer.destroy?.();
+      if (!borrowedForceSummaryBuffer) forceSummaryBuffer.destroy?.();
+      if (!retainGasPressureCellsBuffer || !returnedRetainedGasPressureCellsBuffer) {
+        gasPressureCellsBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederFarAggregateForceApplicationWebGpu({
   device,
   farAggregateForceSummary,
@@ -9198,6 +9615,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateLawConsumerDiagnosticSummary = null,
   farAggregateLawConsumerAuthorityPolicy = null,
   farAggregateGasStateDelta = null,
+  farAggregateGasCellImport = null,
   farAggregateForceApplication = null,
   crossLevelCoupling = null,
   conservationSummary = null,
@@ -9254,6 +9672,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableFarAggregateLawConsumerDiagnosticSummary = enableFarAggregateLawConsumer,
   enableFarAggregateLawConsumerAuthorityPolicy = enableFarAggregateLawConsumerDiagnosticSummary,
   enableFarAggregateGasStateDelta = Boolean(farAggregateGasStateDeltaAdmission),
+  enableFarAggregateGasCellImport = enableFarAggregateGasStateDelta,
   enableFarAggregateForceApplication = Boolean(farAggregateForceApplicationAdmission),
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
@@ -9311,6 +9730,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     DEFAULT_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_DENSITY_SCALE,
   farAggregateGasStateDeltaGamma =
     DEFAULT_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_GAMMA,
+  farAggregateGasCellImportReadbackMode = null,
+  farAggregateGasCellImportDefaultCellVolumeM3 = 0,
   farAggregateForceApplicationReadbackMode = null,
   farAggregateForceApplicationAccelerationScale =
     DEFAULT_SCHROEDER_FAR_AGGREGATE_APPLICATION_ACCELERATION_SCALE,
@@ -9344,6 +9765,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateLawConsumerAuthorityPolicyRunner =
     createSchroederFarAggregateLawConsumerAuthorityPolicy,
   farAggregateGasStateDeltaRunner = runSchroederFarAggregateGasStateDeltaWebGpu,
+  farAggregateGasCellImportRunner = runSchroederFarAggregateGasCellImportWebGpu,
   farAggregateForceApplicationRunner = runSchroederFarAggregateForceApplicationWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
@@ -9516,6 +9938,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof farAggregateGasStateDeltaRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateGasStateDeltaRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && enableFarAggregateCandidates
+    && enableFarAggregateForceSummary
+    && enableFarAggregateLawConsumer
+    && enableFarAggregateGasStateDelta
+    && enableFarAggregateGasCellImport
+    && typeof farAggregateGasCellImportRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateGasCellImportRunner function');
   }
   if (
     enableCrossLevelCoupling
@@ -9843,6 +10281,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainGasStateDeltaBuffer: true,
       readbackMode: farAggregateGasStateDeltaReadbackMode ?? readbackMode
     });
+  const resolvedFarAggregateGasCellImport = !resolvedFarAggregateGasStateDelta
+    || !resolvedFarAggregateForceSummary
+    || !enableFarAggregateGasCellImport
+    ? null
+    : farAggregateGasCellImport || await farAggregateGasCellImportRunner({
+      device,
+      farAggregateGasStateDelta: resolvedFarAggregateGasStateDelta,
+      farAggregateForceSummary: resolvedFarAggregateForceSummary,
+      defaultCellVolumeM3: farAggregateGasCellImportDefaultCellVolumeM3,
+      queueEpoch: mergeEpoch,
+      retainGasPressureCellsBuffer: true,
+      readbackMode: farAggregateGasCellImportReadbackMode ?? readbackMode
+    });
   const resolvedFarAggregateForceApplication = !resolvedFarAggregateForceSummary || !enableFarAggregateForceApplication
     ? null
     : farAggregateForceApplication || await farAggregateForceApplicationRunner({
@@ -9916,6 +10367,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       farAggregateLawConsumerDiagnosticSummary: resolvedFarAggregateLawConsumerDiagnosticSummary,
       farAggregateLawConsumerAuthorityPolicy: resolvedFarAggregateLawConsumerAuthorityPolicy,
       farAggregateGasStateDelta: resolvedFarAggregateGasStateDelta,
+      farAggregateGasCellImport: resolvedFarAggregateGasCellImport,
       farAggregateForceApplication: resolvedFarAggregateForceApplication,
       hierarchyAggregateNode: resolvedHierarchyAggregateNode,
       conservationSummary: resolvedConservationSummary,
@@ -9955,6 +10407,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederFarAggregateLawConsumerDiagnosticSummary: resolvedFarAggregateLawConsumerDiagnosticSummary,
     schroederFarAggregateLawConsumerAuthorityPolicy: resolvedFarAggregateLawConsumerAuthorityPolicy,
     schroederFarAggregateGasStateDelta: resolvedFarAggregateGasStateDelta,
+    schroederFarAggregateGasCellImport: resolvedFarAggregateGasCellImport,
     schroederFarAggregateForceApplication: resolvedFarAggregateForceApplication,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
@@ -10272,6 +10725,38 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedFarAggregateGasStateDelta.gasStateDeltaByteLength
         ?? 0
     } : null,
+    farAggregateGasCellImport: resolvedFarAggregateGasCellImport ? {
+      schema: resolvedFarAggregateGasCellImport.schema,
+      status: resolvedFarAggregateGasCellImport.status,
+      gasPressureCellRowCount: resolvedFarAggregateGasCellImport.gasPressureCellRowCount,
+      pressureInterfaceGasPressureCellRowCount:
+        resolvedFarAggregateGasCellImport.pressureInterfaceGasPressureCellRowCount,
+      gasPressureCellRowStrideFloats: resolvedFarAggregateGasCellImport.gasPressureCellRowStrideFloats,
+      pressureInterfaceGasPressureCellRowStrideFloats:
+        resolvedFarAggregateGasCellImport.pressureInterfaceGasPressureCellRowStrideFloats,
+      gasPressureCellRowByteLength: resolvedFarAggregateGasCellImport.gasPressureCellRowByteLength,
+      pressureInterfaceGasPressureCellRowByteLength:
+        resolvedFarAggregateGasCellImport.pressureInterfaceGasPressureCellRowByteLength,
+      pressureFieldMode: resolvedFarAggregateGasCellImport.pressureFieldMode,
+      pressureFieldResolution: resolvedFarAggregateGasCellImport.pressureFieldResolution,
+      pressureInterfaceImportReady:
+        resolvedFarAggregateGasCellImport.pressureInterfaceImportReady === true,
+      conservativeTransferStatus: resolvedFarAggregateGasCellImport.conservativeTransferStatus,
+      retainedGasPressureBufferRefs: [
+        ...(resolvedFarAggregateGasCellImport.retainedGasPressureBufferRefs || [])
+      ],
+      retainedGasCellFieldSourceReady:
+        resolvedFarAggregateGasCellImport.retainedGasCellFieldSourceReady === true,
+      retainedGasPressureCellsBuffer: Boolean(
+        resolvedFarAggregateGasCellImport.gasPressureCellsBuffer
+        || resolvedFarAggregateGasCellImport.pressureInterfaceGasPressureCellsBuffer
+      ),
+      gasCellFieldSnapshotReady:
+        resolvedFarAggregateGasCellImport.gasCellFieldSnapshot?.localPressureGradientReady === true,
+      localPressureGradientReady:
+        resolvedFarAggregateGasCellImport.localPressureGradientReady === true,
+      localPressureGradientStatus: resolvedFarAggregateGasCellImport.localPressureGradientStatus
+    } : null,
     farAggregateForceApplication: resolvedFarAggregateForceApplication ? {
       schema: resolvedFarAggregateForceApplication.schema,
       status: resolvedFarAggregateForceApplication.status,
@@ -10448,6 +10933,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       farAggregateLawConsumerDiagnosticSummaryCount:
         resolvedPortableSummary.farAggregateLawConsumerDiagnosticSummaryCount,
       farAggregateGasStateDeltaCount: resolvedPortableSummary.farAggregateGasStateDeltaCount,
+      farAggregateGasCellImportCount: resolvedPortableSummary.farAggregateGasCellImportCount,
       farAggregateForceApplicationCount: resolvedPortableSummary.farAggregateForceApplicationCount,
       retainedRefs: Array.isArray(resolvedPortableSummary.retainedRefs)
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
@@ -10481,6 +10967,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         farAggregateLawConsumerDiagnosticSummaryCount:
           resolvedPortableSummary.renderLod.farAggregateLawConsumerDiagnosticSummaryCount,
         farAggregateGasStateDeltaCount: resolvedPortableSummary.renderLod.farAggregateGasStateDeltaCount,
+        farAggregateGasCellImportCount: resolvedPortableSummary.renderLod.farAggregateGasCellImportCount,
         farAggregateForceApplicationCount: resolvedPortableSummary.renderLod.farAggregateForceApplicationCount,
         phaseVolumeDiagnosticRowsAvailable: resolvedPortableSummary.renderLod.phaseVolumeDiagnosticRowsAvailable,
         opticalPolicy: resolvedPortableSummary.renderLod.opticalPolicy,
@@ -10602,6 +11089,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         : (resolvedFarAggregateForceSummary
           ? 'disabled-far-aggregate-law-consumer-admission-not-provided'
           : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates'))),
+    farAggregateGasCellImportStatus: resolvedFarAggregateGasCellImport?.status ?? (
+      resolvedFarAggregateGasStateDelta
+        ? 'disabled-far-aggregate-gas-cell-import'
+        : 'disabled-far-aggregate-gas-state-delta'
+    ),
+    farAggregateGasCellImportConsumerStatus: resolvedFarAggregateGasCellImport
+      ? 'far-aggregate-gas-cell-import-forwarded-to-resident-backend'
+      : (resolvedFarAggregateGasStateDelta
+          ? 'disabled-far-aggregate-gas-cell-import'
+          : 'disabled-far-aggregate-gas-state-delta'),
     farAggregateForceApplicationStatus: resolvedFarAggregateForceApplication?.status ?? (
       resolvedFarAggregateForceSummary
         ? 'disabled-far-aggregate-force-application-admission-not-provided'
@@ -10663,6 +11160,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     portableSummaryTransferMode: resolvedPortableSummary?.transferMode ?? null,
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
       ?? resolvedPhaseVolumeMigration?.conservativeTransferStatus
+      ?? resolvedFarAggregateGasCellImport?.conservativeTransferStatus
       ?? resolvedFarAggregateGasStateDelta?.conservationStatus
       ?? resolvedFarAggregateForceApplication?.conservationStatus
       ?? resolvedFarAggregateLawConsumer?.conservationStatus

@@ -12,6 +12,7 @@ import {
   SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ROW_LAYOUT,
@@ -51,6 +52,8 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA,
@@ -134,11 +137,13 @@ import {
   SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
   SCHROEDER_FAR_AGGREGATE_LAW_MASK,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_FLOATS,
   SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_MASK,
+  SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_OUTPUT_FAMILY,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_TARGET_FAMILY,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
@@ -169,6 +174,8 @@ import {
   createSchroederFarAggregateForceApplicationPlan,
   createSchroederFarAggregateForceSummaryParamsArray,
   createSchroederFarAggregateForceSummaryPlan,
+  createSchroederFarAggregateGasCellImportParamsArray,
+  createSchroederFarAggregateGasCellImportPlan,
   createSchroederFarAggregateGasStateDeltaParamsArray,
   createSchroederFarAggregateGasStateDeltaPlan,
   createSchroederFarAggregateLawConsumerAuthorityPolicy,
@@ -210,6 +217,7 @@ import {
   runSchroederFarAggregateDiagnosticSummaryWebGpu,
   runSchroederFarAggregateForceApplicationWebGpu,
   runSchroederFarAggregateForceSummaryWebGpu,
+  runSchroederFarAggregateGasCellImportWebGpu,
   runSchroederFarAggregateGasStateDeltaWebGpu,
   runSchroederFarAggregateLawConsumerDiagnosticSummaryWebGpu,
   runSchroederFarAggregateLawConsumerWebGpu,
@@ -597,6 +605,20 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS
   );
   assert.equal(SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
+    'peercompute.ulg.schroeder-far-aggregate-gas-cell-import.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-far-aggregate-gas-cell-import-execution.v0'
+  );
+  assert.equal(SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS, 12);
+  assert.equal(
+    SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT.length,
+    SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS
+  );
+  assert.equal(SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS % 4, 0);
   assert.equal(
     ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA,
     'peercompute.ulg.schroeder-far-aggregate-force-application.v0'
@@ -2242,6 +2264,8 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
     SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const farAggregateGasStateDeltaByteLength =
     3 * SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const farAggregateGasCellImportByteLength =
+    3 * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const farAggregateForceApplicationByteLength =
     3 * SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const aggregateNodeByteLength = 2 * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
@@ -2342,6 +2366,20 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
       gasStateDeltaBuffer: { label: 'retained-far-aggregate-gas-state-delta' },
       gasStateDeltaBufferByteLength: farAggregateGasStateDeltaByteLength
     },
+    farAggregateGasCellImport: {
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+      status: 'schroeder-far-aggregate-gas-cell-import-submitted',
+      gasPressureCellRowCount: 3,
+      pressureInterfaceGasPressureCellRowCount: 3,
+      gasPressureCellRowStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+      pressureInterfaceGasPressureCellRowStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS,
+      gasPressureCellRowByteLength: farAggregateGasCellImportByteLength,
+      pressureInterfaceGasPressureCellRowByteLength: farAggregateGasCellImportByteLength,
+      pressureInterfaceImportReady: true,
+      retainedGasCellFieldSourceReady: true,
+      retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+      gasPressureCellsBuffer: { label: 'retained-far-aggregate-gas-pressure-cells' }
+    },
     farAggregateForceApplication: {
       schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA,
       status: 'schroeder-far-aggregate-force-application-submitted',
@@ -2399,9 +2437,10 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.farAggregateLawConsumerCount, 3);
   assert.equal(plan.farAggregateLawConsumerDiagnosticSummaryCount, 1);
   assert.equal(plan.farAggregateGasStateDeltaCount, 3);
+  assert.equal(plan.farAggregateGasCellImportCount, 3);
   assert.equal(plan.farAggregateForceApplicationCount, 3);
-  assert.equal(plan.retainedRefCount, 14);
-  assert.equal(plan.retainedBufferRefCount, 14);
+  assert.equal(plan.retainedRefCount, 15);
+  assert.equal(plan.retainedBufferRefCount, 15);
   assert.equal(
     plan.retainedRefs.find((entry) => entry.family === 'schroeder-active-node-list')?.retainedBufferRef,
     'schroeder-active-node-list:render-lod-leaf-source'
@@ -2438,6 +2477,14 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
     ))?.retainedBufferRef,
     'schroeder-far-aggregate-gas-state-delta:admitted-far-field-gas-pressure-state-deltas'
   );
+  const retainedGasCellRef = plan.retainedRefs.find((entry) => (
+    entry.family === SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY
+  ));
+  assert.equal(retainedGasCellRef?.role, 'retained-pressure-interface-gas-cell-rows');
+  assert.equal(retainedGasCellRef?.rowCount, 3);
+  assert.equal(retainedGasCellRef?.strideFloats, SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS);
+  assert.equal(retainedGasCellRef?.byteLength, farAggregateGasCellImportByteLength);
+  assert.equal(retainedGasCellRef?.retainedBufferRef, 'resident-gas-pressure-cells-buffer');
   assert.equal(
     plan.retainedRefs.find((entry) => entry.family === 'schroeder-far-aggregate-force-application')?.retainedBufferRef,
     'schroeder-far-aggregate-force-application:admitted-far-field-force-application-deltas'
@@ -2453,6 +2500,7 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.renderLod.farAggregateLawConsumerCount, 3);
   assert.equal(plan.renderLod.farAggregateLawConsumerDiagnosticSummaryCount, 1);
   assert.equal(plan.renderLod.farAggregateGasStateDeltaCount, 3);
+  assert.equal(plan.renderLod.farAggregateGasCellImportCount, 3);
   assert.equal(plan.renderLod.farAggregateForceApplicationCount, 3);
   assert.equal(plan.renderLod.phaseVolumeDiagnosticRowsAvailable, true);
   assert.equal(plan.renderLod.fullParticleReadbackRequired, false);
@@ -4441,6 +4489,136 @@ test('Schroeder far-aggregate gas state delta emits retained GPU pressure deltas
   );
 });
 
+test('Schroeder far-aggregate gas-cell import materializes retained pressure rows after gas admission', async () => {
+  const device = createFakeWebGpuDevice();
+  const gasStateDeltaBuffer = device.createBuffer({
+    label: 'retained-far-aggregate-gas-state-delta',
+    size: 4 * SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const forceSummaryBuffer = device.createBuffer({
+    label: 'retained-far-aggregate-force-summary',
+    size: 4 * SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const farAggregateGasStateDelta = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-gas-state-delta-submitted',
+    lawConsumerRowCount: 4,
+    gasStateDeltaRowCount: 4,
+    stateDeltaRowCount: 4,
+    gasStateDeltaStrideFloats: SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS,
+    gasStateDeltaBuffer,
+    gasStateDeltaBufferByteLength:
+      4 * SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    farAggregateGasStateDeltaAdmissionApproved: true,
+    pressureInterfaceImportRequired: true,
+    stateMutationRequired: true,
+    fullParticleReadbackRequired: false,
+    queueEpoch: 9,
+    stateFamilyId: 5
+  };
+  const farAggregateForceSummary = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-force-summary-submitted',
+    activeNodeCount: 4,
+    forceSummaryRowCount: 4,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    forceSummaryBuffer,
+    forceSummaryBufferByteLength:
+      4 * SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    queueEpoch: 9
+  };
+
+  const plan = createSchroederFarAggregateGasCellImportPlan({
+    farAggregateGasStateDelta,
+    farAggregateForceSummary,
+    defaultCellVolumeM3: 0.125
+  });
+  assert.equal(plan.schema, ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA);
+  assert.equal(plan.status, 'schroeder-far-aggregate-gas-cell-import-plan-ready');
+  assert.equal(plan.gasPressureCellRowCount, 4);
+  assert.equal(plan.pressureInterfaceGasPressureCellRowCount, 4);
+  assert.equal(plan.gasPressureCellRowStrideFloats, SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS);
+  assert.equal(
+    plan.gasPressureCellRowByteLength,
+    4 * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(plan.pressureInterfaceImportReady, true);
+  assert.equal(plan.retainedGasCellFieldSourceReady, true);
+  assert.deepEqual(plan.outputFamilies, [SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_OUTPUT_FAMILY]);
+  assert.deepEqual(plan.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(plan.retainedGasCellFieldSource.consumerAccessProtocol, 'same-device-retained-buffer-ref');
+  assert.equal(plan.retainedGasCellFieldSource.cpuSnapshotRequiredForPortableImport, true);
+  assert.equal(plan.localPressureGradientReady, false);
+  assert.equal(plan.localPressureGradientStatus, 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read');
+  assert.equal(plan.conservativeTransferStatus, 'retained-gas-pressure-cells-ready-for-pressure-interface');
+
+  const params = createSchroederFarAggregateGasCellImportParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 48);
+  assert.equal(view.getUint32(0, true), 4);
+  assert.equal(view.getUint32(4, true), SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_FLOATS);
+  assert.equal(view.getUint32(8, true), 4);
+  assert.equal(view.getUint32(12, true), SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS);
+  assert.equal(view.getUint32(16, true), SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS);
+
+  const gasCellImport = await runSchroederFarAggregateGasCellImportWebGpu({
+    device,
+    farAggregateGasStateDelta,
+    farAggregateForceSummary,
+    defaultCellVolumeM3: 0.125
+  });
+
+  assert.equal(gasCellImport.schema, ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA);
+  assert.equal(gasCellImport.farAggregateGasCellImportSchema, ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA);
+  assert.equal(gasCellImport.status, 'schroeder-far-aggregate-gas-cell-import-submitted');
+  assert.equal(gasCellImport.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(gasCellImport.fullReadbackPerformed, false);
+  assert.equal(gasCellImport.fullParticleReadbackPerformed, false);
+  assert.equal(gasCellImport.normalHotLoopReadbackFree, true);
+  assert.equal(gasCellImport.pressureInterfaceImportReady, true);
+  assert.equal(gasCellImport.retainedGasCellFieldSourceReady, true);
+  assert.equal(gasCellImport.localPressureGradientReady, false);
+  assert.equal(
+    gasCellImport.localPressureGradientStatus,
+    'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read'
+  );
+  assert.equal(gasCellImport.gasPressureCellRows.length, 0);
+  assert.equal(gasCellImport.gasPressureCellRowsBufferRetained, true);
+  assert.equal(gasCellImport.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.ok(gasCellImport.gasPressureCellsBuffer);
+  assert.equal(gasCellImport.gasPressureCellsBuffer.destroyed, false);
+  assert.equal(gasCellImport.gasPressureCellRowCount, 4);
+  assert.equal(gasCellImport.pressureInterfaceGasPressureCellRowCount, 4);
+  assert.equal(
+    gasCellImport.gasPressureCellRowByteLength,
+    4 * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.deepEqual(gasCellImport.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(
+    gasCellImport.retainedGasCellFieldSource.schema,
+    'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0'
+  );
+  assert.equal(gasCellImport.retainedGasCellFieldSource.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(gasCellImport.retainedGasCellFieldSource.stateManagerAdmissionRequired, true);
+  assert.deepEqual(device.dispatches.slice(-1), [[1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederFarAggregateGasCellImportParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('gas_cell_rows')));
+  assert.ok(device.writes.some((write) => (
+    write.label === 'ulg-schroeder-far-aggregate-gas-cell-import-params'
+    && write.byteLength === 48
+  )));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-far-aggregate-gas-cell-import-pressure-cells-out'
+    && buffer.size === 4 * SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('gas-cell-import-readback')),
+    false
+  );
+});
+
 test('Schroeder far-aggregate force application blocks without admission and dispatches no work', async () => {
   const device = createFakeWebGpuDevice();
   const { sphParticleState } = manualBuffers({ particleCount: 4, massKg: 2, smoothingLengthM: 0.25 });
@@ -5809,6 +5987,7 @@ test('Schroeder same-level mechanics forwards admitted far-aggregate gas state d
           options.schroederFarAggregateLawConsumerAuthorityPolicy
         ),
         hasFarAggregateGasStateDelta: Boolean(options.schroederFarAggregateGasStateDelta),
+        hasFarAggregateGasCellImport: Boolean(options.schroederFarAggregateGasCellImport),
         hasFarAggregateForceApplication: Boolean(options.schroederFarAggregateForceApplication),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration)
       };
@@ -5834,17 +6013,35 @@ test('Schroeder same-level mechanics forwards admitted far-aggregate gas state d
     result.farAggregateGasStateDeltaConsumerStatus,
     'far-aggregate-gas-state-delta-forwarded-to-resident-backend'
   );
+  assert.equal(result.farAggregateGasCellImport.status, 'schroeder-far-aggregate-gas-cell-import-submitted');
+  assert.equal(result.farAggregateGasCellImport.gasPressureCellRowCount, 3);
+  assert.equal(result.farAggregateGasCellImport.pressureInterfaceGasPressureCellRowCount, 3);
+  assert.equal(result.farAggregateGasCellImport.pressureInterfaceImportReady, true);
+  assert.equal(result.farAggregateGasCellImport.retainedGasCellFieldSourceReady, true);
+  assert.equal(result.farAggregateGasCellImport.retainedGasPressureCellsBuffer, true);
+  assert.equal(result.farAggregateGasCellImport.gasCellFieldSnapshotReady, false);
+  assert.equal(result.farAggregateGasCellImport.localPressureGradientReady, false);
+  assert.equal(
+    result.farAggregateGasCellImport.conservativeTransferStatus,
+    'retained-gas-pressure-cells-ready-for-pressure-interface'
+  );
+  assert.equal(result.farAggregateGasCellImportStatus, 'schroeder-far-aggregate-gas-cell-import-submitted');
+  assert.equal(
+    result.farAggregateGasCellImportConsumerStatus,
+    'far-aggregate-gas-cell-import-forwarded-to-resident-backend'
+  );
   assert.equal(result.farAggregateForceApplication, null);
   assert.equal(result.phaseVolumeMigration, null);
   assert.equal(
     result.conservativeTransferStatus,
-    'pending-gas-pressure-state-delta-requires-admitted-import'
+    'retained-gas-pressure-cells-ready-for-pressure-interface'
   );
   assert.equal(result.stateMutationStatus, 'admitted-far-aggregate-gas-state-delta-buffer-submitted');
   assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-retained-gas-state-delta-buffer');
   assert.equal(result.residentStep.hasFarAggregateLawConsumer, true);
   assert.equal(result.residentStep.hasFarAggregateLawConsumerAuthorityPolicy, true);
   assert.equal(result.residentStep.hasFarAggregateGasStateDelta, true);
+  assert.equal(result.residentStep.hasFarAggregateGasCellImport, true);
   assert.equal(result.residentStep.hasFarAggregateForceApplication, false);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, false);
   assert.equal(calls.length, 1);
@@ -5852,9 +6049,20 @@ test('Schroeder same-level mechanics forwards admitted far-aggregate gas state d
     calls[0].schroederFarAggregateGasStateDelta.schema,
     ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_EXECUTION_SCHEMA
   );
+  assert.equal(
+    calls[0].schroederFarAggregateGasCellImport.schema,
+    ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA
+  );
+  assert.equal(calls[0].schroederFarAggregateGasCellImport.pressureInterfaceImportReady, true);
+  assert.equal(calls[0].schroederFarAggregateGasCellImport.gasPressureCellsBuffer.destroyed, false);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederFarAggregateGasStateDeltaParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederFarAggregateGasCellImportParams')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('gas-state-delta-readback')),
+    false
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('gas-cell-import-readback')),
     false
   );
 });

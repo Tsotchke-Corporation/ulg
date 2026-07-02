@@ -35326,3 +35326,40 @@ Next:
   visible status pane.
 - Keep diagnostic CPU proxy geometry explicit, capped, and outside the
   PeerCompute hot path.
+
+## 2026-07-01 AKDT - SS Performance Telemetry Harness
+
+Status:
+
+- Added compact Schroeder execution/render-proxy telemetry to the long-horizon
+  browser probe under `peercompute.ulg.sph-probe-schroeder-telemetry.v0`.
+- The probe now reports whether SS was requested/active, the config source,
+  selected level, sequence/mechanics status, native grid spacing, active leaf /
+  coherent aggregate / law queue proxy counts, render source and draw source
+  status, retained local resolver status, backend selection, native executor
+  readiness, native submit draw counts, surface-draw bridge, and render-field /
+  render-row readback status.
+- Added `ULG_BENCH_SCHROEDER_SIMULATION`, `ULG_BENCH_SCHROEDER_LEVEL`,
+  `ULG_BENCH_SCHROEDER_PORTABLE_SUMMARY`, and
+  `ULG_BENCH_SCHROEDER_ACTIVE_NODE_INDEX` to the SPH performance benchmark so
+  SS live-path runs can be configured from benchmark env without hand-editing
+  the scenario URL.
+- Lifted the compact SS telemetry into benchmark scenario summaries, keeping
+  native retained-proxy submit evidence and no-readback status visible in the
+  performance artifact rather than only the demo status pane.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check tests/nativeSurfaceHarness.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/nativeSurfaceHarness.test.mjs` with `14/14`
+  passing.
+
+Next:
+
+- Keep diagnostic CPU proxy geometry explicit, capped, and outside the
+  PeerCompute hot path.
+- Start compact PeerCompute replay/admission of SS summaries as descriptors,
+  seeds, or snapshots rather than raw browser `GPUBuffer` handles.

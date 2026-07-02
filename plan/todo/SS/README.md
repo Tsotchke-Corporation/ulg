@@ -189,16 +189,18 @@ Landed checkpoints:
     auto scheduler and batch signature, adds visible SS status telemetry, and
     fixes native surface auto-refresh so URL-configured SS runs submit retained
     native proxy draws without CPU render-field readback.
+51. `6fa1fec` feeds compact SS execution/render-proxy telemetry into the
+    long-horizon probe and performance benchmark output: selected level, native
+    grid spacing, active/coherent/law proxy counts, retained resolver status,
+    backend selection, native executor/submit draw counts, surface-draw bridge,
+    and render-field/render-row readback status.
 
 Next implementation queue:
 
-1. Feed compact SS telemetry into the performance harness output, not only the
-   visible status pane: selected level, native spacing, active leaves, retained
-   proxy draw batches, native submit counts, and render-field readback status.
-2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
+1. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
-3. Publish/replay compact SS summaries across PeerCompute/StateManager
+2. Publish/replay compact SS summaries across PeerCompute/StateManager
    boundaries as descriptors, seeds, or snapshots rather than raw browser
    `GPUBuffer` handles.
-4. Keep the bucket index as the small-scene/default first GPU index and use
+3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

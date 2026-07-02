@@ -2534,6 +2534,122 @@ async function runBrowserProbe({
         residentMechanicsStageWorkerRunnerFactoryReady: host.residentMechanicsStageWorkerRunnerFactoryReady ?? null,
         workerCapability: compactWorkerCapability(host)
       } : null;
+      const compactSchroederTelemetry = ({
+        steps = null,
+        residentStep = null,
+        renderState = null,
+        surfaceDraw = null,
+        sceneUserData = {},
+        overlayRef = null
+      } = {}) => {
+        const config = overlayRef?.__sphSchroederSimulationConfig || null;
+        const options = overlayRef?.__mlsMpmSchroederExecutionOptions || null;
+        const mechanics = steps?.schroederSameLevelMechanics
+          || residentStep?.schroederSameLevelMechanics
+          || null;
+        const portableSummary = steps?.portableSummary
+          || residentStep?.portableSummary
+          || mechanics?.portableSummary
+          || null;
+        const renderLod = portableSummary?.renderLod
+          || steps?.renderLod
+          || mechanics?.renderLod
+          || null;
+        const renderSource = sceneUserData.schroederRenderSource || null;
+        const drawSource = sceneUserData.schroederRenderProxyDrawSource || null;
+        const backendSelection = sceneUserData.schroederRenderProxyBackendSelection || null;
+        const localRetained = steps?.schroederLocalRetainedRenderBuffers
+          || steps?.localRetainedRenderBuffers
+          || null;
+        const requested = Boolean(config?.enabled || options?.schroederSimulation);
+        const active = Boolean(steps?.schroederSimulation || residentStep?.schroederSimulation);
+        if (!requested && !active && !renderSource && !drawSource && !backendSelection) return null;
+        return {
+          schema: 'peercompute.ulg.sph-probe-schroeder-telemetry.v0',
+          requested,
+          active,
+          configSource: config?.source ?? null,
+          selectedLevel: finiteOrNull(
+            renderLod?.selectedLevel
+            ?? renderSource?.selectedLevel
+            ?? mechanics?.selectedLevel
+            ?? options?.schroederSelectedLevel
+            ?? config?.selectedLevel
+          ),
+          sequenceStatus:
+            steps?.schroederSameLevelSequenceStatus
+            || residentStep?.schroederSameLevelSequenceStatus
+            || null,
+          mechanicsStatus: mechanics?.status ?? null,
+          residentComputeManagerMode: steps?.residentComputeManagerMode ?? null,
+          portableSummaryStatus: portableSummary?.status ?? null,
+          renderLodStatus: portableSummary?.renderLodStatus ?? renderLod?.status ?? null,
+          nativeGridSpacingM: finiteOrNull(
+            renderLod?.nativeGridSpacingM
+            ?? renderSource?.nativeGridSpacingM
+            ?? mechanics?.mechanicsGridSpacingM
+          ),
+          activeLeafProxyCount: finiteOrNull(
+            renderLod?.activeLeafProxyCount
+            ?? renderSource?.activeLeafProxyCount
+            ?? drawSource?.activeLeafProxyCount
+          ),
+          aggregateProxyCount: finiteOrNull(
+            renderLod?.aggregateProxyCount
+            ?? renderSource?.aggregateProxyCount
+            ?? drawSource?.aggregateProxyCount
+          ),
+          lawQueueProxyCount: finiteOrNull(
+            renderLod?.lawQueueProxyCount
+            ?? renderSource?.lawQueueProxyCount
+            ?? drawSource?.lawQueueProxyCount
+          ),
+          renderSourceStatus: renderSource?.status ?? null,
+          renderSourcePresentationReady: renderSource?.renderLodPresentationReady ?? null,
+          drawSourceStatus: drawSource?.status ?? null,
+          drawBatchCount: finiteOrNull(drawSource?.drawBatchCount),
+          localRetainedResolverStatus:
+            localRetained?.status
+            ?? renderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverStatus
+            ?? null,
+          localRetainedRefCount: finiteOrNull(
+            localRetained?.retainedBufferRefs?.length
+            ?? renderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+          ),
+          backendSelectionStatus: backendSelection?.status ?? null,
+          backendSelected: backendSelection?.selectedBackend ?? null,
+          backendNativeSubmitReady: backendSelection?.nativeSubmitReady ?? null,
+          nativeExecutorStatus:
+            renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorStatus
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorStatus
+            ?? null,
+          nativeExecutorReady:
+            renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorReady
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorReady
+            ?? null,
+          nativeExecutorDrawCommandCount: finiteOrNull(
+            renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount
+          ),
+          nativeLastSubmitStatus:
+            renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitStatus
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitStatus
+            ?? null,
+          nativeLastSubmitDrawCommandCount: finiteOrNull(
+            renderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+            ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+          ),
+          renderFieldReadback: renderState?.renderFieldReadback ?? null,
+          renderRowsReadback: renderState?.renderRowsReadback ?? null,
+          surfaceDrawStatus: surfaceDraw?.status ?? renderState?.surfaceDrawStatus ?? null,
+          surfaceDrawBridge:
+            surfaceDraw?.visibleRendererBridge
+            ?? renderState?.surfaceDrawVisibleRendererBridge
+            ?? null
+        };
+      };
       const sample = (batchIndex, phase, batchMs = null) => {
         const steps = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || execution || null;
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
@@ -2626,6 +2742,14 @@ async function runBrowserProbe({
         residentWebGpuDeviceTextureReadbackSmoke:
           sceneUserData.sphResidentWebGpuDeviceTextureReadbackSmoke || null,
         nativeSurfaceValidation: nativeSurfaceValidationSnapshot(),
+        schroederTelemetry: compactSchroederTelemetry({
+          steps,
+          residentStep,
+          renderState,
+          surfaceDraw,
+          sceneUserData,
+          overlayRef: overlay
+        }),
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
         residentMaterialInterfaceState: residentMaterialInterfaceState ? {
           schema: residentMaterialInterfaceState.schema ?? null,

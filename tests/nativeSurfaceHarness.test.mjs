@@ -125,6 +125,62 @@ test('performance benchmark reports worker offscreen frame transport budget', ()
   );
 });
 
+test('performance benchmark reports Schroeder native render proxy telemetry', () => {
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+
+  assert.match(
+    probeSource,
+    /peercompute\.ulg\.sph-probe-schroeder-telemetry\.v0/,
+    'long-horizon probe should publish a stable Schroeder telemetry schema'
+  );
+  assert.match(
+    probeSource,
+    /compactSchroederTelemetry/,
+    'long-horizon probe should collect Schroeder execution and render-proxy status together'
+  );
+  assert.match(
+    probeSource,
+    /surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount/,
+    'Schroeder telemetry should include native executor draw submissions'
+  );
+  assert.match(
+    benchmarkSource,
+    /ULG_BENCH_SCHROEDER_SIMULATION/,
+    'benchmark should expose an opt-in SS scenario flag'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederPortableSummaryRequested/,
+    'benchmark should record whether portable summaries are enabled for the SS run'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederActiveNodeIndexRequested/,
+    'benchmark should record whether the SS active-node index is enabled'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederTelemetry,/,
+    'benchmark scenarios should retain the compact Schroeder telemetry object'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederNativeLastSubmitDrawCommandCount/,
+    'benchmark should lift native render-proxy draw submissions into scenario summaries'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederRenderFieldReadback/,
+    'benchmark should expose whether SS native rendering avoided render-field readback'
+  );
+  assert.match(
+    benchmarkSource,
+    /schroederActiveLeafProxyCount/,
+    'benchmark should expose render LOD active leaf proxy counts'
+  );
+});
+
 test('direct resident throughput benchmark does not default to per-batch queue fences', () => {
   const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
   const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');

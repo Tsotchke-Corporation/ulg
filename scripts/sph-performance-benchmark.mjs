@@ -48,6 +48,23 @@ const presentationWorkerResidentStagesRequested = ['1', 'true', 'yes', 'on'].inc
 const retainedCompactSnapshotExportRequested = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ULG_BENCH_RETAINED_COMPACT_SNAPSHOT_EXPORT || '').toLowerCase()
 );
+const schroederSimulationRequested = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.ULG_BENCH_SCHROEDER_SIMULATION || '').toLowerCase()
+);
+const schroederSelectedLevel = Number.isFinite(Number(process.env.ULG_BENCH_SCHROEDER_LEVEL))
+  && Number(process.env.ULG_BENCH_SCHROEDER_LEVEL) >= 0
+  ? Math.round(Number(process.env.ULG_BENCH_SCHROEDER_LEVEL))
+  : 0;
+const schroederPortableSummaryRequested = ['0', 'false', 'no', 'off'].includes(
+  String(process.env.ULG_BENCH_SCHROEDER_PORTABLE_SUMMARY || '').toLowerCase()
+)
+  ? false
+  : schroederSimulationRequested;
+const schroederActiveNodeIndexRequested = ['0', 'false', 'no', 'off'].includes(
+  String(process.env.ULG_BENCH_SCHROEDER_ACTIVE_NODE_INDEX || '').toLowerCase()
+)
+  ? false
+  : schroederSimulationRequested;
 const renderOwnershipMode = String(process.env.ULG_BENCH_RENDER_OWNERSHIP || '').trim();
 const renderOwnershipUseCase = String(
   process.env.ULG_BENCH_RENDER_USE_CASE
@@ -184,6 +201,12 @@ function scenarioUrlForCount(targetCount) {
     ...(workerOffscreenPresentationRequested ? { workerOffscreenPresentation: '1' } : {}),
     ...(presentationWorkerResidentStagesRequested ? { presentationWorkerResidentStages: '1' } : {}),
     ...(retainedCompactSnapshotExportRequested ? { retainedCompactSnapshotExport: '1' } : {}),
+    ...(schroederSimulationRequested ? {
+      ss: '1',
+      schroederLevel: String(schroederSelectedLevel),
+      schroederPortableSummary: schroederPortableSummaryRequested ? '1' : '0',
+      schroederActiveNodeIndex: schroederActiveNodeIndexRequested ? '1' : '0'
+    } : {}),
     ...(renderOwnershipMode ? { renderOwnership: renderOwnershipMode } : {}),
     ...(renderOwnershipUseCase ? { renderUseCase: renderOwnershipUseCase } : {}),
     ...(residentInterfaceRefreshWarmupFrames != null
@@ -630,6 +653,40 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     dpr: deviceScaleFactor,
     refreshHz: workerOffscreenTargetFps
   });
+  const schroederTelemetry = metric?.schroederTelemetry || null;
+  const schroederSimulationRequestedMetric = schroederTelemetry?.requested ?? null;
+  const schroederSimulationActive = schroederTelemetry?.active ?? null;
+  const schroederConfigSource = schroederTelemetry?.configSource ?? null;
+  const schroederSelectedLevelMetric = numberOrNull(schroederTelemetry?.selectedLevel);
+  const schroederSequenceStatus = schroederTelemetry?.sequenceStatus ?? null;
+  const schroederMechanicsStatus = schroederTelemetry?.mechanicsStatus ?? null;
+  const schroederResidentComputeManagerMode = schroederTelemetry?.residentComputeManagerMode ?? null;
+  const schroederPortableSummaryStatus = schroederTelemetry?.portableSummaryStatus ?? null;
+  const schroederRenderLodStatus = schroederTelemetry?.renderLodStatus ?? null;
+  const schroederNativeGridSpacingM = numberOrNull(schroederTelemetry?.nativeGridSpacingM);
+  const schroederActiveLeafProxyCount = numberOrNull(schroederTelemetry?.activeLeafProxyCount);
+  const schroederAggregateProxyCount = numberOrNull(schroederTelemetry?.aggregateProxyCount);
+  const schroederLawQueueProxyCount = numberOrNull(schroederTelemetry?.lawQueueProxyCount);
+  const schroederRenderSourceStatus = schroederTelemetry?.renderSourceStatus ?? null;
+  const schroederRenderSourcePresentationReady = schroederTelemetry?.renderSourcePresentationReady ?? null;
+  const schroederDrawSourceStatus = schroederTelemetry?.drawSourceStatus ?? null;
+  const schroederDrawBatchCount = numberOrNull(schroederTelemetry?.drawBatchCount);
+  const schroederLocalRetainedResolverStatus = schroederTelemetry?.localRetainedResolverStatus ?? null;
+  const schroederLocalRetainedRefCount = numberOrNull(schroederTelemetry?.localRetainedRefCount);
+  const schroederBackendSelectionStatus = schroederTelemetry?.backendSelectionStatus ?? null;
+  const schroederBackendSelected = schroederTelemetry?.backendSelected ?? null;
+  const schroederBackendNativeSubmitReady = schroederTelemetry?.backendNativeSubmitReady ?? null;
+  const schroederNativeExecutorStatus = schroederTelemetry?.nativeExecutorStatus ?? null;
+  const schroederNativeExecutorReady = schroederTelemetry?.nativeExecutorReady ?? null;
+  const schroederNativeExecutorDrawCommandCount =
+    numberOrNull(schroederTelemetry?.nativeExecutorDrawCommandCount);
+  const schroederNativeLastSubmitStatus = schroederTelemetry?.nativeLastSubmitStatus ?? null;
+  const schroederNativeLastSubmitDrawCommandCount =
+    numberOrNull(schroederTelemetry?.nativeLastSubmitDrawCommandCount);
+  const schroederRenderFieldReadback = schroederTelemetry?.renderFieldReadback ?? null;
+  const schroederRenderRowsReadback = schroederTelemetry?.renderRowsReadback ?? null;
+  const schroederSurfaceDrawStatus = schroederTelemetry?.surfaceDrawStatus ?? null;
+  const schroederSurfaceDrawBridge = schroederTelemetry?.surfaceDrawBridge ?? null;
   const peerComputeRenderOwnershipPolicy = metric?.peerComputeRenderOwnershipPolicy
     ?? renderState?.peerComputeRenderOwnershipPolicy
     ?? metric?.rendererInit?.peerComputeRenderOwnershipPolicy
@@ -2382,6 +2439,38 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     activeGridNodeCountSource,
     activeGridRatio,
     activeGridDispatch,
+    schroederTelemetry,
+    schroederSimulationRequested: schroederSimulationRequestedMetric,
+    schroederSimulationActive,
+    schroederConfigSource,
+    schroederSelectedLevel: schroederSelectedLevelMetric,
+    schroederSequenceStatus,
+    schroederMechanicsStatus,
+    schroederResidentComputeManagerMode,
+    schroederPortableSummaryStatus,
+    schroederRenderLodStatus,
+    schroederNativeGridSpacingM,
+    schroederActiveLeafProxyCount,
+    schroederAggregateProxyCount,
+    schroederLawQueueProxyCount,
+    schroederRenderSourceStatus,
+    schroederRenderSourcePresentationReady,
+    schroederDrawSourceStatus,
+    schroederDrawBatchCount,
+    schroederLocalRetainedResolverStatus,
+    schroederLocalRetainedRefCount,
+    schroederBackendSelectionStatus,
+    schroederBackendSelected,
+    schroederBackendNativeSubmitReady,
+    schroederNativeExecutorStatus,
+    schroederNativeExecutorReady,
+    schroederNativeExecutorDrawCommandCount,
+    schroederNativeLastSubmitStatus,
+    schroederNativeLastSubmitDrawCommandCount,
+    schroederRenderFieldReadback,
+    schroederRenderRowsReadback,
+    schroederSurfaceDrawStatus,
+    schroederSurfaceDrawBridge,
     visualRefreshHzEstimate: probeWallRefreshHz,
     compactSummaryMeanBatchShare: analysis.compactSummaryMeanBatchShare ?? null,
     browserConsoleIssueCount,
@@ -2804,6 +2893,10 @@ async function main() {
       })
     },
     surfaceDrawMode,
+    schroederSimulationRequested,
+    schroederSelectedLevel,
+    schroederPortableSummaryRequested,
+    schroederActiveNodeIndexRequested,
     materialInterfaceDiagnosticRequested,
     materialInterfaceCandidateReadbackMode,
     fusedResidentMechanicsSequence: fuseResidentMechanicsSequence,

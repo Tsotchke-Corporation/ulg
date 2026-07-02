@@ -73,6 +73,8 @@ import {
   resolveResidentSurfaceVisibleGpuConsumer,
   resolveSphNativeWebGpuSurfaceValidationCadence,
   summarizeThreeWebGpuDeviceLimits,
+  buildSchroederPressureInterfaceGasCellFieldImportPublicationFromResidentExecution,
+  selectSchroederPressureInterfaceGasCellFieldImportFromResidentExecution,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
@@ -121,6 +123,7 @@ import {
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
@@ -4896,6 +4899,88 @@ test('SPH scene asks resident authority host to admit gas-cell fields before imp
   });
   assert.equal(state.pressureInterfaceGasCellFieldAdmissionPublicationStatus, 'pressure-interface-gas-cell-field-admission-published');
   assert.equal(state.pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey, 'ulg:test:scene-gas-cell-admission-hot-buffer');
+});
+
+test('SPH scene promotes retained Schroeder gas-cell rows for pressure-interface scheduling', () => {
+  const gasPressureCellsBuffer = { label: 'retained-ss-gas-pressure-cells-buffer' };
+  const schroederGasCellImport = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-gas-cell-import-submitted',
+    pressureInterfaceImportReady: true,
+    gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellsBuffer: gasPressureCellsBuffer,
+    gasPressureCellRowsBufferRetained: true,
+    pressureInterfaceGasPressureCellRowsBufferRetained: true,
+    gasPressureCellRowCount: 2,
+    pressureInterfaceGasPressureCellRowCount: 2,
+    gasPressureCellRowStrideFloats: 12,
+    pressureInterfaceGasPressureCellRowStrideFloats: 12,
+    gasPressureCellRowByteLength: 96,
+    pressureInterfaceGasPressureCellRowByteLength: 96,
+    pressureFieldMode: 'local-gas-cell-pressure-gradient',
+    pressureFieldResolution: 'structured-gas-cell-grid',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    retainedGasCellFieldSource: {
+      schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+      status: 'pressure-interface-retained-gas-cell-field-source-ready',
+      sourceHotBufferKey: 'ulg:test:ss-gas-cell-source',
+      sourceStage: 'schroederFarAggregateGasCellImport',
+      retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+      workerRetainedGasPressureBufferRefs: ['worker:resident-gas-pressure-cells-buffer'],
+      pressureInterfaceGasPressureCellRowCount: 2,
+      pressureInterfaceGasPressureCellRowStrideFloats: 12,
+      pressureInterfaceGasPressureCellRowByteLength: 96,
+      pressureInterfaceGasPressureCellRowsBufferRetained: true
+    }
+  };
+  const execution = {
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    status: 'resident-steps-executed',
+    schroederSimulation: true,
+    computeManagerTask: {
+      acceptedTaskId: 'ulg:test:ss-resident-steps',
+      stateKey: 'ulg:test:ss-resident-state'
+    },
+    finalStep: {
+      schroederFarAggregateGasCellImport: schroederGasCellImport
+    }
+  };
+
+  const selected = selectSchroederPressureInterfaceGasCellFieldImportFromResidentExecution(execution);
+  const publication = buildSchroederPressureInterfaceGasCellFieldImportPublicationFromResidentExecution({
+    execution,
+    source: 'test-ss-pressure-interface-promotion',
+    sourceCadence: 'schroeder-same-level-resident-step-completed'
+  });
+
+  assert.equal(selected, schroederGasCellImport);
+  assert.equal(publication.status, 'schroeder-pressure-interface-gas-cell-field-import-promoted');
+  assert.equal(publication.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldImportSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.equal(publication.schroederFarAggregateGasCellImportSchema, ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.gasPressureCellsBuffer, gasPressureCellsBuffer);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.sourceSchema, ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.sourceTaskId, 'ulg:test:ss-resident-steps');
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.sourceHotBufferKey, 'ulg:test:ss-gas-cell-source');
+  assert.deepEqual(publication.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.deepEqual(publication.workerRetainedGasPressureBufferRefs, ['worker:resident-gas-pressure-cells-buffer']);
+  assert.equal(publication.pressureInterfaceGasPressureCellRowCount, 2);
+  assert.equal(publication.pressureInterfaceGasCellFieldAdmissionApproved, true);
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField: {
+      schema: 'peercompute.ulg.sph-material-interface-field.v0',
+      status: 'material-interface-field-ready',
+      readySurfaceCount: 0,
+      totalSurfaceAreaM2: 0,
+      elementCount: 0,
+      elements: []
+    },
+    pressureInterfaceGasCellFieldImportPublication: publication
+  });
+  assert.equal(state.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(state.pressureInterfaceGasCellFieldImport.gasPressureCellsBuffer, gasPressureCellsBuffer);
+  assert.deepEqual(state.pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
 });
 
 test('SPH scene publishes gas-cell import from gas-cell EOS producer result source', () => {

@@ -355,7 +355,11 @@ Suggested schemas:
   reuse telemetry through lane summaries, pressure-interface worker publication
   candidates, and mounted worker-lane reports, including explicit
   retained/borrowed row consumption status without trying to transfer
-  main-thread `GPUBuffer` handles into the dedicated worker lane.
+  main-thread `GPUBuffer` handles into the dedicated worker lane. `0a91ae6`
+  reuses retained SS gas-cell imports as descriptor-backed pressure-feedback
+  inputs: retained GPU rows are accepted as local-gradient-ready but
+  unvalidated gas-cell fields without CPU cell snapshots, and scene pressure
+  refreshes inject promoted SS imports into next-frame same-level feedback.
 
 ### Slice 8: Render And Distribution
 
@@ -389,11 +393,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - use promoted SS pressure-interface gas-cell imports as explicit
-     next-frame pressure-feedback input across repeated same-level scene
-     schedules;
-   - keep mounted worker-lane pressure imports descriptor-only until a
-     worker-owned retained import/admission path can consume worker-local refs;
+   - add a worker-owned retained gas-cell import/admission path for dedicated
+     mounted worker lanes, keeping PeerCompute boundaries descriptor-only and
+     consuming only worker-local retained refs;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -452,13 +454,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS pressure-feedback input reuse**:
+The next code slice on `SS` is **SS worker-owned pressure import reuse**:
 
-1. Reuse promoted `schroeder-far-aggregate-gas-cell-import` descriptors as
-   next-frame pressure-feedback inputs across repeated same-level scene
-   schedules.
+1. Add a worker-owned retained gas-cell import/admission path for mounted
+   worker lanes so pressure/interface stages can consume worker-local retained
+   refs without cloning or posting main-thread `GPUBuffer` handles.
 2. Preserve the boundary between far aggregate gas pressure summaries and
    exact-near-field pressure/interface contact work.
-3. Keep mounted worker lanes descriptor-only until a worker-owned retained
-   gas-cell import/admission path can consume worker-local refs, and do not
-   introduce full particle readback as the validation path.
+3. Keep descriptor-only PeerCompute replay artifacts and do not introduce full
+   particle readback as the validation path.

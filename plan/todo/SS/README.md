@@ -276,13 +276,18 @@ Landed checkpoints:
     mounted worker-lane report distinguishes main-thread promoted imports from
     worker-lane consumption instead of implying cross-worker `GPUBuffer`
     transfer.
+68. `0a91ae6` reuses retained SS gas-cell imports as pressure-feedback inputs.
+    The runtime now normalizes retained pressure rows into a descriptor-backed
+    gas-cell field without CPU cell snapshots, shared gas-pressure feedback
+    summaries accept retained row metadata as local-gradient-ready but
+    unvalidated, and the scene pressure refresh injects promoted SS imports
+    into next-frame same-level pressure feedback.
 
 Next implementation queue:
 
-1. Continue Slice 7 by turning promoted SS pressure-interface gas-cell imports
-   into explicit next-frame pressure-feedback inputs for repeated same-level
-   scene schedules. Keep dedicated mounted worker lanes descriptor-only until a
-   worker-owned retained import/admission path exists.
+1. Continue Slice 7 by adding a worker-owned retained gas-cell import/admission
+   path for dedicated mounted worker lanes. Keep the boundary descriptor-only
+   across PeerCompute and consume only worker-local retained refs.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

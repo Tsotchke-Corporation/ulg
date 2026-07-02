@@ -92,6 +92,7 @@ export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_EXECUTION_SCHEMA = 'peerco
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-admission.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-diagnostic-summary.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-diagnostic-summary-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_LAW_CONSUMER_AUTHORITY_POLICY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-law-consumer-authority-policy.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ADMISSION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-application-admission.v0';

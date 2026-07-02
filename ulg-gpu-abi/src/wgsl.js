@@ -7893,3 +7893,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   state_delta_rows[state_delta_offset + 31u] = 0.0;
 }
 `;
+
+export const schroederCrossLevelStateDeltaMergeWgsl = `
+struct SchroederCrossLevelStateDeltaMergeParams {
+  candidate_count: u32,
+  state_delta_stride: u32,
+  merge_stride: u32,
+  flags: u32,
+  merge_epoch: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> state_delta_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> merge_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederCrossLevelStateDeltaMergeParams;
+
+const SCHROEDER_DEFAULT_STATE_DELTA_STRIDE_FOR_MERGE: u32 = 32u;
+const SCHROEDER_DEFAULT_STATE_DELTA_MERGE_STRIDE: u32 = 32u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  if (candidate_index >= params.candidate_count) {
+    return;
+  }
+
+  let state_delta_stride = max(params.state_delta_stride, SCHROEDER_DEFAULT_STATE_DELTA_STRIDE_FOR_MERGE);
+  let merge_stride = max(params.merge_stride, SCHROEDER_DEFAULT_STATE_DELTA_MERGE_STRIDE);
+  let state_delta_offset = candidate_index * state_delta_stride;
+  let merge_offset = candidate_index * merge_stride;
+
+  for (var column = 0u; column < 30u; column = column + 1u) {
+    merge_rows[merge_offset + column] = state_delta_rows[state_delta_offset + column];
+  }
+  merge_rows[merge_offset + 30u] = 1.0;
+  merge_rows[merge_offset + 31u] = params.merge_epoch;
+}
+`;

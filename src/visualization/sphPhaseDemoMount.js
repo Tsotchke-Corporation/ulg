@@ -5047,6 +5047,63 @@ export async function mountSphPhaseDemoOverlay({
     };
   }
 
+  function mountedPressureInterfaceGasCellImportTelemetry() {
+    const pressureState = scene.getSphResidentPressureInterfaceState?.()
+      || overlay.__sphResidentPressureInterfaceState
+      || null;
+    const publication = pressureState?.pressureInterfaceGasCellFieldImportPublication
+      || scene.userData?.sphPressureInterfaceGasCellFieldImportPublication
+      || null;
+    const importDescriptor = pressureState?.pressureInterfaceGasCellFieldImport
+      || publication?.pressureInterfaceGasCellFieldImport
+      || scene.userData?.sphPressureInterfaceGasCellFieldImport
+      || null;
+    const rowCount = Math.max(0, Number(
+      importDescriptor?.pressureInterfaceGasPressureCellRowCount
+        ?? importDescriptor?.gasPressureCellRowCount
+        ?? publication?.pressureInterfaceGasPressureCellRowCount
+        ?? 0
+    ) || 0);
+    const rowByteLength = Math.max(0, Number(
+      importDescriptor?.pressureInterfaceGasPressureCellRowByteLength
+        ?? importDescriptor?.gasPressureCellRowByteLength
+        ?? publication?.pressureInterfaceGasPressureCellRowByteLength
+        ?? 0
+    ) || 0);
+    const importReady = pressureState?.pressureInterfaceGasCellFieldImportReady === true
+      || publication?.pressureInterfaceGasCellFieldImportReady === true
+      || importDescriptor?.status === 'pressure-interface-gas-cell-field-import-ready'
+      || importDescriptor?.pressureInterfaceImportReady === true;
+    return {
+      pressureInterfaceGasCellFieldImportAvailable: importReady,
+      pressureInterfaceGasCellFieldImportSchema: importDescriptor?.schema || publication?.pressureInterfaceGasCellFieldImportSchema || null,
+      pressureInterfaceGasCellFieldImportStatus: importDescriptor?.status || publication?.pressureInterfaceGasCellFieldImportStatus || null,
+      pressureInterfaceGasCellFieldImportSourceHotBufferKey:
+        importDescriptor?.sourceHotBufferKey
+          || publication?.pressureInterfaceGasCellFieldImportSourceHotBufferKey
+          || publication?.hotBufferKey
+          || null,
+      pressureInterfaceGasPressureCellRowCount: rowCount,
+      pressureInterfaceGasPressureCellRowByteLength: rowByteLength,
+      pressureInterfaceGasPressureCellRowsBufferRetained:
+        importDescriptor?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+        || importDescriptor?.gasPressureCellRowsBufferRetained === true,
+      pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer:
+        Boolean(
+          importDescriptor?.retainedGasPressureCellsBuffer
+            || importDescriptor?.gasPressureCellsBuffer
+            || importDescriptor?.pressureInterfaceGasPressureCellsBuffer
+        ),
+      schroederPressureInterfaceGasCellFieldImportPromotionStatus:
+        pressureState?.schroederPressureInterfaceGasCellFieldImportPromotionStatus
+          || scene.userData?.sphPressureInterfaceGasCellFieldImportPublication?.status
+          || null,
+      mountedWorkerLanePressureInterfaceGasCellImportTransferStatus: importReady
+        ? 'main-thread-retained-import-observed-not-posted-to-worker-lane'
+        : 'no-main-thread-retained-import'
+    };
+  }
+
   function publishMountedMechanicsStageWorkerLane(status, extra = {}) {
     const report = mountedMechanicsStageWorkerLaneReport(status, extra);
     overlay.__sphMountedMechanicsStageWorkerLane = report;
@@ -5082,7 +5139,8 @@ export async function mountSphPhaseDemoOverlay({
       scheduleToken,
       generation,
       sequence,
-      workerCapabilityStatus: resolvedHost?.workerCapability?.status || null
+      workerCapabilityStatus: resolvedHost?.workerCapability?.status || null,
+      ...mountedPressureInterfaceGasCellImportTelemetry()
     });
     pendingMountedMechanicsStageWorkerLanePromise = (async () => {
       if (!resolvedHost || typeof resolvedHost.runMechanicsStageTaskChain !== 'function') {
@@ -5203,6 +5261,7 @@ export async function mountSphPhaseDemoOverlay({
           });
         }
         const stageLaneSummaries = chain?.gpuResidentLaneStageTaskLaneSummaries || {};
+        const pressureStageLaneSummary = stageLaneSummaries.pressureInterface || null;
         const stageCopyBudgetPresent = Object.values(stageLaneSummaries)
           .some((summary) => Boolean(summary?.copyBudget));
         const stageCopyBudgetTotals = Object.values(stageLaneSummaries).reduce((totals, summary) => ({
@@ -5260,6 +5319,22 @@ export async function mountSphPhaseDemoOverlay({
             sameDeviceRetainedBufferImportAvailable:
               sameDeviceRetainedBufferImport?.sameDevice === true && Boolean(sameDeviceSourceHotBufferKey),
             sameDeviceRetainedBufferImportSourceHotBufferKey: sameDeviceSourceHotBufferKey,
+            ...mountedPressureInterfaceGasCellImportTelemetry(),
+            pressureInterfaceWorkerLaneSummaryPresent: Boolean(pressureStageLaneSummary),
+            pressureInterfaceWorkerLaneGasCellFieldImportReady:
+              pressureStageLaneSummary?.pressureInterfaceGasCellFieldImportReady === true,
+            pressureInterfaceWorkerLaneRetainedLocalPressureGradientReady:
+              pressureStageLaneSummary?.pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady === true,
+            pressureInterfaceWorkerLaneRetainedGasPressureCellsBuffer:
+              pressureStageLaneSummary?.pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer === true,
+            pressureInterfaceWorkerLaneGasPressureCellRowsBufferRetained:
+              pressureStageLaneSummary?.pressureInterfaceGasPressureCellRowsBufferRetained === true,
+            pressureInterfaceWorkerLaneGasPressureCellRowsBufferBorrowed:
+              pressureStageLaneSummary?.pressureInterfaceGasPressureCellRowsBufferBorrowed === true,
+            pressureInterfaceWorkerLaneRetainedRowConsumptionStatus:
+              pressureStageLaneSummary?.pressureInterfaceRetainedRowConsumptionStatus
+                || chain?.pressureInterfaceRetainedRowConsumptionStatus
+                || null,
             stageChainStatus: chain?.status || null,
             gpuResidentLaneStagePlanLaneId: chain?.gpuResidentLaneStagePlanLaneId || null,
             gpuResidentLaneStagePlanStateKey: chain?.gpuResidentLaneStagePlanStateKey || null,

@@ -3462,10 +3462,11 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   assert.equal(admissionCalls[0].sourceStage, 'gasCellEosProducer');
   assert.equal(importCalls[0].source.retainedGasCellFieldSource.schema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
   assert.equal(importCalls[0].gasCellFieldSnapshot.localPressureGradientReady, true);
-  assert.equal(
-    step.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.pressureInterface.pressureInterfaceGasCellFieldImportReady,
-    true
-  );
+  const pressureLaneSummary =
+    step.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.pressureInterface;
+  assert.equal(pressureLaneSummary.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(pressureLaneSummary.pressureInterfaceGasPressureCellRowCount, 2);
+  assert.ok(pressureLaneSummary.pressureInterfaceGasPressureCellRowByteLength > 0);
 });
 
 test('SPH pressure interface stage compute task declares retained force-row output without authority mutation', async () => {

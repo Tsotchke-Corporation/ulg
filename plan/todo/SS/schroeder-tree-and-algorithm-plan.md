@@ -255,7 +255,9 @@ Suggested schemas:
   `f74c836`; row-aligned retained phase-volume level-update assignment overlays
   for active-node level selection landed in `3257cf4`; sparse source-particle
   overlay indexing and same-level next-tick overlay descriptors landed in
-  `4a4e6f0`.
+  `4a4e6f0`; same-device scene feedback caching, resident-step scheduling
+  consumption, local-only summary diagnostics, and retained overlay preservation
+  landed in `f06ed2d`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -492,16 +494,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume overlay feedback into mounted
-resident scheduling**:
+The next code slice on `SS` is **SS phase-volume feedback browser proof and
+active-node telemetry**:
 
-1. Cache `phaseVolumeNextTickAssignmentOverlay` and its retained source refs in
-   the same-device scene/resident authority state after a same-level run
-   produces admitted level-update rows.
-2. Feed that cached descriptor into the next scheduled
-   `runSchroederSameLevelMechanicsWebGpu` call as `phaseVolumeAssignmentOverlay`
-   plus a retained sparse index when required; do not post raw `GPUBuffer`
+1. Add a mounted-demo/browser diagnostic gate that drives a visible
+   water-to-steam phase-volume update, then verifies the following resident tick
+   reports `schroederPhaseVolumeAssignmentOverlayFeedbackReady=true` and active
+   node selection consumes the cached overlay.
+2. Surface the scene/userData telemetry needed to distinguish row-aligned
+   overlays from sparse auto-indexed overlays without publishing raw `GPUBuffer`
    handles across PeerCompute or worker boundaries.
-3. Add browser/demo-facing diagnostics proving a current water-to-steam level
-   update becomes active-node selection input on the following tick while
-   sparse/row-aligned fallback statuses remain explicit.
+3. Capture a fresh VPN-visible browser run with no black-screen regression,
+   retained animation, and no full-particle readback in the normal SS hot path.

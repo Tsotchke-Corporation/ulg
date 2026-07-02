@@ -1258,6 +1258,36 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT = Object.freeze(
   'admissionApproved:f32',
   'mergeEpoch:f32'
 ]);
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-restriction.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_RESTRICTION_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-restriction-execution.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-prolongation.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-prolongation-execution.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-conservation-summary.v0';
+export const ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-cross-level-grid-conservation-summary-execution.v0';
+export const SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'fineMassKg:f32',
+  'fineMomentumXKgMPerS:f32',
+  'fineMomentumYKgMPerS:f32',
+  'fineMomentumZKgMPerS:f32',
+  'coarseMassKg:f32',
+  'coarseMomentumXKgMPerS:f32',
+  'coarseMomentumYKgMPerS:f32',
+  'coarseMomentumZKgMPerS:f32',
+  'massResidualKg:f32',
+  'momentumResidualXKgMPerS:f32',
+  'momentumResidualYKgMPerS:f32',
+  'momentumResidualZKgMPerS:f32',
+  'fineActiveNodeCount:f32',
+  'coarseActiveNodeCount:f32',
+  'status:f32',
+  'couplingEpoch:f32'
+]);
 export const SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT = Object.freeze([
   'targetAggregateKey:f32',
   'levelId:f32',

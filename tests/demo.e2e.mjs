@@ -11301,3 +11301,194 @@ async function readServiceArtifactTelemetryRecord(page, serviceId) {
     artifact.ref.sourceService === sourceService
   )), serviceId);
 }
+
+test('Schroeder cross-level grid coupling conserves mass and momentum numerically on GPU', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const coupling = await import('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
+
+    const GPUBufferUsageRef = globalThis.GPUBufferUsage;
+    const makeGridBuffer = (label, rows) => {
+      const buffer = device.createBuffer({
+        label,
+        size: Math.max(16, rows.byteLength),
+        usage: GPUBufferUsageRef.STORAGE | GPUBufferUsageRef.COPY_DST | GPUBufferUsageRef.COPY_SRC
+      });
+      device.queue.writeBuffer(buffer, 0, rows);
+      return buffer;
+    };
+    const readbackGridBuffer = async (buffer, floatCount) => {
+      const readBuffer = device.createBuffer({
+        size: floatCount * 4,
+        usage: GPUBufferUsageRef.MAP_READ | GPUBufferUsageRef.COPY_DST
+      });
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(buffer, 0, readBuffer, 0, floatCount * 4);
+      device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const rows = new Float32Array(readBuffer.getMappedRange()).slice(0, floatCount);
+      readBuffer.unmap();
+      readBuffer.destroy();
+      return rows;
+    };
+
+    let seed = 20260702;
+    const random = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+
+    const plan = coupling.createSchroederCrossLevelGridCouplingPlan({
+      fineGridDims: [9, 7, 6],
+      fineGridSpacingM: 0.25,
+      gridOriginM: [0, 0, 0]
+    });
+    const stride = plan.gridStrideFloats;
+
+    // Random massive/empty fine grid with expected float64 totals.
+    const fineRows = new Float32Array(plan.fineNodeCount * stride);
+    let expectedMass = 0;
+    const expectedMomentum = [0, 0, 0];
+    for (let index = 0; index < plan.fineNodeCount; index += 1) {
+      const offset = index * stride;
+      const mass = random() < 0.3 ? 0 : 0.05 + random() * 2;
+      const velocity = [random() * 4 - 2, random() * 4 - 2, random() * 4 - 2];
+      fineRows[offset] = mass;
+      fineRows[offset + 1] = mass * velocity[0];
+      fineRows[offset + 2] = mass * velocity[1];
+      fineRows[offset + 3] = mass * velocity[2];
+      fineRows[offset + 7] = mass > 0 ? 1 : 0;
+      expectedMass += fineRows[offset];
+      expectedMomentum[0] += fineRows[offset + 1];
+      expectedMomentum[1] += fineRows[offset + 2];
+      expectedMomentum[2] += fineRows[offset + 3];
+    }
+    const fineBuffer = makeGridBuffer('proof-fine-grid', fineRows);
+
+    const restriction = await coupling.runSchroederCrossLevelGridRestrictionWebGpu({
+      device,
+      plan,
+      fineGridBuffer: fineBuffer
+    });
+    const summary = await coupling.runSchroederCrossLevelGridConservationSummaryWebGpu({
+      device,
+      plan,
+      fineGridBuffer: fineBuffer,
+      coarseGridBuffer: restriction.coarseGridBuffer
+    });
+    const conservation = summary.conservation;
+
+    // Constant velocity field: restrict, zero the fine momentum, prolong the
+    // coarse velocity back, then read the fine grid (diagnostic-only readback)
+    // and verify every massive node recovers the constant field.
+    const constantVelocity = [1.5, -0.75, 2.25];
+    const constantRows = new Float32Array(plan.fineNodeCount * stride);
+    for (let index = 0; index < plan.fineNodeCount; index += 1) {
+      const offset = index * stride;
+      const mass = random() < 0.25 ? 0 : 0.1 + random();
+      constantRows[offset] = mass;
+      constantRows[offset + 1] = mass * constantVelocity[0];
+      constantRows[offset + 2] = mass * constantVelocity[1];
+      constantRows[offset + 3] = mass * constantVelocity[2];
+    }
+    const constantFineBuffer = makeGridBuffer('proof-constant-fine-grid', constantRows);
+    const constantRestriction = await coupling.runSchroederCrossLevelGridRestrictionWebGpu({
+      device,
+      plan,
+      fineGridBuffer: constantFineBuffer
+    });
+    const zeroedRows = Float32Array.from(constantRows);
+    for (let index = 0; index < plan.fineNodeCount; index += 1) {
+      const offset = index * stride;
+      zeroedRows[offset + 1] = 0;
+      zeroedRows[offset + 2] = 0;
+      zeroedRows[offset + 3] = 0;
+    }
+    const zeroedFineBuffer = makeGridBuffer('proof-zeroed-fine-grid', zeroedRows);
+    await coupling.runSchroederCrossLevelGridProlongationWebGpu({
+      device,
+      plan,
+      coarseGridBuffer: constantRestriction.coarseGridBuffer,
+      fineGridBuffer: zeroedFineBuffer
+    });
+    const prolongedRows = await readbackGridBuffer(zeroedFineBuffer, plan.fineNodeCount * stride);
+    let maxVelocityError = 0;
+    let massiveNodeCount = 0;
+    for (let index = 0; index < plan.fineNodeCount; index += 1) {
+      const offset = index * stride;
+      const mass = prolongedRows[offset];
+      if (!(mass > 0)) continue;
+      massiveNodeCount += 1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const error = Math.abs(prolongedRows[offset + 1 + axis] / mass - constantVelocity[axis]);
+        if (error > maxVelocityError) maxVelocityError = error;
+      }
+    }
+    const prolongedSummary = await coupling.runSchroederCrossLevelGridConservationSummaryWebGpu({
+      device,
+      plan,
+      fineGridBuffer: zeroedFineBuffer,
+      coarseGridBuffer: constantRestriction.coarseGridBuffer
+    });
+
+    restriction.destroyCoarseGridBuffer?.();
+    constantRestriction.destroyCoarseGridBuffer?.();
+    fineBuffer.destroy();
+    constantFineBuffer.destroy();
+    zeroedFineBuffer.destroy();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      restrictionStatus: restriction.status,
+      restrictionReadbackMode: restriction.readbackMode,
+      summaryStatus: summary.status,
+      expectedMass,
+      expectedMomentum,
+      conservation,
+      prolongedConservation: prolongedSummary.conservation,
+      maxVelocityError,
+      massiveNodeCount,
+      fineNodeCount: plan.fineNodeCount,
+      coarseNodeCount: plan.coarseNodeCount
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.restrictionStatus).toBe('schroeder-cross-level-grid-restriction-submitted');
+  expect(result.restrictionReadbackMode).toBe('no-full-readback');
+  expect(result.summaryStatus).toBe('schroeder-cross-level-grid-conservation-summary-submitted');
+
+  const conservation = result.conservation;
+  expect(conservation).not.toBeNull();
+  // GPU totals match the float64 expectation within f32 accumulation error.
+  const massScale = Math.max(1, result.expectedMass);
+  expect(Math.abs(conservation.fineMassKg - result.expectedMass)).toBeLessThan(1e-4 * massScale);
+  // Restriction conserves mass and momentum: residuals from the compact GPU
+  // summary row must be numerically tiny relative to the totals.
+  expect(Math.abs(conservation.massResidualKg)).toBeLessThan(1e-4 * massScale);
+  for (let axis = 0; axis < 3; axis += 1) {
+    const momentumScale = Math.max(1, Math.abs(result.expectedMomentum[axis]));
+    expect(Math.abs(conservation.momentumResidualKgMPerS[axis])).toBeLessThan(1e-4 * momentumScale);
+  }
+  expect(conservation.fineActiveNodeCount).toBeGreaterThan(0);
+  expect(conservation.coarseActiveNodeCount).toBeGreaterThan(0);
+  expect(conservation.coarseActiveNodeCount).toBeLessThanOrEqual(conservation.fineActiveNodeCount);
+
+  // Constant velocity field is preserved exactly (to f32) through
+  // restriction followed by prolongation.
+  expect(result.massiveNodeCount).toBeGreaterThan(0);
+  expect(result.maxVelocityError).toBeLessThan(1e-5);
+  // And the prolonged fine grid carries the same totals as the coarse grid.
+  const prolonged = result.prolongedConservation;
+  expect(Math.abs(prolonged.massResidualKg)).toBeLessThan(1e-4 * massScale);
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(prolonged.momentumResidualKgMPerS[axis]))
+      .toBeLessThan(1e-4 * Math.max(1, Math.abs(prolonged.fineMomentumKgMPerS[axis])));
+  }
+});

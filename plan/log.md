@@ -36158,3 +36158,60 @@ Next:
   assertions from compact readbacks, and one admitted split/merge that
   changes live particle count by an explicit admitted delta.
 - Portable cross-peer rematerializer explicitly deferred until Phase 1 lands.
+
+## 2026-07-02 AKDT - SS Cross-Level Grid Coupling Operator (Phase 1 Slice 1)
+
+First slice of the physics-first checkpoint from
+`plan/todo/SS/fable-plan-2026-07-02.md`: a real adjacent-level conservative
+coupling operator, in a new module instead of appending to
+`schroederHierarchyGpu.js`.
+
+New module `src/runtime/sph/schroederCrossLevelCouplingGpu.js`:
+
+- `runSchroederCrossLevelGridRestrictionWebGpu`: agglomeration restriction of
+  MLS-MPM grid-node mass/momentum from an SS fine level into the adjacent
+  coarse level (component-wise floor(index/2) parent mapping, spacing exactly
+  doubled). Every fine node has exactly one parent, so restriction conserves
+  mass and momentum exactly in infinite precision. Emits a retained coarse
+  grid buffer, no full readback.
+- `runSchroederCrossLevelGridProlongationWebGpu`: mass-weighted
+  piecewise-constant prolongation of coarse velocity back onto fine nodes.
+  Conserves total momentum when the coarse grid came from restriction of the
+  same fine masses, and preserves constant velocity fields exactly.
+- `runSchroederCrossLevelGridConservationSummaryWebGpu`: one compact 16-float
+  GPU summary row (per-level totals, residuals, active counts) as the only
+  readback, matching the SS compact-counter allowance.
+- Float64 CPU oracles (`restrictGridRowsCpuOracle` etc.) exported for tests
+  only; documented as numerical oracles, not a runtime path.
+
+ABI additions (`ulg-gpu-abi`): three v0 schemas plus execution variants,
+`SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_ROW_LAYOUT` (16 floats), and
+three WGSL kernels sharing one params struct.
+
+Numeric acceptance gates now enforced by tests (numbers, not descriptor
+statuses):
+
+- `tests/schroederCrossLevelCouplingGpu.test.mjs` (8 tests): float64 oracle
+  conservation on random grids, constant-velocity preservation through
+  restrict-then-prolong, momentum conservation of prolongation for
+  non-constant fields, plan/params/WGSL structure.
+- Playwright `Schroeder cross-level grid coupling conserves mass and momentum
+  numerically on GPU`: real-device proof asserting the compact GPU summary
+  residuals (`|massResidual| < 1e-4 * mass`, per-axis momentum residuals),
+  GPU totals matching float64 expectations, constant-velocity recovery with
+  max per-node error `< 1e-5`, and prolonged-vs-coarse total equality.
+
+Validation:
+
+- PASS: `node --test tests/schroederCrossLevelCouplingGpu.test.mjs` `8/8`.
+- PASS: targeted Playwright grid-coupling proof `1/1` (4.6s).
+- PASS: `npm test` `955/958`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next (Phase 1 slices 2-3):
+
+- Wire restriction/prolongation into two-level SS mechanics so both levels
+  are simultaneously active in a scheduled scene step, with the conservation
+  summary asserted numerically in a mounted proof.
+- One admitted split/merge that changes live particle count via an explicit
+  `admittedParticleCountDelta` from a compact split/merge diagnostic readback.

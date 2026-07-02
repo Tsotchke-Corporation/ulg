@@ -8067,7 +8067,11 @@ struct SchroederLawNeighborParams {
   enabled_law_mask: u32,
   flags: u32,
   source_span_stride: u32,
-  pad1: u32,
+  active_node_index_enabled: u32,
+  active_node_index_bucket_count: u32,
+  active_node_index_bucket_slot_capacity: u32,
+  active_node_index_bucket_slot_count: u32,
+  pad0: u32,
 };
 
 @group(0) @binding(0) var<storage, read> law_queue_rows: array<f32>;
@@ -8076,6 +8080,7 @@ struct SchroederLawNeighborParams {
 @group(0) @binding(3) var<storage, read_write> neighbor_candidate_rows: array<f32>;
 @group(0) @binding(4) var<storage, read_write> source_candidate_span_rows: array<f32>;
 @group(0) @binding(5) var<uniform> params: SchroederLawNeighborParams;
+@group(0) @binding(6) var<storage, read> active_node_index_bucket_slots: array<u32>;
 
 const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE: u32 = 16u;
@@ -8087,6 +8092,7 @@ const SCHROEDER_LAW_NEIGHBOR_STATUS_INACTIVE: f32 = 32.0;
 const SCHROEDER_LAW_NEIGHBOR_REACTION_MASK: u32 = 1u;
 const SCHROEDER_LAW_NEIGHBOR_CONTACT_MASK: u32 = 2u;
 const SCHROEDER_LAW_NEIGHBOR_INTERFACE_MASK: u32 = 4u;
+const SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL: u32 = 0xffffffffu;
 
 fn ss_neighbor_state_pos_mass(particle_index: u32, state_stride: u32) -> vec4<f32> {
   let offset = particle_index * state_stride;
@@ -8131,6 +8137,117 @@ fn ss_neighbor_tiles_overlap(queue_offset: u32, active_offset: u32) -> bool {
     && queue_min.y <= active_max.y && queue_max.y >= active_min.y
     && queue_min.z <= active_max.z && queue_max.z >= active_min.z;
   return same_level && same_chart && overlap;
+}
+
+fn ss_neighbor_active_index_enabled() -> bool {
+  return params.active_node_index_enabled != 0u
+    && params.active_node_index_bucket_count > 0u
+    && params.active_node_index_bucket_slot_capacity > 0u
+    && params.active_node_index_bucket_slot_count > 0u;
+}
+
+fn ss_neighbor_active_index_hash_mix(value: u32, seed: u32) -> u32 {
+  var hash = seed ^ (value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn ss_neighbor_active_index_i32_bits(value: f32) -> u32 {
+  return bitcast<u32>(i32(round(value)));
+}
+
+fn ss_neighbor_active_index_bucket(queue_offset: u32) -> u32 {
+  var hash = 0x811c9dc5u;
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 1u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 4u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 5u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 6u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 2u]), hash);
+  return hash % max(params.active_node_index_bucket_count, 1u);
+}
+
+fn ss_neighbor_active_index_slot(queue_offset: u32, bucket_slot_index: u32) -> u32 {
+  if (!ss_neighbor_active_index_enabled() || bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
+    return SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL;
+  }
+  let bucket_index = ss_neighbor_active_index_bucket(queue_offset);
+  let absolute_slot = bucket_index * params.active_node_index_bucket_slot_capacity + bucket_slot_index;
+  if (absolute_slot >= params.active_node_index_bucket_slot_count) {
+    return SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL;
+  }
+  return active_node_index_bucket_slots[absolute_slot];
+}
+
+fn ss_neighbor_active_index_contains(queue_offset: u32, active_index: u32) -> bool {
+  if (!ss_neighbor_active_index_enabled()) {
+    return false;
+  }
+  var bucket_slot_index = 0u;
+  loop {
+    if (bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
+      break;
+    }
+    if (ss_neighbor_active_index_slot(queue_offset, bucket_slot_index) == active_index) {
+      return true;
+    }
+    bucket_slot_index = bucket_slot_index + 1u;
+  }
+  return false;
+}
+
+fn ss_neighbor_active_index_match_count(queue_offset: u32, source_active_index: u32, active_stride: u32) -> u32 {
+  if (!ss_neighbor_active_index_enabled()) {
+    return 0u;
+  }
+  var matched_count = 0u;
+  var bucket_slot_index = 0u;
+  loop {
+    if (bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
+      break;
+    }
+    let active_index = ss_neighbor_active_index_slot(queue_offset, bucket_slot_index);
+    if (active_index < params.active_node_count && active_index != source_active_index) {
+      let active_offset = active_index * active_stride;
+      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+        matched_count = matched_count + 1u;
+      }
+    }
+    bucket_slot_index = bucket_slot_index + 1u;
+  }
+  return matched_count;
+}
+
+fn ss_neighbor_select_active_index_match(
+  queue_offset: u32,
+  source_active_index: u32,
+  active_stride: u32,
+  candidate_slot: u32
+) -> u32 {
+  if (!ss_neighbor_active_index_enabled()) {
+    return params.active_node_count;
+  }
+  var matched_count = 0u;
+  var bucket_slot_index = 0u;
+  loop {
+    if (bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
+      break;
+    }
+    let active_index = ss_neighbor_active_index_slot(queue_offset, bucket_slot_index);
+    if (active_index < params.active_node_count && active_index != source_active_index) {
+      let active_offset = active_index * active_stride;
+      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+        if (matched_count == candidate_slot) {
+          return active_index;
+        }
+        matched_count = matched_count + 1u;
+      }
+    }
+    bucket_slot_index = bucket_slot_index + 1u;
+  }
+  return params.active_node_count;
 }
 
 fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_index: u32, queue_epoch: f32) {
@@ -8224,24 +8341,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     source_active_index = min(queue_row_index, params.active_node_count - 1u);
   }
   var selected_active_index = params.active_node_count;
+  var indexed_match_count = 0u;
+  if (ss_neighbor_active_index_enabled()) {
+    selected_active_index = ss_neighbor_select_active_index_match(
+      queue_offset,
+      source_active_index,
+      active_stride,
+      candidate_slot
+    );
+    if (selected_active_index >= params.active_node_count) {
+      indexed_match_count = ss_neighbor_active_index_match_count(queue_offset, source_active_index, active_stride);
+    }
+  }
+  var fallback_target_slot = candidate_slot;
+  if (candidate_slot >= indexed_match_count) {
+    fallback_target_slot = candidate_slot - indexed_match_count;
+  }
   var matched_count = 0u;
   var scan_step = 0u;
-  loop {
-    if (scan_step >= params.active_node_count) {
-      break;
-    }
-    let active_index = (source_active_index + 1u + scan_step) % params.active_node_count;
-    if (active_index != source_active_index) {
-      let active_offset = active_index * active_stride;
-      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
-        if (matched_count == candidate_slot) {
-          selected_active_index = active_index;
-          break;
-        }
-        matched_count = matched_count + 1u;
+  if (selected_active_index >= params.active_node_count) {
+    loop {
+      if (scan_step >= params.active_node_count) {
+        break;
       }
+      let active_index = (source_active_index + 1u + scan_step) % params.active_node_count;
+      if (active_index != source_active_index && !ss_neighbor_active_index_contains(queue_offset, active_index)) {
+        let active_offset = active_index * active_stride;
+        if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+          if (matched_count == fallback_target_slot) {
+            selected_active_index = active_index;
+            break;
+          }
+          matched_count = matched_count + 1u;
+        }
+      }
+      scan_step = scan_step + 1u;
     }
-    scan_step = scan_step + 1u;
   }
   if (selected_active_index >= params.active_node_count) {
     ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);

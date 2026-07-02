@@ -673,9 +673,14 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(plan.status, 'schroeder-law-neighbor-candidate-plan-ready');
   assert.equal(plan.sourceLawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
   assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(plan.sourceActiveNodeIndexSchema, null);
   assert.equal(plan.particleCount, 3);
   assert.equal(plan.lawQueueCount, 3);
   assert.equal(plan.activeNodeCount, 3);
+  assert.equal(plan.activeNodeIndexEnabled, false);
+  assert.equal(plan.activeNodeIndexBucketCount, 0);
+  assert.equal(plan.activeNodeIndexBucketSlotCapacity, 0);
+  assert.equal(plan.activeNodeIndexBucketSlotCount, 0);
   assert.equal(plan.candidateBudget, 5);
   assert.equal(plan.neighborCandidateCount, 15);
   assert.equal(plan.lawQueueStrideFloats, SCHROEDER_LAW_QUEUE_FLOATS);
@@ -688,6 +693,7 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(plan.enumerationMode, 'schroeder-active-node-tile-traversal-neighbor-enumeration');
   assert.equal(plan.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
   assert.equal(plan.candidateIndexingMode, 'particle-source-candidate-span-table');
+  assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-index-disabled-full-active-node-scan');
   assert.equal(
     plan.treeTraversalStatus,
     'active-node-tile-traversal-before-sorted-schroeder-tree-index'
@@ -698,6 +704,7 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
 
   const params = createSchroederLawNeighborCandidateParamsArray(plan);
   const view = new DataView(params);
+  assert.equal(params.byteLength, 64);
   assert.equal(view.getUint32(0, true), 3);
   assert.equal(view.getUint32(4, true), 3);
   assert.equal(view.getUint32(8, true), 3);
@@ -708,6 +715,61 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(view.getUint32(28, true), 5);
   assert.equal(view.getUint32(32, true), SCHROEDER_LOCAL_LAW_QUEUE_MASK);
   assert.equal(view.getUint32(40, true), SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS);
+  assert.equal(view.getUint32(44, true), 0);
+  assert.equal(view.getUint32(48, true), 0);
+  assert.equal(view.getUint32(52, true), 0);
+  assert.equal(view.getUint32(56, true), 0);
+});
+
+test('Schroeder law-neighbor candidate plan can consume an active-node bucket index', () => {
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer: { label: 'fake-law-queue-buffer' },
+    candidateBudget: 5,
+    queueEpoch: 11
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const activeNodeIndex = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-index-submitted',
+    activeNodeCount: 3,
+    bucketCount: 2,
+    bucketSlotCapacity: 4,
+    bucketSlotCount: 8,
+    bucketSlotBuffer: { label: 'fake-active-node-index-bucket-slots' }
+  };
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue,
+    activeNodeList,
+    activeNodeIndex,
+    particleCount: 3,
+    candidateBudget: 5
+  });
+
+  assert.equal(plan.activeNodeIndexEnabled, true);
+  assert.equal(plan.sourceActiveNodeIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(plan.activeNodeIndexBucketCount, 2);
+  assert.equal(plan.activeNodeIndexBucketSlotCapacity, 4);
+  assert.equal(plan.activeNodeIndexBucketSlotCount, 8);
+  assert.equal(plan.enumerationMode, 'schroeder-active-node-indexed-tile-traversal-neighbor-enumeration');
+  assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-bucket-index-consumed-with-exact-scan-fallback');
+  assert.equal(plan.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
+
+  const params = createSchroederLawNeighborCandidateParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(44, true), 1);
+  assert.equal(view.getUint32(48, true), 2);
+  assert.equal(view.getUint32(52, true), 4);
+  assert.equal(view.getUint32(56, true), 8);
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -1472,6 +1534,8 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.candidateBudget, 4);
   assert.equal(candidates.neighborCandidateCount, 12);
   assert.equal(candidates.sourceCandidateSpanCount, 3);
+  assert.equal(candidates.activeNodeIndexEnabled, false);
+  assert.equal(candidates.activeNodeIndexConsumerStatus, 'active-node-index-disabled-full-active-node-scan');
   assert.equal(candidates.retainedNeighborCandidateBuffer, true);
   assert.equal(candidates.retainedSourceCandidateSpanBuffer, true);
   assert.ok(candidates.neighborCandidateBuffer);
@@ -1495,22 +1559,106 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.deepEqual(device.dispatches, [[1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederLawNeighborParams')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('active_nodes')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('active_node_index_bucket_slots')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('source_candidate_span_rows')));
-  assert.equal(device.bindGroups.at(-1).entries.length, 6);
+  assert.equal(device.bindGroups.at(-1).entries.length, 7);
   assert.equal(device.bindGroups.at(-1).entries[1].resource.buffer, activeNodeBuffer);
   assert.equal(device.bindGroups.at(-1).entries[4].resource.buffer, candidates.sourceCandidateSpanBuffer);
+  assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer.label, 'ulg-schroeder-law-neighbor-active-node-index-slots-dummy');
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && write.byteLength === 48
+    && write.byteLength === 64
   )));
   assert.ok(device.createdBuffers.some((buffer) => (
     buffer.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && buffer.size === 48
+    && buffer.size === 64
   )));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
   );
+});
+
+test('Schroeder law-neighbor candidates consume retained active-node bucket index slots', async () => {
+  const device = createFakeWebGpuDevice();
+  const lawQueueBuffer = device.createBuffer({
+    label: 'retained-law-queue-buffer',
+    size: 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const activeNodeBuffer = device.createBuffer({
+    label: 'retained-active-node-buffer',
+    size: 3 * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const activeNodeIndexBucketSlotBuffer = device.createBuffer({
+    label: 'retained-active-node-index-bucket-slots',
+    size: 8 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const stateBuffer = device.createBuffer({
+    label: 'retained-state-buffer',
+    size: 3 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer,
+    enabledLawMask: SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+    candidateBudget: 4,
+    queueEpoch: 7
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer
+  };
+  const activeNodeIndex = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-index-submitted',
+    activeNodeCount: 3,
+    bucketCount: 2,
+    bucketSlotCapacity: 4,
+    bucketSlotCount: 8,
+    bucketSlotBuffer: activeNodeIndexBucketSlotBuffer
+  };
+  const candidates = await runSchroederLawNeighborCandidateWebGpu({
+    device,
+    lawQueue,
+    activeNodeList,
+    activeNodeIndex,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 3,
+      stateBuffer
+    },
+    candidateBudget: 4
+  });
+
+  assert.equal(candidates.activeNodeIndexEnabled, true);
+  assert.equal(candidates.sourceActiveNodeIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(candidates.sourceActiveNodeIndexStatus, 'schroeder-active-node-index-submitted');
+  assert.equal(candidates.activeNodeIndexBucketCount, 2);
+  assert.equal(candidates.activeNodeIndexBucketSlotCapacity, 4);
+  assert.equal(candidates.activeNodeIndexBucketSlotCount, 8);
+  assert.equal(candidates.enumerationMode, 'schroeder-active-node-indexed-tile-traversal-neighbor-enumeration');
+  assert.equal(candidates.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
+  assert.equal(
+    candidates.activeNodeIndexConsumerStatus,
+    'active-node-bucket-index-consumed-with-exact-scan-fallback'
+  );
+  assert.equal(device.bindGroups.at(-1).entries.length, 7);
+  assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer, activeNodeIndexBucketSlotBuffer);
+  assert.equal(activeNodeIndexBucketSlotBuffer.destroyed, false);
+  assert.ok(device.writes.some((write) => (
+    write.label === 'ulg-schroeder-law-neighbor-candidates-params'
+    && write.byteLength === 64
+  )));
 });
 
 test('Schroeder WebGPU cross-level coupling consumes retained hierarchy buffers without default readback', async () => {
@@ -2289,6 +2437,55 @@ test('Schroeder same-level mechanics can build an opt-in active-node index befor
   assert.equal(calls[0].schroederActiveNodeList.schema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
   assert.equal(calls[0].schroederLawQueue, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+});
+
+test('Schroeder same-level mechanics forwards opt-in active-node index to law-neighbor traversal', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const lawNeighborCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeIndex: true,
+    activeNodeIndexBucketSlotCapacity: 4,
+    enableCrossLevelCoupling: false,
+    lawNeighborCandidateRunner: async (options) => {
+      lawNeighborCalls.push(options);
+      return {
+        schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+        status: 'schroeder-law-neighbor-candidates-submitted',
+        lawQueueCount: options.lawQueue.activeNodeCount,
+        neighborCandidateCount: options.lawQueue.activeNodeCount * options.candidateBudget,
+        candidateBudget: options.candidateBudget,
+        enumerationMode: 'schroeder-active-node-indexed-tile-traversal-neighbor-enumeration',
+        outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
+        treeTraversalStatus: 'active-node-bucket-index-traversal-with-exact-scan-fallback',
+        activeNodeIndexEnabled: Boolean(options.activeNodeIndex),
+        activeNodeIndexConsumerStatus: 'active-node-bucket-index-consumed-with-exact-scan-fallback',
+        neighborCandidateBuffer: { label: 'stub-indexed-law-neighbor-candidates' },
+        neighborCandidateBufferByteLength: 4 * Float32Array.BYTES_PER_ELEMENT
+      };
+    },
+    residentStepRunner: async (options) => ({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates)
+    })
+  });
+
+  assert.equal(lawNeighborCalls.length, 1);
+  assert.equal(lawNeighborCalls[0].activeNodeIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA);
+  assert.equal(lawNeighborCalls[0].activeNodeIndex.bucketSlotCapacity, 4);
+  assert.equal(result.lawNeighborCandidates.activeNodeIndexEnabled, true);
+  assert.equal(
+    result.lawNeighborCandidates.activeNodeIndexConsumerStatus,
+    'active-node-bucket-index-consumed-with-exact-scan-fallback'
+  );
+  assert.equal(result.lawNeighborCandidates.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
+  assert.equal(result.lawNeighborCandidateConsumerStatus, 'law-neighbor-candidates-forwarded-to-resident-backend');
+  assert.equal(result.residentStep.hasLawNeighborCandidates, true);
 });
 
 test('Schroeder same-level mechanics can run admitted state-delta merge before resident backend', async () => {

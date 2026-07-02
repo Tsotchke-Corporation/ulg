@@ -22658,8 +22658,12 @@ export function createSphPhaseScene(container, {
       surfaceDrawDiagnosticMode,
       nativeSurfaceExtractionAllowed
     });
+    const presentationWorkerRetainedOutputBypassedForNativeConsumer =
+      String(surfaceDrawDiagnosticMode || '').toLowerCase()
+      === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
     const presentationWorkerRetainedOutputStatus = (
       renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+      && !presentationWorkerRetainedOutputBypassedForNativeConsumer
     )
       ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
       : null;

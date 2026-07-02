@@ -342,6 +342,19 @@ async function newProbePage(browser) {
   return browser.newPage(probePageOptions());
 }
 
+async function ensureProbeSphPhaseOverlay(page, { timeoutMs }) {
+  const overlay = page.locator('#sph-phase-overlay');
+  if (await overlay.count() === 0) {
+    await page.locator('#run-sph-phase').click({
+      timeout: Math.min(5_000, timeoutMs)
+    }).catch(async (error) => {
+      if (await overlay.count() > 0) return;
+      throw error;
+    });
+  }
+  await page.waitForSelector('#sph-phase-overlay', { timeout: timeoutMs });
+}
+
 function appendQueryParam(url, key, value) {
   const hashIndex = url.indexOf('#');
   const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
@@ -1320,10 +1333,7 @@ async function runBrowserProbe({
       reactionBinMetadataReadback
     }), baseUrl).toString();
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    if (await page.locator('#sph-phase-overlay').count() === 0) {
-      await page.locator('#run-sph-phase').click({ timeout: timeoutMs });
-    }
-    await page.waitForSelector('#sph-phase-overlay', { timeout: timeoutMs });
+    await ensureProbeSphPhaseOverlay(page, { timeoutMs });
     preProbeSnapshots.push(await collectBrowserSnapshot(page, 'overlay-ready'));
     await page.waitForFunction(() => {
       const overlay = document.querySelector('#sph-phase-overlay');

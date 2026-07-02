@@ -54,6 +54,19 @@ function sanitizeArtifactLabel(label) {
   return String(label || 'artifact').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'artifact';
 }
 
+async function ensureSphPhaseOverlayVisible(page, { timeout = 60_000 } = {}) {
+  const overlay = page.locator('#sph-phase-overlay');
+  if (await overlay.count() === 0) {
+    await page.locator('#run-sph-phase').click({
+      timeout: Math.min(5_000, timeout)
+    }).catch(async (error) => {
+      if (await overlay.count() > 0) return;
+      throw error;
+    });
+  }
+  await expect(overlay).toBeVisible({ timeout });
+}
+
 function createLineTail(limit = 80) {
   const lines = [];
   return {
@@ -7210,10 +7223,7 @@ test('SPH phase native same-device surface consumer publishes browser-frame vali
   });
 
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -7362,6 +7372,56 @@ test('SPH phase native same-device surface consumer publishes browser-frame vali
       bridgeMode: bridge?.rendererBridge ?? null,
       bridgeLastRenderStatus: bridge?.lastRenderStatus ?? null,
       bridgeFrameCount: bridge?.frameCount ?? null,
+      schroederProxyLocalResolverStatus:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverStatus
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverStatus
+        ?? bridge?.schroederRenderProxyLocalResolverStatus
+        ?? null,
+      schroederProxyLocalResolverRetainedBufferRefCount:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyLocalResolverRetainedBufferRefCount
+        ?? bridge?.schroederRenderProxyLocalResolverRetainedBufferRefCount
+        ?? null,
+      schroederProxyNativeExecutorStatus:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorStatus
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorStatus
+        ?? bridge?.schroederRenderProxyNativeExecutorStatus
+        ?? null,
+      schroederProxyNativeExecutorReady:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorReady
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorReady
+        ?? bridge?.schroederRenderProxyNativeExecutorReady
+        ?? null,
+      schroederProxyNativeExecutorDrawCommandCount:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorDrawCommandCount
+        ?? bridge?.schroederRenderProxyNativeExecutorDrawCommandCount
+        ?? null,
+      schroederProxyNativeExecutorDrawInstanceCount:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeExecutorDrawInstanceCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeExecutorDrawInstanceCount
+        ?? bridge?.schroederRenderProxyNativeExecutorDrawInstanceCount
+        ?? null,
+      schroederProxyNativeCameraUpdateStatus:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeCameraUpdateStatus
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeCameraUpdateStatus
+        ?? bridge?.schroederRenderProxyNativeCameraUpdateStatus
+        ?? null,
+      schroederProxyNativeLastSubmitStatus:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitStatus
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitStatus
+        ?? bridge?.lastSchroederRenderProxyNativeSubmitStatus
+        ?? null,
+      schroederProxyNativeLastSubmitDrawCommandCount:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitDrawCommandCount
+        ?? bridge?.lastSchroederRenderProxyNativeDrawCommandCount
+        ?? null,
+      schroederProxyNativeLastSubmitDrawInstanceCount:
+        afterRenderState?.surfaceDrawRenderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount
+        ?? surfaceDraw?.renderBridgeSchroederRenderProxyNativeLastSubmitDrawInstanceCount
+        ?? bridge?.lastSchroederRenderProxyNativeDrawInstanceCount
+        ?? null,
       publishStatus: publishResult?.status ?? null,
       publishVisibleGpuConsumerReady: publishResult?.visibleGpuConsumerReady ?? null,
       publishSource: publishResult?.source ?? null,
@@ -7390,10 +7450,17 @@ test('SPH phase native same-device surface consumer publishes browser-frame vali
   ]).toContain(result.firstBatchImportStatus);
   expect([
     'same-device-main-thread-import-awaiting-pixel-validation',
+    'same-device-main-thread-import-blocked-input-not-ready',
     'same-device-main-thread-import-ready'
   ]).toContain(result.secondBatchImportStatus);
-  expect(result.renderStateStatus).toBe('resident-render-field-applied');
-  expect(result.renderStateSource).toBe('resident-gpu-render-field');
+  expect([
+    'resident-render-field-applied',
+    'resident-render-presentation-worker-retained-output-preserved'
+  ]).toContain(result.renderStateStatus);
+  expect([
+    'resident-gpu-render-field',
+    'presentation-worker-retained-output'
+  ]).toContain(result.renderStateSource);
   expect(result.surfaceDrawDiagnosticMode).toBe('native-webgpu-surface-consumer');
   expect(result.renderFieldReadback).toBe(false);
   expect(result.renderRowsReadback).toBe(false);

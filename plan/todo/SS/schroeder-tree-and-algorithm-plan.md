@@ -175,6 +175,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-cross-level-state-delta-merge.v0`
 - `peercompute.ulg.schroeder-hierarchy-aggregate.v0`
 - `peercompute.ulg.schroeder-hierarchy-aggregate-node.v0`
+- `peercompute.ulg.schroeder-phase-volume-migration.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -237,6 +238,10 @@ Suggested schemas:
 
 ### Slice 5: Phase-Volume Migration
 
+- Status: retained GPU phase-volume migration decision rows over level
+  assignments and aggregate nodes landed in `730f2ff`; StateManager-admitted
+  level migration consumption and visible water-to-steam stress-case wiring are
+  next.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -275,8 +280,10 @@ Suggested schemas:
    - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
-   - drive level changes from closure-derived density/pressure/temperature;
-   - make water-to-steam expansion migrate levels without particle explosion;
+   - consume retained migration rows through a StateManager-admitted level
+     migration boundary;
+   - make water-to-steam expansion visibly migrate levels without particle
+     explosion;
    - preserve fine representation near surfaces, reactions, and walls.
 3. Active-node mechanics consumption:
    - consume retained SS active-node rows in same-level P2G/G2P dispatch;
@@ -322,17 +329,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **phase-volume migration over retained SS
-aggregate nodes**:
+The next code slice on `SS` is **StateManager-admitted phase-volume level
+migration consumption**:
 
-1. Keep water-to-steam support and level changes derived from closure density,
-   pressure, temperature, represented volume, and phase response.
-2. Feed the retained aggregate-node buffer into the migration decision path so
-   coherent bulk steam can move to coarser levels without multiplying particle
-   count.
-3. Preserve fine representation near surfaces, reactions, walls, and large
+1. Add a compact admission artifact for retained phase-volume migration rows.
+2. Apply approved migration rows as an authoritative SS level/state-family
+   update without full particle readback.
+3. Surface visible water-to-steam migration diagnostics in the SS path: target
+   level counts, coarsen/refine counters, aggregate coherence counters, and
+   conservation residual counters.
+4. Preserve fine representation near surfaces, reactions, walls, and large
    pressure/interface gradients.
-4. Emit compact migration diagnostics and conservation residual counters, not a
-   full particle readback.
-5. Track the exact aggregate-node reducer as a correctness-first bridge; replace
+5. Keep the exact aggregate-node reducer as a correctness-first bridge; replace
    it with sort/radix or bucket reduction before scale testing.

@@ -59,10 +59,14 @@ Landed checkpoints:
     aggregate contribution rows.
 14. `60d2d7e` reduces retained aggregate contribution rows into retained SS
     hierarchy aggregate-node rows with exact GPU duplicate-key summation.
+15. `730f2ff` adds retained GPU phase-volume migration decision rows that
+    consume level assignments and aggregate nodes without full particle
+    readback.
 
 Next implementation queue:
 
-1. Promote water-to-steam phase-volume migration into a visible SS stress case.
+1. Consume phase-volume migration rows through StateManager admission and make
+   water-to-steam migration visible in an SS stress case.
 2. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
    or bucket reduction once the node contract is consumed by later slices.
 3. Route reaction/contact/interface work queues through SS active nodes.

@@ -794,6 +794,12 @@ export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT = Object.freeze([
   'admissibilityFlags:f32',
   'queueEpoch:f32'
 ]);
+export const SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'candidateOffset:f32',
+  'candidateCount:f32',
+  'status:f32'
+]);
 export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',
   'childLevelId:f32',

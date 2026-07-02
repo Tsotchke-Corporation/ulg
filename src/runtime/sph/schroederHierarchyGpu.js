@@ -8,6 +8,7 @@ import {
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
+  SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
@@ -117,6 +118,7 @@ export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANS
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
+export const SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS = SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT.length;
 export const SCHROEDER_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS = SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
@@ -483,6 +485,7 @@ export function createSchroederLawNeighborCandidateParamsArray({
   lawQueueStrideFloats = SCHROEDER_LAW_QUEUE_FLOATS,
   activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
   neighborCandidateStrideFloats = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+  sourceCandidateSpanStrideFloats = SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
   stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
   candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
@@ -515,7 +518,10 @@ export function createSchroederLawNeighborCandidateParamsArray({
   ))), true);
   view.setUint32(32, Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK))), true);
   view.setUint32(36, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
-  view.setUint32(40, 0, true);
+  view.setUint32(40, Math.max(1, Math.round(finiteNumber(
+    sourceCandidateSpanStrideFloats,
+    SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS
+  ))), true);
   view.setUint32(44, 0, true);
   return buffer;
 }
@@ -1375,6 +1381,11 @@ export function createSchroederLawNeighborCandidatePlan({
     4,
     neighborCandidateCount * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
+  const sourceCandidateSpanCount = resolvedParticleCount;
+  const sourceCandidateSpanByteLength = Math.max(
+    4,
+    sourceCandidateSpanCount * SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
   return {
     schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
     status: 'schroeder-law-neighbor-candidate-plan-ready',
@@ -1394,13 +1405,19 @@ export function createSchroederLawNeighborCandidatePlan({
     neighborCandidateRowLayout: [...SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT],
     neighborCandidateStrideFloats: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
     neighborCandidateStrideBytes: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    sourceCandidateSpanCount,
+    sourceCandidateSpanRowLayout: [...SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT],
+    sourceCandidateSpanStrideFloats: SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
+    sourceCandidateSpanStrideBytes: SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     neighborCandidateByteLength,
+    sourceCandidateSpanByteLength,
     enabledLawMask: resolvedLawMask,
     candidateBudget: resolvedCandidateBudget,
     queueEpoch: finiteNumber(lawQueue.queueEpoch, 0),
     enumerationMode: 'schroeder-active-node-tile-traversal-neighbor-enumeration',
     outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
+    candidateIndexingMode: 'particle-source-candidate-span-table',
     treeTraversalStatus: 'active-node-tile-traversal-before-sorted-schroeder-tree-index',
     exactNearFieldRequirement: 'candidate-rows-feed-reaction-contact-interface-exact-near-field-consumers',
     stateMutationTarget: 'schroeder-retained-local-law-neighbor-candidate-buffer',
@@ -2477,19 +2494,32 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     size: plan.neighborCandidateByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
+  const sourceCandidateSpanBuffer = device.createBuffer({
+    label: 'ulg-schroeder-law-neighbor-source-spans-out',
+    size: plan.sourceCandidateSpanByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-law-neighbor-candidates-params',
-    size: 32,
+    size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  const readBuffer = noFullReadback
+  const candidateReadBuffer = noFullReadback
     ? null
     : device.createBuffer({
       label: 'ulg-schroeder-law-neighbor-candidates-readback',
       size: plan.neighborCandidateByteLength,
       usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
+  const sourceSpanReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-law-neighbor-source-spans-readback',
+      size: plan.sourceCandidateSpanByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
   let returnedRetainedNeighborCandidateBuffer = false;
+  let returnedRetainedSourceCandidateSpanBuffer = false;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSchroederLawNeighborCandidateParamsArray(plan));
@@ -2498,10 +2528,11 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'read-only-storage'),
       computeBufferBinding(3, 'storage'),
-      computeBufferBinding(4, 'uniform')
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v1',
+      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v2',
       label: 'ulg-schroeder-law-neighbor-candidates',
       code: schroederLawNeighborCandidateWgsl,
       entryPoint: 'main',
@@ -2514,7 +2545,8 @@ export async function runSchroederLawNeighborCandidateWebGpu({
         { binding: 1, resource: { buffer: activeNodeBuffer } },
         { binding: 2, resource: { buffer: stateBuffer } },
         { binding: 3, resource: { buffer: neighborCandidateBuffer } },
-        { binding: 4, resource: { buffer: paramsBuffer } }
+        { binding: 4, resource: { buffer: sourceCandidateSpanBuffer } },
+        { binding: 5, resource: { buffer: paramsBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -2530,21 +2562,35 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       encoder.copyBufferToBuffer(
         neighborCandidateBuffer,
         0,
-        readBuffer,
+        candidateReadBuffer,
         0,
         plan.neighborCandidateByteLength
+      );
+      encoder.copyBufferToBuffer(
+        sourceCandidateSpanBuffer,
+        0,
+        sourceSpanReadBuffer,
+        0,
+        plan.sourceCandidateSpanByteLength
       );
     }
     device.queue.submit([encoder.finish()]);
 
     let neighborCandidateRows = new Float32Array();
+    let sourceCandidateSpanRows = new Float32Array();
     if (!noFullReadback) {
-      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
-      neighborCandidateRows = new Float32Array(readBuffer.getMappedRange()).slice(
+      await candidateReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      neighborCandidateRows = new Float32Array(candidateReadBuffer.getMappedRange()).slice(
         0,
         plan.neighborCandidateCount * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS
       );
-      readBuffer.unmap();
+      candidateReadBuffer.unmap();
+      await sourceSpanReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      sourceCandidateSpanRows = new Float32Array(sourceSpanReadBuffer.getMappedRange()).slice(
+        0,
+        plan.sourceCandidateSpanCount * SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS
+      );
+      sourceSpanReadBuffer.unmap();
     }
 
     const result = {
@@ -2563,6 +2609,10 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       retainedNeighborCandidateBuffer: Boolean(retainNeighborCandidateBuffer),
       neighborCandidateBufferByteLength: plan.neighborCandidateByteLength,
       neighborCandidateRows,
+      retainedSourceCandidateSpanBuffer: Boolean(retainNeighborCandidateBuffer),
+      sourceCandidateSpanBufferByteLength: plan.sourceCandidateSpanByteLength,
+      sourceCandidateSpanRows,
+      sourceCandidateSpanStatus: 'local-law-neighbor-source-spans-submitted',
       neighborCandidateStatus: 'local-law-neighbor-candidates-submitted',
       conservativeTransferStatus: 'local-law-neighbor-candidates-submitted-no-transfer',
       stateMutationStatus: 'law-neighbor-candidates-buffer-submitted-no-state-mutation',
@@ -2575,7 +2625,10 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     if (retainNeighborCandidateBuffer) {
       result.neighborCandidateBuffer = neighborCandidateBuffer;
       result.destroyNeighborCandidateBuffer = () => neighborCandidateBuffer.destroy?.();
+      result.sourceCandidateSpanBuffer = sourceCandidateSpanBuffer;
+      result.destroySourceCandidateSpanBuffer = () => sourceCandidateSpanBuffer.destroy?.();
       returnedRetainedNeighborCandidateBuffer = true;
+      returnedRetainedSourceCandidateSpanBuffer = true;
     }
     return result;
   } finally {
@@ -2586,8 +2639,12 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       if (!retainNeighborCandidateBuffer || !returnedRetainedNeighborCandidateBuffer) {
         neighborCandidateBuffer.destroy?.();
       }
+      if (!retainNeighborCandidateBuffer || !returnedRetainedSourceCandidateSpanBuffer) {
+        sourceCandidateSpanBuffer.destroy?.();
+      }
       paramsBuffer.destroy?.();
-      readBuffer?.destroy?.();
+      candidateReadBuffer?.destroy?.();
+      sourceSpanReadBuffer?.destroy?.();
     };
     if (noFullReadback) {
       deferSubmittedWorkCleanup(device, cleanup);

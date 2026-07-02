@@ -334,7 +334,9 @@ test('pressure/interface contact-kinematics WGSL can gate candidates from a Schr
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*ck_schroeder_neighbor_candidates_enabled\(\)\s*\)/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /else\s+if\s*\(\s*ck_particle_bin_ready\(\)\s*\)/);
-  assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*!ck_schroeder_law_queue_allows_particle\(particle_index\)\s*\)/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /law_queue_gate_required:\s*bool/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /if\s*\(\s*law_queue_gate_required\s*&&\s*!ck_schroeder_law_queue_allows_particle\(particle_index\)\s*\)/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /target_phase_id,\s*false/);
 });
 
 test('pressure/interface packs algorithm contact policy rows for GPU matching', () => {

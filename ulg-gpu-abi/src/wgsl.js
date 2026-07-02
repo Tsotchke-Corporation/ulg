@@ -951,9 +951,9 @@ struct SchroederReactionLawNeighborParams {
   candidate_stride: u32,
   candidate_budget: u32,
   reaction_mask: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
+  source_span_count: u32,
+  source_span_stride: u32,
+  source_span_enabled: u32,
 };
 
 struct ThermalRows {
@@ -1012,6 +1012,7 @@ struct ProductTerm {
 @group(0) @binding(21) var<uniform> schroeder_reaction_law_queue_params: SchroederReactionLawQueueParams;
 @group(0) @binding(22) var<storage, read> schroeder_reaction_neighbor_candidate_rows: array<f32>;
 @group(0) @binding(23) var<uniform> schroeder_reaction_neighbor_candidate_params: SchroederReactionLawNeighborParams;
+@group(0) @binding(24) var<storage, read> schroeder_reaction_source_span_rows: array<f32>;
 
 const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
 const SCHROEDER_REACTION_LAW_QUEUE_STRIDE: u32 = 32u;
@@ -1024,6 +1025,11 @@ const SCHROEDER_REACTION_LAW_NEIGHBOR_NEIGHBOR_OFFSET: u32 = 1u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_LAW_MASK_OFFSET: u32 = 2u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_OFFSET: u32 = 3u;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STRIDE: u32 = 4u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_SOURCE_OFFSET: u32 = 0u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_START_OFFSET: u32 = 1u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_COUNT_OFFSET: u32 = 2u;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STATUS_OFFSET: u32 = 3u;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
@@ -1465,6 +1471,44 @@ fn schroeder_reaction_neighbor_candidates_enabled() -> bool {
     && schroeder_reaction_neighbor_candidate_params.reaction_mask != 0u;
 }
 
+fn schroeder_reaction_source_spans_enabled() -> bool {
+  return schroeder_reaction_neighbor_candidates_enabled()
+    && schroeder_reaction_neighbor_candidate_params.source_span_enabled != 0u
+    && schroeder_reaction_neighbor_candidate_params.source_span_count > 0u
+    && schroeder_reaction_neighbor_candidate_params.source_span_stride > 0u;
+}
+
+fn schroeder_reaction_neighbor_candidate_span(particle_index: u32) -> vec4<u32> {
+  if (!schroeder_reaction_source_spans_enabled()
+      || particle_index >= schroeder_reaction_neighbor_candidate_params.source_span_count) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let source_span_stride = max(
+    schroeder_reaction_neighbor_candidate_params.source_span_stride,
+    SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STRIDE
+  );
+  let span_offset = particle_index * source_span_stride;
+  let status = schroeder_reaction_source_span_rows[
+    span_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_STATUS_OFFSET
+  ];
+  if (abs(status - SCHROEDER_REACTION_LAW_NEIGHBOR_STATUS_READY) > 0.5) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let row_source = u32(max(round(schroeder_reaction_source_span_rows[
+    span_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_SOURCE_OFFSET
+  ]), 0.0));
+  if (row_source != particle_index) {
+    return vec4<u32>(0u, 0u, 0u, 0u);
+  }
+  let span_start = u32(max(round(schroeder_reaction_source_span_rows[
+    span_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_START_OFFSET
+  ]), 0.0));
+  let span_count = u32(max(round(schroeder_reaction_source_span_rows[
+    span_offset + SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_COUNT_OFFSET
+  ]), 0.0));
+  return vec4<u32>(span_start, span_count, 1u, 0u);
+}
+
 fn schroeder_reaction_neighbor_candidate_partner(particle_index: u32, candidate_index: u32) -> u32 {
   if (!schroeder_reaction_neighbor_candidates_enabled()
       || candidate_index >= schroeder_reaction_neighbor_candidate_params.candidate_count) {
@@ -1595,7 +1639,8 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
-  if (!schroeder_reaction_law_queue_allows_particle(particle_index)) {
+  let using_schroeder_candidate_rows = schroeder_reaction_neighbor_candidates_enabled();
+  if (!using_schroeder_candidate_rows && !schroeder_reaction_law_queue_allows_particle(particle_index)) {
     proposals[particle_index] = vec4<f32>(-1.0, -1.0, 0.0, 0.0);
     return;
   }
@@ -1637,8 +1682,16 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
     let contact_radius2 = rx1.y * rx1.y;
-    if (schroeder_reaction_neighbor_candidates_enabled()) {
-      for (var candidate_index = 0u; candidate_index < schroeder_reaction_neighbor_candidate_params.candidate_count; candidate_index = candidate_index + 1u) {
+    if (using_schroeder_candidate_rows) {
+      let span = schroeder_reaction_neighbor_candidate_span(particle_index);
+      var candidate_start = 0u;
+      var candidate_end = schroeder_reaction_neighbor_candidate_params.candidate_count;
+      if (span.z != 0u) {
+        candidate_start = min(span.x, schroeder_reaction_neighbor_candidate_params.candidate_count);
+        let max_span_count = schroeder_reaction_neighbor_candidate_params.candidate_count - candidate_start;
+        candidate_end = candidate_start + min(span.y, max_span_count);
+      }
+      for (var candidate_index = candidate_start; candidate_index < candidate_end; candidate_index = candidate_index + 1u) {
         let other = schroeder_reaction_neighbor_candidate_partner(particle_index, candidate_index);
         if (other >= params.particle_count) {
           continue;
@@ -5910,7 +5963,8 @@ fn ck_candidate_for_particle(
   element_material_id: f32,
   element_phase_id: f32,
   target_material_id: f32,
-  target_phase_id: f32
+  target_phase_id: f32,
+  law_queue_gate_required: bool
 ) -> CkParticleCandidate {
   var candidate = CkParticleCandidate(
     0u,
@@ -5920,7 +5974,7 @@ fn ck_candidate_for_particle(
     vec3<f32>(0.0),
     0.0
   );
-  if (!ck_schroeder_law_queue_allows_particle(particle_index)) {
+  if (law_queue_gate_required && !ck_schroeder_law_queue_allows_particle(particle_index)) {
     return candidate;
   }
   let thermo0 = ck_thermo_row0(particle_index);
@@ -6047,7 +6101,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           element_material_id,
           element_phase_id,
           target_material_id,
-          target_phase_id
+          target_phase_id,
+          false
         );
         let signed2 = candidate.signed_m * candidate.signed_m;
         if (candidate.source_match != 0u) {
@@ -6123,7 +6178,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               element_material_id,
               element_phase_id,
               target_material_id,
-              target_phase_id
+              target_phase_id,
+              true
             );
             let signed2 = candidate.signed_m * candidate.signed_m;
             if (candidate.source_match != 0u) {
@@ -6163,7 +6219,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         element_material_id,
         element_phase_id,
         target_material_id,
-        target_phase_id
+        target_phase_id,
+        true
       );
       let signed2 = candidate.signed_m * candidate.signed_m;
       if (candidate.source_match != 0u) {
@@ -7851,7 +7908,7 @@ struct SchroederLawNeighborParams {
   candidate_budget: u32,
   enabled_law_mask: u32,
   flags: u32,
-  pad0: u32,
+  source_span_stride: u32,
   pad1: u32,
 };
 
@@ -7859,11 +7916,13 @@ struct SchroederLawNeighborParams {
 @group(0) @binding(1) var<storage, read> active_nodes: array<f32>;
 @group(0) @binding(2) var<storage, read> sph_state_rows: array<f32>;
 @group(0) @binding(3) var<storage, read_write> neighbor_candidate_rows: array<f32>;
-@group(0) @binding(4) var<uniform> params: SchroederLawNeighborParams;
+@group(0) @binding(4) var<storage, read_write> source_candidate_span_rows: array<f32>;
+@group(0) @binding(5) var<uniform> params: SchroederLawNeighborParams;
 
 const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE: u32 = 16u;
 const SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE: u32 = 16u;
+const SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_STRIDE: u32 = 4u;
 const SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE: u32 = 8u;
 const SCHROEDER_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
 const SCHROEDER_LAW_NEIGHBOR_STATUS_INACTIVE: f32 = 32.0;
@@ -7935,6 +7994,18 @@ fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_inde
   neighbor_candidate_rows[row_offset + 15u] = queue_epoch;
 }
 
+fn ss_neighbor_write_source_span(source_index: u32, candidate_start: u32, candidate_count: u32, status: f32) {
+  if (source_index >= params.particle_count) {
+    return;
+  }
+  let source_span_stride = max(params.source_span_stride, SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_STRIDE);
+  let span_offset = source_index * source_span_stride;
+  source_candidate_span_rows[span_offset + 0u] = f32(source_index);
+  source_candidate_span_rows[span_offset + 1u] = f32(candidate_start);
+  source_candidate_span_rows[span_offset + 2u] = f32(candidate_count);
+  source_candidate_span_rows[span_offset + 3u] = status;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let candidate_index = global_id.x;
@@ -7949,6 +8020,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let active_stride = max(params.active_node_stride, SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE);
   let neighbor_stride = max(params.neighbor_stride, SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE);
   let state_stride = max(params.state_stride, SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE);
+  let candidate_start = queue_row_index * candidate_budget;
   let queue_offset = queue_row_index * queue_stride;
   let row_offset = candidate_index * neighbor_stride;
   let source_index_f = law_queue_rows[queue_offset + 0u];
@@ -7976,6 +8048,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let interface_enabled = (enabled_law_mask & SCHROEDER_LAW_NEIGHBOR_INTERFACE_MASK) != 0u
     && law_queue_rows[queue_offset + 15u] > 0.5;
   let local_law_enabled = reaction_enabled || contact_enabled || interface_enabled;
+  if (candidate_slot == 0u) {
+    let span_status = select(
+      SCHROEDER_LAW_NEIGHBOR_STATUS_INACTIVE,
+      SCHROEDER_LAW_NEIGHBOR_STATUS_READY,
+      queue_enabled && local_law_enabled
+    );
+    ss_neighbor_write_source_span(source_index, candidate_start, candidate_budget, span_status);
+  }
   if (!queue_enabled || !local_law_enabled) {
     ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
     return;

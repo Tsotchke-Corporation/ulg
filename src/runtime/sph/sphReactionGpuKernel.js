@@ -1,6 +1,7 @@
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
+  SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -87,6 +88,7 @@ const REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
 const REACTION_PARTICLE_BIN_GRID_MAX_CELL_COUNT = REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const SCHROEDER_REACTION_LAW_MASK = 1;
 const SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS = SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT.length;
 const SCHROEDER_REACTION_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
@@ -1971,9 +1973,15 @@ function createSchroederReactionLawNeighborCandidateParamsArray(schroederReactio
     schroederReactionLawNeighborCandidates?.reactionMask,
     SCHROEDER_REACTION_LAW_MASK
   ))), true);
-  view.setUint32(20, 0, true);
-  view.setUint32(24, 0, true);
-  view.setUint32(28, 0, true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.sourceCandidateSpanCount,
+    0
+  ))), true);
+  view.setUint32(24, Math.max(1, Math.round(finiteNumber(
+    schroederReactionLawNeighborCandidates?.sourceCandidateSpanStrideFloats,
+    SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS
+  ))), true);
+  view.setUint32(28, schroederReactionLawNeighborCandidates?.sourceCandidateSpanBufferConsumed ? 1 : 0, true);
   return buffer;
 }
 
@@ -1993,6 +2001,11 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
     neighborCandidateBufferConsumed: false,
     neighborCandidateCount: 0,
     neighborCandidateStrideFloats: SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    sourceCandidateSpanBuffer: null,
+    sourceCandidateSpanBufferObserved: false,
+    sourceCandidateSpanBufferConsumed: false,
+    sourceCandidateSpanCount: 0,
+    sourceCandidateSpanStrideFloats: SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
     candidateBudget: 0,
     lawQueueCount: 0,
     enabledLawMask: 0,
@@ -2014,6 +2027,10 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
   const neighborCandidateBuffer = schroederLawNeighborCandidates.neighborCandidateBuffer
     || schroederLawNeighborCandidates.candidateBuffer
     || schroederLawNeighborCandidates.buffer
+    || null;
+  const sourceCandidateSpanBuffer = schroederLawNeighborCandidates.sourceCandidateSpanBuffer
+    || schroederLawNeighborCandidates.sourceSpanBuffer
+    || schroederLawNeighborCandidates.candidateSpanBuffer
     || null;
   if (!neighborCandidateBuffer) {
     return {
@@ -2067,6 +2084,21 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
   }
   const traversalBacked = String(schroederLawNeighborCandidates.enumerationMode || '').includes('active-node')
     || String(schroederLawNeighborCandidates.treeTraversalStatus || '').includes('active-node');
+  const sourceCandidateSpanCount = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.sourceCandidateSpanCount
+      ?? schroederLawNeighborCandidates.sourceSpanCount
+      ?? schroederLawNeighborCandidates.particleCount,
+    0
+  )));
+  const sourceCandidateSpanStrideFloats = Math.max(
+    SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
+    Math.round(finiteNumber(
+      schroederLawNeighborCandidates.sourceCandidateSpanStrideFloats
+        ?? schroederLawNeighborCandidates.sourceSpanStrideFloats,
+      SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS
+    ))
+  );
+  const sourceCandidateSpanAvailable = Boolean(sourceCandidateSpanBuffer && sourceCandidateSpanCount > 0);
   return {
     ...base,
     status: 'schroeder-reaction-law-neighbor-candidates-ready',
@@ -2083,6 +2115,11 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
     neighborCandidateBufferConsumed: traversalBacked,
     neighborCandidateCount,
     neighborCandidateStrideFloats,
+    sourceCandidateSpanBuffer,
+    sourceCandidateSpanBufferObserved: sourceCandidateSpanAvailable,
+    sourceCandidateSpanBufferConsumed: traversalBacked && sourceCandidateSpanAvailable,
+    sourceCandidateSpanCount,
+    sourceCandidateSpanStrideFloats,
     candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
     lawQueueCount: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.lawQueueCount, 0))),
     enabledLawMask
@@ -2365,6 +2402,18 @@ export async function runSphReactionStepWebGpu({
     );
   const schroederReactionLawNeighborCandidateBuffer = borrowedSchroederLawNeighborCandidateBuffer
     || localSchroederLawNeighborCandidateBuffer;
+  const borrowedSchroederLawNeighborSourceSpanBuffer = schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
+    ? schroederReactionLawNeighborCandidates.sourceCandidateSpanBuffer
+    : null;
+  const localSchroederLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-reaction-schroeder-law-neighbor-source-spans-disabled',
+      new Float32Array(SCHROEDER_REACTION_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS)
+    );
+  const schroederReactionLawNeighborSourceSpanBuffer = borrowedSchroederLawNeighborSourceSpanBuffer
+    || localSchroederLawNeighborSourceSpanBuffer;
   const schroederReactionLawNeighborCandidateParamsBuffer = device.createBuffer({
     label: 'ulg-sph-reaction-schroeder-law-neighbor-candidates-params',
     size: 32,
@@ -2425,7 +2474,8 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(20, 'read-only-storage'),
     computeBufferBinding(21, 'uniform'),
     computeBufferBinding(22, 'read-only-storage'),
-    computeBufferBinding(23, 'uniform')
+    computeBufferBinding(23, 'uniform'),
+    computeBufferBinding(24, 'read-only-storage')
   ];
   const reactionParticleBinBindings = [
     computeBufferBinding(0, 'read-only-storage'),
@@ -2505,7 +2555,8 @@ export async function runSphReactionStepWebGpu({
       { binding: 20, resource: { buffer: schroederReactionLawQueueBuffer } },
       { binding: 21, resource: { buffer: schroederReactionLawQueueParamsBuffer } },
       { binding: 22, resource: { buffer: schroederReactionLawNeighborCandidateBuffer } },
-      { binding: 23, resource: { buffer: schroederReactionLawNeighborCandidateParamsBuffer } }
+      { binding: 23, resource: { buffer: schroederReactionLawNeighborCandidateParamsBuffer } },
+      { binding: 24, resource: { buffer: schroederReactionLawNeighborSourceSpanBuffer } }
     ]
   });
   const resolveBindEntries = (layout) => ({
@@ -2677,6 +2728,7 @@ export async function runSphReactionStepWebGpu({
     localSchroederLawQueueBuffer,
     schroederReactionLawQueueParamsBuffer,
     localSchroederLawNeighborCandidateBuffer,
+    localSchroederLawNeighborSourceSpanBuffer,
     schroederReactionLawNeighborCandidateParamsBuffer,
     ...reactionParticleBins.cleanupBuffers,
     localSourceStateBuffer,
@@ -2763,6 +2815,9 @@ export async function runSphReactionStepWebGpu({
       schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
         ? 'schroeder-law-neighbor-candidates-authoritative'
         : (schroederReactionLawNeighborCandidates.available ? 'schroeder-law-neighbor-candidates-observed' : null),
+      schroederReactionLawNeighborCandidates.sourceCandidateSpanBufferConsumed
+        ? 'source-span-indexed'
+        : null,
       schroederReactionLawNeighborCandidates.neighborCandidateBufferConsumed
         ? null
         : (reactionParticleBins.enabled ? 'fixed-capacity-particle-bin-grid' : 'all-particle-scan-fallback')

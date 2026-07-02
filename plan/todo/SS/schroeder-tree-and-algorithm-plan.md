@@ -174,6 +174,7 @@ Suggested schemas:
 - `peercompute.ulg.schroeder-cross-level-state-delta.v0`
 - `peercompute.ulg.schroeder-cross-level-state-delta-merge.v0`
 - `peercompute.ulg.schroeder-hierarchy-aggregate.v0`
+- `peercompute.ulg.schroeder-hierarchy-aggregate-node.v0`
 - `peercompute.ulg.schroeder-portable-summary.v0`
 
 ## Implementation Slices
@@ -227,8 +228,8 @@ Suggested schemas:
   GPU-resident transfer rows landed in `38fd33b`; pending conservative
   source/target state-delta rows landed in `c0b980f`; StateManager-admitted
   retained merge buffers landed in `60a63c2`; SS-owned aggregate state
-  contribution materialization landed in `258d7c2`; keyed aggregate-node
-  reduction is next.
+  contribution materialization landed in `258d7c2`; exact GPU duplicate-key
+  aggregate-node reduction landed in `60d2d7e`.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -267,8 +268,10 @@ Suggested schemas:
 1. Conservative cross-level state mutation:
    - consume adjacent-level admitted state-delta merge rows and aggregate
      contribution rows;
-   - reduce/sort contributions into SS-owned authoritative hierarchy aggregate
-     nodes;
+   - consume retained SS aggregate-node rows built from exact GPU duplicate-key
+     summation;
+   - replace exact O(n^2) node reduction with sort/radix or bucket reduction
+     before scaling beyond diagnostic row counts;
    - summarize residual counters across mass, volume, momentum, and energy;
    - fail closed when parent/child level metadata is missing.
 2. Phase-volume migration:
@@ -319,17 +322,17 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS keyed aggregate-node reduction**:
+The next code slice on `SS` is **phase-volume migration over retained SS
+aggregate nodes**:
 
-1. Keep aggregate contribution rows GPU-resident and no-full-readback by
-   default.
-2. Pick a GPU reduction strategy for duplicate parent keys: sort/radix,
-   hash-bucket accumulation, or a bounded workgroup-local first pass.
-3. Emit retained aggregate-node rows with summed mass, represented volume,
-   momentum, internal energy, and residual counters.
-4. Preserve explicit state-family ownership metadata for the aggregate-node
-   buffer.
-5. Fail closed when duplicate-key reduction capacity is exceeded.
-
-That moves Slice 4 from unsorted aggregate contributions into actual SS
-hierarchy nodes.
+1. Keep water-to-steam support and level changes derived from closure density,
+   pressure, temperature, represented volume, and phase response.
+2. Feed the retained aggregate-node buffer into the migration decision path so
+   coherent bulk steam can move to coarser levels without multiplying particle
+   count.
+3. Preserve fine representation near surfaces, reactions, walls, and large
+   pressure/interface gradients.
+4. Emit compact migration diagnostics and conservation residual counters, not a
+   full particle readback.
+5. Track the exact aggregate-node reducer as a correctness-first bridge; replace
+   it with sort/radix or bucket reduction before scale testing.

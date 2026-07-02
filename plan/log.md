@@ -35101,3 +35101,38 @@ Next:
   active-leaf/coherent-aggregate batches.
 - Keep the diagnostic CPU proxy path capped and visibly diagnostic, not a
   primary PeerCompute hot path.
+
+## 2026-07-01 AKDT - SS Native Retained-Proxy Executor
+
+Status:
+
+- Added `sph-scene-schroeder-render-proxy-native-executor`.
+- The executor consumes `schroederRenderProxyDrawSource` batches only after the
+  backend selection is native-submit-ready.
+- Same-device retained SS source refs are resolved through an explicit buffer
+  resolver; descriptor refs are never converted into transferable raw browser
+  `GPUBuffer` handles.
+- Added a native WebGPU instanced proxy-splat shader for active-leaf and
+  coherent-aggregate SS rows using the ABI row layouts.
+- The executor creates the render pipeline, per-batch uniform bindings, and
+  draw commands for retained buffers while keeping frame-copy readback,
+  full-particle readback, and overlay ownership disabled.
+- Fail-closed cases now cover missing draw source, backend, device, format,
+  buffer resolver, and unresolved retained source refs.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `86/86` passing.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `168/168` passing.
+
+Next:
+
+- Wire the native retained-proxy executor into the live native surface render
+  bridge.
+- Add camera/viewport uniform updates and same-device retained-buffer resolver
+  plumbing.
+- Keep the integration inside the main/native scene pass rather than using a
+  detached overlay or frame-copy-back path.

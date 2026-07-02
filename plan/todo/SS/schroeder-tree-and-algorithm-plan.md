@@ -312,7 +312,8 @@ Suggested schemas:
   source metadata materialization landed in `df261c7`; compact render proxy
   descriptor plans landed in `24ecd87`; renderer-visible proxy consumer binding
   landed in `9b31697`; descriptor-batched proxy draw-source contracts landed
-  in `5b54457`; proxy backend selection landed in `4316da6`.
+  in `5b54457`; proxy backend selection landed in `4316da6`; the native
+  retained-proxy WebGPU executor landed in `bdc48a5`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -320,8 +321,9 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - implement the native WebGPU retained-proxy draw executor for selected
-     active-node leaf / coherent aggregate batches;
+   - wire the native WebGPU retained-proxy executor into the live native
+     surface render bridge with camera uniforms and same-device buffer
+     resolver plumbing;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep diagnostic CPU proxy geometry explicit, capped, and outside the
      PeerCompute hot path;
@@ -378,12 +380,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS native retained-proxy draw executor**:
+The next code slice on `SS` is **SS native retained-proxy render bridge
+integration**:
 
-1. Build a native WebGPU executor/shader path for selected
-   `schroederRenderProxyBackendSelection` batches.
-2. Consume same-device retained SS source refs only after backend selection is
-   native-submit-ready; do not require frame-copy or full-particle readback.
-3. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
-4. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
+1. Thread a same-device retained-buffer resolver from the resident SS hot-buffer
+   owner into the native proxy executor.
+2. Update camera/viewport uniforms from the live scene camera before each draw
+   pass.
+3. Submit executor draw commands inside the native surface path, not as a
+   detached overlay or frame-copy path.
+4. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
+5. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.

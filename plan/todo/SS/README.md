@@ -156,11 +156,17 @@ Landed checkpoints:
     draw is selected only with same-device renderer capability and a bound
     surface consumer, while diagnostic CPU proxy geometry remains explicit,
     capped, and outside the PeerCompute hot path.
+45. `bdc48a5` adds a native WebGPU retained-proxy executor for SS active-leaf
+    and coherent-aggregate draw batches. It resolves descriptor-only retained
+    refs through a same-device buffer resolver, builds a no-readback instanced
+    proxy-splat pipeline, and fails closed without raw `GPUBuffer` transfer,
+    frame-copy readback, or overlay ownership.
 
 Next implementation queue:
 
-1. Implement the native WebGPU retained-proxy draw executor for selected SS
-   active-leaf/coherent-aggregate batches.
+1. Wire the native WebGPU retained-proxy executor into the live native surface
+   render bridge with camera uniforms and same-device retained-buffer resolver
+   plumbing.
 2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
 3. Keep the bucket index as the small-scene/default first GPU index and use

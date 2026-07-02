@@ -7784,3 +7784,112 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   transfer_rows[transfer_offset + 23u] = transfer_status;
 }
 `;
+
+export const schroederCrossLevelStateDeltaWgsl = `
+struct SchroederCrossLevelStateDeltaParams {
+  candidate_count: u32,
+  transfer_stride: u32,
+  state_delta_stride: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
+};
+
+@group(0) @binding(0) var<storage, read> transfer_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> state_delta_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederCrossLevelStateDeltaParams;
+
+const SCHROEDER_DEFAULT_TRANSFER_STRIDE_FOR_DELTA: u32 = 24u;
+const SCHROEDER_DEFAULT_STATE_DELTA_STRIDE: u32 = 32u;
+
+fn ss_delta_target_key(parent_cell: vec3<f32>, chart_id: f32, parent_level: f32) -> f32 {
+  return chart_id * 268435456.0
+    + parent_level * 16777216.0
+    + parent_cell.z * 65536.0
+    + parent_cell.y * 256.0
+    + parent_cell.x;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  if (candidate_index >= params.candidate_count) {
+    return;
+  }
+
+  let transfer_stride = max(params.transfer_stride, SCHROEDER_DEFAULT_TRANSFER_STRIDE_FOR_DELTA);
+  let state_delta_stride = max(params.state_delta_stride, SCHROEDER_DEFAULT_STATE_DELTA_STRIDE);
+  let transfer_offset = candidate_index * transfer_stride;
+  let state_delta_offset = candidate_index * state_delta_stride;
+
+  let source_particle_index = transfer_rows[transfer_offset + 0u];
+  let child_level = transfer_rows[transfer_offset + 1u];
+  let parent_level = transfer_rows[transfer_offset + 2u];
+  let level_delta = transfer_rows[transfer_offset + 3u];
+  let parent_cell = vec3<f32>(
+    transfer_rows[transfer_offset + 4u],
+    transfer_rows[transfer_offset + 5u],
+    transfer_rows[transfer_offset + 6u]
+  );
+  let chart_id = transfer_rows[transfer_offset + 7u];
+  let transfer_mass_kg = transfer_rows[transfer_offset + 9u];
+  let transfer_volume_m3 = transfer_rows[transfer_offset + 12u];
+  let momentum = vec3<f32>(
+    transfer_rows[transfer_offset + 14u],
+    transfer_rows[transfer_offset + 15u],
+    transfer_rows[transfer_offset + 16u]
+  );
+  let internal_energy_j = transfer_rows[transfer_offset + 17u];
+  let transfer_weight = transfer_rows[transfer_offset + 22u];
+  let transfer_status = transfer_rows[transfer_offset + 23u];
+  let active_transfer = select(0.0, 1.0, transfer_status > 0.0 && transfer_status < 32.0 && transfer_weight > 0.0);
+  let applied_mass_kg = transfer_mass_kg * active_transfer;
+  let applied_volume_m3 = transfer_volume_m3 * active_transfer;
+  let applied_momentum = momentum * active_transfer;
+  let applied_internal_energy_j = internal_energy_j * active_transfer;
+  let source_mass_delta_kg = -applied_mass_kg;
+  let target_mass_delta_kg = applied_mass_kg;
+  let source_volume_delta_m3 = -applied_volume_m3;
+  let target_volume_delta_m3 = applied_volume_m3;
+  let source_momentum_delta = -applied_momentum;
+  let target_momentum_delta = applied_momentum;
+  let source_internal_energy_delta_j = -applied_internal_energy_j;
+  let target_internal_energy_delta_j = applied_internal_energy_j;
+  let state_delta_status = select(32.0, 1.0, active_transfer > 0.0);
+
+  state_delta_rows[state_delta_offset + 0u] = source_particle_index;
+  state_delta_rows[state_delta_offset + 1u] = child_level;
+  state_delta_rows[state_delta_offset + 2u] = parent_level;
+  state_delta_rows[state_delta_offset + 3u] = level_delta;
+  state_delta_rows[state_delta_offset + 4u] = parent_cell.x;
+  state_delta_rows[state_delta_offset + 5u] = parent_cell.y;
+  state_delta_rows[state_delta_offset + 6u] = parent_cell.z;
+  state_delta_rows[state_delta_offset + 7u] = chart_id;
+  state_delta_rows[state_delta_offset + 8u] = source_mass_delta_kg;
+  state_delta_rows[state_delta_offset + 9u] = target_mass_delta_kg;
+  state_delta_rows[state_delta_offset + 10u] = source_mass_delta_kg + target_mass_delta_kg;
+  state_delta_rows[state_delta_offset + 11u] = source_volume_delta_m3;
+  state_delta_rows[state_delta_offset + 12u] = target_volume_delta_m3;
+  state_delta_rows[state_delta_offset + 13u] = source_volume_delta_m3 + target_volume_delta_m3;
+  state_delta_rows[state_delta_offset + 14u] = source_momentum_delta.x;
+  state_delta_rows[state_delta_offset + 15u] = source_momentum_delta.y;
+  state_delta_rows[state_delta_offset + 16u] = source_momentum_delta.z;
+  state_delta_rows[state_delta_offset + 17u] = target_momentum_delta.x;
+  state_delta_rows[state_delta_offset + 18u] = target_momentum_delta.y;
+  state_delta_rows[state_delta_offset + 19u] = target_momentum_delta.z;
+  state_delta_rows[state_delta_offset + 20u] = source_momentum_delta.x + target_momentum_delta.x;
+  state_delta_rows[state_delta_offset + 21u] = source_momentum_delta.y + target_momentum_delta.y;
+  state_delta_rows[state_delta_offset + 22u] = source_momentum_delta.z + target_momentum_delta.z;
+  state_delta_rows[state_delta_offset + 23u] = source_internal_energy_delta_j;
+  state_delta_rows[state_delta_offset + 24u] = target_internal_energy_delta_j;
+  state_delta_rows[state_delta_offset + 25u] = source_internal_energy_delta_j + target_internal_energy_delta_j;
+  state_delta_rows[state_delta_offset + 26u] = transfer_weight * active_transfer;
+  state_delta_rows[state_delta_offset + 27u] = ss_delta_target_key(parent_cell, chart_id, parent_level);
+  state_delta_rows[state_delta_offset + 28u] = state_delta_status;
+  state_delta_rows[state_delta_offset + 29u] = 1.0;
+  state_delta_rows[state_delta_offset + 30u] = 1.0;
+  state_delta_rows[state_delta_offset + 31u] = 0.0;
+}
+`;

@@ -2,6 +2,7 @@ import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
+  SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -11,6 +12,8 @@ import {
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -23,6 +26,7 @@ import {
   schroederActiveNodeListWgsl,
   schroederConservationSummaryWgsl,
   schroederCrossLevelCouplingWgsl,
+  schroederCrossLevelStateDeltaWgsl,
   schroederCrossLevelTransferWgsl,
   schroederLevelAssignmentWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -41,6 +45,8 @@ export {
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -52,11 +58,13 @@ export {
 export const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_CONSERVATION_SUMMARY_FLOATS = SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT.length;
+export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
 export const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SCHROEDER_ACTIVE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CONSERVATION_SUMMARY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
+export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LEVEL_ASSIGNMENT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_ACTIVE_NODE_SCOPE = 'schroeder-gpu-active-node-list';
@@ -68,6 +76,7 @@ export const SCHROEDER_FULL_READBACK_MODE = 'full-assignment-readback';
 export const SCHROEDER_FULL_ACTIVE_NODE_READBACK_MODE = 'full-active-node-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_READBACK_MODE = 'full-cross-level-readback';
 export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservation-summary-readback';
+export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-level-state-delta-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
 
 const DEFAULT_MIN_LEVEL = -8;
@@ -350,6 +359,31 @@ export function createSchroederCrossLevelTransferParamsArray({
   return buffer;
 }
 
+export function createSchroederCrossLevelStateDeltaParamsArray({
+  crossLevelCandidateCount = 0,
+  transferStrideFloats = SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
+  stateDeltaStrideFloats = SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS,
+  flags = 0
+} = {}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(crossLevelCandidateCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    transferStrideFloats,
+    SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    stateDeltaStrideFloats,
+    SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(16, 0, true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
+  return buffer;
+}
+
 function assertLevelAssignmentInput(levelAssignment) {
   if (
     levelAssignment?.schema !== ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
@@ -416,6 +450,26 @@ function assertSphParticleStateInput(sphParticleState) {
   }
   if (!(sphParticleState.state instanceof Float32Array)) {
     throw new TypeError('Schroeder cross-level transfer requires packed Float32Array SPH state rows');
+  }
+}
+
+function assertCrossLevelTransferInput(crossLevelTransfer) {
+  if (
+    crossLevelTransfer?.schema !== ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA
+    && crossLevelTransfer?.schema !== ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA
+  ) {
+    throw new TypeError('Schroeder cross-level state delta requires a Schroeder cross-level transfer input');
+  }
+  const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelTransfer.crossLevelCandidateCount, 0)));
+  if (candidateCount <= 0) {
+    throw new RangeError('Schroeder cross-level state delta requires at least one transfer candidate');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    crossLevelTransfer.transferStrideFloats,
+    SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS
+  )));
+  if (stride !== SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS) {
+    throw new RangeError('Schroeder cross-level state delta requires the current transfer row layout');
   }
 }
 
@@ -543,6 +597,41 @@ export function createSchroederCrossLevelTransferPlan({
     transferByteLength,
     outputCompaction: 'one-conservative-transfer-row-per-cross-level-candidate',
     conservativeTransferStatus: 'transfer-rows-ready-no-state-mutation',
+    conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+export function createSchroederCrossLevelStateDeltaPlan({
+  crossLevelTransfer
+} = {}) {
+  assertCrossLevelTransferInput(crossLevelTransfer);
+  const candidateCount = Math.max(0, Math.round(finiteNumber(crossLevelTransfer.crossLevelCandidateCount, 0)));
+  const stateDeltaByteLength = Math.max(
+    4,
+    candidateCount * SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  return {
+    schema: ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
+    status: 'schroeder-cross-level-state-delta-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-cross-level-state-delta',
+    sourceTransferSchema: crossLevelTransfer.schema,
+    sourceTransferStatus: crossLevelTransfer.status ?? null,
+    crossLevelCandidateCount: candidateCount,
+    transferStrideFloats: SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS,
+    stateDeltaRowLayout: [...SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT],
+    stateDeltaStrideFloats: SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS,
+    stateDeltaStrideBytes: SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    stateDeltaByteLength,
+    outputCompaction: 'one-pending-state-delta-row-per-transfer-candidate',
+    conservativeTransferStatus: 'pending-state-delta-planned',
+    stateMutationTarget: 'schroeder-pending-state-delta-buffer',
+    stateMutationStatus: 'pending-state-delta-not-authoritative',
+    stateAuthorityStatus: 'requires-state-manager-admission-before-authoritative-merge',
     conservedQuantities: ['mass', 'represented-volume', 'momentum', 'internal-energy'],
     gpuFirst: true,
     cpuReferenceRequired: false,
@@ -1350,6 +1439,136 @@ export async function runSchroederCrossLevelTransferWebGpu({
   }
 }
 
+export async function runSchroederCrossLevelStateDeltaWebGpu({
+  device,
+  crossLevelTransfer,
+  retainStateDeltaBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederCrossLevelStateDeltaWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederCrossLevelStateDeltaPlan({ crossLevelTransfer });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedTransferBuffer = crossLevelTransfer?.transferBuffer || null;
+  const transferRows = crossLevelTransfer?.transferRows instanceof Float32Array
+    ? crossLevelTransfer.transferRows
+    : null;
+  if (!borrowedTransferBuffer && !(transferRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder cross-level state delta requires a retained transfer buffer or explicit rows');
+  }
+  const transferBuffer = borrowedTransferBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-state-delta-transfer-in', transferRows);
+  const stateDeltaBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-state-delta-out',
+    size: plan.stateDeltaByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-cross-level-state-delta-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-cross-level-state-delta-readback',
+      size: plan.stateDeltaByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedStateDeltaBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelStateDeltaParamsArray(plan));
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-cross-level-state-delta.v0',
+      label: 'ulg-schroeder-cross-level-state-delta',
+      code: schroederCrossLevelStateDeltaWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: transferBuffer } },
+        { binding: 1, resource: { buffer: stateDeltaBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.crossLevelCandidateCount / SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(stateDeltaBuffer, 0, readBuffer, 0, plan.stateDeltaByteLength);
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let stateDeltaRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      stateDeltaRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.crossLevelCandidateCount * SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_EXECUTION_SCHEMA,
+      stateDeltaSchema: plan.schema,
+      status: 'schroeder-cross-level-state-delta-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedStateDeltaBuffer: Boolean(retainStateDeltaBuffer),
+      stateDeltaBufferByteLength: plan.stateDeltaByteLength,
+      stateDeltaRows,
+      conservativeTransferStatus: 'state-delta-ready-pending-admission',
+      stateMutationStatus: 'pending-state-delta-submitted-awaiting-admission',
+      stateAuthorityStatus: 'requires-state-manager-admission-before-authoritative-merge',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainStateDeltaBuffer) {
+      result.stateDeltaBuffer = stateDeltaBuffer;
+      result.destroyStateDeltaBuffer = () => stateDeltaBuffer.destroy?.();
+      returnedRetainedStateDeltaBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedTransferBuffer) transferBuffer.destroy?.();
+      if (!retainStateDeltaBuffer || !returnedRetainedStateDeltaBuffer) stateDeltaBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederSameLevelMechanicsWebGpu({
   device,
   sphParticleState,
@@ -1361,6 +1580,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   crossLevelCoupling = null,
   conservationSummary = null,
   crossLevelTransfer = null,
+  crossLevelStateDelta = null,
   selectedLevel = 0,
   baseGridSpacingM = sphParticleState?.smoothingLengthM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = DEFAULT_MIN_LEVEL,
@@ -1372,6 +1592,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableCrossLevelCoupling = true,
   enableConservationSummary = enableCrossLevelCoupling,
   enableCrossLevelTransfer = enableConservationSummary,
+  enableCrossLevelStateDelta = enableCrossLevelTransfer,
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -1384,6 +1605,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   crossLevelCouplingRunner = runSchroederCrossLevelCouplingWebGpu,
   conservationSummaryRunner = runSchroederConservationSummaryWebGpu,
   crossLevelTransferRunner = runSchroederCrossLevelTransferWebGpu,
+  crossLevelStateDeltaRunner = runSchroederCrossLevelStateDeltaWebGpu,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
   residentStepOptions = {}
 } = {}) {
@@ -1401,6 +1623,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   }
   if (enableCrossLevelCoupling && enableCrossLevelTransfer && typeof crossLevelTransferRunner !== 'function') {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelTransferRunner function');
+  }
+  if (enableCrossLevelCoupling && enableCrossLevelTransfer && enableCrossLevelStateDelta && typeof crossLevelStateDeltaRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a crossLevelStateDeltaRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -1468,6 +1693,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainTransferBuffer: true,
       readbackMode
     });
+  const resolvedCrossLevelStateDelta = !resolvedCrossLevelTransfer || !enableCrossLevelStateDelta
+    ? null
+    : crossLevelStateDelta || await crossLevelStateDeltaRunner({
+      device,
+      crossLevelTransfer: resolvedCrossLevelTransfer,
+      retainStateDeltaBuffer: true,
+      readbackMode
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -1487,6 +1720,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
     schroederCrossLevelTransfer: resolvedCrossLevelTransfer,
+    schroederCrossLevelStateDelta: resolvedCrossLevelStateDelta,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -1550,6 +1784,19 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedCrossLevelTransfer.transferByteLength
         ?? 0
     } : null,
+    crossLevelStateDelta: resolvedCrossLevelStateDelta ? {
+      schema: resolvedCrossLevelStateDelta.schema,
+      status: resolvedCrossLevelStateDelta.status,
+      crossLevelCandidateCount: resolvedCrossLevelStateDelta.crossLevelCandidateCount,
+      outputCompaction: resolvedCrossLevelStateDelta.outputCompaction,
+      conservativeTransferStatus: resolvedCrossLevelStateDelta.conservativeTransferStatus,
+      stateMutationStatus: resolvedCrossLevelStateDelta.stateMutationStatus,
+      stateAuthorityStatus: resolvedCrossLevelStateDelta.stateAuthorityStatus,
+      retainedStateDeltaBuffer: Boolean(resolvedCrossLevelStateDelta.stateDeltaBuffer),
+      stateDeltaBufferByteLength: resolvedCrossLevelStateDelta.stateDeltaBufferByteLength
+        ?? resolvedCrossLevelStateDelta.stateDeltaByteLength
+        ?? 0
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -1565,8 +1812,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     crossLevelTransferStatus: resolvedCrossLevelTransfer?.status ?? (
       resolvedCrossLevelCoupling ? 'disabled-cross-level-transfer' : 'disabled-same-level-only-mechanics'
     ),
-    conservativeTransferStatus: resolvedCrossLevelTransfer?.conservativeTransferStatus
+    crossLevelStateDeltaStatus: resolvedCrossLevelStateDelta?.status ?? (
+      resolvedCrossLevelTransfer ? 'disabled-cross-level-state-delta' : (
+        resolvedCrossLevelCoupling ? 'disabled-cross-level-transfer' : 'disabled-same-level-only-mechanics'
+      )
+    ),
+    conservativeTransferStatus: resolvedCrossLevelStateDelta?.conservativeTransferStatus
+      ?? resolvedCrossLevelTransfer?.conservativeTransferStatus
       ?? resolvedConservationSummary?.conservativeTransferStatus
+      ?? 'not-run',
+    stateMutationStatus: resolvedCrossLevelStateDelta?.stateMutationStatus
+      ?? resolvedCrossLevelTransfer?.stateMutationStatus
       ?? 'not-run',
     scientificValidation: false,
     sphValidation: false,

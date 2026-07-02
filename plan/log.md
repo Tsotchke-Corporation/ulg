@@ -34974,3 +34974,34 @@ Next:
   descriptors for active leaves and coherent aggregates.
 - Keep those descriptors closure/PBR-derived and no-full-readback, then decide
   which existing render bridge should consume them first.
+
+## 2026-07-01 AKDT - SS Render Proxy Descriptor Plans
+
+Status:
+
+- Added a compact `sph-scene-schroeder-render-proxy-descriptor-plan` over
+  `schroederRenderSource`.
+- The plan emits renderer-visible descriptor batches for active leaves and
+  coherent aggregates, plus diagnostic-only law queue metadata.
+- Proxy descriptors preserve closure/PBR requirements, no-full-readback status,
+  descriptor-only PeerCompute handoff, source admission metadata, and the rule
+  that presentation does not own physics cadence.
+- The resident render-source metadata/apply path now carries the SS proxy plan,
+  and scene/renderer `userData` expose it for diagnostics.
+- Blocked or raw-`GPUBuffer` SS render sources stay fail-closed before renderer
+  consumption.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `84/84` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Bind `schroederRenderProxyDescriptorPlan` into an existing renderer-visible
+  consumer path.
+- Defer raw same-device `GPUBuffer` draw binding until a renderer capability and
+  admission contract proves it can avoid frame-copy readback and overlay-only
+  integration.

@@ -139,12 +139,16 @@ Landed checkpoints:
     source metadata, including active leaf, coherent aggregate, law queue proxy,
     closure-PBR, admission, and no-full-readback fields on the existing resident
     render-source path.
+41. `24ecd87` adds compact SS render proxy descriptor plans over
+    `schroederRenderSource`, separating drawable active-leaf/coherent-aggregate
+    proxy batches from diagnostic law-queue metadata without generating
+    per-node JavaScript geometry.
 
 Next implementation queue:
 
-1. Map active-node leaves and coherent aggregate nodes into closure-derived PBR
-   render sources without full particle readback.
-2. Add renderer-visible SS proxy/draw descriptors that consume the scene
-   `schroederRenderSource` contract without creating overlay-owned physics.
+1. Bind SS render proxy descriptor plans into an existing renderer-visible
+   consumer path without creating overlay-owned physics cadence.
+2. Add the first concrete active-leaf/coherent-aggregate proxy draw source while
+   preserving closure-derived PBR and no-full-readback defaults.
 3. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

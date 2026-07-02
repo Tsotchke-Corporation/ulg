@@ -10354,6 +10354,169 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateForceApplicationWgsl = `
+struct SchroederFarAggregateForceApplicationParams {
+  particle_count: u32,
+  force_summary_row_count: u32,
+  force_summary_stride: u32,
+  particle_state_stride: u32,
+  application_stride: u32,
+  admission_approved: u32,
+  flags: u32,
+  pad0: u32,
+  dt_s: f32,
+  acceleration_scale: f32,
+  max_acceleration_m_per_s2: f32,
+  max_far_field_error_bound: f32,
+  max_opening_ratio: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> force_summary_rows: array<f32>;
+@group(0) @binding(1) var<storage, read> particle_state_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> force_application_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederFarAggregateForceApplicationParams;
+
+const SCHROEDER_DEFAULT_FORCE_APPLICATION_FORCE_SUMMARY_STRIDE: u32 = 32u;
+const SCHROEDER_DEFAULT_FORCE_APPLICATION_PARTICLE_STATE_STRIDE: u32 = 8u;
+const SCHROEDER_DEFAULT_FORCE_APPLICATION_STRIDE: u32 = 32u;
+
+fn ss_force_application_write_empty(row_offset: u32, force_offset: u32, status: f32) {
+  force_application_rows[row_offset + 0u] = force_summary_rows[force_offset + 0u];
+  force_application_rows[row_offset + 1u] = force_summary_rows[force_offset + 1u];
+  force_application_rows[row_offset + 2u] = force_summary_rows[force_offset + 2u];
+  force_application_rows[row_offset + 3u] = force_summary_rows[force_offset + 3u];
+  force_application_rows[row_offset + 4u] = 0.0;
+  force_application_rows[row_offset + 5u] = 0.0;
+  force_application_rows[row_offset + 6u] = 0.0;
+  force_application_rows[row_offset + 7u] = 0.0;
+  force_application_rows[row_offset + 8u] = 0.0;
+  force_application_rows[row_offset + 9u] = 0.0;
+  force_application_rows[row_offset + 10u] = 0.0;
+  force_application_rows[row_offset + 11u] = max(params.dt_s, 0.0);
+  force_application_rows[row_offset + 12u] = 0.0;
+  force_application_rows[row_offset + 13u] = 0.0;
+  force_application_rows[row_offset + 14u] = 0.0;
+  force_application_rows[row_offset + 15u] = 0.0;
+  force_application_rows[row_offset + 16u] = 0.0;
+  force_application_rows[row_offset + 17u] = force_summary_rows[force_offset + 11u];
+  force_application_rows[row_offset + 18u] = force_summary_rows[force_offset + 7u];
+  force_application_rows[row_offset + 19u] = force_summary_rows[force_offset + 6u];
+  force_application_rows[row_offset + 20u] = force_summary_rows[force_offset + 14u];
+  force_application_rows[row_offset + 21u] = force_summary_rows[force_offset + 15u];
+  force_application_rows[row_offset + 22u] = 0.0;
+  force_application_rows[row_offset + 23u] = force_summary_rows[force_offset + 18u];
+  force_application_rows[row_offset + 24u] = f32(params.admission_approved);
+  force_application_rows[row_offset + 25u] = 0.0;
+  force_application_rows[row_offset + 26u] = 0.0;
+  force_application_rows[row_offset + 27u] = params.queue_epoch;
+  force_application_rows[row_offset + 28u] = params.state_family_id;
+  force_application_rows[row_offset + 29u] = status;
+  force_application_rows[row_offset + 30u] = 1.0;
+  force_application_rows[row_offset + 31u] = 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.force_summary_row_count) {
+    return;
+  }
+
+  let force_summary_stride = max(
+    params.force_summary_stride,
+    SCHROEDER_DEFAULT_FORCE_APPLICATION_FORCE_SUMMARY_STRIDE
+  );
+  let particle_state_stride = max(
+    params.particle_state_stride,
+    SCHROEDER_DEFAULT_FORCE_APPLICATION_PARTICLE_STATE_STRIDE
+  );
+  let application_stride = max(params.application_stride, SCHROEDER_DEFAULT_FORCE_APPLICATION_STRIDE);
+  let force_offset = row_index * force_summary_stride;
+  let application_offset = row_index * application_stride;
+
+  if (params.admission_approved == 0u) {
+    ss_force_application_write_empty(application_offset, force_offset, 128.0);
+    return;
+  }
+
+  let source_particle_f = force_summary_rows[force_offset + 0u];
+  let source_particle = u32(max(source_particle_f, 0.0));
+  let source_in_range = source_particle < params.particle_count;
+  if (!source_in_range) {
+    ss_force_application_write_empty(application_offset, force_offset, 96.0);
+    return;
+  }
+
+  let particle_offset = source_particle * particle_state_stride;
+  let source_mass = max(particle_state_rows[particle_offset + 3u], 0.0);
+  let raw_acceleration = vec3<f32>(
+    force_summary_rows[force_offset + 8u],
+    force_summary_rows[force_offset + 9u],
+    force_summary_rows[force_offset + 10u]
+  ) * params.acceleration_scale;
+  let raw_acceleration_magnitude = length(raw_acceleration);
+  var acceleration = raw_acceleration;
+  if (params.max_acceleration_m_per_s2 > 0.0 && raw_acceleration_magnitude > params.max_acceleration_m_per_s2) {
+    acceleration = raw_acceleration * (params.max_acceleration_m_per_s2 / max(raw_acceleration_magnitude, 0.000001));
+  }
+
+  let dt_s = max(params.dt_s, 0.0);
+  let delta_velocity = acceleration * dt_s;
+  let momentum_delta = delta_velocity * source_mass;
+  let impulse_magnitude = length(momentum_delta);
+  let kinetic_energy_delta = 0.5 * source_mass * dot(delta_velocity, delta_velocity);
+  let active_candidate_count = max(force_summary_rows[force_offset + 7u], 0.0);
+  let force_status = force_summary_rows[force_offset + 18u];
+  let opening_ratio = max(force_summary_rows[force_offset + 14u], 0.0);
+  let far_error_bound = max(force_summary_rows[force_offset + 15u], 0.0);
+  let active_force = force_status > 0.0 && force_status < 32.0 && active_candidate_count > 0.0;
+  let pressure_blocked = (
+    (params.max_opening_ratio > 0.0 && opening_ratio > params.max_opening_ratio)
+    || (params.max_far_field_error_bound > 0.0 && far_error_bound > params.max_far_field_error_bound)
+  );
+  var status = select(32.0, 1.0, active_force && source_mass > 0.0);
+  if (pressure_blocked) {
+    status = 64.0;
+  }
+
+  force_application_rows[application_offset + 0u] = source_particle_f;
+  force_application_rows[application_offset + 1u] = force_summary_rows[force_offset + 1u];
+  force_application_rows[application_offset + 2u] = force_summary_rows[force_offset + 2u];
+  force_application_rows[application_offset + 3u] = force_summary_rows[force_offset + 3u];
+  force_application_rows[application_offset + 4u] = source_mass;
+  force_application_rows[application_offset + 5u] = acceleration.x;
+  force_application_rows[application_offset + 6u] = acceleration.y;
+  force_application_rows[application_offset + 7u] = acceleration.z;
+  force_application_rows[application_offset + 8u] = delta_velocity.x;
+  force_application_rows[application_offset + 9u] = delta_velocity.y;
+  force_application_rows[application_offset + 10u] = delta_velocity.z;
+  force_application_rows[application_offset + 11u] = dt_s;
+  force_application_rows[application_offset + 12u] = momentum_delta.x;
+  force_application_rows[application_offset + 13u] = momentum_delta.y;
+  force_application_rows[application_offset + 14u] = momentum_delta.z;
+  force_application_rows[application_offset + 15u] = impulse_magnitude;
+  force_application_rows[application_offset + 16u] = kinetic_energy_delta;
+  force_application_rows[application_offset + 17u] = force_summary_rows[force_offset + 11u];
+  force_application_rows[application_offset + 18u] = active_candidate_count;
+  force_application_rows[application_offset + 19u] = force_summary_rows[force_offset + 6u];
+  force_application_rows[application_offset + 20u] = opening_ratio;
+  force_application_rows[application_offset + 21u] = far_error_bound;
+  force_application_rows[application_offset + 22u] = select(1.0, 64.0, pressure_blocked);
+  force_application_rows[application_offset + 23u] = force_status;
+  force_application_rows[application_offset + 24u] = 1.0;
+  force_application_rows[application_offset + 25u] = 1.0;
+  force_application_rows[application_offset + 26u] = 0.0;
+  force_application_rows[application_offset + 27u] = params.queue_epoch;
+  force_application_rows[application_offset + 28u] = params.state_family_id;
+  force_application_rows[application_offset + 29u] = status;
+  force_application_rows[application_offset + 30u] = 1.0;
+  force_application_rows[application_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederPhaseVolumeMigrationWgsl = `
 struct SchroederPhaseVolumeMigrationParams {
   particle_count: u32,

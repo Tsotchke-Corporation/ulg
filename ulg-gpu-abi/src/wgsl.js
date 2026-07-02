@@ -7665,21 +7665,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 export const schroederLawNeighborCandidateWgsl = `
 struct SchroederLawNeighborParams {
   law_queue_count: u32,
+  active_node_count: u32,
   particle_count: u32,
   law_queue_stride: u32,
+  active_node_stride: u32,
   neighbor_stride: u32,
   state_stride: u32,
   candidate_budget: u32,
   enabled_law_mask: u32,
   flags: u32,
+  pad0: u32,
+  pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> law_queue_rows: array<f32>;
-@group(0) @binding(1) var<storage, read> sph_state_rows: array<f32>;
-@group(0) @binding(2) var<storage, read_write> neighbor_candidate_rows: array<f32>;
-@group(0) @binding(3) var<uniform> params: SchroederLawNeighborParams;
+@group(0) @binding(1) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(2) var<storage, read> sph_state_rows: array<f32>;
+@group(0) @binding(3) var<storage, read_write> neighbor_candidate_rows: array<f32>;
+@group(0) @binding(4) var<uniform> params: SchroederLawNeighborParams;
 
 const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
+const SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE: u32 = 16u;
 const SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE: u32 = 16u;
 const SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE: u32 = 8u;
 const SCHROEDER_LAW_NEIGHBOR_STATUS_READY: f32 = 1.0;
@@ -7696,6 +7702,41 @@ fn ss_neighbor_state_pos_mass(particle_index: u32, state_stride: u32) -> vec4<f3
     sph_state_rows[offset + 2u],
     sph_state_rows[offset + 3u]
   );
+}
+
+fn ss_neighbor_active_node_ready(active_offset: u32) -> bool {
+  let active_status = active_nodes[active_offset + 11u];
+  let source_particle = active_nodes[active_offset + 10u];
+  return active_status > 0.0 && active_status < 32.0 && source_particle >= 0.0;
+}
+
+fn ss_neighbor_tiles_overlap(queue_offset: u32, active_offset: u32) -> bool {
+  let same_level = abs(active_nodes[active_offset + 0u] - law_queue_rows[queue_offset + 1u]) < 0.5;
+  let same_chart = abs(active_nodes[active_offset + 15u] - law_queue_rows[queue_offset + 2u]) < 0.5;
+  let queue_min = vec3<f32>(
+    law_queue_rows[queue_offset + 4u],
+    law_queue_rows[queue_offset + 5u],
+    law_queue_rows[queue_offset + 6u]
+  );
+  let queue_max = vec3<f32>(
+    law_queue_rows[queue_offset + 7u],
+    law_queue_rows[queue_offset + 8u],
+    law_queue_rows[queue_offset + 9u]
+  );
+  let active_min = vec3<f32>(
+    active_nodes[active_offset + 1u],
+    active_nodes[active_offset + 2u],
+    active_nodes[active_offset + 3u]
+  );
+  let active_max = vec3<f32>(
+    active_nodes[active_offset + 4u],
+    active_nodes[active_offset + 5u],
+    active_nodes[active_offset + 6u]
+  );
+  let overlap = queue_min.x <= active_max.x && queue_max.x >= active_min.x
+    && queue_min.y <= active_max.y && queue_max.y >= active_min.y
+    && queue_min.z <= active_max.z && queue_max.z >= active_min.z;
+  return same_level && same_chart && overlap;
 }
 
 fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_index: u32, queue_epoch: f32) {
@@ -7728,6 +7769,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let queue_row_index = candidate_index / candidate_budget;
   let candidate_slot = candidate_index - queue_row_index * candidate_budget;
   let queue_stride = max(params.law_queue_stride, SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE);
+  let active_stride = max(params.active_node_stride, SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE);
   let neighbor_stride = max(params.neighbor_stride, SCHROEDER_LAW_NEIGHBOR_ROW_STRIDE);
   let state_stride = max(params.state_stride, SCHROEDER_LAW_NEIGHBOR_STATE_STRIDE);
   let queue_offset = queue_row_index * queue_stride;
@@ -7735,7 +7777,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let source_index_f = law_queue_rows[queue_offset + 0u];
   let queue_epoch = law_queue_rows[queue_offset + 28u];
 
-  if (params.particle_count == 0u || queue_row_index >= params.law_queue_count) {
+  if (params.particle_count == 0u || params.active_node_count == 0u || queue_row_index >= params.law_queue_count) {
     ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
     return;
   }
@@ -7762,14 +7804,43 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
-  let neighbor_index = (source_index + candidate_slot + 1u) % params.particle_count;
-  if (neighbor_index == source_index) {
+  var source_active_index = u32(max(round(law_queue_rows[queue_offset + 27u]), 0.0));
+  if (source_active_index >= params.active_node_count) {
+    source_active_index = min(queue_row_index, params.active_node_count - 1u);
+  }
+  var selected_active_index = params.active_node_count;
+  var matched_count = 0u;
+  var scan_step = 0u;
+  loop {
+    if (scan_step >= params.active_node_count) {
+      break;
+    }
+    let active_index = (source_active_index + 1u + scan_step) % params.active_node_count;
+    if (active_index != source_active_index) {
+      let active_offset = active_index * active_stride;
+      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+        if (matched_count == candidate_slot) {
+          selected_active_index = active_index;
+          break;
+        }
+        matched_count = matched_count + 1u;
+      }
+    }
+    scan_step = scan_step + 1u;
+  }
+  if (selected_active_index >= params.active_node_count) {
+    ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
+    return;
+  }
+  let selected_active_offset = selected_active_index * active_stride;
+  let neighbor_index = u32(max(round(active_nodes[selected_active_offset + 10u]), 0.0));
+  if (neighbor_index >= params.particle_count || neighbor_index == source_index) {
     ss_neighbor_write_inactive(row_offset, source_index_f, queue_row_index, queue_epoch);
     return;
   }
   let source_state = ss_neighbor_state_pos_mass(source_index, state_stride);
   let neighbor_state = ss_neighbor_state_pos_mass(neighbor_index, state_stride);
-  let support_radius = max(law_queue_rows[queue_offset + 11u], 0.000001);
+  let support_radius = max(max(law_queue_rows[queue_offset + 11u], active_nodes[selected_active_offset + 9u]), 0.000001);
   let delta = neighbor_state.xyz - source_state.xyz;
   let distance_m = length(delta);
   let within_support = distance_m <= support_radius;
@@ -7784,18 +7855,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   neighbor_candidate_rows[row_offset + 2u] = f32(enabled_law_mask);
   neighbor_candidate_rows[row_offset + 3u] = SCHROEDER_LAW_NEIGHBOR_STATUS_READY;
   neighbor_candidate_rows[row_offset + 4u] = law_queue_rows[queue_offset + 1u];
-  neighbor_candidate_rows[row_offset + 5u] = law_queue_rows[queue_offset + 1u];
+  neighbor_candidate_rows[row_offset + 5u] = active_nodes[selected_active_offset + 0u];
   neighbor_candidate_rows[row_offset + 6u] = law_queue_rows[queue_offset + 2u];
-  neighbor_candidate_rows[row_offset + 7u] = law_queue_rows[queue_offset + 2u];
+  neighbor_candidate_rows[row_offset + 7u] = active_nodes[selected_active_offset + 15u];
   neighbor_candidate_rows[row_offset + 8u] = distance_m;
   neighbor_candidate_rows[row_offset + 9u] = support_radius;
-  neighbor_candidate_rows[row_offset + 10u] = 1.0 / (1.0 + distance_m);
+  neighbor_candidate_rows[row_offset + 10u] = max(0.0, 1.0 - distance_m / support_radius);
   neighbor_candidate_rows[row_offset + 11u] = f32(queue_row_index);
   neighbor_candidate_rows[row_offset + 12u] = law_queue_rows[queue_offset + 16u];
   neighbor_candidate_rows[row_offset + 13u] = 0.0;
   neighbor_candidate_rows[row_offset + 14u] = select(0.0, 1.0, reaction_enabled)
     + select(0.0, 2.0, contact_enabled)
-    + select(0.0, 4.0, interface_enabled);
+    + select(0.0, 4.0, interface_enabled)
+    + 8.0;
   neighbor_candidate_rows[row_offset + 15u] = queue_epoch;
 }
 `;

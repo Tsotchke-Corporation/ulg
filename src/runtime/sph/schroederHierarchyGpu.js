@@ -478,36 +478,45 @@ export function createSchroederLawQueueParamsArray({
 
 export function createSchroederLawNeighborCandidateParamsArray({
   lawQueueCount = 0,
+  activeNodeCount = 0,
   particleCount = 0,
   lawQueueStrideFloats = SCHROEDER_LAW_QUEUE_FLOATS,
+  activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
   neighborCandidateStrideFloats = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
   stateStrideFloats = SPH_GPU_PARTICLE_STATE_FLOATS,
   candidateBudget = DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   enabledLawMask = SCHROEDER_LOCAL_LAW_QUEUE_MASK,
   flags = 0
 } = {}) {
-  const buffer = new ArrayBuffer(32);
+  const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(lawQueueCount, 0))), true);
-  view.setUint32(4, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
-  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(particleCount, 0))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
     lawQueueStrideFloats,
     SCHROEDER_LAW_QUEUE_FLOATS
   ))), true);
-  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+  view.setUint32(16, Math.max(1, Math.round(finiteNumber(
+    activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  ))), true);
+  view.setUint32(20, Math.max(1, Math.round(finiteNumber(
     neighborCandidateStrideFloats,
     SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS
   ))), true);
-  view.setUint32(16, Math.max(1, Math.round(finiteNumber(
+  view.setUint32(24, Math.max(1, Math.round(finiteNumber(
     stateStrideFloats,
     SPH_GPU_PARTICLE_STATE_FLOATS
   ))), true);
-  view.setUint32(20, Math.max(1, Math.round(finiteNumber(
+  view.setUint32(28, Math.max(1, Math.round(finiteNumber(
     candidateBudget,
     DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET
   ))), true);
-  view.setUint32(24, Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK))), true);
-  view.setUint32(28, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(32, Math.max(0, Math.round(finiteNumber(enabledLawMask, SCHROEDER_LOCAL_LAW_QUEUE_MASK))), true);
+  view.setUint32(36, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setUint32(40, 0, true);
+  view.setUint32(44, 0, true);
   return buffer;
 }
 
@@ -898,6 +907,29 @@ function assertLawQueueInput(lawQueue) {
   )));
   if (stride !== SCHROEDER_LAW_QUEUE_FLOATS) {
     throw new RangeError('Schroeder law-neighbor candidates require the current law queue row layout');
+  }
+}
+
+function assertLawNeighborActiveNodeInput(activeNodeList) {
+  if (
+    activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA
+    && activeNodeList?.schema !== ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA
+  ) {
+    throw new TypeError('Schroeder law-neighbor candidates require a Schroeder active-node input');
+  }
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    0
+  )));
+  if (activeNodeCount <= 0) {
+    throw new RangeError('Schroeder law-neighbor candidates require at least one active-node row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  )));
+  if (stride !== SCHROEDER_ACTIVE_NODE_FLOATS) {
+    throw new RangeError('Schroeder law-neighbor candidates require the current active-node row layout');
   }
 }
 
@@ -1309,6 +1341,7 @@ export function createSchroederLawQueuePlan({
 
 export function createSchroederLawNeighborCandidatePlan({
   lawQueue,
+  activeNodeList,
   sphParticleState = null,
   sphParticleUpload = null,
   particleCount = null,
@@ -1316,6 +1349,7 @@ export function createSchroederLawNeighborCandidatePlan({
   enabledLawMask = lawQueue?.enabledLawMask ?? SCHROEDER_LOCAL_LAW_QUEUE_MASK
 } = {}) {
   assertLawQueueInput(lawQueue);
+  assertLawNeighborActiveNodeInput(activeNodeList);
   const resolvedParticleCount = Math.max(0, Math.round(finiteNumber(
     particleCount ?? sphParticleUpload?.particleCount ?? sphParticleState?.particleCount,
     0
@@ -1325,6 +1359,10 @@ export function createSchroederLawNeighborCandidatePlan({
   }
   const lawQueueCount = Math.max(0, Math.round(finiteNumber(
     lawQueue.activeNodeCount ?? lawQueue.lawQueueCount ?? lawQueue.lawQueueRowCount,
+    0
+  )));
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
     0
   )));
   const resolvedCandidateBudget = Math.max(1, Math.round(finiteNumber(
@@ -1345,9 +1383,13 @@ export function createSchroederLawNeighborCandidatePlan({
     kernelScope: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCOPE,
     sourceLawQueueSchema: lawQueue.schema,
     sourceLawQueueStatus: lawQueue.status ?? null,
+    sourceActiveNodeSchema: activeNodeList.schema,
+    sourceActiveNodeStatus: activeNodeList.status ?? null,
     particleCount: resolvedParticleCount,
     lawQueueCount,
+    activeNodeCount,
     lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
     neighborCandidateCount,
     neighborCandidateRowLayout: [...SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT],
     neighborCandidateStrideFloats: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
@@ -1357,9 +1399,9 @@ export function createSchroederLawNeighborCandidatePlan({
     enabledLawMask: resolvedLawMask,
     candidateBudget: resolvedCandidateBudget,
     queueEpoch: finiteNumber(lawQueue.queueEpoch, 0),
-    enumerationMode: 'schroeder-law-queue-bounded-window-neighbor-enumeration',
+    enumerationMode: 'schroeder-active-node-tile-traversal-neighbor-enumeration',
     outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
-    treeTraversalStatus: 'placeholder-window-traversal-before-sorted-schroeder-tree-neighbor-walk',
+    treeTraversalStatus: 'active-node-tile-traversal-before-sorted-schroeder-tree-index',
     exactNearFieldRequirement: 'candidate-rows-feed-reaction-contact-interface-exact-near-field-consumers',
     stateMutationTarget: 'schroeder-retained-local-law-neighbor-candidate-buffer',
     stateMutationStatus: 'law-neighbor-candidates-planned-no-state-mutation',
@@ -2377,9 +2419,11 @@ export async function runSchroederLawQueueWebGpu({
 export async function runSchroederLawNeighborCandidateWebGpu({
   device,
   lawQueue,
+  activeNodeList,
   sphParticleState = null,
   sphParticleUpload = null,
   sourceStateBuffer = null,
+  sourceActiveNodeBuffer = null,
   particleCount = null,
   candidateBudget = lawQueue?.candidateBudget ?? DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   enabledLawMask = lawQueue?.enabledLawMask ?? SCHROEDER_LOCAL_LAW_QUEUE_MASK,
@@ -2391,6 +2435,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   }
   const plan = createSchroederLawNeighborCandidatePlan({
     lawQueue,
+    activeNodeList,
     sphParticleState,
     sphParticleUpload,
     particleCount,
@@ -2405,6 +2450,13 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   if (!borrowedLawQueueBuffer && !(lawQueueRows instanceof Float32Array && lawQueueRows.byteLength > 0)) {
     throw new TypeError('Schroeder law-neighbor candidates require a retained law queue buffer or explicit law queue rows');
   }
+  const borrowedActiveNodeBuffer = sourceActiveNodeBuffer || activeNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
+    ? activeNodeList.activeNodes
+    : null;
+  if (!borrowedActiveNodeBuffer && !(activeNodeRows instanceof Float32Array && activeNodeRows.byteLength > 0)) {
+    throw new TypeError('Schroeder law-neighbor candidates require a retained active-node buffer or explicit active-node rows');
+  }
   const borrowedStateBuffer = sourceStateBuffer
     || optionalSourceStateBuffer(sphParticleUpload)
     || sphParticleUpload?.stateBuffer
@@ -2416,6 +2468,8 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   }
   const lawQueueBuffer = borrowedLawQueueBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-law-neighbor-law-queue-in', lawQueueRows);
+  const activeNodeBuffer = borrowedActiveNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-law-neighbor-active-node-in', activeNodeRows);
   const stateBuffer = borrowedStateBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-law-neighbor-sph-state-in', stateRows);
   const neighborCandidateBuffer = device.createBuffer({
@@ -2442,11 +2496,12 @@ export async function runSchroederLawNeighborCandidateWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-law-neighbor-candidates.v0',
+      cacheKey: 'ulg-schroeder-law-neighbor-candidates.active-node-traversal.v1',
       label: 'ulg-schroeder-law-neighbor-candidates',
       code: schroederLawNeighborCandidateWgsl,
       entryPoint: 'main',
@@ -2456,9 +2511,10 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: lawQueueBuffer } },
-        { binding: 1, resource: { buffer: stateBuffer } },
-        { binding: 2, resource: { buffer: neighborCandidateBuffer } },
-        { binding: 3, resource: { buffer: paramsBuffer } }
+        { binding: 1, resource: { buffer: activeNodeBuffer } },
+        { binding: 2, resource: { buffer: stateBuffer } },
+        { binding: 3, resource: { buffer: neighborCandidateBuffer } },
+        { binding: 4, resource: { buffer: paramsBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -2525,6 +2581,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
   } finally {
     const cleanup = () => {
       if (!borrowedLawQueueBuffer) lawQueueBuffer.destroy?.();
+      if (!borrowedActiveNodeBuffer) activeNodeBuffer.destroy?.();
       if (!borrowedStateBuffer) stateBuffer.destroy?.();
       if (!retainNeighborCandidateBuffer || !returnedRetainedNeighborCandidateBuffer) {
         neighborCandidateBuffer.destroy?.();
@@ -4303,6 +4360,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     : lawNeighborCandidates || await lawNeighborCandidateRunner({
       device,
       lawQueue: resolvedLawQueue,
+      activeNodeList: resolvedActiveNodeList,
       sphParticleState,
       sphParticleUpload,
       candidateBudget: lawNeighborCandidateBudget,

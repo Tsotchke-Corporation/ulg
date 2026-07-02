@@ -906,11 +906,15 @@ function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeig
       consumerDeviceId: mismatch.consumerDeviceId
     };
   }
+  const traversalBacked = String(schroederLawNeighborCandidates.enumerationMode || '').includes('active-node')
+    || String(schroederLawNeighborCandidates.treeTraversalStatus || '').includes('active-node');
   return {
     ...base,
     status: 'schroeder-pressure-interface-law-neighbor-candidates-ready',
     consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative',
-    reason: 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
+    reason: traversalBacked
+      ? 'Traversal-backed law-neighbor candidate rows are validated but not authoritative until pressure/interface binds them as direct contact input'
+      : 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
     available: true,
     authoritative: false,
     neighborCandidateBuffer,

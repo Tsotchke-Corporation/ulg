@@ -176,12 +176,14 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
   const shaderModules = [];
   const dispatches = [];
   const submitted = [];
+  const bindGroups = [];
   return {
     createdBuffers,
     writes,
     shaderModules,
     dispatches,
     submitted,
+    bindGroups,
     createBuffer({ label, size, usage }) {
       const buffer = {
         label,
@@ -217,6 +219,7 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
       };
     },
     createBindGroup(descriptor) {
+      bindGroups.push(descriptor);
       return descriptor;
     },
     createCommandEncoder() {
@@ -577,7 +580,7 @@ test('Schroeder law queue plan projects active nodes into local law work descrip
   assert.equal(view.getFloat32(28, true), 2);
 });
 
-test('Schroeder law-neighbor candidate plan expands law queues into bounded resident rows', () => {
+test('Schroeder law-neighbor candidate plan expands law queues through active-node traversal rows', () => {
   const lawQueue = {
     schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
     status: 'schroeder-law-queue-submitted',
@@ -587,26 +590,37 @@ test('Schroeder law-neighbor candidate plan expands law queues into bounded resi
     candidateBudget: 5,
     queueEpoch: 11
   };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
   const plan = createSchroederLawNeighborCandidatePlan({
     lawQueue,
+    activeNodeList,
     particleCount: 3,
     candidateBudget: 5
   });
   assert.equal(plan.schema, ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA);
   assert.equal(plan.status, 'schroeder-law-neighbor-candidate-plan-ready');
   assert.equal(plan.sourceLawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
   assert.equal(plan.particleCount, 3);
   assert.equal(plan.lawQueueCount, 3);
+  assert.equal(plan.activeNodeCount, 3);
   assert.equal(plan.candidateBudget, 5);
   assert.equal(plan.neighborCandidateCount, 15);
   assert.equal(plan.lawQueueStrideFloats, SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(plan.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_FLOATS);
   assert.equal(plan.neighborCandidateStrideFloats, SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS);
   assert.equal(plan.neighborCandidateByteLength, 15 * 16 * Float32Array.BYTES_PER_ELEMENT);
-  assert.equal(plan.enumerationMode, 'schroeder-law-queue-bounded-window-neighbor-enumeration');
+  assert.equal(plan.enumerationMode, 'schroeder-active-node-tile-traversal-neighbor-enumeration');
   assert.equal(plan.outputCompaction, 'fixed-budget-law-neighbor-candidate-rows');
   assert.equal(
     plan.treeTraversalStatus,
-    'placeholder-window-traversal-before-sorted-schroeder-tree-neighbor-walk'
+    'active-node-tile-traversal-before-sorted-schroeder-tree-index'
   );
   assert.equal(plan.gpuFirst, true);
   assert.equal(plan.cpuReferenceRequired, false);
@@ -616,11 +630,13 @@ test('Schroeder law-neighbor candidate plan expands law queues into bounded resi
   const view = new DataView(params);
   assert.equal(view.getUint32(0, true), 3);
   assert.equal(view.getUint32(4, true), 3);
-  assert.equal(view.getUint32(8, true), SCHROEDER_LAW_QUEUE_FLOATS);
-  assert.equal(view.getUint32(12, true), SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS);
-  assert.equal(view.getUint32(16, true), 8);
-  assert.equal(view.getUint32(20, true), 5);
-  assert.equal(view.getUint32(24, true), SCHROEDER_LOCAL_LAW_QUEUE_MASK);
+  assert.equal(view.getUint32(8, true), 3);
+  assert.equal(view.getUint32(12, true), SCHROEDER_LAW_QUEUE_FLOATS);
+  assert.equal(view.getUint32(16, true), SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(view.getUint32(20, true), SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS);
+  assert.equal(view.getUint32(24, true), 8);
+  assert.equal(view.getUint32(28, true), 5);
+  assert.equal(view.getUint32(32, true), SCHROEDER_LOCAL_LAW_QUEUE_MASK);
 });
 
 test('Schroeder cross-level coupling plan keeps child-parent candidates GPU-resident', () => {
@@ -1262,6 +1278,11 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
     size: 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     usage: 0
   });
+  const activeNodeBuffer = device.createBuffer({
+    label: 'retained-active-node-buffer',
+    size: 3 * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
   const stateBuffer = device.createBuffer({
     label: 'retained-state-buffer',
     size: 3 * 8 * Float32Array.BYTES_PER_ELEMENT,
@@ -1277,9 +1298,17 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
     candidateBudget: 4,
     queueEpoch: 7
   };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer
+  };
   const candidates = await runSchroederLawNeighborCandidateWebGpu({
     device,
     lawQueue,
+    activeNodeList,
     sphParticleUpload: {
       status: 'webgpu-uploaded',
       particleCount: 3,
@@ -1292,12 +1321,14 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.equal(candidates.neighborCandidateSchema, ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA);
   assert.equal(candidates.status, 'schroeder-law-neighbor-candidates-submitted');
   assert.equal(candidates.sourceLawQueueSchema, ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA);
+  assert.equal(candidates.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
   assert.equal(candidates.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
   assert.equal(candidates.fullReadbackPerformed, false);
   assert.equal(candidates.fullParticleReadbackPerformed, false);
   assert.equal(candidates.normalHotLoopReadbackFree, true);
   assert.equal(candidates.particleCount, 3);
   assert.equal(candidates.lawQueueCount, 3);
+  assert.equal(candidates.activeNodeCount, 3);
   assert.equal(candidates.candidateBudget, 4);
   assert.equal(candidates.neighborCandidateCount, 12);
   assert.equal(candidates.retainedNeighborCandidateBuffer, true);
@@ -1311,12 +1342,16 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
     candidates.stateAuthorityStatus,
     'state-manager-admission-required-before-law-neighbor-output-mutation'
   );
-  assert.equal(candidates.enumerationMode, 'schroeder-law-queue-bounded-window-neighbor-enumeration');
+  assert.equal(candidates.enumerationMode, 'schroeder-active-node-tile-traversal-neighbor-enumeration');
+  assert.equal(candidates.treeTraversalStatus, 'active-node-tile-traversal-before-sorted-schroeder-tree-index');
   assert.deepEqual(device.dispatches, [[1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederLawNeighborParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('active_nodes')));
+  assert.equal(device.bindGroups.at(-1).entries.length, 5);
+  assert.equal(device.bindGroups.at(-1).entries[1].resource.buffer, activeNodeBuffer);
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && write.byteLength === 32
+    && write.byteLength === 48
   )));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),

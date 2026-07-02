@@ -2039,11 +2039,15 @@ function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandi
       enabledLawMask
     };
   }
+  const traversalBacked = String(schroederLawNeighborCandidates.enumerationMode || '').includes('active-node')
+    || String(schroederLawNeighborCandidates.treeTraversalStatus || '').includes('active-node');
   return {
     ...base,
     status: 'schroeder-reaction-law-neighbor-candidates-ready',
     consumerStatus: 'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative',
-    reason: 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
+    reason: traversalBacked
+      ? 'Traversal-backed law-neighbor candidate rows are validated but not authoritative until the reaction stage binds them as direct proposal input'
+      : 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
     available: true,
     authoritative: false,
     neighborCandidateBuffer,

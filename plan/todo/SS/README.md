@@ -76,9 +76,13 @@ Landed checkpoints:
 20. `f7cf080` adds retained active-node law-queue descriptors for
     reaction/contact/interface candidate work, including exact-near-field,
     sedenion reaction scope, and state-admission metadata.
+21. `8491fb5` routes retained SS law queues through the same-level mechanics
+    prepass chain and forwards them to the resident backend as
+    `schroederLawQueue`, with a per-use-case disable switch.
 
 Next implementation queue:
 
-1. Wire retained SS law-queue rows into reaction/contact/interface consumers.
+1. Wire retained `schroederLawQueue` rows into reaction/contact/interface
+   consumer kernels.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

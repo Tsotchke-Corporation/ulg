@@ -256,12 +256,15 @@ Suggested schemas:
 ### Slice 6: Law Work Queues
 
 - Status: retained active-node local law-queue descriptors landed in `f7cf080`.
+  Same-level mechanics orchestration and resident backend forwarding landed in
+  `8491fb5`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
-- Current caveat: the GPU descriptors are produced and retained without full
-  readback, but reaction/contact/interface kernels still need to consume them.
+- Current caveat: the GPU descriptors are produced, retained, and forwarded
+  without full readback, but reaction/contact/interface kernels still need to
+  consume them.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -279,8 +282,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - consume retained SS law-queue rows in reaction/contact/interface candidate
-     generation;
+   - consume retained `schroederLawQueue` rows in reaction/contact/interface
+     candidate generation;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:

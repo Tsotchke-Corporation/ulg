@@ -324,7 +324,9 @@ Suggested schemas:
   resident auto-scheduler wiring, visible SS telemetry, and no-full native
   auto-refresh for URL-configured SS retained proxy draws landed in `9699d58`;
   compact SS execution/render-proxy telemetry in the long-horizon probe and
-  performance benchmark landed in `6fa1fec`.
+  performance benchmark landed in `6fa1fec`; diagnostic CPU proxy selection was
+  restricted to explicit admitted, under-budget, metadata-only diagnostic use
+  in `fc99828`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -333,8 +335,6 @@ Suggested schemas:
 
 1. Render and distribution:
    - keep draw sources closure/PBR-derived and no-full-readback by default;
-   - keep diagnostic CPU proxy geometry explicit, capped, and outside the
-     PeerCompute hot path;
    - publish compact SS summaries across PeerCompute/StateManager boundaries as
      descriptors, seeds, or snapshots rather than raw browser `GPUBuffer`
      handles.
@@ -391,8 +391,7 @@ Suggested schemas:
 The next code slice on `SS` is **SS performance/admission hardening for
 configured live runs**:
 
-1. Keep diagnostic CPU proxy geometry explicit, bounded, and non-hot-path.
-2. Start compact PeerCompute replay/admission of SS summaries as descriptors,
+1. Start compact PeerCompute replay/admission of SS summaries as descriptors,
    seeds, or snapshots rather than raw browser `GPUBuffer` handles.
-3. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
+2. Preserve presentation as a consumer of SS draw/proxy contracts, not as the
    owner of physics cadence or state authority.

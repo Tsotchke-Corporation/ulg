@@ -194,13 +194,15 @@ Landed checkpoints:
     grid spacing, active/coherent/law proxy counts, retained resolver status,
     backend selection, native executor/submit draw counts, surface-draw bridge,
     and render-field/render-row readback status.
+52. `fc99828` hardens diagnostic CPU proxy selection so `auto` never falls back
+    to CPU descriptor proxy geometry. Diagnostic CPU now requires explicit
+    `diagnostic-cpu` preference, explicit admission, and an under-budget proxy
+    count, and flattened telemetry marks it metadata-only and non-hot-path.
 
 Next implementation queue:
 
-1. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
-   not a replacement hot path.
-2. Publish/replay compact SS summaries across PeerCompute/StateManager
+1. Publish/replay compact SS summaries across PeerCompute/StateManager
    boundaries as descriptors, seeds, or snapshots rather than raw browser
    `GPUBuffer` handles.
-3. Keep the bucket index as the small-scene/default first GPU index and use
+2. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

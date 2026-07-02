@@ -35363,3 +35363,33 @@ Next:
   PeerCompute hot path.
 - Start compact PeerCompute replay/admission of SS summaries as descriptors,
   seeds, or snapshots rather than raw browser `GPUBuffer` handles.
+
+## 2026-07-01 AKDT - SS Diagnostic CPU Proxy Containment
+
+Status:
+
+- Hardened SS render-proxy backend selection so `auto` never selects diagnostic
+  CPU descriptor proxy geometry as a fallback when the native retained WebGPU
+  path is unavailable.
+- Diagnostic CPU proxy selection now requires `backendPreference:
+  'diagnostic-cpu'`, explicit diagnostic admission, and a drawable proxy count
+  within `schroederRenderProxyDiagnosticMaxProxyCount`.
+- Added backend and flattened render-source telemetry for explicit diagnostic
+  request state, admission, budget, metadata-only materialization mode, CPU
+  geometry materialization policy, and the invariant that diagnostic CPU is not
+  a PeerCompute hot path.
+- Tightened `peerComputeHotPath` so it only reports true for a ready native
+  retained WebGPU proxy backend, not merely for a blocked native selection.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `171/171` passing.
+
+Next:
+
+- Start compact PeerCompute replay/admission of SS summaries as descriptors,
+  seeds, or snapshots rather than raw browser `GPUBuffer` handles.

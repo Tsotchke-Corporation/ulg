@@ -34609,3 +34609,24 @@ Next:
   once retained candidate counts or throughput pressure justify it.
 - Extend direct active-node mechanics filtering to fused sequence batches when
   SS starts dispatching multiple hierarchy levels through the sequence path.
+
+## 2026-07-01 AKDT - SS Active-Node Mechanics Orchestration
+
+Status:
+
+- Forwarded the retained same-level `activeNodeList` into the resident mechanics
+  backend as `schroederActiveNodeList`.
+- Updated same-level SS execution diagnostics from planned-only active-node
+  consumption to active-node list forwarded into MLS-MPM P2G/G2P.
+- Added orchestration test coverage so the resident backend stub must receive
+  the retained active-node list.
+
+Validation:
+
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/sphMlsMpmGpuStep.test.mjs` with `115/115` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Replace the unsorted active-node broad phase with a sorted/radix SS tree index
+  once retained candidate counts or throughput pressure justify it.

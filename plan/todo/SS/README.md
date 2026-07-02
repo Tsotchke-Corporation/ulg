@@ -102,6 +102,9 @@ Landed checkpoints:
 29. `17c9de8` consumes retained SS active-node rows directly in fused P2G/G2P
     mechanics, with copy-through G2P behavior for filtered particles and dummy
     bindings for non-SS/shared shader callers.
+30. `199f9e6` forwards the retained same-level active-node list into the
+    resident mechanics backend so SS orchestration actually drives the fused
+    P2G/G2P active-node consumer.
 
 Next implementation queue:
 

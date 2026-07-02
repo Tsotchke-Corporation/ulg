@@ -7937,9 +7937,10 @@ test('SPH phase URL Schroeder water-to-steam phase-volume diagnostics stay readb
       noFullParticleReadback:
         diagnostics?.noFullParticleReadback ?? null,
       statusTextIncludesPhaseTelemetry:
-        statusText.includes('phase-migration=detected')
+        statusText.includes('phase-migration=changed')
         && statusText.includes('phase-delta=')
-        && statusText.includes('phase-update-delta=0.00')
+        && statusText.includes('phase-update-delta=')
+        && statusText.includes('phase-update=changed')
         && statusText.includes('phase-no-full=true')
     };
   });
@@ -7952,12 +7953,12 @@ test('SPH phase URL Schroeder water-to-steam phase-volume diagnostics stay readb
   expect(result.phaseVolumeDiagnosticSummaryStatus)
     .toBe('schroeder-phase-volume-diagnostic-summary-submitted');
   expect(result.phaseVolumeExpansionDetected).toBe(true);
-  expect(result.phaseVolumeLevelUpdateChanged).toBe(false);
+  expect(result.phaseVolumeLevelUpdateChanged).toBe(true);
   expect(result.phaseVolumeUpdateEffectStatus)
-    .toBe('phase-volume-expansion-detected-without-additional-level-change');
+    .toBe('admitted-phase-volume-level-update-changed-level');
   expect(result.representedToRestVolumeRatio).toBeGreaterThan(100);
   expect(result.expectedLevelDeltaFromVolume).toBeGreaterThan(2);
-  expect(result.observedPositiveLevelDelta).toBe(0);
+  expect(result.observedPositiveLevelDelta).toBeGreaterThan(0);
   expect(result.particleCountGrowthFactor).toBeLessThanOrEqual(1);
   expect(result.noFullParticleReadback).toBe(true);
   expect(result.statusTextIncludesPhaseTelemetry).toBe(true);

@@ -7860,12 +7860,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (ss_positive(phase_volume_reference_mass_kg) && ss_positive(rest_density_kg_per_m3)) {
     density_represented_volume_m3 = phase_volume_reference_mass_kg / rest_density_kg_per_m3;
   }
+  var source_volume_m3 = mechanics_volume_m3;
+  if (!ss_positive(source_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
+    source_volume_m3 = mass_kg / rest_density_kg_per_m3;
+  }
   var represented_volume_m3 = max(mechanics_volume_m3, density_represented_volume_m3);
   if (!ss_positive(represented_volume_m3) && ss_positive(rest_density_kg_per_m3) && ss_positive(mass_kg)) {
     represented_volume_m3 = mass_kg / rest_density_kg_per_m3;
   }
+  if (!ss_positive(source_volume_m3)) {
+    source_volume_m3 = represented_volume_m3;
+  }
 
-  let physical_radius_m = ss_volume_radius(represented_volume_m3);
+  let physical_radius_m = ss_volume_radius(source_volume_m3);
   var support_radius_m = physical_radius_m * max(params.support_radius_scale, 0.0);
   var status = 1.0;
   if (!ss_positive(support_radius_m)) {
@@ -7896,7 +7903,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   level_assignments[assignment_offset + 2u] = support_radius_m;
   level_assignments[assignment_offset + 3u] = represented_volume_m3;
   level_assignments[assignment_offset + 4u] = rest_volume_m3;
-  level_assignments[assignment_offset + 5u] = mechanics_volume_m3;
+  level_assignments[assignment_offset + 5u] = source_volume_m3;
   level_assignments[assignment_offset + 6u] = mass_kg;
   level_assignments[assignment_offset + 7u] = rest_density_kg_per_m3;
   level_assignments[assignment_offset + 8u] = phase_id;

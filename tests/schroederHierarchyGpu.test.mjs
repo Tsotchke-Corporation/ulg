@@ -867,6 +867,10 @@ test('Schroeder level assignment WGSL uses SS phase-volume reference mass for re
     schroederLevelAssignmentWgsl,
     /represented_volume_m3 = max\(mechanics_volume_m3, density_represented_volume_m3\)/
   );
+  assert.match(schroederLevelAssignmentWgsl, /source_volume_m3 = mass_kg \/ rest_density_kg_per_m3/);
+  assert.match(schroederLevelAssignmentWgsl, /physical_radius_m = ss_volume_radius\(source_volume_m3\)/);
+  assert.match(schroederLevelAssignmentWgsl, /level_assignments\[assignment_offset \+ 3u\] = represented_volume_m3/);
+  assert.match(schroederLevelAssignmentWgsl, /level_assignments\[assignment_offset \+ 5u\] = source_volume_m3/);
 });
 
 test('Schroeder active-node plan uses retained level assignments as unsorted tile ranges', () => {

@@ -269,6 +269,12 @@ Suggested schemas:
   through resident same-level mechanics, and adds URL-scheduled browser
   coverage showing H2O steam at about `680x` represented/rest volume, expected
   level delta about `3.14`, particle-count growth `1x`, and no full particle
+  readback. The follow-up authority-ordering checkpoint keeps the level
+  assignment source level derived from current mechanics volume, carries
+  `phaseVolumeReferenceMassKg` only as represented volume for migration, and
+  makes the StateManager-admitted phase-volume overlay the source of the
+  positive level update; the mounted H2O steam proof now reports source level
+  `0`, target level up to `2`, `phase-migration=changed`, and no full
   readback.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
@@ -465,12 +471,9 @@ Suggested schemas:
      the default scene/demo path;
    - keep water-to-steam expansion visible in compact diagnostics without
      particle explosion;
-   - resolve the remaining authority-ordering question: first-tick SS level
-     assignment now pre-levels vapor from `phaseVolumeReferenceMassKg`, so the
-     admitted phase-volume update can report expansion detected with
-     `phase-update-delta=0`; decide whether future authoritative level changes
-     should be gated before level assignment or remain a diagnostic/overlay
-     consumer on top of pre-leveled assignments;
+   - keep future phase-volume level changes StateManager-admitted: source
+     assignment levels come from current mechanics volume, while represented
+     phase volume drives the retained migration target level;
    - preserve fine representation near surfaces, reactions, and walls.
 
 ## Acceptance Gates
@@ -512,20 +515,15 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume authority ordering and
-aggregate-coherent level changes**:
+The next code slice on `SS` is **SS aggregate-coherent phase-volume coarsening**:
 
-1. Decide and implement the authority ordering for phase-volume scale changes:
-   either level assignment remains pre-leveled from `phaseVolumeReferenceMassKg`
-   and the admitted update is a descriptor/overlay confirmation, or the
-   migration overlay becomes the first stage allowed to change native levels.
-2. If authoritative update deltas are required, make the migration shader
-   compare target represented-volume level against a current/rest-volume source
-   level and keep the active-node overlay as the StateManager-admitted source of
-   truth for the following tick.
-3. Improve aggregate-node matching/coherence for water-to-steam target cells so
+1. Improve aggregate-node matching/coherence for water-to-steam target cells so
    coherent bulk steam can produce coarsen rows instead of refine-required rows
    when conservation residuals allow it.
-4. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
-   represented/rest volume > 100, particle growth <= 1, no full readback, and
-   status telemetry separating expansion detection from level-update deltas.
+2. Preserve the authority split: current/rest mechanics volume defines source
+   level assignment, represented phase volume defines migration target level,
+   and admitted overlay rows own following-tick level changes.
+3. Keep the URL-scheduled H2O steam proof green: expected level delta > 2,
+   observed admitted update delta > 0, represented/rest volume > 100, particle
+   growth <= 1, no full readback, and status telemetry separating expansion
+   detection from level-update deltas.

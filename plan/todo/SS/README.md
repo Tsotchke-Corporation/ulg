@@ -70,10 +70,12 @@ Landed checkpoints:
 18. `dd3e928` publishes compact SS phase-volume diagnostic summaries through the
     scene/status path so water-to-steam level migration can be observed without
     particle readback.
+19. `81f51cd` adds an auto-selected bounded bucket aggregate-node reducer for
+    larger SS aggregate row counts while preserving the exact reducer for
+    diagnostic counts.
 
 Next implementation queue:
 
-1. Replace the exact O(n^2) aggregate-node scan with a scalable GPU sort/radix
-   or bucket reduction once the node contract is consumed by later slices.
-2. Route reaction/contact/interface work queues through SS active nodes.
-3. Consume retained SS active-node rows directly inside same-level P2G/G2P.
+1. Route reaction/contact/interface work queues through SS active nodes.
+2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
+3. Add render LOD and PeerCompute portable SS summaries.

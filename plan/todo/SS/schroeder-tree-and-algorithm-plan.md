@@ -232,7 +232,8 @@ Suggested schemas:
   source/target state-delta rows landed in `c0b980f`; StateManager-admitted
   retained merge buffers landed in `60a63c2`; SS-owned aggregate state
   contribution materialization landed in `258d7c2`; exact GPU duplicate-key
-  aggregate-node reduction landed in `60d2d7e`.
+  aggregate-node reduction landed in `60d2d7e`; bounded bucket aggregate-node
+  reduction for larger row counts landed in `81f51cd`.
 - Add restriction/prolongation between adjacent levels.
 - Conserve mass, volume, momentum, and internal energy.
 - Add residual counters for bad weights, missing parent/child nodes, and
@@ -274,23 +275,20 @@ Suggested schemas:
 
 ## Current Implementation Queue
 
-1. Scalable aggregate-node reduction:
-   - replace exact O(n^2) node reduction with sort/radix or bucket reduction
-     before scaling beyond diagnostic row counts;
-   - preserve the current aggregate-node row contract consumed by
-     phase-volume migration;
-   - keep duplicate-key mass, represented volume, momentum, and internal-energy
-     summation GPU-resident;
-   - retain compact overflow/capacity diagnostics instead of full row readback.
-2. Phase-volume migration:
+1. Law work queues:
+   - route reaction/contact/interface candidate generation through retained SS
+     active-node rows;
+   - preserve strict reaction gates, sedenion scoping, and material/phase masks;
+   - keep exact near-field candidates for small diagnostic scenes.
+2. Active-node mechanics consumption:
+   - consume retained SS active-node rows in same-level P2G/G2P dispatch;
+   - keep fused no-full active-grid behavior readback-free;
+   - avoid presentation-owned physics cadence.
+3. Phase-volume migration:
    - consume/report admitted retained level-update rows from the SS path;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
-3. Active-node mechanics consumption:
-   - consume retained SS active-node rows in same-level P2G/G2P dispatch;
-   - keep fused no-full active-grid behavior readback-free;
-   - avoid presentation-owned physics cadence.
 
 ## Acceptance Gates
 
@@ -331,12 +329,11 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **scalable aggregate-node reduction**:
+The next code slice on `SS` is **SS law work queues**:
 
-1. Keep the existing exact aggregate-node reducer as the correctness contract.
-2. Add a GPU-friendly bucket or radix reduction plan that can replace the
-   O(n^2) duplicate-key scan for larger aggregate contribution counts.
-3. Preserve retained aggregate-node buffers and compact diagnostics as the
-   consumer-facing contract for phase-volume migration and later law queues.
-4. Fail closed on capacity overflow, out-of-range level keys, or missing
-   parent/child metadata.
+1. Introduce GPU-first law queue planning over retained SS active-node rows.
+2. Start with reaction/contact/interface queue descriptors and compact
+   candidate counters.
+3. Preserve existing strict reaction discovery and exact small-scene behavior as
+   validation anchors, not as the hot path.
+4. Keep queue outputs GPU-resident and StateManager-admission-aware.

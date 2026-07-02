@@ -360,6 +360,12 @@ Suggested schemas:
   inputs: retained GPU rows are accepted as local-gradient-ready but
   unvalidated gas-cell fields without CPU cell snapshots, and scene pressure
   refreshes inject promoted SS imports into next-frame same-level feedback.
+  `3df3470` adds the worker-owned pressure import path for dedicated mounted
+  worker lanes: worker services resolve descriptor-only retained gas-cell refs
+  against same-lane worker-local GPU buffers, mounted lanes keep a persistent
+  worker runner instead of recreating it each schedule, and mounted mechanics
+  runs can include the pressure/interface stage without posting main-thread
+  `GPUBuffer` handles across the PeerCompute boundary.
 
 ### Slice 8: Render And Distribution
 
@@ -393,9 +399,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - add a worker-owned retained gas-cell import/admission path for dedicated
-     mounted worker lanes, keeping PeerCompute boundaries descriptor-only and
-     consuming only worker-local retained refs;
+   - consume worker-owned retained gas-cell descriptors from mounted worker
+     lanes without cloning or posting main-thread `GPUBuffer` handles;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -454,12 +459,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS worker-owned pressure import reuse**:
+The next code slice on `SS` is **SS pressure/interface spatial indexing**:
 
-1. Add a worker-owned retained gas-cell import/admission path for mounted
-   worker lanes so pressure/interface stages can consume worker-local retained
-   refs without cloning or posting main-thread `GPUBuffer` handles.
-2. Preserve the boundary between far aggregate gas pressure summaries and
-   exact-near-field pressure/interface contact work.
-3. Keep descriptor-only PeerCompute replay artifacts and do not introduce full
-   particle readback as the validation path.
+1. Build a retained GPU spatial/interface index for pressure/interface contact
+   kinematics so exact near-field pressure work stops leaning on broad
+   source-span scans.
+2. Feed the pressure/interface consumer from retained active-node, source-span,
+   and interface-index descriptors while preserving the exact local law
+   boundary.
+3. Keep descriptor-only PeerCompute replay artifacts and no-full-readback
+   validation as the default path.

@@ -75,6 +75,8 @@ export const ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA = 'peercompute.ulg.schroeder-
 export const ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-list-execution.v0';
 export const ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA = 'peercompute.ulg.schroeder-active-node-index.v0';
 export const ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-index-execution.v0';
+export const ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA = 'peercompute.ulg.schroeder-active-node-sorted-index.v0';
+export const ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-active-node-sorted-index-execution.v0';
 export const ULG_SCHROEDER_LAW_QUEUE_SCHEMA = 'peercompute.ulg.schroeder-law-queue.v0';
 export const ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-queue-execution.v0';
 export const ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA = 'peercompute.ulg.schroeder-law-neighbor-candidate.v0';
@@ -743,6 +745,12 @@ export const SCHROEDER_ACTIVE_NODE_ROW_LAYOUT = Object.freeze([
   'positionYM:f32',
   'positionZM:f32',
   'chartId:f32'
+]);
+export const SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_ROW_LAYOUT = Object.freeze([
+  'bucketOffset:u32',
+  'bucketCount:u32',
+  'pad0:u32',
+  'pad1:u32'
 ]);
 export const SCHROEDER_LAW_QUEUE_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

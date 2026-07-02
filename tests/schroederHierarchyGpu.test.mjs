@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_ROW_LAYOUT,
   SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT,
@@ -21,6 +22,8 @@ import {
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_LIST_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA,
   ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
@@ -55,6 +58,7 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   SCHROEDER_ACTIVE_NODE_FLOATS,
+  SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_UINTS,
   SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
   SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS,
@@ -68,6 +72,7 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
+  SCHROEDER_FULL_ACTIVE_NODE_SORTED_INDEX_READBACK_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE,
   SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE,
@@ -89,6 +94,8 @@ import {
   createSchroederActiveNodeIndexPlan,
   createSchroederActiveNodeListPlan,
   createSchroederActiveNodeParamsArray,
+  createSchroederActiveNodeSortedIndexParamsArray,
+  createSchroederActiveNodeSortedIndexPlan,
   createSchroederCrossLevelCouplingParamsArray,
   createSchroederCrossLevelCouplingPlan,
   createSchroederConservationSummaryParamsArray,
@@ -122,6 +129,7 @@ import {
   estimateSchroederLevelFromSupportRadius,
   runSchroederActiveNodeIndexWebGpu,
   runSchroederActiveNodeListWebGpu,
+  runSchroederActiveNodeSortedIndexWebGpu,
   runSchroederConservationSummaryWebGpu,
   runSchroederCrossLevelCouplingWebGpu,
   runSchroederCrossLevelStateDeltaMergeWebGpu,
@@ -480,6 +488,19 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(SCHROEDER_CONSERVATION_SUMMARY_FLOATS, 16);
   assert.equal(SCHROEDER_CONSERVATION_SUMMARY_ROW_LAYOUT.length, SCHROEDER_CONSERVATION_SUMMARY_FLOATS);
   assert.equal(SCHROEDER_CONSERVATION_SUMMARY_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA,
+    'peercompute.ulg.schroeder-active-node-sorted-index.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-active-node-sorted-index-execution.v0'
+  );
+  assert.equal(SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_UINTS, 4);
+  assert.equal(
+    SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_ROW_LAYOUT.length,
+    SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_UINTS
+  );
   assert.equal(ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA, 'peercompute.ulg.schroeder-same-level-mechanics.v0');
   assert.equal(
     ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
@@ -607,6 +628,51 @@ test('Schroeder active-node index plan builds a retained bucket indirection tabl
   assert.equal(view.getUint32(24, true), 0);
 });
 
+test('Schroeder active-node sorted index plan builds retained radix bucket ranges', () => {
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 5,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const plan = createSchroederActiveNodeSortedIndexPlan({
+    activeNodeList,
+    bucketCount: 8
+  });
+
+  assert.equal(plan.schema, ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA);
+  assert.equal(plan.status, 'schroeder-active-node-sorted-index-plan-ready');
+  assert.equal(plan.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(plan.activeNodeCount, 5);
+  assert.equal(plan.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(plan.bucketCount, 8);
+  assert.equal(plan.bucketRangeOffsetCount, 9);
+  assert.deepEqual(plan.bucketRangeRowLayout, [...SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_ROW_LAYOUT]);
+  assert.equal(plan.bucketRangeStrideUints, SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_UINTS);
+  assert.equal(plan.bucketCountByteLength, 8 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.bucketCursorByteLength, 8 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.bucketRangeOffsetByteLength, 9 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.sortedActiveIndexByteLength, 5 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.diagnosticCounterByteLength, 4 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.outputCompaction, 'contiguous-active-node-index-ranges-by-radix-bucket');
+  assert.equal(plan.capacityStatus, 'unbounded-per-bucket-range-no-fixed-slot-overflow');
+  assert.equal(plan.indexCoverageStatus, 'hash-bucket-ranges-require-exact-overlap-validation');
+  assert.equal(plan.consumerStatus, 'available-for-law-neighbor-sorted-radix-traversal');
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederActiveNodeSortedIndexParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 64);
+  assert.equal(view.getUint32(0, true), 5);
+  assert.equal(view.getUint32(4, true), SCHROEDER_ACTIVE_NODE_FLOATS);
+  assert.equal(view.getUint32(8, true), 8);
+  assert.equal(view.getUint32(12, true), 9);
+  assert.equal(view.getUint32(16, true), 0);
+});
+
 test('Schroeder law queue plan projects active nodes into local law work descriptors', () => {
   const activeNodeList = {
     schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
@@ -691,6 +757,9 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(plan.activeNodeIndexBucketCount, 0);
   assert.equal(plan.activeNodeIndexBucketSlotCapacity, 0);
   assert.equal(plan.activeNodeIndexBucketSlotCount, 0);
+  assert.equal(plan.activeNodeSortedIndexEnabled, false);
+  assert.equal(plan.activeNodeSortedIndexBucketCount, 0);
+  assert.equal(plan.activeNodeSortedIndexBucketRangeOffsetCount, 0);
   assert.equal(plan.candidateBudget, 5);
   assert.equal(plan.neighborCandidateCount, 15);
   assert.equal(plan.lawQueueStrideFloats, SCHROEDER_LAW_QUEUE_FLOATS);
@@ -735,7 +804,7 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
 
   const params = createSchroederLawNeighborCandidateParamsArray(plan);
   const view = new DataView(params);
-  assert.equal(params.byteLength, 64);
+  assert.equal(params.byteLength, 80);
   assert.equal(view.getUint32(0, true), 3);
   assert.equal(view.getUint32(4, true), 3);
   assert.equal(view.getUint32(8, true), 3);
@@ -750,6 +819,9 @@ test('Schroeder law-neighbor candidate plan expands law queues through active-no
   assert.equal(view.getUint32(48, true), 0);
   assert.equal(view.getUint32(52, true), 0);
   assert.equal(view.getUint32(56, true), 0);
+  assert.equal(view.getUint32(60, true), 0);
+  assert.equal(view.getUint32(64, true), 0);
+  assert.equal(view.getUint32(68, true), 0);
 });
 
 test('Schroeder law-neighbor candidate plan can consume an active-node bucket index', () => {
@@ -791,6 +863,7 @@ test('Schroeder law-neighbor candidate plan can consume an active-node bucket in
   assert.equal(plan.activeNodeIndexBucketCount, 2);
   assert.equal(plan.activeNodeIndexBucketSlotCapacity, 4);
   assert.equal(plan.activeNodeIndexBucketSlotCount, 8);
+  assert.equal(plan.activeNodeSortedIndexEnabled, false);
   assert.equal(plan.enumerationMode, 'schroeder-active-node-indexed-tile-traversal-neighbor-enumeration');
   assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-bucket-index-consumed-with-exact-scan-fallback');
   assert.equal(plan.treeTraversalStatus, 'active-node-bucket-index-traversal-with-exact-scan-fallback');
@@ -803,6 +876,63 @@ test('Schroeder law-neighbor candidate plan can consume an active-node bucket in
   assert.equal(view.getUint32(48, true), 2);
   assert.equal(view.getUint32(52, true), 4);
   assert.equal(view.getUint32(56, true), 8);
+  assert.equal(view.getUint32(60, true), 0);
+  assert.equal(view.getUint32(64, true), 0);
+  assert.equal(view.getUint32(68, true), 0);
+});
+
+test('Schroeder law-neighbor candidate plan can consume a sorted active-node index', () => {
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer: { label: 'fake-law-queue-buffer' },
+    candidateBudget: 5,
+    queueEpoch: 11
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer: { label: 'fake-active-node-buffer' }
+  };
+  const activeNodeSortedIndex = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-sorted-index-submitted',
+    activeNodeCount: 3,
+    bucketCount: 4,
+    bucketRangeOffsetCount: 5,
+    bucketRangeOffsetBuffer: { label: 'fake-sorted-range-offsets' },
+    sortedActiveIndexBuffer: { label: 'fake-sorted-active-indices' }
+  };
+  const plan = createSchroederLawNeighborCandidatePlan({
+    lawQueue,
+    activeNodeList,
+    activeNodeSortedIndex,
+    particleCount: 3,
+    candidateBudget: 5
+  });
+
+  assert.equal(plan.activeNodeSortedIndexEnabled, true);
+  assert.equal(plan.sourceActiveNodeSortedIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA);
+  assert.equal(plan.activeNodeSortedIndexBucketCount, 4);
+  assert.equal(plan.activeNodeSortedIndexBucketRangeOffsetCount, 5);
+  assert.equal(plan.enumerationMode, 'schroeder-active-node-sorted-radix-range-traversal-neighbor-enumeration');
+  assert.equal(plan.activeNodeIndexConsumerStatus, 'active-node-sorted-radix-index-consumed-with-exact-scan-fallback');
+  assert.equal(plan.treeTraversalStatus, 'active-node-sorted-radix-range-traversal-with-exact-scan-fallback');
+  assert.equal(plan.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(plan.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(plan.sortedRadixIndexStatus, 'sorted-radix-active-node-index-available');
+
+  const params = createSchroederLawNeighborCandidateParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 80);
+  assert.equal(view.getUint32(44, true), 0);
+  assert.equal(view.getUint32(60, true), 1);
+  assert.equal(view.getUint32(64, true), 4);
+  assert.equal(view.getUint32(68, true), 5);
 });
 
 test('Schroeder law-neighbor traversal diagnostics decode compact counters', () => {
@@ -1568,6 +1698,86 @@ test('Schroeder WebGPU active-node index builds retained bucket slots without de
   );
 });
 
+test('Schroeder WebGPU active-node sorted index builds retained radix ranges without default readback', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    tileCellCount: 4,
+    supportInflateCells: 1
+  });
+  const index = await runSchroederActiveNodeSortedIndexWebGpu({
+    device,
+    activeNodeList: activeNodes,
+    bucketCount: 4
+  });
+
+  assert.equal(index.schema, ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA);
+  assert.equal(index.activeNodeSortedIndexSchema, ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA);
+  assert.equal(index.status, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(index.sourceActiveNodeSchema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(index.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(index.fullReadbackPerformed, false);
+  assert.equal(index.fullParticleReadbackPerformed, false);
+  assert.equal(index.normalHotLoopReadbackFree, true);
+  assert.equal(index.retainedIndexBuffers, true);
+  assert.ok(index.bucketCountBuffer);
+  assert.ok(index.bucketRangeOffsetBuffer);
+  assert.ok(index.bucketCursorBuffer);
+  assert.ok(index.sortedActiveIndexBuffer);
+  assert.ok(index.diagnosticCounterBuffer);
+  assert.equal(index.bucketCountBuffer.destroyed, false);
+  assert.equal(index.bucketRangeOffsetBuffer.destroyed, false);
+  assert.equal(index.bucketCursorBuffer.destroyed, false);
+  assert.equal(index.sortedActiveIndexBuffer.destroyed, false);
+  assert.equal(index.diagnosticCounterBuffer.destroyed, false);
+  assert.equal(index.activeNodeCount, 3);
+  assert.equal(index.bucketCount, 4);
+  assert.equal(index.bucketRangeOffsetCount, 5);
+  assert.equal(index.bucketCounts.length, 0);
+  assert.equal(index.bucketRangeOffsets.length, 0);
+  assert.equal(index.sortedActiveIndices.length, 0);
+  assert.equal(index.diagnosticCounters.length, 0);
+  assert.equal(index.indexStatus, 'sorted-radix-active-node-index-submitted');
+  assert.equal(index.capacityStatus, 'unbounded-per-bucket-range-no-fixed-slot-overflow');
+  assert.equal(index.indexCoverageStatus, 'hash-bucket-ranges-require-exact-overlap-validation');
+  assert.equal(index.stateMutationStatus, 'active-node-sorted-index-submitted-no-state-mutation');
+  assert.equal(
+    index.stateAuthorityStatus,
+    'index-buffer-derived-from-active-node-list-no-state-admission-required'
+  );
+  assert.deepEqual(device.dispatches, [
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1]
+  ]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeSortedIndexParams')));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-active-node-sorted-index-bucket-range-offsets'
+    && buffer.size === 5 * Uint32Array.BYTES_PER_ELEMENT
+  )));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-active-node-sorted-index-active-indices'
+    && buffer.size === 3 * Uint32Array.BYTES_PER_ELEMENT
+  )));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
 test('Schroeder law queue consumes retained active nodes without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const activeNodeList = {
@@ -1721,14 +1931,22 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   assert.ok(device.shaderModules.some((module) => module.code.includes('active_nodes')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('active_node_index_bucket_slots')));
   assert.ok(device.shaderModules.some((module) => module.code.includes('source_candidate_span_rows')));
-  assert.equal(device.bindGroups.at(-1).entries.length, 8);
+  assert.equal(device.bindGroups.at(-1).entries.length, 10);
   assert.equal(device.bindGroups.at(-1).entries[1].resource.buffer, activeNodeBuffer);
   assert.equal(device.bindGroups.at(-1).entries[4].resource.buffer, candidates.sourceCandidateSpanBuffer);
   assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer.label, 'ulg-schroeder-law-neighbor-active-node-index-slots-dummy');
   assert.equal(device.bindGroups.at(-1).entries[7].resource.buffer, candidates.diagnosticCounterBuffer);
+  assert.equal(
+    device.bindGroups.at(-1).entries[8].resource.buffer.label,
+    'ulg-schroeder-law-neighbor-active-node-sorted-index-range-offsets-dummy'
+  );
+  assert.equal(
+    device.bindGroups.at(-1).entries[9].resource.buffer.label,
+    'ulg-schroeder-law-neighbor-active-node-sorted-index-active-indices-dummy'
+  );
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && write.byteLength === 64
+    && write.byteLength === 80
   )));
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-diagnostic-counters'
@@ -1736,7 +1954,7 @@ test('Schroeder law-neighbor candidates consume retained law queues without defa
   )));
   assert.ok(device.createdBuffers.some((buffer) => (
     buffer.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && buffer.size === 64
+    && buffer.size === 80
   )));
   assert.ok(device.createdBuffers.some((buffer) => (
     buffer.label === 'ulg-schroeder-law-neighbor-diagnostic-counters'
@@ -1826,14 +2044,120 @@ test('Schroeder law-neighbor candidates consume retained active-node bucket inde
   assert.equal(candidates.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(candidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(candidates.retainedDiagnosticCounterBuffer, true);
-  assert.equal(device.bindGroups.at(-1).entries.length, 8);
+  assert.equal(device.bindGroups.at(-1).entries.length, 10);
   assert.equal(device.bindGroups.at(-1).entries[6].resource.buffer, activeNodeIndexBucketSlotBuffer);
   assert.equal(device.bindGroups.at(-1).entries[7].resource.buffer, candidates.diagnosticCounterBuffer);
+  assert.equal(
+    device.bindGroups.at(-1).entries[8].resource.buffer.label,
+    'ulg-schroeder-law-neighbor-active-node-sorted-index-range-offsets-dummy'
+  );
+  assert.equal(
+    device.bindGroups.at(-1).entries[9].resource.buffer.label,
+    'ulg-schroeder-law-neighbor-active-node-sorted-index-active-indices-dummy'
+  );
   assert.equal(activeNodeIndexBucketSlotBuffer.destroyed, false);
   assert.ok(device.writes.some((write) => (
     write.label === 'ulg-schroeder-law-neighbor-candidates-params'
-    && write.byteLength === 64
+    && write.byteLength === 80
   )));
+});
+
+test('Schroeder law-neighbor candidates consume retained sorted active-node ranges', async () => {
+  const device = createFakeWebGpuDevice();
+  const lawQueueBuffer = device.createBuffer({
+    label: 'retained-law-queue-buffer',
+    size: 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const activeNodeBuffer = device.createBuffer({
+    label: 'retained-active-node-buffer',
+    size: 3 * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const sortedRangeOffsetBuffer = device.createBuffer({
+    label: 'retained-sorted-active-node-range-offsets',
+    size: 5 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const sortedActiveIndexBuffer = device.createBuffer({
+    label: 'retained-sorted-active-node-indices',
+    size: 3 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const stateBuffer = device.createBuffer({
+    label: 'retained-state-buffer',
+    size: 3 * 8 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const lawQueue = {
+    schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-queue-submitted',
+    activeNodeCount: 3,
+    lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+    lawQueueBuffer,
+    enabledLawMask: SCHROEDER_LOCAL_LAW_QUEUE_MASK,
+    candidateBudget: 4,
+    queueEpoch: 7
+  };
+  const activeNodeList = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-list-submitted',
+    activeCandidateCount: 3,
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    activeNodeBuffer
+  };
+  const activeNodeSortedIndex = {
+    schema: ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA,
+    status: 'schroeder-active-node-sorted-index-submitted',
+    activeNodeCount: 3,
+    bucketCount: 4,
+    bucketRangeOffsetCount: 5,
+    bucketRangeOffsetBuffer: sortedRangeOffsetBuffer,
+    sortedActiveIndexBuffer
+  };
+  const candidates = await runSchroederLawNeighborCandidateWebGpu({
+    device,
+    lawQueue,
+    activeNodeList,
+    activeNodeSortedIndex,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      particleCount: 3,
+      stateBuffer
+    },
+    candidateBudget: 4,
+    traversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
+  });
+
+  assert.equal(candidates.activeNodeSortedIndexEnabled, true);
+  assert.equal(
+    candidates.sourceActiveNodeSortedIndexSchema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA
+  );
+  assert.equal(candidates.sourceActiveNodeSortedIndexStatus, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(candidates.activeNodeSortedIndexBucketCount, 4);
+  assert.equal(candidates.activeNodeSortedIndexBucketRangeOffsetCount, 5);
+  assert.equal(
+    candidates.enumerationMode,
+    'schroeder-active-node-sorted-radix-range-traversal-neighbor-enumeration'
+  );
+  assert.equal(candidates.treeTraversalStatus, 'active-node-sorted-radix-range-traversal-with-exact-scan-fallback');
+  assert.equal(
+    candidates.activeNodeIndexConsumerStatus,
+    'active-node-sorted-radix-index-consumed-with-exact-scan-fallback'
+  );
+  assert.equal(candidates.traversalPolicyStatus, 'traversal-policy-forced-sorted-radix-index');
+  assert.equal(candidates.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(candidates.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(candidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(candidates.sortedRadixIndexRequired, true);
+  assert.equal(candidates.sortedRadixIndexStatus, 'sorted-radix-active-node-index-selected');
+  assert.equal(device.bindGroups.at(-1).entries.length, 10);
+  assert.equal(device.bindGroups.at(-1).entries[8].resource.buffer, sortedRangeOffsetBuffer);
+  assert.equal(device.bindGroups.at(-1).entries[9].resource.buffer, sortedActiveIndexBuffer);
+  assert.equal(sortedRangeOffsetBuffer.destroyed, false);
+  assert.equal(sortedActiveIndexBuffer.destroyed, false);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('active_node_sorted_bucket_range_offsets')));
 });
 
 test('Schroeder law-neighbor candidates can read compact traversal diagnostics only', async () => {
@@ -2684,6 +3008,66 @@ test('Schroeder same-level mechanics can build an opt-in active-node index befor
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
 });
 
+test('Schroeder same-level mechanics can build an opt-in sorted active-node index before resident backend', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeSortedIndex: true,
+    activeNodeSortedIndexBucketCount: 4,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasActiveNodeSortedIndex: Boolean(options.schroederActiveNodeSortedIndex),
+        hasLawQueue: Boolean(options.schroederLawQueue)
+      };
+    }
+  });
+
+  assert.equal(result.activeNodeSortedIndex.schema, ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA);
+  assert.equal(
+    result.activeNodeSortedIndex.activeNodeSortedIndexSchema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SCHEMA
+  );
+  assert.equal(result.activeNodeSortedIndex.status, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(result.activeNodeSortedIndex.activeNodeCount, 3);
+  assert.equal(result.activeNodeSortedIndex.bucketCount, 4);
+  assert.equal(result.activeNodeSortedIndex.bucketRangeOffsetCount, 5);
+  assert.equal(result.activeNodeSortedIndex.outputCompaction, 'contiguous-active-node-index-ranges-by-radix-bucket');
+  assert.equal(result.activeNodeSortedIndex.capacityStatus, 'unbounded-per-bucket-range-no-fixed-slot-overflow');
+  assert.equal(result.activeNodeSortedIndex.retainedIndexBuffers, true);
+  assert.equal(result.activeNodeSortedIndexStatus, 'schroeder-active-node-sorted-index-submitted');
+  assert.equal(result.activeNodeSortedIndexConsumerStatus, 'active-node-sorted-radix-index-available-not-yet-consumed');
+  assert.equal(result.activeNodeIndex, null);
+  assert.equal(result.activeNodeIndexStatus, 'disabled-active-node-index');
+  assert.equal(result.lawQueue, null);
+  assert.equal(result.lawQueueStatus, 'disabled-local-law-queue');
+  assert.equal(result.residentStep.hasActiveNodeSortedIndex, true);
+  assert.equal(result.residentStep.hasLawQueue, false);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederActiveNodeSortedIndex.schema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA
+  );
+  assert.equal(calls[0].schroederLawQueue, null);
+  assert.deepEqual(device.dispatches, [
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1],
+    [1, 1, 1]
+  ]);
+});
+
 test('Schroeder same-level mechanics forwards opt-in active-node index to law-neighbor traversal', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
@@ -2764,6 +3148,82 @@ test('Schroeder same-level mechanics forwards opt-in active-node index to law-ne
   assert.equal(result.lawNeighborCandidates.retainedDiagnosticCounterBuffer, true);
   assert.equal(result.activeNodeIndexConsumerStatus, 'active-node-bucket-index-consumed-with-exact-scan-fallback');
   assert.equal(result.lawNeighborCandidateConsumerStatus, 'law-neighbor-candidates-forwarded-to-resident-backend');
+  assert.equal(result.residentStep.hasLawNeighborCandidates, true);
+});
+
+test('Schroeder same-level mechanics forwards opt-in sorted active-node index to law-neighbor traversal', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const lawNeighborCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableActiveNodeSortedIndex: true,
+    activeNodeSortedIndexBucketCount: 4,
+    enableCrossLevelCoupling: false,
+    lawNeighborTraversalPolicyMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+    lawNeighborCandidateRunner: async (options) => {
+      lawNeighborCalls.push(options);
+      return {
+        schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+        status: 'schroeder-law-neighbor-candidates-submitted',
+        lawQueueCount: options.lawQueue.activeNodeCount,
+        neighborCandidateCount: options.lawQueue.activeNodeCount * options.candidateBudget,
+        candidateBudget: options.candidateBudget,
+        enumerationMode: 'schroeder-active-node-sorted-radix-range-traversal-neighbor-enumeration',
+        outputCompaction: 'fixed-budget-law-neighbor-candidate-rows',
+        treeTraversalStatus: 'active-node-sorted-radix-range-traversal-with-exact-scan-fallback',
+        activeNodeIndexEnabled: false,
+        activeNodeSortedIndexEnabled: Boolean(options.activeNodeSortedIndex),
+        activeNodeIndexConsumerStatus: 'active-node-sorted-radix-index-consumed-with-exact-scan-fallback',
+        traversalDiagnosticStatus: 'law-neighbor-traversal-diagnostic-counters-submitted',
+        traversalPolicyStatus: 'traversal-policy-forced-sorted-radix-index',
+        traversalPolicyMode: options.traversalPolicyMode,
+        appliedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        recommendedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        selectedTraversalIndexMode: SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE,
+        sortedRadixIndexRequired: true,
+        sortedRadixIndexStatus: 'sorted-radix-active-node-index-selected',
+        diagnosticCountersAvailable: false,
+        diagnosticReadbackRecommended: true,
+        diagnosticCounterBuffer: { label: 'stub-traversal-diagnostics' },
+        diagnosticCounterBufferByteLength: 8 * Uint32Array.BYTES_PER_ELEMENT,
+        neighborCandidateBuffer: { label: 'stub-sorted-law-neighbor-candidates' },
+        neighborCandidateBufferByteLength: 4 * Float32Array.BYTES_PER_ELEMENT
+      };
+    },
+    residentStepRunner: async (options) => ({
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed',
+      hasActiveNodeSortedIndex: Boolean(options.schroederActiveNodeSortedIndex),
+      hasLawNeighborCandidates: Boolean(options.schroederLawNeighborCandidates)
+    })
+  });
+
+  assert.equal(lawNeighborCalls.length, 1);
+  assert.equal(
+    lawNeighborCalls[0].activeNodeSortedIndex.schema,
+    ULG_SCHROEDER_ACTIVE_NODE_SORTED_INDEX_EXECUTION_SCHEMA
+  );
+  assert.equal(lawNeighborCalls[0].activeNodeSortedIndex.bucketCount, 4);
+  assert.equal(lawNeighborCalls[0].activeNodeIndex, null);
+  assert.equal(lawNeighborCalls[0].traversalPolicyMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(result.lawNeighborCandidates.activeNodeSortedIndexEnabled, true);
+  assert.equal(result.lawNeighborCandidates.activeNodeIndexEnabled, false);
+  assert.equal(
+    result.lawNeighborCandidates.activeNodeIndexConsumerStatus,
+    'active-node-sorted-radix-index-consumed-with-exact-scan-fallback'
+  );
+  assert.equal(
+    result.lawNeighborCandidates.treeTraversalStatus,
+    'active-node-sorted-radix-range-traversal-with-exact-scan-fallback'
+  );
+  assert.equal(result.lawNeighborCandidates.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
+  assert.equal(result.lawNeighborCandidates.sortedRadixIndexStatus, 'sorted-radix-active-node-index-selected');
+  assert.equal(result.activeNodeSortedIndexConsumerStatus, 'active-node-sorted-radix-index-consumed-by-law-neighbor-traversal');
+  assert.equal(result.residentStep.hasActiveNodeSortedIndex, true);
   assert.equal(result.residentStep.hasLawNeighborCandidates, true);
 });
 

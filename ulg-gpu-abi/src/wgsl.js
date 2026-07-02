@@ -7956,6 +7956,147 @@ fn assignIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederActiveNodeSortedIndexWgsl = `
+struct SchroederActiveNodeSortedIndexParams {
+  active_node_count: u32,
+  active_node_stride: u32,
+  bucket_count: u32,
+  bucket_range_offset_count: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
+  pad4: u32,
+  pad5: u32,
+  pad6: u32,
+  pad7: u32,
+  pad8: u32,
+  pad9: u32,
+  pad10: u32,
+};
+
+@group(0) @binding(0) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(1) var<storage, read_write> bucket_counts: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> bucket_range_offsets: array<u32>;
+@group(0) @binding(3) var<storage, read_write> bucket_cursors: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> sorted_active_indices: array<u32>;
+@group(0) @binding(5) var<storage, read_write> diagnostic_counters: array<atomic<u32>>;
+@group(0) @binding(6) var<uniform> params: SchroederActiveNodeSortedIndexParams;
+
+const SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SENTINEL: u32 = 0xffffffffu;
+const SCHROEDER_ACTIVE_NODE_SORTED_INDEX_STRIDE: u32 = 16u;
+const SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_READY_COUNT: u32 = 0u;
+const SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_SCATTER_COUNT: u32 = 1u;
+const SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_INACTIVE_COUNT: u32 = 2u;
+const SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_TOTAL_COUNT: u32 = 3u;
+
+fn ss_sorted_index_hash_mix(value: u32, seed: u32) -> u32 {
+  var hash = seed ^ (value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn ss_sorted_index_i32_bits(value: f32) -> u32 {
+  return bitcast<u32>(i32(round(value)));
+}
+
+fn ss_sorted_index_bucket(active_offset: u32) -> u32 {
+  var hash = 0x811c9dc5u;
+  hash = ss_sorted_index_hash_mix(ss_sorted_index_i32_bits(active_nodes[active_offset + 0u]), hash);
+  hash = ss_sorted_index_hash_mix(ss_sorted_index_i32_bits(active_nodes[active_offset + 1u]), hash);
+  hash = ss_sorted_index_hash_mix(ss_sorted_index_i32_bits(active_nodes[active_offset + 2u]), hash);
+  hash = ss_sorted_index_hash_mix(ss_sorted_index_i32_bits(active_nodes[active_offset + 3u]), hash);
+  hash = ss_sorted_index_hash_mix(ss_sorted_index_i32_bits(active_nodes[active_offset + 15u]), hash);
+  return hash % max(params.bucket_count, 1u);
+}
+
+fn ss_sorted_index_ready(active_offset: u32) -> bool {
+  let status = active_nodes[active_offset + 11u];
+  return status > 0.0 && status < 32.0;
+}
+
+@compute @workgroup_size(64)
+fn clearSortedIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let index = global_id.x;
+  if (index < params.bucket_count) {
+    atomicStore(&bucket_counts[index], 0u);
+    atomicStore(&bucket_cursors[index], 0u);
+  }
+  if (index < params.bucket_range_offset_count) {
+    bucket_range_offsets[index] = 0u;
+  }
+  if (index < params.active_node_count) {
+    sorted_active_indices[index] = SCHROEDER_ACTIVE_NODE_SORTED_INDEX_SENTINEL;
+  }
+  if (index < 4u) {
+    atomicStore(&diagnostic_counters[index], 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn countSortedIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let active_index = global_id.x;
+  if (active_index >= params.active_node_count) {
+    return;
+  }
+  let active_stride = max(params.active_node_stride, SCHROEDER_ACTIVE_NODE_SORTED_INDEX_STRIDE);
+  let active_offset = active_index * active_stride;
+  if (!ss_sorted_index_ready(active_offset)) {
+    atomicAdd(&diagnostic_counters[SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_INACTIVE_COUNT], 1u);
+    return;
+  }
+  let bucket_index = ss_sorted_index_bucket(active_offset);
+  atomicAdd(&bucket_counts[bucket_index], 1u);
+  atomicAdd(&diagnostic_counters[SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_READY_COUNT], 1u);
+}
+
+@compute @workgroup_size(1)
+fn prefixSortedIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) {
+    return;
+  }
+  var running_total = 0u;
+  var bucket_index = 0u;
+  loop {
+    if (bucket_index >= params.bucket_count) {
+      break;
+    }
+    bucket_range_offsets[bucket_index] = running_total;
+    atomicStore(&bucket_cursors[bucket_index], 0u);
+    running_total = running_total + atomicLoad(&bucket_counts[bucket_index]);
+    bucket_index = bucket_index + 1u;
+  }
+  if (params.bucket_range_offset_count > params.bucket_count) {
+    bucket_range_offsets[params.bucket_count] = running_total;
+  }
+  atomicStore(&diagnostic_counters[SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_TOTAL_COUNT], running_total);
+}
+
+@compute @workgroup_size(64)
+fn scatterSortedIndex(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let active_index = global_id.x;
+  if (active_index >= params.active_node_count) {
+    return;
+  }
+  let active_stride = max(params.active_node_stride, SCHROEDER_ACTIVE_NODE_SORTED_INDEX_STRIDE);
+  let active_offset = active_index * active_stride;
+  if (!ss_sorted_index_ready(active_offset)) {
+    return;
+  }
+  let bucket_index = ss_sorted_index_bucket(active_offset);
+  let slot = atomicAdd(&bucket_cursors[bucket_index], 1u);
+  let destination = bucket_range_offsets[bucket_index] + slot;
+  if (destination < params.active_node_count) {
+    sorted_active_indices[destination] = active_index;
+    atomicAdd(&diagnostic_counters[SCHROEDER_ACTIVE_NODE_SORTED_DIAGNOSTIC_SCATTER_COUNT], 1u);
+  }
+}
+`;
+
 export const schroederLawQueueWgsl = `
 struct SchroederLawQueueParams {
   active_node_count: u32,
@@ -8071,7 +8212,11 @@ struct SchroederLawNeighborParams {
   active_node_index_bucket_count: u32,
   active_node_index_bucket_slot_capacity: u32,
   active_node_index_bucket_slot_count: u32,
+  active_node_sorted_index_enabled: u32,
+  active_node_sorted_bucket_count: u32,
+  active_node_sorted_bucket_range_offset_count: u32,
   pad0: u32,
+  pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> law_queue_rows: array<f32>;
@@ -8082,6 +8227,8 @@ struct SchroederLawNeighborParams {
 @group(0) @binding(5) var<uniform> params: SchroederLawNeighborParams;
 @group(0) @binding(6) var<storage, read> active_node_index_bucket_slots: array<u32>;
 @group(0) @binding(7) var<storage, read_write> traversal_diagnostic_counters: array<atomic<u32>>;
+@group(0) @binding(8) var<storage, read> active_node_sorted_bucket_range_offsets: array<u32>;
+@group(0) @binding(9) var<storage, read> active_node_sorted_active_indices: array<u32>;
 
 const SCHROEDER_LAW_NEIGHBOR_QUEUE_STRIDE: u32 = 32u;
 const SCHROEDER_LAW_NEIGHBOR_ACTIVE_NODE_STRIDE: u32 = 16u;
@@ -8185,6 +8332,56 @@ fn ss_neighbor_active_index_bucket(queue_offset: u32) -> u32 {
   return hash % max(params.active_node_index_bucket_count, 1u);
 }
 
+fn ss_neighbor_sorted_index_enabled() -> bool {
+  return params.active_node_sorted_index_enabled != 0u
+    && params.active_node_sorted_bucket_count > 0u
+    && params.active_node_sorted_bucket_range_offset_count > params.active_node_sorted_bucket_count;
+}
+
+fn ss_neighbor_sorted_index_bucket(queue_offset: u32) -> u32 {
+  var hash = 0x811c9dc5u;
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 1u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 4u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 5u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 6u]), hash);
+  hash = ss_neighbor_active_index_hash_mix(ss_neighbor_active_index_i32_bits(law_queue_rows[queue_offset + 2u]), hash);
+  return hash % max(params.active_node_sorted_bucket_count, 1u);
+}
+
+fn ss_neighbor_sorted_range_start(queue_offset: u32) -> u32 {
+  if (!ss_neighbor_sorted_index_enabled()) {
+    return 0u;
+  }
+  let bucket_index = ss_neighbor_sorted_index_bucket(queue_offset);
+  return active_node_sorted_bucket_range_offsets[bucket_index];
+}
+
+fn ss_neighbor_sorted_range_end(queue_offset: u32) -> u32 {
+  if (!ss_neighbor_sorted_index_enabled()) {
+    return 0u;
+  }
+  let bucket_index = ss_neighbor_sorted_index_bucket(queue_offset);
+  return active_node_sorted_bucket_range_offsets[min(bucket_index + 1u, params.active_node_sorted_bucket_range_offset_count - 1u)];
+}
+
+fn ss_neighbor_sorted_index_contains(queue_offset: u32, active_index: u32) -> bool {
+  if (!ss_neighbor_sorted_index_enabled()) {
+    return false;
+  }
+  var cursor = ss_neighbor_sorted_range_start(queue_offset);
+  let end = min(ss_neighbor_sorted_range_end(queue_offset), params.active_node_count);
+  loop {
+    if (cursor >= end) {
+      break;
+    }
+    if (active_node_sorted_active_indices[cursor] == active_index) {
+      return true;
+    }
+    cursor = cursor + 1u;
+  }
+  return false;
+}
+
 fn ss_neighbor_active_index_slot(queue_offset: u32, bucket_slot_index: u32) -> u32 {
   if (!ss_neighbor_active_index_enabled() || bucket_slot_index >= params.active_node_index_bucket_slot_capacity) {
     return SCHROEDER_LAW_NEIGHBOR_ACTIVE_INDEX_SENTINEL;
@@ -8286,6 +8483,60 @@ fn ss_neighbor_select_active_index_match(
   return params.active_node_count;
 }
 
+fn ss_neighbor_sorted_index_match_count(queue_offset: u32, source_active_index: u32, active_stride: u32) -> u32 {
+  if (!ss_neighbor_sorted_index_enabled()) {
+    return 0u;
+  }
+  var matched_count = 0u;
+  var cursor = ss_neighbor_sorted_range_start(queue_offset);
+  let end = min(ss_neighbor_sorted_range_end(queue_offset), params.active_node_count);
+  loop {
+    if (cursor >= end) {
+      break;
+    }
+    let active_index = active_node_sorted_active_indices[cursor];
+    if (active_index < params.active_node_count && active_index != source_active_index) {
+      let active_offset = active_index * active_stride;
+      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+        matched_count = matched_count + 1u;
+      }
+    }
+    cursor = cursor + 1u;
+  }
+  return matched_count;
+}
+
+fn ss_neighbor_select_sorted_index_match(
+  queue_offset: u32,
+  source_active_index: u32,
+  active_stride: u32,
+  candidate_slot: u32
+) -> u32 {
+  if (!ss_neighbor_sorted_index_enabled()) {
+    return params.active_node_count;
+  }
+  var matched_count = 0u;
+  var cursor = ss_neighbor_sorted_range_start(queue_offset);
+  let end = min(ss_neighbor_sorted_range_end(queue_offset), params.active_node_count);
+  loop {
+    if (cursor >= end) {
+      break;
+    }
+    let active_index = active_node_sorted_active_indices[cursor];
+    if (active_index < params.active_node_count && active_index != source_active_index) {
+      let active_offset = active_index * active_stride;
+      if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
+        if (matched_count == candidate_slot) {
+          return active_index;
+        }
+        matched_count = matched_count + 1u;
+      }
+    }
+    cursor = cursor + 1u;
+  }
+  return params.active_node_count;
+}
+
 fn ss_neighbor_write_inactive(row_offset: u32, source_index: f32, queue_row_index: u32, queue_epoch: f32) {
   ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_INACTIVE_CANDIDATES, 1u);
   neighbor_candidate_rows[row_offset + 0u] = source_index;
@@ -8381,7 +8632,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   var selected_active_index = params.active_node_count;
   var indexed_match_count = 0u;
-  if (ss_neighbor_active_index_enabled()) {
+  if (ss_neighbor_sorted_index_enabled()) {
+    ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_ATTEMPTS, 1u);
+    selected_active_index = ss_neighbor_select_sorted_index_match(
+      queue_offset,
+      source_active_index,
+      active_stride,
+      candidate_slot
+    );
+    if (selected_active_index < params.active_node_count) {
+      ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_SELECTED, 1u);
+    }
+    if (selected_active_index >= params.active_node_count) {
+      indexed_match_count = ss_neighbor_sorted_index_match_count(queue_offset, source_active_index, active_stride);
+    }
+  } else if (ss_neighbor_active_index_enabled()) {
     ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_ATTEMPTS, 1u);
     if (candidate_slot == 0u && ss_neighbor_active_index_bucket_full(queue_offset)) {
       ss_neighbor_diagnostic_add(SCHROEDER_LAW_NEIGHBOR_DIAGNOSTIC_BUCKET_PRESSURE, 1u);
@@ -8412,7 +8677,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         break;
       }
       let active_index = (source_active_index + 1u + scan_step) % params.active_node_count;
-      if (active_index != source_active_index && !ss_neighbor_active_index_contains(queue_offset, active_index)) {
+      if (
+        active_index != source_active_index
+        && !ss_neighbor_sorted_index_contains(queue_offset, active_index)
+        && !ss_neighbor_active_index_contains(queue_offset, active_index)
+      ) {
         let active_offset = active_index * active_stride;
         if (ss_neighbor_active_node_ready(active_offset) && ss_neighbor_tiles_overlap(queue_offset, active_offset)) {
           if (matched_count == fallback_target_slot) {

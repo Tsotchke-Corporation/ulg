@@ -269,13 +269,20 @@ Landed checkpoints:
     now reuse a pressure-interface import descriptor that preserves the
     retained gas-pressure-cell GPU buffer, row metadata, and admission evidence;
     the resident cleanup preservation list also carries that buffer forward.
+67. `c0707cb` surfaces retained-row pressure reuse telemetry across lane
+    summaries, pressure-interface worker publication candidates, and mounted
+    worker-lane reports. The pressure path now records whether retained SS
+    gas-cell rows were borrowed/retained by the force-row producer, while the
+    mounted worker-lane report distinguishes main-thread promoted imports from
+    worker-lane consumption instead of implying cross-worker `GPUBuffer`
+    transfer.
 
 Next implementation queue:
 
-1. Continue Slice 7 by using the promoted SS pressure-interface gas-cell import
-   as the next pressure-feedback input across repeated same-level/mounted
-   worker-lane schedules, with compact telemetry showing whether the retained
-   rows were consumed.
+1. Continue Slice 7 by turning promoted SS pressure-interface gas-cell imports
+   into explicit next-frame pressure-feedback inputs for repeated same-level
+   scene schedules. Keep dedicated mounted worker lanes descriptor-only until a
+   worker-owned retained import/admission path exists.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep radiation, plasma/electromagnetic approximation, and gas-summary

@@ -351,7 +351,11 @@ Suggested schemas:
   resident execution into the scene pressure-interface state, converts it into
   the existing pressure-interface import descriptor while preserving the SS
   source schema and GPU buffer handle, and adds the retained gas-cell buffer to
-  resident cleanup preservation.
+  resident cleanup preservation. `c0707cb` then surfaces retained-row pressure
+  reuse telemetry through lane summaries, pressure-interface worker publication
+  candidates, and mounted worker-lane reports, including explicit
+  retained/borrowed row consumption status without trying to transfer
+  main-thread `GPUBuffer` handles into the dedicated worker lane.
 
 ### Slice 8: Render And Distribution
 
@@ -385,9 +389,11 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - use promoted SS pressure-interface gas-cell imports as the next
-     pressure-feedback input across repeated same-level/mounted worker-lane
-     schedules, with compact telemetry showing retained-row consumption;
+   - use promoted SS pressure-interface gas-cell imports as explicit
+     next-frame pressure-feedback input across repeated same-level scene
+     schedules;
+   - keep mounted worker-lane pressure imports descriptor-only until a
+     worker-owned retained import/admission path can consume worker-local refs;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
    - keep radiation, plasma/electromagnetic approximation, and gas-summary
@@ -446,13 +452,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS pressure-feedback reuse telemetry**:
+The next code slice on `SS` is **SS pressure-feedback input reuse**:
 
 1. Reuse promoted `schroeder-far-aggregate-gas-cell-import` descriptors as
-   next-frame pressure-feedback inputs across repeated same-level/mounted
-   worker-lane schedules.
+   next-frame pressure-feedback inputs across repeated same-level scene
+   schedules.
 2. Preserve the boundary between far aggregate gas pressure summaries and
    exact-near-field pressure/interface contact work.
-3. Report compact telemetry for retained-row consumption and keep
-   descriptor-only PeerCompute replay artifacts; do not introduce full particle
-   readback as the validation path.
+3. Keep mounted worker lanes descriptor-only until a worker-owned retained
+   gas-cell import/admission path can consume worker-local refs, and do not
+   introduce full particle readback as the validation path.

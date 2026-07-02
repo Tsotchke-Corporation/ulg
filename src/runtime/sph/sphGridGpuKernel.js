@@ -1,5 +1,6 @@
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
+  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
@@ -30,6 +31,7 @@ export {
 };
 
 export const MLS_MPM_GPU_GRID_NODE_FLOATS = MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.length;
+const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 export const ULG_MLS_MPM_P2G_BACKEND_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-p2g-backend-policy.v0';
@@ -868,7 +870,7 @@ function createProjectionParamsArray(
     SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
   ))), true);
   view.setUint32(56, 0, true);
-  view.setUint32(60, 0, true);
+  view.setUint32(60, SCHROEDER_ACTIVE_NODE_FLOATS, true);
   return buffer;
 }
 
@@ -951,6 +953,11 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         : 'ulg-mls-mpm-p2g-schroeder-level-assignments-dummy',
       schroederFilter.enabled ? schroederAssignmentRows : new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
     );
+  const schroederActiveNodeBuffer = writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-p2g-schroeder-active-nodes-dummy',
+    new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
+  );
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
@@ -993,24 +1000,25 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(4, 'uniform'),
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
-      computeBufferBinding(7, 'read-only-storage')
+      computeBufferBinding(7, 'read-only-storage'),
+      computeBufferBinding(8, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v2',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v3',
       label: 'ulg-mls-mpm-p2g-grid-projection',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v2',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v3',
       label: 'ulg-mls-mpm-p2g-product-event-scatter',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'scatter_product_events',
       bindings: p2gBindings
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v2',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v3',
       label: 'ulg-mls-mpm-p2g-grid-finalize',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'finalize_grid',
@@ -1024,7 +1032,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         { binding: 4, resource: { buffer: paramsBuffer } },
         { binding: 5, resource: { buffer: productEventBuffer } },
         { binding: 6, resource: { buffer: gridBuffer } },
-        { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
+        { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
+        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
     const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });
@@ -1099,6 +1108,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
       if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
       if (!borrowedSchroederAssignmentBuffer) schroederAssignmentBuffer.destroy?.();
+      schroederActiveNodeBuffer.destroy?.();
       if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
       accumulatorBuffer.destroy?.();
       paramsBuffer.destroy?.();

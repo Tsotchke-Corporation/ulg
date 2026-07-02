@@ -196,6 +196,9 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
+  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_active_nodes/);
+  assert.match(mlsMpmG2pReconstructWgsl, /fn g2p_particle_enabled/);
+  assert.match(mlsMpmG2pReconstructWgsl, /fn g2p_copy_input_particle/);
   assert.match(mlsMpmG2pReconstructWgsl, /g2p_cubic_root_positive/);
   assert.match(mlsMpmG2pReconstructWgsl, /g2p_particle_wall_clearance/);
   assert.match(mlsMpmG2pReconstructWgsl, /wall_clearance = g2p_particle_wall_clearance\(row4\.w\)/);

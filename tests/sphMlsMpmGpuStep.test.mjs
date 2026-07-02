@@ -16,7 +16,9 @@ import {
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
+  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -2043,12 +2045,13 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(device.dispatches.length, 4);
 });
 
-test('MLS-MPM resident fused mechanics filters P2G by retained Schroeder level assignment', async () => {
+test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder active nodes', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const schroederAssignmentBuffer = tracker.buffer('retained-schroeder-assignment');
+  const schroederActiveNodeBuffer = tracker.buffer('retained-schroeder-active-nodes');
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
@@ -2072,6 +2075,15 @@ test('MLS-MPM resident fused mechanics filters P2G by retained Schroeder level a
       retainedAssignmentBuffer: true
     },
     schroederSelectedLevel: 2,
+    schroederActiveNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+      status: 'schroeder-active-node-list-submitted',
+      particleCount: buffers.sphParticleState.particleCount,
+      activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length,
+      activeNodeBuffer: schroederActiveNodeBuffer,
+      activeNodeBufferByteLength: SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT,
+      retainedActiveNodeBuffer: true
+    },
     preferWebGpu: true,
     device,
     boxDimsM: [3, 3, 3],
@@ -2144,21 +2156,49 @@ test('MLS-MPM resident fused mechanics filters P2G by retained Schroeder level a
   assert.equal(step.p2gGridProjection.schroederLevelFilter.assignmentStrideFloats, SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(step.p2gGridProjection.schroederLevelFilter.retainedAssignmentBuffer, true);
   assert.equal(step.p2gGridProjection.schroederLevelFilter.assignmentBufferSource, 'retained-schroeder-level-assignment-buffer');
+  assert.equal(step.p2gGridProjection.schroederActiveNodeFilterEnabled, true);
+  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.retainedActiveNodeBuffer, true);
+  assert.equal(step.p2gGridProjection.schroederActiveNodeFilter.activeNodeBufferSource, 'retained-schroeder-active-node-buffer');
+  assert.equal(step.g2pReconstruction.schroederActiveNodeFilterEnabled, true);
+  assert.equal(step.g2pReconstruction.schroederActiveNodeFilter.activeNodeStrideFloats, SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
   const p2gParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-p2g-params');
   assert.ok(p2gParamWrite);
   const p2gParams = new DataView(p2gParamWrite.data);
   assert.equal(p2gParams.getUint32(44, true), 1);
   assert.equal(p2gParams.getInt32(48, true), 2);
   assert.equal(p2gParams.getUint32(52, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
-  const schroederBindGroups = device.bindGroups.filter((group) => {
-    return group.entries.some((entry) => entry.binding === 7);
+  assert.equal(p2gParams.getUint32(56, true), 1);
+  assert.equal(p2gParams.getUint32(60, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  const g2pParamWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-fused-g2p-params');
+  assert.ok(g2pParamWrite);
+  const g2pParams = new DataView(g2pParamWrite.data);
+  assert.equal(g2pParams.getUint32(24, true), 1);
+  assert.equal(g2pParams.getInt32(28, true), 2);
+  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  assert.equal(g2pParams.getUint32(72, true), 1);
+  const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
+    return group.entries.some((entry) => entry.binding === 8);
   });
-  assert.equal(schroederBindGroups.length, 2);
-  assert.ok(schroederBindGroups.every((group) => {
+  assert.equal(p2gSchroederBindGroups.length, 2);
+  assert.ok(p2gSchroederBindGroups.every((group) => {
     return group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer;
   }));
+  assert.ok(p2gSchroederBindGroups.every((group) => {
+    return group.entries.find((entry) => entry.binding === 8)?.resource?.buffer === schroederActiveNodeBuffer;
+  }));
+  const g2pSchroederBindGroups = device.bindGroups.filter((group) => {
+    return group.entries.length === 8
+      && group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederActiveNodeBuffer
+      && !group.entries.some((entry) => entry.binding === 8);
+  });
+  assert.equal(g2pSchroederBindGroups.length, 1);
   assert.equal(
     device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-level-assignments'),
+    false
+  );
+  assert.equal(
+    device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-fused-empty-schroeder-active-nodes'),
     false
   );
   assert.equal(device.dispatches.length, 4);
@@ -6401,7 +6441,11 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments'
     && buffer.destroyed
   )));
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 9);
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-active-nodes'
+    && buffer.destroyed
+  )));
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 10);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });

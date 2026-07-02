@@ -4949,8 +4949,8 @@ struct P2gProjectionParams {
   schroeder_filter_enabled: u32,
   schroeder_selected_level: i32,
   schroeder_assignment_stride_floats: u32,
-  pad1: u32,
-  pad2: u32,
+  schroeder_active_node_filter_enabled: u32,
+  schroeder_active_node_stride_floats: u32,
 };
 
 struct StressRows {
@@ -4967,6 +4967,7 @@ struct StressRows {
 @group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
+@group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<f32>;
 
 const P2G_ATOMIC_SCALE: f32 = 65536.0;
 const P2G_ATOMIC_INV_SCALE: f32 = 1.0 / P2G_ATOMIC_SCALE;
@@ -5002,6 +5003,20 @@ fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
 }
 
 fn p2g_particle_enabled(particle_index: u32) -> bool {
+  if (params.schroeder_active_node_filter_enabled != 0u) {
+    let active_stride = max(params.schroeder_active_node_stride_floats, 1u);
+    let active_offset = particle_index * active_stride;
+    let active_level = i32(round(schroeder_active_nodes[active_offset]));
+    let source_particle_index = u32(max(round(schroeder_active_nodes[active_offset + 10u]), 0.0));
+    let status = schroeder_active_nodes[active_offset + 11u];
+    if (!(status > 0.0) || status >= 32.0 || source_particle_index != particle_index) {
+      return false;
+    }
+    if (params.schroeder_filter_enabled != 0u && active_level != params.schroeder_selected_level) {
+      return false;
+    }
+    return true;
+  }
   if (params.schroeder_filter_enabled == 0u) {
     return true;
   }
@@ -6276,8 +6291,8 @@ struct G2pParams {
   grid_ny: u32,
   grid_nz: u32,
   shift: u32,
-  pad_u0: u32,
-  pad_u1: u32,
+  schroeder_active_node_filter_enabled: u32,
+  schroeder_selected_level: i32,
   grid_spacing_m: f32,
   inv_grid_spacing_m: f32,
   dt: f32,
@@ -6287,8 +6302,8 @@ struct G2pParams {
   internal_pressure_scale: f32,
   liquid_wall_damping_alpha: f32,
   liquid_wall_damping_distance_m: f32,
-  pad1: f32,
-  pad2: f32,
+  schroeder_active_node_stride_floats: u32,
+  schroeder_level_filter_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -6298,6 +6313,7 @@ struct G2pParams {
 @group(0) @binding(4) var<storage, read_write> out_sph_state: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: G2pParams;
+@group(0) @binding(7) var<storage, read> schroeder_active_nodes: array<f32>;
 
 fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {
   let a = 1.5 - fx;
@@ -6368,6 +6384,37 @@ fn g2p_in_range(i: i32, j: i32, k: i32) -> bool {
     && kk < i32(params.grid_nz);
 }
 
+fn g2p_particle_enabled(particle_index: u32) -> bool {
+  if (params.schroeder_active_node_filter_enabled == 0u) {
+    return true;
+  }
+  let active_stride = max(params.schroeder_active_node_stride_floats, 1u);
+  let active_offset = particle_index * active_stride;
+  let active_level = i32(round(schroeder_active_nodes[active_offset]));
+  let source_particle_index = u32(max(round(schroeder_active_nodes[active_offset + 10u]), 0.0));
+  let status = schroeder_active_nodes[active_offset + 11u];
+  if (!(status > 0.0) || status >= 32.0 || source_particle_index != particle_index) {
+    return false;
+  }
+  if (params.schroeder_level_filter_enabled != 0u && active_level != params.schroeder_selected_level) {
+    return false;
+  }
+  return true;
+}
+
+fn g2p_copy_input_particle(state_base: u32, mechanics_base: u32) {
+  out_sph_state[state_base] = sph_state[state_base];
+  out_sph_state[state_base + 1u] = sph_state[state_base + 1u];
+  out_mls_mechanics[mechanics_base] = mls_mechanics[mechanics_base];
+  out_mls_mechanics[mechanics_base + 1u] = mls_mechanics[mechanics_base + 1u];
+  out_mls_mechanics[mechanics_base + 2u] = mls_mechanics[mechanics_base + 2u];
+  out_mls_mechanics[mechanics_base + 3u] = mls_mechanics[mechanics_base + 3u];
+  out_mls_mechanics[mechanics_base + 4u] = mls_mechanics[mechanics_base + 4u];
+  out_mls_mechanics[mechanics_base + 5u] = mls_mechanics[mechanics_base + 5u];
+  out_mls_mechanics[mechanics_base + 6u] = mls_mechanics[mechanics_base + 6u];
+  out_mls_mechanics[mechanics_base + 7u] = mls_mechanics[mechanics_base + 7u];
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
@@ -6377,6 +6424,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let state_base = particle_index * 2u;
   let mechanics_base = particle_index * 8u;
+  if (!g2p_particle_enabled(particle_index)) {
+    g2p_copy_input_particle(state_base, mechanics_base);
+    return;
+  }
   let pos_mass = sph_state[state_base];
   let vel_u = sph_state[state_base + 1u];
   let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;

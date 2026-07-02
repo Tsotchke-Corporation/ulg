@@ -1,4 +1,5 @@
 import {
+  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -40,6 +41,7 @@ const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const G2P_SCOPE = 'mls-mpm-g2p-velocity-affine-deformation-reconstruction';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
 const EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
   taitCondensed: 1
@@ -592,6 +594,8 @@ function createParamsArray({
   view.setUint32(12, gridUpdate.gridDims[1], true);
   view.setUint32(16, gridUpdate.gridDims[2], true);
   view.setUint32(20, gridUpdate.gridShift, true);
+  view.setUint32(24, 0, true);
+  view.setInt32(28, -1, true);
   view.setFloat32(32, gridUpdate.gridSpacingM, true);
   view.setFloat32(36, 1 / gridUpdate.gridSpacingM, true);
   view.setFloat32(40, dt, true);
@@ -601,6 +605,8 @@ function createParamsArray({
   view.setFloat32(56, finiteNumber(internalPressureScale, 1), true);
   view.setFloat32(60, clamp(finiteNumber(liquidWallDampingAlpha, 0), 0, 1), true);
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
+  view.setUint32(68, SCHROEDER_ACTIVE_NODE_FLOATS, true);
+  view.setUint32(72, 0, true);
   return buffer;
 }
 
@@ -645,6 +651,11 @@ export async function runMlsMpmG2pWebGpu({
   const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const paramsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-params', size: G2P_PARAMS_BYTES, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const schroederActiveNodeBuffer = writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-g2p-schroeder-active-nodes-dummy',
+    new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
+  );
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
     ? null
@@ -665,7 +676,7 @@ export async function runMlsMpmG2pWebGpu({
       liquidWallDampingDistanceM
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v2',
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v3',
       label: 'ulg-mls-mpm-g2p-reconstruct',
       code: mlsMpmG2pReconstructWgsl,
       entryPoint: 'main',
@@ -676,7 +687,8 @@ export async function runMlsMpmG2pWebGpu({
         computeBufferBinding(3, 'read-only-storage'),
         computeBufferBinding(4, 'storage'),
         computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform')
+        computeBufferBinding(6, 'uniform'),
+        computeBufferBinding(7, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -688,7 +700,8 @@ export async function runMlsMpmG2pWebGpu({
         { binding: 3, resource: { buffer: gridBuffer } },
         { binding: 4, resource: { buffer: outStateBuffer } },
         { binding: 5, resource: { buffer: outMechanicsBuffer } },
-        { binding: 6, resource: { buffer: paramsBuffer } }
+        { binding: 6, resource: { buffer: paramsBuffer } },
+        { binding: 7, resource: { buffer: schroederActiveNodeBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -747,6 +760,7 @@ export async function runMlsMpmG2pWebGpu({
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
       }
+      schroederActiveNodeBuffer.destroy?.();
       paramsBuffer.destroy?.();
       stateReadBuffer?.destroy?.();
       mechanicsReadBuffer?.destroy?.();

@@ -291,7 +291,9 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /internal_pressure_scale: f32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> product_events/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_active_nodes/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_filter_enabled: u32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_active_node_filter_enabled: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_particle_enabled/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /max\(row7\.x, 0\.0\)/);

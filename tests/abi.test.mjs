@@ -1056,6 +1056,7 @@ test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> grid_nodes: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(5\) var<storage, read> product_events: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(8\) var<storage, read> schroeder_active_nodes: array<f32>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
@@ -1111,6 +1112,7 @@ test('MLS-MPM GPU G2P reconstruction ABI exposes execution schemas and WGSL bind
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
+  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_active_nodes: array<f32>/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });
 

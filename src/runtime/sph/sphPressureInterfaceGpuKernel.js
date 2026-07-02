@@ -1712,19 +1712,63 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   retainForceRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE,
   schroederLawQueue = null,
-  schroederLawNeighborCandidates = null
+  schroederLawNeighborCandidates = null,
+  retainedGasPressureCellsBuffer = null,
+  retainedGasPressureCellRowCount = 0,
+  retainedGasPressureCellRowStrideFloats = SPH_GAS_PRESSURE_CELL_FLOATS,
+  retainedGasPressureCellRowByteLength = 0,
+  retainedPressureFieldMode = LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
+  retainedPressureFieldResolution = LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
+  retainedLocalPressureGradientStatus = 'retained-gpu-gas-cell-rows-ready-cpu-snapshot-not-read',
+  retainedGasPressureCellImport = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceForceRowsWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
+  const retainedGasPressureRowsReady = Boolean(
+    retainedGasPressureCellsBuffer
+      && Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))) > 0
+      && Math.max(1, Math.trunc(finiteNumber(
+        retainedGasPressureCellRowStrideFloats,
+        SPH_GAS_PRESSURE_CELL_FLOATS
+      ))) === SPH_GAS_PRESSURE_CELL_FLOATS
+  );
   const pressurePa = finiteNumber(
     pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa,
-    Number.NaN
+    retainedGasPressureRowsReady ? 0 : Number.NaN
   );
-  const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
+  const pressureFieldResolution = retainedGasPressureRowsReady
+    ? {
+        pressureFieldMode: retainedPressureFieldMode || LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
+        pressureFieldResolution: retainedPressureFieldResolution || LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
+        pressureGradientStatus: 'retained-gpu-gas-cell-pressure-rows-consumed',
+        localPressureGradientSchema: ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
+        localPressureGradientReady: true,
+        localPressureGradientStatus: retainedLocalPressureGradientStatus,
+        localPressureGradientBlockers: [],
+        localPressureGradientForceCouplingStatus: 'retained-gpu-gas-cell-rows-ready-for-force-coupling',
+        localPressureGradientValidation: false
+      }
+    : gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
   const packedContactKinematics = packMaterialInterfaceContactKinematicsRows(materialInterfaceField);
-  const packedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
+  const cpuPackedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
+  const packedGasPressureCells = retainedGasPressureRowsReady
+    ? {
+        rows: new Float32Array(0),
+        rowCount: Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0))),
+        rowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+        rowByteLength: Math.max(
+          0,
+          Math.trunc(finiteNumber(
+            retainedGasPressureCellRowByteLength,
+            Math.max(0, Math.trunc(finiteNumber(retainedGasPressureCellRowCount, 0)))
+              * SPH_GAS_PRESSURE_CELL_FLOATS
+              * Float32Array.BYTES_PER_ELEMENT
+          ))
+        )
+      }
+    : cpuPackedGasPressureCells;
   const contactPolicy = normalizeAlgorithmContactPairResponsePolicy({
     algorithmMaterialContactRows,
     algorithmContactPairResponseScale,
@@ -1876,7 +1920,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const outputByteLength = packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const inputBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
-  const gasPressureCellsBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
+  const gasPressureCellsBuffer = retainedGasPressureRowsReady
+    ? retainedGasPressureCellsBuffer
+    : writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
   const contactPolicyBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-contact-policy-rows', packedContactPolicy.rows);
   let contactKinematicsBuffer = null;
   let contactKinematicsGpuDerivation = null;
@@ -2038,7 +2084,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
-      gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
+      gasPressureCellRowsBufferRetained:
+        (retainForceRowsBuffer === true || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0,
+      gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
+      retainedGasPressureCellImportSchema: retainedGasPressureCellImport?.schema || null,
+      retainedGasPressureCellImportStatus: retainedGasPressureCellImport?.status || null,
       pressureModelId,
       algorithmContactPairResponseSchema: summary.algorithmContactPairResponseSchema,
       algorithmContactPairResponseStatus: summary.algorithmContactPairResponseStatus,
@@ -2169,7 +2219,11 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
-      gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
+      gasPressureCellRowsBufferRetained:
+        (retainForceRowsBuffer === true || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0,
+      gasPressureCellRowsBufferBorrowed: retainedGasPressureRowsReady,
+      retainedGasPressureCellImportSchema: retainedGasPressureCellImport?.schema || null,
+      retainedGasPressureCellImportStatus: retainedGasPressureCellImport?.status || null,
       algorithmContactPolicyRowCount: packedContactPolicy.rowCount,
       algorithmContactPolicyRowByteLength: packedContactPolicy.rowByteLength,
       interfaceContactKinematicsRowCount: packedContactKinematics.rowCount,
@@ -2215,17 +2269,21 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       result.destroyForceRowsBuffer = () => forceRowsBuffer.destroy?.();
       returnedRetainedForceRowsBuffer = true;
     }
-    if (retainForceRowsBuffer && packedGasPressureCells.rowCount > 0) {
+    if ((retainForceRowsBuffer || retainedGasPressureRowsReady) && packedGasPressureCells.rowCount > 0) {
       result.gasPressureCellsBuffer = gasPressureCellsBuffer;
       result.gasPressureCellRowsBufferByteLength = packedGasPressureCells.rowByteLength;
-      result.destroyGasPressureCellsBuffer = () => gasPressureCellsBuffer.destroy?.();
+      result.destroyGasPressureCellsBuffer = retainedGasPressureRowsReady
+        ? null
+        : () => gasPressureCellsBuffer.destroy?.();
       returnedRetainedGasPressureCellsBuffer = true;
     }
     return result;
   } finally {
     const cleanup = () => {
       inputBuffer.destroy?.();
-      if (!returnedRetainedGasPressureCellsBuffer) gasPressureCellsBuffer.destroy?.();
+      if (!retainedGasPressureRowsReady && !returnedRetainedGasPressureCellsBuffer) {
+        gasPressureCellsBuffer.destroy?.();
+      }
       contactPolicyBuffer.destroy?.();
       contactKinematicsBuffer.destroy?.();
       for (const buffer of contactKinematicsCleanupBuffers) buffer?.destroy?.();

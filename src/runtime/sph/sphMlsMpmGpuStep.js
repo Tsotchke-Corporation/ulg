@@ -336,32 +336,109 @@ function isPressureInterfaceGasCellFieldAdmissionApproved(admission = null) {
 
 function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
   const source = importValue && typeof importValue === 'object' ? importValue : null;
+  const retainedGasCellFieldSource = source?.retainedGasCellFieldSource
+    || source?.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
+    || source?.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+    || null;
   const gasCellField = source?.gasCellFieldSnapshot
     || source?.gasCellField
     || source?.pressureFeedback?.gasCellField
     || null;
+  const sourceIsSchroederGasCellImport = source?.schema === ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA
+    || source?.schema === ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA;
+  const gasPressureCellsBuffer = source?.gasPressureCellsBuffer
+    || source?.pressureInterfaceGasPressureCellsBuffer
+    || source?.retainedGasPressureCellsBuffer
+    || null;
+  const pressureInterfaceGasPressureCellRowCount = Math.max(0, Math.trunc(finiteNumber(
+    source?.pressureInterfaceGasPressureCellRowCount
+      ?? source?.gasPressureCellRowCount
+      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
+    0
+  )));
+  const pressureInterfaceGasPressureCellRowStrideFloats = Math.max(0, Math.trunc(finiteNumber(
+    source?.pressureInterfaceGasPressureCellRowStrideFloats
+      ?? source?.gasPressureCellRowStrideFloats
+      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
+    SPH_GAS_PRESSURE_CELL_FLOATS
+  )));
+  const pressureInterfaceGasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteNumber(
+    source?.pressureInterfaceGasPressureCellRowByteLength
+      ?? source?.gasPressureCellRowByteLength
+      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowCount
+      * Math.max(pressureInterfaceGasPressureCellRowStrideFloats, SPH_GAS_PRESSURE_CELL_FLOATS)
+      * Float32Array.BYTES_PER_ELEMENT
+  )));
+  const retainedGasPressureBufferRefs = uniqueNonEmptyStrings([
+    ...(source?.retainedGasPressureBufferRefs || []),
+    ...(retainedGasCellFieldSource?.retainedGasPressureBufferRefs || []),
+    ...(source?.pressureInterfaceGasCellFieldAdmission?.retainedGasPressureBufferRefs || []),
+    ...(source?.admission?.retainedGasPressureBufferRefs || [])
+  ]);
+  const workerRetainedGasPressureBufferRefs = uniqueNonEmptyStrings([
+    ...(source?.workerRetainedGasPressureBufferRefs || []),
+    ...(retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs || []),
+    ...(source?.pressureInterfaceGasCellFieldAdmission?.workerRetainedGasPressureBufferRefs || []),
+    ...(source?.admission?.workerRetainedGasPressureBufferRefs || [])
+  ]);
+  const retainedRowsReady = Boolean(
+    gasPressureCellsBuffer
+      && pressureInterfaceGasPressureCellRowCount > 0
+      && pressureInterfaceGasPressureCellRowStrideFloats === SPH_GAS_PRESSURE_CELL_FLOATS
+      && (
+        source?.pressureInterfaceImportReady === true
+        || source?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+        || source?.gasPressureCellRowsBufferRetained === true
+        || retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowsBufferRetained === true
+      )
+  );
+  const derivedSchroederAdmission = sourceIsSchroederGasCellImport && retainedRowsReady
+    ? {
+        schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+        status: 'pressure-interface-gas-cell-field-consumption-approved',
+        gasCellFieldConsumptionApproved: true,
+        sourceSchema: source.schema,
+        sourceHotBufferKey:
+          source.sourceHotBufferKey
+          || source.hotBufferKey
+          || retainedGasCellFieldSource?.sourceHotBufferKey
+          || null,
+        sourceStage: source.sourceStage || retainedGasCellFieldSource?.sourceStage || 'schroederFarAggregateGasCellImport',
+        retainedGasPressureBufferRefs,
+        workerRetainedGasPressureBufferRefs,
+        retainedGasCellFieldSource,
+        pressureInterfaceGasPressureCellRowCount,
+        pressureInterfaceGasPressureCellRowStrideFloats,
+        pressureInterfaceGasPressureCellRowByteLength,
+        stateManagerAdmitted: true,
+        authoritativeStateMutation: false
+      }
+    : null;
   const admission = source?.pressureInterfaceGasCellFieldAdmission
     || source?.gasCellFieldAdmission
     || source?.admission
+    || derivedSchroederAdmission
     || null;
-  const retainedGasPressureBufferRefs = uniqueNonEmptyStrings(
-    source?.retainedGasPressureBufferRefs
-      || source?.workerRetainedGasPressureBufferRefs
-      || admission?.retainedGasPressureBufferRefs
-      || admission?.workerRetainedGasPressureBufferRefs
-      || []
-  );
-  const schemaAccepted = source?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA;
-  const statusAccepted = source?.status === 'pressure-interface-gas-cell-field-import-ready';
+  const schemaAccepted = source?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA
+    || sourceIsSchroederGasCellImport;
+  const statusAccepted = source?.status === 'pressure-interface-gas-cell-field-import-ready'
+    || (
+      sourceIsSchroederGasCellImport
+      && source?.status === 'schroeder-far-aggregate-gas-cell-import-submitted'
+      && source?.pressureInterfaceImportReady === true
+    );
   const localPressureGradientReady = gasCellField?.localPressureGradientReady === true
     && Array.isArray(gasCellField?.cells)
     && gasCellField.cells.length > 0;
+  const retainedLocalPressureGradientReady = retainedRowsReady;
   const admissionApproved = isPressureInterfaceGasCellFieldAdmissionApproved(admission);
-  const retainedRefsReady = retainedGasPressureBufferRefs.length > 0;
+  const retainedRefsReady = retainedGasPressureBufferRefs.length > 0
+    || workerRetainedGasPressureBufferRefs.length > 0;
   const importReady = Boolean(
     schemaAccepted
       && statusAccepted
-      && localPressureGradientReady
+      && (localPressureGradientReady || retainedLocalPressureGradientReady)
       && admissionApproved
       && retainedRefsReady
   );
@@ -371,7 +448,7 @@ function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
         ? 'pressure-interface-gas-cell-field-import-schema-invalid'
         : (!statusAccepted
             ? 'pressure-interface-gas-cell-field-import-not-ready'
-            : (!localPressureGradientReady
+            : (!(localPressureGradientReady || retainedLocalPressureGradientReady)
                 ? 'pressure-interface-gas-cell-field-import-local-gradient-required'
                 : (!admissionApproved
                     ? 'pressure-interface-gas-cell-field-import-admission-required'
@@ -386,12 +463,31 @@ function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
     importReady,
     gasCellField: importReady ? gasCellField : null,
     gasCellFieldPresent: Boolean(gasCellField),
-    localPressureGradientReady,
+    localPressureGradientReady: localPressureGradientReady || retainedLocalPressureGradientReady,
+    retainedLocalPressureGradientReady,
     pressureInterfaceGasCellFieldAdmission: admission,
     pressureInterfaceGasCellFieldAdmissionApproved: admissionApproved,
     sourceHotBufferKey: source?.sourceHotBufferKey || source?.hotBufferKey || admission?.sourceHotBufferKey || null,
     retainedGasPressureBufferRefs,
-    workerRetainedGasPressureBufferRefs: uniqueNonEmptyStrings(source?.workerRetainedGasPressureBufferRefs || [])
+    workerRetainedGasPressureBufferRefs,
+    gasPressureCellsBuffer,
+    retainedGasPressureCellsBuffer: gasPressureCellsBuffer,
+    pressureInterfaceGasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: retainedRowsReady,
+    retainedGasCellFieldSource,
+    pressureFieldMode: gasCellField?.pressureFieldMode
+      || source?.pressureFieldMode
+      || retainedGasCellFieldSource?.pressureFieldMode
+      || null,
+    pressureFieldResolution: gasCellField?.pressureFieldResolution
+      || source?.pressureFieldResolution
+      || retainedGasCellFieldSource?.pressureFieldResolution
+      || null,
+    localPressureGradientStatus: gasCellField?.localPressureGradientStatus
+      || source?.localPressureGradientStatus
+      || null
   };
 }
 
@@ -593,7 +689,10 @@ function pressureInterfaceLocalGasCellFieldReadyFromOptions(options = {}) {
       || options.gasCellFieldImport
       || null
   );
-  if (pressureInterfaceGasCellFieldImport.localPressureGradientReady === true) return true;
+  if (pressureInterfaceGasCellFieldImport.importReady === true
+    && pressureInterfaceGasCellFieldImport.localPressureGradientReady === true) {
+    return true;
+  }
   const gasCellField = options.pressureFeedback?.gasCellField
     || options.gasPressureSummary?.gasCellField
     || options.pressureSummary?.gasCellField
@@ -8676,6 +8775,22 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     pressureInterfaceGasCellFieldImportStatus: pressureResult?.pressureInterfaceGasCellFieldImportStatus || null,
     pressureInterfaceGasCellFieldImportReady: pressureResult?.pressureInterfaceGasCellFieldImportReady === true,
     pressureInterfaceGasCellFieldImportSourceHotBufferKey: pressureResult?.pressureInterfaceGasCellFieldImportSourceHotBufferKey || null,
+    pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady:
+      pressureResult?.pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady === true,
+    pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer:
+      pressureResult?.pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer === true,
+    pressureInterfaceGasPressureCellRowCount: finiteNumber(
+      pressureResult?.pressureInterfaceGasPressureCellRowCount,
+      0
+    ),
+    pressureInterfaceGasPressureCellRowStrideFloats: finiteNumber(
+      pressureResult?.pressureInterfaceGasPressureCellRowStrideFloats,
+      0
+    ),
+    pressureInterfaceGasPressureCellRowByteLength: finiteNumber(
+      pressureResult?.pressureInterfaceGasPressureCellRowByteLength,
+      0
+    ),
     pressureInterfaceForceRowCount: finiteNumber(solver?.forceRowCount ?? pressureResult?.forceRowCount, 0),
     pressureInterfaceForceRowsPresent: forceRowsPresent,
     pressureInterfaceConservationStatus: solver?.conservationStatus || null,
@@ -8889,7 +9004,8 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     || stageOptions.gasPressureCellFieldAdmission
     || pressureInterfaceGasCellFieldImport.pressureInterfaceGasCellFieldAdmission
     || null;
-  const localPressureGradientReady = pressureFeedback?.gasCellField?.localPressureGradientReady === true;
+  const localPressureGradientReady = pressureFeedback?.gasCellField?.localPressureGradientReady === true
+    || pressureInterfaceGasCellFieldImport.retainedLocalPressureGradientReady === true;
   const pressureInterfaceGasCellFieldAdmissionApproved = !localPressureGradientReady
     || isPressureInterfaceGasCellFieldAdmissionApproved(pressureInterfaceGasCellFieldAdmission);
   const pressureInterfaceGasCellFieldAdmissionStatus = localPressureGradientReady
@@ -8934,6 +9050,18 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           boxDimsM: stageOptions.boxDimsM || null,
           schroederLawQueue: stageOptions.schroederLawQueue || null,
           schroederLawNeighborCandidates: stageOptions.schroederLawNeighborCandidates || null,
+          retainedGasPressureCellsBuffer: pressureInterfaceGasCellFieldImport.retainedGasPressureCellsBuffer,
+          retainedGasPressureCellRowCount:
+            pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowCount,
+          retainedGasPressureCellRowStrideFloats:
+            pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowStrideFloats,
+          retainedGasPressureCellRowByteLength:
+            pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowByteLength,
+          retainedPressureFieldMode: pressureInterfaceGasCellFieldImport.pressureFieldMode,
+          retainedPressureFieldResolution: pressureInterfaceGasCellFieldImport.pressureFieldResolution,
+          retainedLocalPressureGradientStatus:
+            pressureInterfaceGasCellFieldImport.localPressureGradientStatus,
+          retainedGasPressureCellImport: pressureInterfaceGasCellFieldImport,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           contactKinematicsParticleBinMetadataReadback:
             stageOptions.contactKinematicsParticleBinMetadataReadback === true,
@@ -8997,6 +9125,18 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     pressureInterfaceGasCellFieldImportReady: pressureInterfaceGasCellFieldImport.importReady === true,
     pressureInterfaceGasCellFieldImportSourceHotBufferKey: pressureInterfaceGasCellFieldImport.sourceHotBufferKey || null,
     pressureInterfaceGasCellFieldImportRetainedGasPressureBufferRefs: [...pressureInterfaceGasCellFieldImport.retainedGasPressureBufferRefs],
+    pressureInterfaceGasCellFieldImportWorkerRetainedGasPressureBufferRefs:
+      [...pressureInterfaceGasCellFieldImport.workerRetainedGasPressureBufferRefs],
+    pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady:
+      pressureInterfaceGasCellFieldImport.retainedLocalPressureGradientReady === true,
+    pressureInterfaceGasCellFieldImportRetainedGasPressureCellsBuffer:
+      Boolean(pressureInterfaceGasCellFieldImport.retainedGasPressureCellsBuffer),
+    pressureInterfaceGasPressureCellRowCount:
+      pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats:
+      pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength:
+      pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowByteLength,
     forceRowCount: finiteNumber(pressureInterfaceForceSolver?.forceRowCount, 0),
     forceRowStrideFloats: finiteNumber(pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     forceRowByteLength: pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
@@ -9063,6 +9203,8 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
       pressureInterfaceGasCellFieldAdmissionRequired: localPressureGradientReady,
       pressureInterfaceGasCellFieldAdmissionApproved,
       pressureInterfaceGasCellFieldImportReady: pressureInterfaceGasCellFieldImport.importReady === true,
+      pressureInterfaceGasCellFieldImportRetainedLocalPressureGradientReady:
+        pressureInterfaceGasCellFieldImport.retainedLocalPressureGradientReady === true,
       commitDeltaSuppressed: true,
       authoritativeStateMutation: false,
       gridForceApplicationApproved: false,

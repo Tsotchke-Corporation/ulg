@@ -105,11 +105,16 @@ Landed checkpoints:
 30. `199f9e6` forwards the retained same-level active-node list into the
     resident mechanics backend so SS orchestration actually drives the fused
     P2G/G2P active-node consumer.
+31. `6e7f5dc` adds a retained GPU bucket index over active-node tile anchors
+    and exposes it as an opt-in same-level orchestration artifact without making
+    it authoritative for neighbor pruning yet.
 
 Next implementation queue:
 
-1. Replace the unsorted active-node broad phase with a sorted/radix SS tree
-   index when candidate counts become the next bottleneck.
-2. Extend active-node mechanics filtering to the fused multi-step sequence when
+1. Consume the retained active-node bucket index in law-neighbor traversal so
+   reaction/contact/interface broad phase stops scanning every active-node row.
+2. Replace the bucket index with sorted/radix SS tree indexing if bucket
+   overflow/candidate counters show it is the next bottleneck.
+3. Extend active-node mechanics filtering to the fused multi-step sequence when
    SS schedules multi-level batches through that path.
-3. Add render LOD and PeerCompute portable SS summaries.
+4. Add render LOD and PeerCompute portable SS summaries.

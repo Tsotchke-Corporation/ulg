@@ -34630,3 +34630,38 @@ Next:
 
 - Replace the unsorted active-node broad phase with a sorted/radix SS tree index
   once retained candidate counts or throughput pressure justify it.
+
+## 2026-07-01 AKDT - SS Active-Node Bucket Index
+
+Status:
+
+- Added `peercompute.ulg.schroeder-active-node-index.v0` and execution schema
+  constants plus a retained WebGPU active-node bucket index producer.
+- The new WGSL pass clears bucket counts/slots, per-node slot lookup, and
+  overflow counters, then hashes ready active-node tile anchors into bounded
+  bucket slots without full particle readback.
+- Same-level SS orchestration can now opt into building the retained active-node
+  index before resident mechanics, while marking it explicitly as available but
+  not yet authoritative for law-neighbor pruning.
+- The index is intentionally a first retained GPU accelerator step, not the full
+  sorted/radix Schroeder tree. Law-neighbor traversal still uses the exact
+  active-node row scan until the next consumer slice.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `45/45` passing.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs` with `3/3` passing.
+- PASS: `node --test tests/abi.test.mjs` with `17/17` passing.
+- PASS: `npm test` with `836` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Consume the retained active-node bucket index in law-neighbor traversal,
+  preserving exact near-field validation and failing closed on bucket overflow.
+- Promote to sorted/radix SS tree indexing only if bucket counters or throughput
+  pressure show the bucket index is not enough.

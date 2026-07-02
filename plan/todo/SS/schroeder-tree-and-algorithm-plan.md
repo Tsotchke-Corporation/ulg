@@ -267,7 +267,9 @@ Suggested schemas:
   leaving sorted/radix tree indexing as future work. Direct retained candidate
   consumption in reaction proposal and pressure/interface contact-kinematics
   kernels landed in `a6315c1`. Retained per-particle source-span rows for
-  candidate lookup landed in `c22ed0a`.
+  candidate lookup landed in `c22ed0a`. A retained bucketed active-node tile
+  anchor index landed in `6e7f5dc` as an opt-in GPU-resident orchestration
+  artifact, but law-neighbor traversal does not consume it yet.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
@@ -276,9 +278,10 @@ Suggested schemas:
   traversal-backed candidate artifacts as authoritative input. The candidate
   producer emits retained source-span rows so reaction avoids whole-buffer
   candidate scans when spans are present. The producer still walks active-node
-  tile overlaps with an unsorted broad phase, and pressure/interface
-  contact-kinematics still needs a spatial/interface index rather than only a
-  source-particle span.
+  tile overlaps with an unsorted broad phase. The next narrow step is consuming
+  the retained bucketed active-node index in that traversal before escalating to
+  a full sorted/radix SS tree. Pressure/interface contact-kinematics still needs
+  a spatial/interface index rather than only a source-particle span.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -296,8 +299,11 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - replace the unsorted active-node broad phase with sorted/radix SS tree
-     indexing when candidate counts make it necessary;
+   - consume the retained bucketed active-node index in law-neighbor traversal
+     so reaction/contact/interface broad phase can query likely overlapping
+     active-node buckets instead of scanning every row;
+   - replace the bucket index with sorted/radix SS tree indexing when
+     overflow/candidate counters make it necessary;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -352,11 +358,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS sorted active-node/tree indexing**:
+The next code slice on `SS` is **SS indexed law-neighbor traversal**:
 
-1. Add sorted/radix active-node indexing once direct consumers expose candidate
-   count or throughput pressure.
-2. Use the sorted index to replace row-order assumptions in law-neighbor
-   candidate generation and future multilevel mechanics batches.
-3. Keep all new outputs GPU-resident, no-full-readback, and
+1. Consume the retained bucketed active-node tile-anchor index in
+   law-neighbor candidate generation.
+2. Keep exact near-field validation and fail closed on bucket overflow or
+   unsupported overlap cases.
+3. Promote to sorted/radix active-node indexing only after bucket counters show
+   it is needed for throughput or correctness.
+4. Keep all new outputs GPU-resident, no-full-readback, and
    StateManager-admission-aware.

@@ -35207,3 +35207,38 @@ Next:
   performance harness.
 - Keep diagnostic CPU proxy geometry capped, explicit, and outside the
   PeerCompute hot path.
+
+## 2026-07-01 AKDT - Native Same-Device Surface Consumer Validation
+
+Status:
+
+- Live-validated the native WebGPU same-device surface consumer path in
+  Chromium against the VPN HTTPS Vite server.
+- Fixed the render assembly path so explicit
+  `native-webgpu-surface-consumer` refreshes bypass the
+  presentation-worker retained-output preservation shortcut and proceed to the
+  resident surface buffer handoff.
+- Hardened the Playwright and long-horizon probe overlay launch helpers so a
+  pre-created overlay canvas no longer intercepts the SPH launch click and
+  stalls native-surface validation.
+- Extended the native browser harness result payload with SS proxy resolver,
+  executor, camera, and submit telemetry fields for the upcoming SS-enabled
+  scene path.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` with `89/89` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs tests/peercomputeRenderOwnershipPolicy.test.mjs`
+  with `82/82` passing.
+- PASS: `NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase native same-device surface consumer"`.
+- PASS: `git diff --check`.
+
+Next:
+
+- Add an opt-in scene execution path that runs
+  `runSchroederSameLevelMechanicsWebGpu` instead of the plain resident
+  MLS-MPM runner, then forwards its portable/local retained render summaries
+  into the existing resident render-source/native proxy path.

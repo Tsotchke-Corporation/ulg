@@ -316,7 +316,9 @@ Suggested schemas:
   retained-proxy WebGPU executor landed in `bdc48a5`; deterministic retained
   descriptor keys and the same-device-only local render-buffer resolver landed
   in `50337ae`; live native-surface render-pass submission with camera uniforms
-  and bridge diagnostics landed in `6fc8f85`.
+  and bridge diagnostics landed in `6fc8f85`; browser validation and
+  presentation-worker preemption bypass for explicit native same-device
+  consumer refreshes landed in `efe73dc`.
 - Generate render/optical LOD from SS leaves and coherent nodes.
 - Keep PBR/optics derived from material closures.
 - Export compact SS summaries/snapshots for PeerCompute replay.
@@ -324,8 +326,12 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Render and distribution:
-   - live-validate the native WebGPU retained-proxy executor in the browser and
-     performance harness, including resolver/executor/camera/submit telemetry;
+   - add an opt-in live scene path that invokes
+     `runSchroederSameLevelMechanicsWebGpu` and publishes its portable/local
+     retained render summaries into the existing resident render-source path;
+   - validate native WebGPU retained-proxy executor telemetry from that
+     SS-enabled browser path, including resolver/executor/camera/submit draw
+     counts;
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep diagnostic CPU proxy geometry explicit, capped, and outside the
      PeerCompute hot path;

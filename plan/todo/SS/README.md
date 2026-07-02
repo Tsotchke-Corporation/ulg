@@ -172,12 +172,21 @@ Landed checkpoints:
     submits active-leaf/coherent-aggregate proxy splats inside the main native
     pass with diagnostics for resolver, executor, camera update, and submit
     counts.
+48. `efe73dc` live-validates the native same-device surface route in Chromium,
+    fixes presentation-worker retained-output preemption for explicit
+    `native-webgpu-surface-consumer` refreshes, and hardens the browser/probe
+    harness against overlay launch races while keeping final same-device
+    readiness strict.
 
 Next implementation queue:
 
-1. Run/live-validate the native SS proxy pass through the browser/performance
-   harness and expose any missing proxy draw telemetry needed for debugging.
-2. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
+1. Add an opt-in live scene path that runs
+   `runSchroederSameLevelMechanicsWebGpu` instead of the plain resident
+   MLS-MPM runner, then publishes its portable/local retained render summaries
+   into the existing render-source path.
+2. Validate native SS proxy telemetry from that SS-enabled live path, including
+   resolver/executor/camera/submit draw counts in the browser harness.
+3. Keep diagnostic CPU proxy geometry capped and visibly marked as diagnostic,
    not a replacement hot path.
-3. Keep the bucket index as the small-scene/default first GPU index and use
+4. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

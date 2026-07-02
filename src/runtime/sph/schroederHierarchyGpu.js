@@ -6,6 +6,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
@@ -32,6 +33,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
@@ -69,6 +72,7 @@ import {
   schroederCrossLevelStateDeltaMergeWgsl,
   schroederCrossLevelStateDeltaWgsl,
   schroederCrossLevelTransferWgsl,
+  schroederFarAggregateCandidateWgsl,
   schroederLevelAssignmentWgsl,
   schroederLawNeighborCandidateWgsl,
   schroederLawQueueWgsl,
@@ -101,6 +105,8 @@ export {
   ULG_SCHROEDER_CROSS_LEVEL_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_EXECUTION_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA,
@@ -134,6 +140,7 @@ export const SCHROEDER_CROSS_LEVEL_COUPLING_FLOATS = SCHROEDER_CROSS_LEVEL_COUPL
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS = SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
@@ -151,6 +158,7 @@ export const SCHROEDER_CROSS_LEVEL_COUPLING_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
+export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_LAW_NEIGHBOR_CANDIDATE_WORKGROUP_SIZE = 64;
@@ -177,6 +185,7 @@ export const SCHROEDER_FULL_CONSERVATION_SUMMARY_READBACK_MODE = 'full-conservat
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_MERGE_READBACK_MODE = 'full-cross-level-state-delta-merge-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-level-state-delta-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
+export const SCHROEDER_FULL_FAR_AGGREGATE_CANDIDATE_READBACK_MODE = 'full-schroeder-far-aggregate-candidate-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
 export const SCHROEDER_FULL_LAW_NEIGHBOR_CANDIDATE_READBACK_MODE = 'full-schroeder-law-neighbor-candidate-readback';
@@ -209,6 +218,19 @@ export const SCHROEDER_LOCAL_LAW_QUEUE_MASK =
   | SCHROEDER_LOCAL_LAW_CONTACT_MASK
   | SCHROEDER_LOCAL_LAW_INTERFACE_MASK;
 export const DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET = 64;
+export const SCHROEDER_FAR_LAW_GRAVITY_MASK = 8;
+export const SCHROEDER_FAR_LAW_RADIATION_MASK = 16;
+export const SCHROEDER_FAR_LAW_PLASMA_MASK = 32;
+export const SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK = 64;
+export const SCHROEDER_FAR_AGGREGATE_LAW_MASK =
+  SCHROEDER_FAR_LAW_GRAVITY_MASK
+  | SCHROEDER_FAR_LAW_RADIATION_MASK
+  | SCHROEDER_FAR_LAW_PLASMA_MASK
+  | SCHROEDER_FAR_LAW_GAS_SUMMARY_MASK;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET = 32;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA = 0.5;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE = 2;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND = 0.01;
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -688,6 +710,67 @@ export function createSchroederLawNeighborCandidateParamsArray({
   view.setUint32(68, Math.max(0, Math.round(finiteNumber(activeNodeSortedIndexBucketRangeOffsetCount, 0))), true);
   view.setUint32(72, 0, true);
   view.setUint32(76, 0, true);
+  return buffer;
+}
+
+export function createSchroederFarAggregateCandidateParamsArray({
+  activeNodeCount = 0,
+  aggregateNodeCount = 0,
+  activeNodeStrideFloats = SCHROEDER_ACTIVE_NODE_FLOATS,
+  aggregateNodeStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+  farAggregateCandidateStrideFloats = SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS,
+  candidateBudget = DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET,
+  enabledFarLawMask = SCHROEDER_FAR_AGGREGATE_LAW_MASK,
+  flags = 0,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  openingTheta = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  nearFieldSupportScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE,
+  farFieldErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(activeNodeCount, 0))), true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(aggregateNodeCount, 0))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    activeNodeStrideFloats,
+    SCHROEDER_ACTIVE_NODE_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(1, Math.round(finiteNumber(
+    aggregateNodeStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+  ))), true);
+  view.setUint32(16, Math.max(1, Math.round(finiteNumber(
+    farAggregateCandidateStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS
+  ))), true);
+  view.setUint32(20, Math.max(1, Math.round(finiteNumber(
+    candidateBudget,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET
+  ))), true);
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(
+    enabledFarLawMask,
+    SCHROEDER_FAR_AGGREGATE_LAW_MASK
+  ))), true);
+  view.setUint32(28, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(32, finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M), true);
+  view.setFloat32(36, Math.max(0, finiteNumber(
+    openingTheta,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+  )), true);
+  view.setFloat32(40, Math.max(0, finiteNumber(
+    nearFieldSupportScale,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE
+  )), true);
+  view.setFloat32(44, Math.max(0, finiteNumber(
+    farFieldErrorBound,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+  )), true);
+  view.setFloat32(48, finiteNumber(queueEpoch, 0), true);
+  view.setFloat32(52, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(56, 0, true);
+  view.setFloat32(60, 0, true);
   return buffer;
 }
 
@@ -1739,6 +1822,52 @@ function assertHierarchyAggregateNodeInput(hierarchyAggregateNode) {
   }
 }
 
+function assertFarAggregateHierarchyNodeInput(hierarchyAggregateNode) {
+  if (
+    hierarchyAggregateNode?.schema !== ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA
+    && hierarchyAggregateNode?.schema !== ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_SCHEMA
+  ) {
+    throw new TypeError('Schroeder far-aggregate candidates require a Schroeder hierarchy aggregate-node input');
+  }
+  const aggregateNodeCount = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregateNode.aggregateNodeCount ?? hierarchyAggregateNode.aggregateRowCount,
+    0
+  )));
+  if (aggregateNodeCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate candidates require at least one aggregate-node row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregateNode.aggregateNodeStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+  )));
+  if (stride !== SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS) {
+    throw new RangeError('Schroeder far-aggregate candidates require the current aggregate-node row layout');
+  }
+}
+
+function assertFarAggregateCandidateInput(farAggregateCandidates) {
+  if (
+    farAggregateCandidates?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA
+    && farAggregateCandidates?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA
+  ) {
+    throw new TypeError('Schroeder portable summary requires a Schroeder far-aggregate candidate input');
+  }
+  const candidateCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateCandidates.farAggregateCandidateCount ?? farAggregateCandidates.candidateCount,
+    0
+  )));
+  if (candidateCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate candidate input requires at least one candidate row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    farAggregateCandidates.farAggregateCandidateStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS
+  )));
+  if (stride !== SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS) {
+    throw new RangeError('Schroeder far-aggregate candidate input requires the current row layout');
+  }
+}
+
 function assertPhaseVolumeMigrationInput(phaseVolumeMigration) {
   if (
     phaseVolumeMigration?.schema !== ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA
@@ -2428,6 +2557,97 @@ export function createSchroederHierarchyAggregateNodePlan({
   };
 }
 
+export function createSchroederFarAggregateCandidatePlan({
+  activeNodeList,
+  hierarchyAggregateNode,
+  candidateBudget = DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET,
+  enabledFarLawMask = SCHROEDER_FAR_AGGREGATE_LAW_MASK,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  openingTheta = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  nearFieldSupportScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE,
+  farFieldErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  assertLawNeighborActiveNodeInput(activeNodeList);
+  assertFarAggregateHierarchyNodeInput(hierarchyAggregateNode);
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    0
+  )));
+  const aggregateNodeCount = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregateNode.aggregateNodeCount ?? hierarchyAggregateNode.aggregateRowCount,
+    0
+  )));
+  const resolvedCandidateBudget = Math.max(1, Math.round(finiteNumber(
+    candidateBudget,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET
+  )));
+  const farAggregateCandidateCount = activeNodeCount * resolvedCandidateBudget;
+  const farAggregateCandidateByteLength = Math.max(
+    4,
+    farAggregateCandidateCount * SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const resolvedFarLawMask = Math.max(0, Math.round(finiteNumber(
+    enabledFarLawMask,
+    SCHROEDER_FAR_AGGREGATE_LAW_MASK
+  )));
+  return {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
+    status: 'schroeder-far-aggregate-candidate-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-far-aggregate-candidates',
+    sourceActiveNodeSchema: activeNodeList.schema,
+    sourceActiveNodeStatus: activeNodeList.status ?? null,
+    sourceHierarchyAggregateNodeSchema: hierarchyAggregateNode.schema,
+    sourceHierarchyAggregateNodeStatus: hierarchyAggregateNode.status ?? null,
+    activeNodeCount,
+    aggregateNodeCount,
+    candidateBudget: resolvedCandidateBudget,
+    farAggregateCandidateCount,
+    enabledFarLawMask: resolvedFarLawMask,
+    farAggregateLawFamilies: ['gravity', 'radiation', 'plasma', 'gas-far-field-summary'],
+    activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+    aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+    farAggregateCandidateRowLayout: [...SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT],
+    farAggregateCandidateStrideFloats: SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS,
+    farAggregateCandidateStrideBytes: SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    farAggregateCandidateByteLength,
+    baseGridSpacingM: finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M),
+    openingTheta: Math.max(0, finiteNumber(
+      openingTheta,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+    )),
+    nearFieldSupportScale: Math.max(0, finiteNumber(
+      nearFieldSupportScale,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE
+    )),
+    farFieldErrorBound: Math.max(0, finiteNumber(
+      farFieldErrorBound,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+    )),
+    queueEpoch: finiteNumber(queueEpoch, 0),
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    traversalMode: 'barnes-hut-style-aggregate-opening-over-schroeder-nodes',
+    outputCompaction: 'fixed-budget-far-aggregate-candidate-rows-per-active-node',
+    aggregateAdmissibilityStatus: resolvedFarLawMask > 0
+      ? 'aggregate-admissible-laws-only-local-incompressibility-and-reactions-excluded'
+      : 'far-aggregate-law-mask-disabled',
+    exactNearFieldRequirement: 'near-field-excluded-use-law-neighbor-candidates-for-exact-pairs',
+    conservationStatus: 'read-only-aggregate-traversal-no-state-mutation',
+    stateMutationStatus: 'far-aggregate-candidates-buffer-submitted-no-state-mutation',
+    stateAuthorityStatus: 'state-manager-admitted-aggregate-node-source-required',
+    outputFamilies: [
+      'schroeder-far-aggregate-candidates',
+      'schroeder-hierarchy-aggregate-nodes'
+    ],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
 export function createSchroederPhaseVolumeMigrationPlan({
   levelAssignment,
   hierarchyAggregateNode,
@@ -2784,6 +3004,7 @@ export function createSchroederPortableSummaryPlan({
   activeNodeSortedIndex = null,
   lawQueue = null,
   lawNeighborCandidates = null,
+  farAggregateCandidates = null,
   hierarchyAggregateNode = null,
   conservationSummary = null,
   phaseVolumeDiagnosticSummary = null,
@@ -2801,6 +3022,7 @@ export function createSchroederPortableSummaryPlan({
   if (activeNodeIndex) assertLawNeighborActiveNodeIndexInput(activeNodeIndex);
   if (activeNodeSortedIndex) assertLawNeighborActiveNodeSortedIndexInput(activeNodeSortedIndex);
   if (lawQueue) assertLawQueueInput(lawQueue);
+  if (farAggregateCandidates) assertFarAggregateCandidateInput(farAggregateCandidates);
   if (hierarchyAggregateNode) assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
 
   const activeNodeCount = Math.max(0, Math.round(finiteNumber(
@@ -2814,6 +3036,10 @@ export function createSchroederPortableSummaryPlan({
   const lawQueueCount = Math.max(0, Math.round(finiteNumber(lawQueue?.activeNodeCount, 0)));
   const lawNeighborCandidateCount = Math.max(0, Math.round(finiteNumber(
     lawNeighborCandidates?.neighborCandidateCount,
+    0
+  )));
+  const farAggregateCandidateCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateCandidates?.farAggregateCandidateCount ?? farAggregateCandidates?.candidateCount,
     0
   )));
   const phaseDiagnosticRowsAvailable = phaseVolumeDiagnosticSummary?.summaryRows instanceof Float32Array
@@ -2874,6 +3100,16 @@ export function createSchroederPortableSummaryPlan({
         ?? lawNeighborCandidates.neighborCandidateByteLength,
       retained: Boolean(lawNeighborCandidates.neighborCandidateBuffer)
     }) : null,
+    farAggregateCandidates ? schroederPortableRetainedRef({
+      family: 'schroeder-far-aggregate-candidate',
+      role: 'aggregate-admissible-far-field-law-candidates',
+      artifact: farAggregateCandidates,
+      rowCount: farAggregateCandidateCount,
+      strideFloats: SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS,
+      byteLength: farAggregateCandidates.farAggregateCandidateBufferByteLength
+        ?? farAggregateCandidates.farAggregateCandidateByteLength,
+      retained: Boolean(farAggregateCandidates.farAggregateCandidateBuffer)
+    }) : null,
     hierarchyAggregateNode ? schroederPortableRetainedRef({
       family: 'schroeder-hierarchy-aggregate-node',
       role: 'coherent-aggregate-render-proxy-source',
@@ -2918,6 +3154,7 @@ export function createSchroederPortableSummaryPlan({
     activeLeafProxyCount: activeNodeCount,
     aggregateProxyCount: aggregateNodeCount,
     lawQueueProxyCount: lawQueueCount,
+    farAggregateCandidateProxyCount: farAggregateCandidateCount,
     phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
     opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
     geometryPolicy: aggregateNodeCount > 0
@@ -2941,6 +3178,7 @@ export function createSchroederPortableSummaryPlan({
     aggregateNodeCount,
     lawQueueCount,
     lawNeighborCandidateCount,
+    farAggregateCandidateCount,
     retainedRefs,
     retainedRefCount: retainedRefs.length,
     retainedBufferRefCount,
@@ -5400,6 +5638,181 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
   }
 }
 
+export async function runSchroederFarAggregateCandidateWebGpu({
+  device,
+  activeNodeList,
+  hierarchyAggregateNode,
+  retainFarAggregateCandidateBuffer = true,
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  candidateBudget = DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET,
+  enabledFarLawMask = SCHROEDER_FAR_AGGREGATE_LAW_MASK,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  openingTheta = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  nearFieldSupportScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE,
+  farFieldErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederFarAggregateCandidateWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederFarAggregateCandidatePlan({
+    activeNodeList,
+    hierarchyAggregateNode,
+    candidateBudget,
+    enabledFarLawMask,
+    baseGridSpacingM,
+    openingTheta,
+    nearFieldSupportScale,
+    farFieldErrorBound,
+    queueEpoch,
+    stateFamilyId
+  });
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedActiveNodeBuffer = activeNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = activeNodeList?.activeNodes instanceof Float32Array
+    ? activeNodeList.activeNodes
+    : null;
+  if (!borrowedActiveNodeBuffer && !(activeNodeRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate candidates require a retained active-node buffer or explicit rows');
+  }
+  const borrowedAggregateNodeBuffer = hierarchyAggregateNode?.aggregateNodeBuffer || null;
+  const aggregateNodeRows = hierarchyAggregateNode?.aggregateNodeRows instanceof Float32Array
+    ? hierarchyAggregateNode.aggregateNodeRows
+    : null;
+  if (!borrowedAggregateNodeBuffer && !(aggregateNodeRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate candidates require a retained aggregate-node buffer or explicit rows');
+  }
+
+  const activeNodeBuffer = borrowedActiveNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-active-node-in', activeNodeRows);
+  const aggregateNodeBuffer = borrowedAggregateNodeBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-node-in', aggregateNodeRows);
+  const farAggregateCandidateBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-candidates-out',
+    size: plan.farAggregateCandidateByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsArray = createSchroederFarAggregateCandidateParamsArray(plan);
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-candidates-params',
+    size: paramsArray.byteLength,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-schroeder-far-aggregate-candidates-readback',
+      size: plan.farAggregateCandidateByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  let returnedRetainedFarAggregateCandidateBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-far-aggregate-candidates.v0',
+      label: 'ulg-schroeder-far-aggregate-candidates',
+      code: schroederFarAggregateCandidateWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: activeNodeBuffer } },
+        { binding: 1, resource: { buffer: aggregateNodeBuffer } },
+        { binding: 2, resource: { buffer: farAggregateCandidateBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.max(
+      1,
+      Math.ceil(plan.farAggregateCandidateCount / SCHROEDER_FAR_AGGREGATE_CANDIDATE_WORKGROUP_SIZE)
+    ));
+    pass.end();
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(
+        farAggregateCandidateBuffer,
+        0,
+        readBuffer,
+        0,
+        plan.farAggregateCandidateByteLength
+      );
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let farAggregateCandidateRows = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      farAggregateCandidateRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        plan.farAggregateCandidateCount * SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
+      farAggregateCandidateSchema: plan.schema,
+      status: 'schroeder-far-aggregate-candidates-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: noFullReadback
+        ? SCHROEDER_NO_FULL_READBACK_MODE
+        : SCHROEDER_FULL_FAR_AGGREGATE_CANDIDATE_READBACK_MODE,
+      fullReadbackPerformed: !noFullReadback,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedFarAggregateCandidateBuffer: Boolean(retainFarAggregateCandidateBuffer),
+      farAggregateCandidateBufferByteLength: plan.farAggregateCandidateByteLength,
+      farAggregateCandidateRows,
+      traversalMode: plan.traversalMode,
+      aggregateAdmissibilityStatus: plan.aggregateAdmissibilityStatus,
+      exactNearFieldRequirement: plan.exactNearFieldRequirement,
+      conservationStatus: plan.conservationStatus,
+      stateMutationStatus: 'far-aggregate-candidates-buffer-submitted-no-state-mutation',
+      stateAuthorityStatus: 'state-manager-admitted-aggregate-node-source-consumed',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainFarAggregateCandidateBuffer) {
+      result.farAggregateCandidateBuffer = farAggregateCandidateBuffer;
+      result.destroyFarAggregateCandidateBuffer = () => farAggregateCandidateBuffer.destroy?.();
+      returnedRetainedFarAggregateCandidateBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      if (!borrowedAggregateNodeBuffer) aggregateNodeBuffer.destroy?.();
+      if (!retainFarAggregateCandidateBuffer || !returnedRetainedFarAggregateCandidateBuffer) {
+        farAggregateCandidateBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederPhaseVolumeMigrationWebGpu({
   device,
   levelAssignment,
@@ -5884,6 +6297,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   activeNodeSortedIndex = null,
   lawQueue = null,
   lawNeighborCandidates = null,
+  farAggregateCandidates = null,
   crossLevelCoupling = null,
   conservationSummary = null,
   crossLevelTransfer = null,
@@ -5929,6 +6343,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableCrossLevelStateDeltaMerge = Boolean(stateDeltaMergeAdmission),
   enableHierarchyAggregate = enableCrossLevelStateDeltaMerge,
   enableHierarchyAggregateNodeReduction = enableHierarchyAggregate,
+  enableFarAggregateCandidates = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
@@ -5942,6 +6357,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   coarsenLevelDeltaThreshold = DEFAULT_COARSEN_LEVEL_DELTA_THRESHOLD,
   gasPhaseId = DEFAULT_GAS_PHASE_ID,
   aggregateResidualTolerance = DEFAULT_AGGREGATE_RESIDUAL_TOLERANCE,
+  farAggregateCandidateBudget = DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET,
+  farAggregateCandidateReadbackMode = null,
+  enabledFarAggregateLawMask = SCHROEDER_FAR_AGGREGATE_LAW_MASK,
+  farAggregateOpeningTheta = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  farAggregateNearFieldSupportScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE,
+  farAggregateErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
   boxDimsM = [5, 5, 5],
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
@@ -5958,6 +6379,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   crossLevelStateDeltaMergeRunner = runSchroederCrossLevelStateDeltaMergeWebGpu,
   hierarchyAggregateRunner = runSchroederHierarchyAggregateWebGpu,
   hierarchyAggregateNodeReductionRunner = runSchroederHierarchyAggregateNodeReductionWebGpu,
+  farAggregateCandidateRunner = runSchroederFarAggregateCandidateWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
@@ -6026,6 +6448,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof hierarchyAggregateNodeReductionRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a hierarchyAggregateNodeReductionRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && enableFarAggregateCandidates
+    && typeof farAggregateCandidateRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateCandidateRunner function');
   }
   if (
     enableCrossLevelCoupling
@@ -6238,6 +6672,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainAggregateNodeBuffer: true,
       readbackMode
     });
+  const resolvedFarAggregateCandidates = !resolvedActiveNodeList || !resolvedHierarchyAggregateNode || !enableFarAggregateCandidates
+    ? null
+    : farAggregateCandidates || await farAggregateCandidateRunner({
+      device,
+      activeNodeList: resolvedActiveNodeList,
+      hierarchyAggregateNode: resolvedHierarchyAggregateNode,
+      candidateBudget: farAggregateCandidateBudget,
+      enabledFarLawMask: enabledFarAggregateLawMask,
+      baseGridSpacingM: plan.baseGridSpacingM,
+      openingTheta: farAggregateOpeningTheta,
+      nearFieldSupportScale: farAggregateNearFieldSupportScale,
+      farFieldErrorBound: farAggregateErrorBound,
+      queueEpoch: mergeEpoch,
+      retainFarAggregateCandidateBuffer: true,
+      readbackMode: farAggregateCandidateReadbackMode ?? readbackMode
+    });
   const resolvedPhaseVolumeMigration = !resolvedLevelAssignment || !resolvedHierarchyAggregateNode || !enablePhaseVolumeMigration
     ? null
     : phaseVolumeMigration || await phaseVolumeMigrationRunner({
@@ -6286,6 +6736,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       activeNodeSortedIndex: resolvedActiveNodeSortedIndex,
       lawQueue: resolvedLawQueue,
       lawNeighborCandidates: resolvedLawNeighborCandidates,
+      farAggregateCandidates: resolvedFarAggregateCandidates,
       hierarchyAggregateNode: resolvedHierarchyAggregateNode,
       conservationSummary: resolvedConservationSummary,
       phaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
@@ -6317,6 +6768,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederActiveNodeSortedIndex: resolvedActiveNodeSortedIndex,
     schroederLawQueue: resolvedLawQueue,
     schroederLawNeighborCandidates: resolvedLawNeighborCandidates,
+    schroederFarAggregateCandidates: resolvedFarAggregateCandidates,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
     schroederCrossLevelTransfer: resolvedCrossLevelTransfer,
@@ -6470,6 +6922,24 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedLawNeighborCandidates.neighborCandidateByteLength
         ?? 0
     } : null,
+    farAggregateCandidates: resolvedFarAggregateCandidates ? {
+      schema: resolvedFarAggregateCandidates.schema,
+      status: resolvedFarAggregateCandidates.status,
+      activeNodeCount: resolvedFarAggregateCandidates.activeNodeCount,
+      aggregateNodeCount: resolvedFarAggregateCandidates.aggregateNodeCount,
+      candidateBudget: resolvedFarAggregateCandidates.candidateBudget,
+      farAggregateCandidateCount: resolvedFarAggregateCandidates.farAggregateCandidateCount,
+      enabledFarLawMask: resolvedFarAggregateCandidates.enabledFarLawMask,
+      traversalMode: resolvedFarAggregateCandidates.traversalMode,
+      outputCompaction: resolvedFarAggregateCandidates.outputCompaction,
+      aggregateAdmissibilityStatus: resolvedFarAggregateCandidates.aggregateAdmissibilityStatus,
+      exactNearFieldRequirement: resolvedFarAggregateCandidates.exactNearFieldRequirement,
+      conservationStatus: resolvedFarAggregateCandidates.conservationStatus,
+      retainedFarAggregateCandidateBuffer: Boolean(resolvedFarAggregateCandidates.farAggregateCandidateBuffer),
+      farAggregateCandidateBufferByteLength: resolvedFarAggregateCandidates.farAggregateCandidateBufferByteLength
+        ?? resolvedFarAggregateCandidates.farAggregateCandidateByteLength
+        ?? 0
+    } : null,
     crossLevelCoupling: resolvedCrossLevelCoupling ? {
       schema: resolvedCrossLevelCoupling.schema,
       status: resolvedCrossLevelCoupling.status,
@@ -6620,6 +7090,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       aggregateNodeCount: resolvedPortableSummary.aggregateNodeCount,
       lawQueueCount: resolvedPortableSummary.lawQueueCount,
       lawNeighborCandidateCount: resolvedPortableSummary.lawNeighborCandidateCount,
+      farAggregateCandidateCount: resolvedPortableSummary.farAggregateCandidateCount,
       retainedRefs: Array.isArray(resolvedPortableSummary.retainedRefs)
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
           family: entry.family,
@@ -6645,6 +7116,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         activeLeafProxyCount: resolvedPortableSummary.renderLod.activeLeafProxyCount,
         aggregateProxyCount: resolvedPortableSummary.renderLod.aggregateProxyCount,
         lawQueueProxyCount: resolvedPortableSummary.renderLod.lawQueueProxyCount,
+        farAggregateCandidateProxyCount: resolvedPortableSummary.renderLod.farAggregateCandidateProxyCount,
         phaseVolumeDiagnosticRowsAvailable: resolvedPortableSummary.renderLod.phaseVolumeDiagnosticRowsAvailable,
         opticalPolicy: resolvedPortableSummary.renderLod.opticalPolicy,
         geometryPolicy: resolvedPortableSummary.renderLod.geometryPolicy,
@@ -6687,6 +7159,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     lawNeighborCandidateConsumerStatus: resolvedLawNeighborCandidates
       ? 'law-neighbor-candidates-forwarded-to-resident-backend'
       : (resolvedLawQueue ? 'disabled-law-neighbor-candidates' : 'disabled-local-law-queue'),
+    farAggregateCandidateStatus: resolvedFarAggregateCandidates?.status ?? (
+      resolvedHierarchyAggregateNode ? 'disabled-far-aggregate-candidates' : 'disabled-hierarchy-aggregate-node-reduction'
+    ),
+    farAggregateCandidateConsumerStatus: resolvedFarAggregateCandidates
+      ? 'far-aggregate-candidates-forwarded-to-resident-backend'
+      : (resolvedHierarchyAggregateNode ? 'disabled-far-aggregate-candidates' : 'disabled-hierarchy-aggregate-node-reduction'),
     crossLevelCouplingStatus: resolvedCrossLevelCoupling
       ? 'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
       : 'disabled-same-level-only-mechanics',

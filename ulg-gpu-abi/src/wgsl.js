@@ -9757,6 +9757,226 @@ fn reduceBuckets(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateCandidateWgsl = `
+struct SchroederFarAggregateCandidateParams {
+  active_node_count: u32,
+  aggregate_node_count: u32,
+  active_node_stride: u32,
+  aggregate_node_stride: u32,
+  candidate_stride: u32,
+  candidate_budget: u32,
+  enabled_far_law_mask: u32,
+  flags: u32,
+  base_grid_spacing_m: f32,
+  opening_theta: f32,
+  near_field_support_scale: f32,
+  far_field_error_bound: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> active_nodes: array<f32>;
+@group(0) @binding(1) var<storage, read> aggregate_node_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> far_candidate_rows: array<f32>;
+@group(0) @binding(3) var<uniform> params: SchroederFarAggregateCandidateParams;
+
+const SCHROEDER_DEFAULT_ACTIVE_NODE_STRIDE_FOR_FAR_AGGREGATE: u32 = 16u;
+const SCHROEDER_DEFAULT_AGGREGATE_NODE_STRIDE_FOR_FAR_AGGREGATE: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_CANDIDATE_STRIDE: u32 = 32u;
+
+fn ss_far_active_node(offset: u32) -> bool {
+  let status = active_nodes[offset + 11u];
+  return status > 0.0 && status < 32.0;
+}
+
+fn ss_far_aggregate_node_active(offset: u32) -> bool {
+  let status = aggregate_node_rows[offset + 3u];
+  let admission = aggregate_node_rows[offset + 30u];
+  let mass = aggregate_node_rows[offset + 8u];
+  return status > 0.0 && status < 32.0 && admission > 0.0 && mass > 0.0;
+}
+
+fn ss_far_grid_spacing(level_id: f32) -> f32 {
+  return max(params.base_grid_spacing_m, 0.000001) * exp2(level_id);
+}
+
+fn ss_far_aggregate_center(node_offset: u32, node_size_m: f32) -> vec3<f32> {
+  return vec3<f32>(
+    (aggregate_node_rows[node_offset + 4u] + 0.5) * node_size_m,
+    (aggregate_node_rows[node_offset + 5u] + 0.5) * node_size_m,
+    (aggregate_node_rows[node_offset + 6u] + 0.5) * node_size_m
+  );
+}
+
+fn ss_far_write_empty(candidate_offset: u32, active_offset: u32, slot_index: u32, status: f32, accepted_count: f32, overflow: f32) {
+  far_candidate_rows[candidate_offset + 0u] = active_nodes[active_offset + 10u];
+  far_candidate_rows[candidate_offset + 1u] = active_nodes[active_offset + 0u];
+  far_candidate_rows[candidate_offset + 2u] = -1.0;
+  far_candidate_rows[candidate_offset + 3u] = 0.0;
+  far_candidate_rows[candidate_offset + 4u] = active_nodes[active_offset + 15u];
+  far_candidate_rows[candidate_offset + 5u] = 0.0;
+  far_candidate_rows[candidate_offset + 6u] = f32(params.enabled_far_law_mask);
+  far_candidate_rows[candidate_offset + 7u] = status;
+  far_candidate_rows[candidate_offset + 8u] = 0.0;
+  far_candidate_rows[candidate_offset + 9u] = 0.0;
+  far_candidate_rows[candidate_offset + 10u] = params.opening_theta;
+  far_candidate_rows[candidate_offset + 11u] = 0.0;
+  far_candidate_rows[candidate_offset + 12u] = 0.0;
+  far_candidate_rows[candidate_offset + 13u] = 0.0;
+  far_candidate_rows[candidate_offset + 14u] = 0.0;
+  far_candidate_rows[candidate_offset + 15u] = 0.0;
+  far_candidate_rows[candidate_offset + 16u] = 0.0;
+  far_candidate_rows[candidate_offset + 17u] = 0.0;
+  far_candidate_rows[candidate_offset + 18u] = 0.0;
+  far_candidate_rows[candidate_offset + 19u] = 0.0;
+  far_candidate_rows[candidate_offset + 20u] = 0.0;
+  far_candidate_rows[candidate_offset + 21u] = active_nodes[active_offset + 12u];
+  far_candidate_rows[candidate_offset + 22u] = active_nodes[active_offset + 13u];
+  far_candidate_rows[candidate_offset + 23u] = active_nodes[active_offset + 14u];
+  far_candidate_rows[candidate_offset + 24u] = active_nodes[active_offset + 9u] * params.near_field_support_scale;
+  far_candidate_rows[candidate_offset + 25u] = params.far_field_error_bound;
+  far_candidate_rows[candidate_offset + 26u] = 0.0;
+  far_candidate_rows[candidate_offset + 27u] = params.queue_epoch;
+  far_candidate_rows[candidate_offset + 28u] = params.state_family_id;
+  far_candidate_rows[candidate_offset + 29u] = f32(slot_index);
+  far_candidate_rows[candidate_offset + 30u] = accepted_count;
+  far_candidate_rows[candidate_offset + 31u] = overflow;
+}
+
+fn ss_far_write_candidate(
+  candidate_offset: u32,
+  active_offset: u32,
+  node_offset: u32,
+  node_index: u32,
+  slot_index: u32,
+  accepted_count: f32,
+  distance_m: f32,
+  node_size_m: f32,
+  opening_ratio: f32,
+  center_m: vec3<f32>
+) {
+  far_candidate_rows[candidate_offset + 0u] = active_nodes[active_offset + 10u];
+  far_candidate_rows[candidate_offset + 1u] = active_nodes[active_offset + 0u];
+  far_candidate_rows[candidate_offset + 2u] = f32(node_index);
+  far_candidate_rows[candidate_offset + 3u] = aggregate_node_rows[node_offset + 1u];
+  far_candidate_rows[candidate_offset + 4u] = active_nodes[active_offset + 15u];
+  far_candidate_rows[candidate_offset + 5u] = aggregate_node_rows[node_offset + 2u];
+  far_candidate_rows[candidate_offset + 6u] = f32(params.enabled_far_law_mask);
+  far_candidate_rows[candidate_offset + 7u] = 1.0;
+  far_candidate_rows[candidate_offset + 8u] = distance_m;
+  far_candidate_rows[candidate_offset + 9u] = node_size_m;
+  far_candidate_rows[candidate_offset + 10u] = params.opening_theta;
+  far_candidate_rows[candidate_offset + 11u] = opening_ratio;
+  far_candidate_rows[candidate_offset + 12u] = aggregate_node_rows[node_offset + 8u];
+  far_candidate_rows[candidate_offset + 13u] = aggregate_node_rows[node_offset + 9u];
+  far_candidate_rows[candidate_offset + 14u] = aggregate_node_rows[node_offset + 10u];
+  far_candidate_rows[candidate_offset + 15u] = aggregate_node_rows[node_offset + 11u];
+  far_candidate_rows[candidate_offset + 16u] = aggregate_node_rows[node_offset + 12u];
+  far_candidate_rows[candidate_offset + 17u] = aggregate_node_rows[node_offset + 13u];
+  far_candidate_rows[candidate_offset + 18u] = center_m.x;
+  far_candidate_rows[candidate_offset + 19u] = center_m.y;
+  far_candidate_rows[candidate_offset + 20u] = center_m.z;
+  far_candidate_rows[candidate_offset + 21u] = active_nodes[active_offset + 12u];
+  far_candidate_rows[candidate_offset + 22u] = active_nodes[active_offset + 13u];
+  far_candidate_rows[candidate_offset + 23u] = active_nodes[active_offset + 14u];
+  far_candidate_rows[candidate_offset + 24u] = active_nodes[active_offset + 9u] * params.near_field_support_scale;
+  far_candidate_rows[candidate_offset + 25u] = params.far_field_error_bound;
+  far_candidate_rows[candidate_offset + 26u] = 7.0;
+  far_candidate_rows[candidate_offset + 27u] = params.queue_epoch;
+  far_candidate_rows[candidate_offset + 28u] = params.state_family_id;
+  far_candidate_rows[candidate_offset + 29u] = f32(slot_index);
+  far_candidate_rows[candidate_offset + 30u] = accepted_count;
+  far_candidate_rows[candidate_offset + 31u] = 0.0;
+}
+
+fn ss_far_candidate_admissible(active_offset: u32, node_offset: u32, source_m: vec3<f32>) -> vec4<f32> {
+  let aggregate_level = aggregate_node_rows[node_offset + 1u];
+  let node_size_m = ss_far_grid_spacing(aggregate_level);
+  let center_m = ss_far_aggregate_center(node_offset, node_size_m);
+  let distance_m = max(length(center_m - source_m), 0.000001);
+  let near_field_radius_m = max(active_nodes[active_offset + 9u] * params.near_field_support_scale, 0.0);
+  let opening_ratio = node_size_m / distance_m;
+  let source_chart = active_nodes[active_offset + 15u];
+  let aggregate_chart = aggregate_node_rows[node_offset + 2u];
+  let same_chart = abs(source_chart - aggregate_chart) < 0.5;
+  let far_enough = distance_m > near_field_radius_m;
+  let opened = opening_ratio <= params.opening_theta;
+  let active = ss_far_aggregate_node_active(node_offset);
+  let accepted = select(0.0, 1.0, same_chart && far_enough && opened && active);
+  return vec4<f32>(accepted, distance_m, node_size_m, opening_ratio);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  let candidate_budget = max(params.candidate_budget, 1u);
+  let candidate_count = params.active_node_count * candidate_budget;
+  if (row_index >= candidate_count) {
+    return;
+  }
+
+  let source_index = row_index / candidate_budget;
+  let slot_index = row_index - source_index * candidate_budget;
+  let active_stride = max(params.active_node_stride, SCHROEDER_DEFAULT_ACTIVE_NODE_STRIDE_FOR_FAR_AGGREGATE);
+  let aggregate_stride = max(params.aggregate_node_stride, SCHROEDER_DEFAULT_AGGREGATE_NODE_STRIDE_FOR_FAR_AGGREGATE);
+  let candidate_stride = max(params.candidate_stride, SCHROEDER_DEFAULT_FAR_AGGREGATE_CANDIDATE_STRIDE);
+  let active_offset = source_index * active_stride;
+  let candidate_offset = row_index * candidate_stride;
+
+  if (!ss_far_active_node(active_offset) || params.enabled_far_law_mask == 0u) {
+    ss_far_write_empty(candidate_offset, active_offset, slot_index, 32.0, 0.0, 0.0);
+    return;
+  }
+
+  let source_m = vec3<f32>(
+    active_nodes[active_offset + 12u],
+    active_nodes[active_offset + 13u],
+    active_nodes[active_offset + 14u]
+  );
+  var accepted_count = 0u;
+  var emitted = false;
+  var overflow = false;
+
+  for (var node_index = 0u; node_index < params.aggregate_node_count; node_index = node_index + 1u) {
+    let node_offset = node_index * aggregate_stride;
+    let admissible = ss_far_candidate_admissible(active_offset, node_offset, source_m);
+    if (admissible.x > 0.0) {
+      if (accepted_count == slot_index) {
+        let node_size_m = admissible.z;
+        let center_m = ss_far_aggregate_center(node_offset, node_size_m);
+        ss_far_write_candidate(
+          candidate_offset,
+          active_offset,
+          node_offset,
+          node_index,
+          slot_index,
+          f32(accepted_count + 1u),
+          admissible.y,
+          node_size_m,
+          admissible.w,
+          center_m
+        );
+        emitted = true;
+      }
+      accepted_count = accepted_count + 1u;
+      if (accepted_count > candidate_budget) {
+        overflow = true;
+      }
+    }
+  }
+
+  if (!emitted) {
+    let status = select(96.0, 128.0, overflow && slot_index + 1u == candidate_budget);
+    ss_far_write_empty(candidate_offset, active_offset, slot_index, status, f32(accepted_count), select(0.0, 1.0, overflow));
+  } else if (overflow && slot_index + 1u == candidate_budget) {
+    far_candidate_rows[candidate_offset + 31u] = 1.0;
+    far_candidate_rows[candidate_offset + 30u] = f32(accepted_count);
+  }
+}
+`;
+
 export const schroederPhaseVolumeMigrationWgsl = `
 struct SchroederPhaseVolumeMigrationParams {
   particle_count: u32,

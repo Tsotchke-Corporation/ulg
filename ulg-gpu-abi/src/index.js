@@ -81,6 +81,8 @@ export const ULG_SCHROEDER_LAW_QUEUE_SCHEMA = 'peercompute.ulg.schroeder-law-que
 export const ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-queue-execution.v0';
 export const ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA = 'peercompute.ulg.schroeder-law-neighbor-candidate.v0';
 export const ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-law-neighbor-candidate-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-candidate.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-candidate-execution.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
@@ -812,6 +814,40 @@ export const SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_ROW_LAYOUT = Object.freeze([
   'candidateOffset:f32',
   'candidateCount:f32',
   'status:f32'
+]);
+export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT = Object.freeze([
+  'sourceParticleIndex:f32',
+  'sourceLevelId:f32',
+  'aggregateNodeIndex:f32',
+  'aggregateLevelId:f32',
+  'sourceChartId:f32',
+  'aggregateChartId:f32',
+  'lawMask:f32',
+  'status:f32',
+  'distanceM:f32',
+  'aggregateNodeSizeM:f32',
+  'openingTheta:f32',
+  'openingRatio:f32',
+  'aggregateMassKg:f32',
+  'aggregateRepresentedVolumeM3:f32',
+  'aggregateMomentumXKgMPerS:f32',
+  'aggregateMomentumYKgMPerS:f32',
+  'aggregateMomentumZKgMPerS:f32',
+  'aggregateInternalEnergyJ:f32',
+  'aggregateCenterXM:f32',
+  'aggregateCenterYM:f32',
+  'aggregateCenterZM:f32',
+  'sourceXM:f32',
+  'sourceYM:f32',
+  'sourceZM:f32',
+  'nearFieldRadiusM:f32',
+  'farFieldErrorBound:f32',
+  'aggregateAdmissibilityFlags:f32',
+  'queueEpoch:f32',
+  'stateFamilyId:f32',
+  'candidateSlotIndex:f32',
+  'acceptedCandidateCount:f32',
+  'overflowFlag:f32'
 ]);
 export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

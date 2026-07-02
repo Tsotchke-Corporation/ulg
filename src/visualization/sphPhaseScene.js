@@ -152,6 +152,10 @@ export const ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-phase-volume-diagnostic-status.v0';
 export const ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA =
   'peercompute.ulg.sph-scene-schroeder-render-source.v0';
+export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-render-proxy-descriptor-plan.v0';
+export const ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA =
+  'peercompute.ulg.sph-scene-schroeder-render-proxy-descriptor.v0';
 
 const SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FIELD_INDEX = Object.freeze(
   Object.fromEntries(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.map((entry, index) => [
@@ -504,6 +508,171 @@ export function createSchroederRenderSourceMetadata({
     descriptorOnlyPeerComputeHandoff: descriptorOnlyTransfer && !rawGpuBufferTransferDetected,
     fullParticleReadbackRequired,
     fullParticleReadbackAvoided: presentationReady && !fullParticleReadbackRequired,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function createSchroederRenderProxyDescriptorPlan({
+  schroederRenderSource = null,
+  source = 'resident-render-refresh'
+} = {}) {
+  const renderSource = schroederRenderSource?.schroederRenderSource || schroederRenderSource || null;
+  if (!renderSource) return null;
+  const sourceReady = Boolean(
+    renderSource.status === 'schroeder-render-source-admitted'
+      || renderSource.status === 'schroeder-render-source-local-observation-ready'
+  );
+  const descriptorOnly = Boolean(renderSource.descriptorOnlyPeerComputeHandoff);
+  const rawGpuBufferTransferDetected = Boolean(renderSource.rawGpuBufferTransferDetected);
+  const fullParticleReadbackRequired = Boolean(renderSource.fullParticleReadbackRequired);
+  const noFullReadback = Boolean(
+    !fullParticleReadbackRequired
+      && renderSource.fullParticleReadbackAvoided !== false
+  );
+  const blocked = Boolean(
+    !sourceReady
+      || !descriptorOnly
+      || rawGpuBufferTransferDetected
+      || fullParticleReadbackRequired
+  );
+  let blocker = null;
+  if (blocked) {
+    if (!sourceReady) {
+      blocker = renderSource.blocker || 'schroeder-render-source-not-ready';
+    } else if (!descriptorOnly) {
+      blocker = 'schroeder-render-source-not-descriptor-only';
+    } else if (rawGpuBufferTransferDetected) {
+      blocker = 'schroeder-render-source-raw-gpubuffer-transfer-detected';
+    } else {
+      blocker = 'schroeder-render-source-requires-full-particle-readback';
+    }
+  }
+
+  const activeLeafProxyCount = schroederRenderSourceCount(renderSource.activeLeafProxyCount, 0);
+  const aggregateProxyCount = schroederRenderSourceCount(renderSource.aggregateProxyCount, 0);
+  const lawQueueProxyCount = schroederRenderSourceCount(renderSource.lawQueueProxyCount, 0);
+  const selectedLevel = finiteNumberOrNull(renderSource.selectedLevel);
+  const nativeGridSpacingM = schroederRenderSourcePositiveNumber(renderSource.nativeGridSpacingM, null);
+  const closurePbrRequired = true;
+  const closurePbrAvailable = Boolean(renderSource.closureDerivedPbr);
+  const pbrMaterialSource = closurePbrAvailable
+    ? 'closure-derived-pbr-deferred-by-ss-node-material-histogram'
+    : 'blocked-until-closure-derived-pbr-available';
+  const common = {
+    sourceRenderSourceSchema: renderSource.schema || null,
+    sourceRenderSourceStatus: renderSource.status || null,
+    sourceRenderLodMode: renderSource.renderLodMode || null,
+    selectedLevel,
+    nativeGridSpacingM,
+    geometryPolicy: renderSource.geometryPolicy || null,
+    opticalPolicy: renderSource.opticalPolicy || null,
+    closurePbrRequired,
+    closurePbrAvailable,
+    pbrMaterialSource,
+    materialSource: 'deferred-to-ss-node-material-phase-histograms',
+    presentationAuthority: renderSource.presentationAuthority || null,
+    stateAuthorityStatus: renderSource.stateAuthorityStatus || null,
+    descriptorOnlyPeerComputeHandoff: descriptorOnly,
+    fullParticleReadbackRequired: false,
+    fullParticleReadbackAvoided: noFullReadback,
+    rawGpuBufferTransferDetected,
+    rawGpuBufferTransferAllowed: false
+  };
+  const descriptors = [];
+  const pushDescriptor = ({
+    proxyClass,
+    proxyRole,
+    proxyCount,
+    sourceRefKind,
+    geometryKind,
+    renderParticipation,
+    drawableProxy
+  }) => {
+    if (proxyCount <= 0) return;
+    descriptors.push({
+      schema: ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA,
+      proxyClass,
+      proxyRole,
+      proxyCount,
+      sourceRefKind,
+      geometryKind,
+      renderParticipation,
+      drawableProxy: Boolean(drawableProxy),
+      ...common
+    });
+  };
+  pushDescriptor({
+    proxyClass: 'active-leaf',
+    proxyRole: 'near-field-visible-leaf-proxy',
+    proxyCount: activeLeafProxyCount,
+    sourceRefKind: 'schroeder-active-node-list-retained-ref',
+    geometryKind: 'active-leaf-sphere-or-splat-proxy',
+    renderParticipation: 'renderer-visible-proxy',
+    drawableProxy: true
+  });
+  pushDescriptor({
+    proxyClass: 'coherent-aggregate',
+    proxyRole: 'far-field-coherent-volume-proxy',
+    proxyCount: aggregateProxyCount,
+    sourceRefKind: 'schroeder-hierarchy-aggregate-node-retained-ref',
+    geometryKind: 'coherent-aggregate-volume-proxy',
+    renderParticipation: 'renderer-visible-proxy',
+    drawableProxy: true
+  });
+  pushDescriptor({
+    proxyClass: 'law-queue',
+    proxyRole: 'law-work-queue-diagnostic-proxy',
+    proxyCount: lawQueueProxyCount,
+    sourceRefKind: 'schroeder-law-queue-retained-ref',
+    geometryKind: 'law-queue-diagnostic-bounds-proxy',
+    renderParticipation: 'diagnostic-metadata-only',
+    drawableProxy: false
+  });
+  const drawableProxyCount = descriptors
+    .filter((descriptor) => descriptor.drawableProxy)
+    .reduce((sum, descriptor) => sum + descriptor.proxyCount, 0);
+  const totalProxyCount = activeLeafProxyCount + aggregateProxyCount + lawQueueProxyCount;
+  const status = blocked
+    ? 'blocked-schroeder-render-proxy-descriptors'
+    : (totalProxyCount > 0
+      ? 'schroeder-render-proxy-descriptors-ready'
+      : 'schroeder-render-proxy-descriptors-empty');
+  return {
+    schema: ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA,
+    status,
+    blocker,
+    source,
+    renderSourceSchema: renderSource.schema || null,
+    renderSourceStatus: renderSource.status || null,
+    renderSourceAdmissionStatus: renderSource.admissionStatus || null,
+    renderSourceAdmissionPublished: Boolean(renderSource.admissionPublished),
+    renderSourcePresentationReady: Boolean(renderSource.renderLodPresentationReady),
+    descriptorCount: descriptors.length,
+    descriptors,
+    activeLeafProxyCount,
+    aggregateProxyCount,
+    lawQueueProxyCount,
+    drawableProxyCount,
+    diagnosticProxyCount: lawQueueProxyCount,
+    totalProxyCount,
+    selectedLevel,
+    nativeGridSpacingM,
+    geometryPolicy: renderSource.geometryPolicy || null,
+    opticalPolicy: renderSource.opticalPolicy || null,
+    closurePbrRequired,
+    closurePbrAvailable,
+    pbrMaterialSource,
+    descriptorOnlyPeerComputeHandoff: descriptorOnly,
+    fullParticleReadbackRequired,
+    fullParticleReadbackAvoided: noFullReadback && !blocked,
+    rawGpuBufferTransferDetected,
+    rawGpuBufferTransferAllowed: false,
+    rendererIntegration: 'scene-resident-schroeder-render-source-consumer',
+    visibleRenderSource: 'schroeder-render-lod-proxy-descriptors',
+    presentationOwnsPhysicsCadence: false,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -5070,6 +5239,10 @@ export function createResidentRenderSourceMetadata({
     renderOwnershipPolicy,
     source
   });
+  const schroederRenderProxyDescriptorPlan = createSchroederRenderProxyDescriptorPlan({
+    schroederRenderSource,
+    source
+  });
 
   return {
     schema: 'peercompute.ulg.sph-resident-render-source.v0',
@@ -5095,6 +5268,7 @@ export function createResidentRenderSourceMetadata({
         ?? step?.particleCount
     ),
     schroederRenderSource,
+    schroederRenderProxyDescriptorPlan,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -5162,6 +5336,39 @@ export function applyResidentRenderSourceMetadata(target, metadata, {
     Boolean(metadata.schroederRenderSource?.admissionPublished);
   target.sourceSchroederRenderSourceAdmissionStateKey =
     metadata.schroederRenderSource?.admissionStateKey ?? null;
+  target.schroederRenderProxyDescriptorPlan = metadata.schroederRenderProxyDescriptorPlan || null;
+  target.sourceSchroederRenderProxyDescriptorPlanSchema =
+    metadata.schroederRenderProxyDescriptorPlan?.schema ?? null;
+  target.sourceSchroederRenderProxyDescriptorPlanStatus =
+    metadata.schroederRenderProxyDescriptorPlan?.status ?? null;
+  target.sourceSchroederRenderProxyDescriptorPlanBlocker =
+    metadata.schroederRenderProxyDescriptorPlan?.blocker ?? null;
+  target.sourceSchroederRenderProxyDescriptorCount =
+    metadata.schroederRenderProxyDescriptorPlan?.descriptorCount ?? 0;
+  target.sourceSchroederRenderProxyActiveLeafProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.activeLeafProxyCount ?? 0;
+  target.sourceSchroederRenderProxyAggregateProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.aggregateProxyCount ?? 0;
+  target.sourceSchroederRenderProxyLawQueueProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.lawQueueProxyCount ?? 0;
+  target.sourceSchroederRenderProxyDrawableProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.drawableProxyCount ?? 0;
+  target.sourceSchroederRenderProxyDiagnosticProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.diagnosticProxyCount ?? 0;
+  target.sourceSchroederRenderProxyTotalProxyCount =
+    metadata.schroederRenderProxyDescriptorPlan?.totalProxyCount ?? 0;
+  target.sourceSchroederRenderProxyClosurePbrAvailable =
+    Boolean(metadata.schroederRenderProxyDescriptorPlan?.closurePbrAvailable);
+  target.sourceSchroederRenderProxyPbrMaterialSource =
+    metadata.schroederRenderProxyDescriptorPlan?.pbrMaterialSource ?? null;
+  target.sourceSchroederRenderProxyVisibleRenderSource =
+    metadata.schroederRenderProxyDescriptorPlan?.visibleRenderSource ?? null;
+  target.sourceSchroederRenderProxyRendererIntegration =
+    metadata.schroederRenderProxyDescriptorPlan?.rendererIntegration ?? null;
+  target.sourceSchroederRenderProxyFullParticleReadbackAvoided =
+    Boolean(metadata.schroederRenderProxyDescriptorPlan?.fullParticleReadbackAvoided);
+  target.sourceSchroederRenderProxyPresentationOwnsPhysicsCadence =
+    Boolean(metadata.schroederRenderProxyDescriptorPlan?.presentationOwnsPhysicsCadence);
   target.sourceResidentRetainedPrevious = Boolean(markRetainedPrevious);
   target.sourceResidentRetentionReason = retentionReason ?? null;
   return target;
@@ -8611,8 +8818,10 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentSteps = null;
   scene.userData.schroederPhaseVolumeDiagnostics = null;
   scene.userData.schroederRenderSource = null;
+  scene.userData.schroederRenderProxyDescriptorPlan = null;
   renderer.userData.schroederPhaseVolumeDiagnostics = null;
   renderer.userData.schroederRenderSource = null;
+  renderer.userData.schroederRenderProxyDescriptorPlan = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
@@ -10718,8 +10927,10 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmResidentSteps = null;
     scene.userData.schroederPhaseVolumeDiagnostics = null;
     scene.userData.schroederRenderSource = null;
+    scene.userData.schroederRenderProxyDescriptorPlan = null;
     renderer.userData.schroederPhaseVolumeDiagnostics = null;
     renderer.userData.schroederRenderSource = null;
+    renderer.userData.schroederRenderProxyDescriptorPlan = null;
     const cleanup = () => destroyCapturedMlsMpmResidentExecutionArtifacts({
       ...captured,
       preserveBuffers: normalizedPreserveBuffers
@@ -15442,6 +15653,10 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmResidentPublishedRenderSource = residentRenderSource;
     scene.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
     renderer.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
+    scene.userData.schroederRenderProxyDescriptorPlan =
+      residentRenderSource.schroederRenderProxyDescriptorPlan || null;
+    renderer.userData.schroederRenderProxyDescriptorPlan =
+      residentRenderSource.schroederRenderProxyDescriptorPlan || null;
     const markRenderArtifactStale = (target, reason) => {
       if (!target) return;
       target.residentRenderSourceStaleAfterPublish = true;
@@ -20964,6 +21179,10 @@ export function createSphPhaseScene(container, {
     });
     scene.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
     renderer.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;
+    scene.userData.schroederRenderProxyDescriptorPlan =
+      residentRenderSource.schroederRenderProxyDescriptorPlan || null;
+    renderer.userData.schroederRenderProxyDescriptorPlan =
+      residentRenderSource.schroederRenderProxyDescriptorPlan || null;
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
       particleCount: nextSphParticleState?.particleCount ?? 0,
@@ -25522,6 +25741,9 @@ export function createSphPhaseScene(container, {
     },
     getSchroederRenderSource() {
       return scene.userData.schroederRenderSource || null;
+    },
+    getSchroederRenderProxyDescriptorPlan() {
+      return scene.userData.schroederRenderProxyDescriptorPlan || null;
     },
     getMlsMpmResidentRequestedReadbackMode() {
       return scene.userData.mlsMpmResidentRequestedReadbackMode;

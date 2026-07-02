@@ -18,6 +18,8 @@ import {
   SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL,
   ULG_SPH_SCENE_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_STATUS_SCHEMA,
   ULG_SPH_SCENE_SCHROEDER_RENDER_SOURCE_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA,
+  ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -35,6 +37,7 @@ import {
   createOpticalGpuTableForSurfaceBatches,
   createProductEventSurfaceBatches,
   createSchroederRenderSourceMetadata,
+  createSchroederRenderProxyDescriptorPlan,
   createResidentRenderSourceMetadata,
   resolveThreeWebGpuSurfaceBufferDrawRecords,
   buildSphResidentPressureInterfaceStateSummary,
@@ -3101,6 +3104,38 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(source.admissionPublished, true);
   assert.equal(source.admissionStateKey, 'schroeder-summary:test-state');
 
+  const proxyPlan = createSchroederRenderProxyDescriptorPlan({ schroederRenderSource: source });
+  assert.equal(proxyPlan.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_PLAN_SCHEMA);
+  assert.equal(proxyPlan.status, 'schroeder-render-proxy-descriptors-ready');
+  assert.equal(proxyPlan.descriptorCount, 3);
+  assert.equal(proxyPlan.totalProxyCount, 20);
+  assert.equal(proxyPlan.drawableProxyCount, 15);
+  assert.equal(proxyPlan.diagnosticProxyCount, 5);
+  assert.equal(proxyPlan.closurePbrAvailable, true);
+  assert.equal(
+    proxyPlan.pbrMaterialSource,
+    'closure-derived-pbr-deferred-by-ss-node-material-histogram'
+  );
+  assert.equal(proxyPlan.visibleRenderSource, 'schroeder-render-lod-proxy-descriptors');
+  assert.equal(proxyPlan.rendererIntegration, 'scene-resident-schroeder-render-source-consumer');
+  assert.equal(proxyPlan.presentationOwnsPhysicsCadence, false);
+  assert.equal(proxyPlan.fullParticleReadbackAvoided, true);
+
+  const activeLeaf = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'active-leaf');
+  const aggregate = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'coherent-aggregate');
+  const lawQueue = proxyPlan.descriptors.find((descriptor) => descriptor.proxyClass === 'law-queue');
+  assert.equal(activeLeaf.schema, ULG_SPH_SCENE_SCHROEDER_RENDER_PROXY_DESCRIPTOR_SCHEMA);
+  assert.equal(activeLeaf.drawableProxy, true);
+  assert.equal(activeLeaf.proxyCount, 12);
+  assert.equal(activeLeaf.sourceRefKind, 'schroeder-active-node-list-retained-ref');
+  assert.equal(activeLeaf.geometryKind, 'active-leaf-sphere-or-splat-proxy');
+  assert.equal(aggregate.drawableProxy, true);
+  assert.equal(aggregate.proxyCount, 3);
+  assert.equal(aggregate.sourceRefKind, 'schroeder-hierarchy-aggregate-node-retained-ref');
+  assert.equal(lawQueue.drawableProxy, false);
+  assert.equal(lawQueue.renderParticipation, 'diagnostic-metadata-only');
+  assert.equal(lawQueue.proxyCount, 5);
+
   const metadata = createResidentRenderSourceMetadata({
     residentSteps: {
       signature: 'steps-with-schroeder-summary',
@@ -3114,6 +3149,10 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   });
   assert.equal(metadata.schroederRenderSource.status, 'schroeder-render-source-admitted');
   assert.equal(metadata.schroederRenderSource.renderLodSummarySchema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+  assert.equal(
+    metadata.schroederRenderProxyDescriptorPlan.status,
+    'schroeder-render-proxy-descriptors-ready'
+  );
 
   const target = {};
   applyResidentRenderSourceMetadata(target, metadata);
@@ -3130,6 +3169,20 @@ test('SPH scene materializes admitted Schroeder render LOD summaries as render s
   assert.equal(target.sourceSchroederRenderSourceRawGpuBufferTransferDetected, false);
   assert.equal(target.sourceSchroederRenderSourceAdmissionPublished, true);
   assert.equal(target.sourceSchroederRenderSourceAdmissionStateKey, 'schroeder-summary:test-state');
+  assert.equal(
+    target.sourceSchroederRenderProxyDescriptorPlanStatus,
+    'schroeder-render-proxy-descriptors-ready'
+  );
+  assert.equal(target.sourceSchroederRenderProxyDescriptorCount, 3);
+  assert.equal(target.sourceSchroederRenderProxyDrawableProxyCount, 15);
+  assert.equal(target.sourceSchroederRenderProxyDiagnosticProxyCount, 5);
+  assert.equal(target.sourceSchroederRenderProxyTotalProxyCount, 20);
+  assert.equal(target.sourceSchroederRenderProxyClosurePbrAvailable, true);
+  assert.equal(
+    target.sourceSchroederRenderProxyVisibleRenderSource,
+    'schroeder-render-lod-proxy-descriptors'
+  );
+  assert.equal(target.sourceSchroederRenderProxyPresentationOwnsPhysicsCadence, false);
 });
 
 test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs', () => {
@@ -3151,6 +3204,12 @@ test('SPH scene blocks Schroeder render source metadata with raw GPUBuffer refs'
   assert.equal(source.descriptorOnlyPeerComputeHandoff, false);
   assert.equal(source.rawGpuBufferTransferDetected, true);
   assert.equal(source.rawGpuBufferTransferAllowed, false);
+
+  const proxyPlan = createSchroederRenderProxyDescriptorPlan({ schroederRenderSource: source });
+  assert.equal(proxyPlan.status, 'blocked-schroeder-render-proxy-descriptors');
+  assert.equal(proxyPlan.blocker, 'schroeder-portable-summary-raw-gpubuffer-transfer-detected');
+  assert.equal(proxyPlan.rawGpuBufferTransferDetected, true);
+  assert.equal(proxyPlan.fullParticleReadbackAvoided, false);
 });
 
 test('SPH visible GPU surface consumer requires renderer and pixel validation', () => {

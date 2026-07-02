@@ -8209,6 +8209,273 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederHierarchyAggregateNodeBucketReduceWgsl = `
+struct SchroederHierarchyAggregateNodeBucketReduceParams {
+  row_count: u32,
+  aggregate_stride: u32,
+  node_stride: u32,
+  flags: u32,
+  bucket_count: u32,
+  bucket_slot_capacity: u32,
+  bucket_slot_count: u32,
+  reduction_mode_id: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
+  pad4: u32,
+  pad5: u32,
+  pad6: u32,
+  pad7: u32,
+};
+
+@group(0) @binding(0) var<storage, read> aggregate_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> aggregate_node_rows: array<f32>;
+@group(0) @binding(2) var<storage, read_write> bucket_counts: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> bucket_slots: array<u32>;
+@group(0) @binding(4) var<storage, read_write> row_bucket_slots: array<u32>;
+@group(0) @binding(5) var<uniform> params: SchroederHierarchyAggregateNodeBucketReduceParams;
+
+const SCHROEDER_BUCKET_SENTINEL: u32 = 0xffffffffu;
+const SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_STRIDE_FOR_BUCKET_NODE: u32 = 32u;
+const SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_BUCKET_NODE_STRIDE: u32 = 32u;
+
+fn ss_bucket_hash_mix(value: u32, seed: u32) -> u32 {
+  var hash = seed ^ (value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+  hash = hash ^ (hash >> 16u);
+  hash = hash * 0x7feb352du;
+  hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu;
+  return hash ^ (hash >> 16u);
+}
+
+fn ss_bucket_i32_bits(value: f32) -> u32 {
+  return bitcast<u32>(i32(round(value)));
+}
+
+fn ss_bucket_hash(source_offset: u32) -> u32 {
+  var hash = 0x811c9dc5u;
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 0u]), hash);
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 1u]), hash);
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 2u]), hash);
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 4u]), hash);
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 5u]), hash);
+  hash = ss_bucket_hash_mix(ss_bucket_i32_bits(aggregate_rows[source_offset + 6u]), hash);
+  return hash % max(params.bucket_count, 1u);
+}
+
+fn ss_bucket_node_same_key(lhs_offset: u32, rhs_offset: u32) -> bool {
+  let lhs_key = aggregate_rows[lhs_offset + 0u];
+  let rhs_key = aggregate_rows[rhs_offset + 0u];
+  let lhs_level = aggregate_rows[lhs_offset + 1u];
+  let rhs_level = aggregate_rows[rhs_offset + 1u];
+  let lhs_chart = aggregate_rows[lhs_offset + 2u];
+  let rhs_chart = aggregate_rows[rhs_offset + 2u];
+  let lhs_cell = vec3<f32>(
+    aggregate_rows[lhs_offset + 4u],
+    aggregate_rows[lhs_offset + 5u],
+    aggregate_rows[lhs_offset + 6u]
+  );
+  let rhs_cell = vec3<f32>(
+    aggregate_rows[rhs_offset + 4u],
+    aggregate_rows[rhs_offset + 5u],
+    aggregate_rows[rhs_offset + 6u]
+  );
+  return abs(lhs_key - rhs_key) < 0.5
+    && abs(lhs_level - rhs_level) < 0.5
+    && abs(lhs_chart - rhs_chart) < 0.5
+    && all(abs(lhs_cell - rhs_cell) < vec3<f32>(0.5));
+}
+
+fn ss_bucket_node_active(offset: u32) -> bool {
+  let status = aggregate_rows[offset + 3u];
+  let admission = aggregate_rows[offset + 30u];
+  return status > 0.0 && status < 32.0 && admission > 0.0;
+}
+
+fn ss_bucket_write_empty(node_offset: u32, source_offset: u32, status: f32, capacity_status: f32) {
+  aggregate_node_rows[node_offset + 0u] = aggregate_rows[source_offset + 0u];
+  aggregate_node_rows[node_offset + 1u] = aggregate_rows[source_offset + 1u];
+  aggregate_node_rows[node_offset + 2u] = aggregate_rows[source_offset + 2u];
+  aggregate_node_rows[node_offset + 3u] = status;
+  aggregate_node_rows[node_offset + 4u] = aggregate_rows[source_offset + 4u];
+  aggregate_node_rows[node_offset + 5u] = aggregate_rows[source_offset + 5u];
+  aggregate_node_rows[node_offset + 6u] = aggregate_rows[source_offset + 6u];
+  aggregate_node_rows[node_offset + 7u] = aggregate_rows[source_offset + 7u];
+  for (var column = 8u; column < SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_BUCKET_NODE_STRIDE; column = column + 1u) {
+    aggregate_node_rows[node_offset + column] = 0.0;
+  }
+  aggregate_node_rows[node_offset + 28u] = f32(params.reduction_mode_id);
+  aggregate_node_rows[node_offset + 29u] = capacity_status;
+  aggregate_node_rows[node_offset + 30u] = aggregate_rows[source_offset + 30u];
+}
+
+@compute @workgroup_size(64)
+fn clearBuckets(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let index = global_id.x;
+  if (index < params.bucket_count) {
+    atomicStore(&bucket_counts[index], 0u);
+  }
+  if (index < params.bucket_slot_count) {
+    bucket_slots[index] = SCHROEDER_BUCKET_SENTINEL;
+  }
+  if (index < params.row_count) {
+    row_bucket_slots[index] = SCHROEDER_BUCKET_SENTINEL;
+  }
+}
+
+@compute @workgroup_size(64)
+fn assignBuckets(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.row_count) {
+    return;
+  }
+  let aggregate_stride = max(params.aggregate_stride, SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_STRIDE_FOR_BUCKET_NODE);
+  let source_offset = row_index * aggregate_stride;
+  if (!ss_bucket_node_active(source_offset)) {
+    row_bucket_slots[row_index] = SCHROEDER_BUCKET_SENTINEL;
+    return;
+  }
+  let bucket_index = ss_bucket_hash(source_offset);
+  let slot_index = atomicAdd(&bucket_counts[bucket_index], 1u);
+  if (slot_index >= params.bucket_slot_capacity) {
+    row_bucket_slots[row_index] = SCHROEDER_BUCKET_SENTINEL;
+    return;
+  }
+  let absolute_slot = bucket_index * params.bucket_slot_capacity + slot_index;
+  if (absolute_slot >= params.bucket_slot_count) {
+    row_bucket_slots[row_index] = SCHROEDER_BUCKET_SENTINEL;
+    return;
+  }
+  bucket_slots[absolute_slot] = row_index;
+  row_bucket_slots[row_index] = absolute_slot;
+}
+
+@compute @workgroup_size(64)
+fn reduceBuckets(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row_index = global_id.x;
+  if (row_index >= params.row_count) {
+    return;
+  }
+
+  let aggregate_stride = max(params.aggregate_stride, SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_STRIDE_FOR_BUCKET_NODE);
+  let node_stride = max(params.node_stride, SCHROEDER_DEFAULT_HIERARCHY_AGGREGATE_BUCKET_NODE_STRIDE);
+  let source_offset = row_index * aggregate_stride;
+  let node_offset = row_index * node_stride;
+
+  if (!ss_bucket_node_active(source_offset)) {
+    ss_bucket_write_empty(node_offset, source_offset, 32.0, 1.0);
+    return;
+  }
+
+  let assigned_slot = row_bucket_slots[row_index];
+  let bucket_index = ss_bucket_hash(source_offset);
+  let raw_bucket_count = atomicLoad(&bucket_counts[bucket_index]);
+  let bucket_overflow = raw_bucket_count > params.bucket_slot_capacity;
+  if (assigned_slot == SCHROEDER_BUCKET_SENTINEL || bucket_overflow) {
+    ss_bucket_write_empty(node_offset, source_offset, 96.0, 96.0);
+    aggregate_node_rows[node_offset + 14u] = f32(row_index);
+    return;
+  }
+
+  let scan_count = min(raw_bucket_count, params.bucket_slot_capacity);
+  let bucket_base = bucket_index * params.bucket_slot_capacity;
+  var duplicate_before = false;
+  for (var slot = 0u; slot < scan_count; slot = slot + 1u) {
+    let other_index = bucket_slots[bucket_base + slot];
+    if (other_index != SCHROEDER_BUCKET_SENTINEL && other_index < row_index) {
+      let other_offset = other_index * aggregate_stride;
+      if (ss_bucket_node_active(other_offset) && ss_bucket_node_same_key(source_offset, other_offset)) {
+        duplicate_before = true;
+      }
+    }
+  }
+
+  if (duplicate_before) {
+    ss_bucket_write_empty(node_offset, source_offset, 64.0, 1.0);
+    aggregate_node_rows[node_offset + 14u] = f32(row_index);
+    aggregate_node_rows[node_offset + 16u] = 1.0;
+    return;
+  }
+
+  var total_mass = 0.0;
+  var total_volume = 0.0;
+  var total_momentum = vec3<f32>(0.0);
+  var total_internal_energy = 0.0;
+  var matching_count = 0.0;
+  var mass_residual = 0.0;
+  var volume_residual = 0.0;
+  var momentum_residual = vec3<f32>(0.0);
+  var internal_energy_residual = 0.0;
+  var child_level_min = aggregate_rows[source_offset + 27u];
+  var child_level_max = aggregate_rows[source_offset + 27u];
+  var level_delta_max = aggregate_rows[source_offset + 28u];
+
+  for (var slot = 0u; slot < scan_count; slot = slot + 1u) {
+    let other_index = bucket_slots[bucket_base + slot];
+    if (other_index != SCHROEDER_BUCKET_SENTINEL) {
+      let scan_offset = other_index * aggregate_stride;
+      if (ss_bucket_node_active(scan_offset) && ss_bucket_node_same_key(source_offset, scan_offset)) {
+        matching_count = matching_count + 1.0;
+        total_mass = total_mass + aggregate_rows[scan_offset + 8u];
+        total_volume = total_volume + aggregate_rows[scan_offset + 9u];
+        total_momentum = total_momentum + vec3<f32>(
+          aggregate_rows[scan_offset + 10u],
+          aggregate_rows[scan_offset + 11u],
+          aggregate_rows[scan_offset + 12u]
+        );
+        total_internal_energy = total_internal_energy + aggregate_rows[scan_offset + 13u];
+        mass_residual = mass_residual + aggregate_rows[scan_offset + 18u];
+        volume_residual = volume_residual + aggregate_rows[scan_offset + 21u];
+        momentum_residual = momentum_residual + vec3<f32>(
+          aggregate_rows[scan_offset + 22u],
+          aggregate_rows[scan_offset + 23u],
+          aggregate_rows[scan_offset + 24u]
+        );
+        internal_energy_residual = internal_energy_residual + aggregate_rows[scan_offset + 25u];
+        child_level_min = min(child_level_min, aggregate_rows[scan_offset + 27u]);
+        child_level_max = max(child_level_max, aggregate_rows[scan_offset + 27u]);
+        level_delta_max = max(level_delta_max, aggregate_rows[scan_offset + 28u]);
+      }
+    }
+  }
+  let suppressed_duplicate_count = max(matching_count - 1.0, 0.0);
+
+  aggregate_node_rows[node_offset + 0u] = aggregate_rows[source_offset + 0u];
+  aggregate_node_rows[node_offset + 1u] = aggregate_rows[source_offset + 1u];
+  aggregate_node_rows[node_offset + 2u] = aggregate_rows[source_offset + 2u];
+  aggregate_node_rows[node_offset + 3u] = 1.0;
+  aggregate_node_rows[node_offset + 4u] = aggregate_rows[source_offset + 4u];
+  aggregate_node_rows[node_offset + 5u] = aggregate_rows[source_offset + 5u];
+  aggregate_node_rows[node_offset + 6u] = aggregate_rows[source_offset + 6u];
+  aggregate_node_rows[node_offset + 7u] = aggregate_rows[source_offset + 7u];
+  aggregate_node_rows[node_offset + 8u] = total_mass;
+  aggregate_node_rows[node_offset + 9u] = total_volume;
+  aggregate_node_rows[node_offset + 10u] = total_momentum.x;
+  aggregate_node_rows[node_offset + 11u] = total_momentum.y;
+  aggregate_node_rows[node_offset + 12u] = total_momentum.z;
+  aggregate_node_rows[node_offset + 13u] = total_internal_energy;
+  aggregate_node_rows[node_offset + 14u] = f32(row_index);
+  aggregate_node_rows[node_offset + 15u] = matching_count;
+  aggregate_node_rows[node_offset + 16u] = suppressed_duplicate_count;
+  aggregate_node_rows[node_offset + 17u] = mass_residual;
+  aggregate_node_rows[node_offset + 18u] = volume_residual;
+  aggregate_node_rows[node_offset + 19u] = momentum_residual.x;
+  aggregate_node_rows[node_offset + 20u] = momentum_residual.y;
+  aggregate_node_rows[node_offset + 21u] = momentum_residual.z;
+  aggregate_node_rows[node_offset + 22u] = internal_energy_residual;
+  aggregate_node_rows[node_offset + 23u] = aggregate_rows[source_offset + 26u];
+  aggregate_node_rows[node_offset + 24u] = child_level_min;
+  aggregate_node_rows[node_offset + 25u] = child_level_max;
+  aggregate_node_rows[node_offset + 26u] = level_delta_max;
+  aggregate_node_rows[node_offset + 27u] = 1.0;
+  aggregate_node_rows[node_offset + 28u] = f32(params.reduction_mode_id);
+  aggregate_node_rows[node_offset + 29u] = 1.0;
+  aggregate_node_rows[node_offset + 30u] = aggregate_rows[source_offset + 30u];
+  aggregate_node_rows[node_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederPhaseVolumeMigrationWgsl = `
 struct SchroederPhaseVolumeMigrationParams {
   particle_count: u32,

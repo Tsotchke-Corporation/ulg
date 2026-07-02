@@ -43,6 +43,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  schroederHierarchyAggregateNodeBucketReduceWgsl,
   schroederHierarchyAggregateNodeReduceWgsl,
   schroederHierarchyAggregateWgsl,
   schroederActiveNodeListWgsl,
@@ -136,6 +137,12 @@ export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-
 export const SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE = 'compact-schroeder-phase-volume-diagnostic-summary-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_LEVEL_UPDATE_READBACK_MODE = 'full-schroeder-phase-volume-level-update-readback';
 export const SCHROEDER_FULL_PHASE_VOLUME_MIGRATION_READBACK_MODE = 'full-schroeder-phase-volume-migration-readback';
+export const SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE = 'gpu-exact-global-scan-o-n2';
+export const SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE =
+  'gpu-bucketed-bounded-slot-reduction';
+export const SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE = 'auto';
+export const DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS = 512;
+export const DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY = 32;
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -183,9 +190,59 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function nextPowerOfTwo(value) {
+  let result = 1;
+  const target = Math.max(1, Math.ceil(finiteNumber(value, 1)));
+  while (result < target) result *= 2;
+  return result;
+}
+
 function finitePositive(value, fallback) {
   const number = finiteNumber(value, fallback);
   return number > 0 ? number : fallback;
+}
+
+function normalizeAggregateNodeReductionMode(mode, aggregateRowCount) {
+  const requested = String(mode || SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE);
+  if (requested === SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE) {
+    return SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
+  }
+  if (requested === SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE) {
+    return SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
+  }
+  const rowCount = Math.max(0, Math.round(finiteNumber(aggregateRowCount, 0)));
+  return rowCount >= DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS
+    ? SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE
+    : SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
+}
+
+function aggregateNodeReductionModeId(mode) {
+  return mode === SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE ? 2 : 1;
+}
+
+function aggregateNodeBucketPlan({
+  aggregateRowCount = 0,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY
+} = {}) {
+  const rowCount = Math.max(0, Math.round(finiteNumber(aggregateRowCount, 0)));
+  const slotCapacity = Math.max(1, Math.round(finiteNumber(
+    bucketSlotCapacity,
+    DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY
+  )));
+  const targetBucketCount = bucketCount == null
+    ? Math.max(1, Math.ceil(rowCount / Math.max(1, Math.floor(slotCapacity / 2))))
+    : Math.max(1, Math.round(finiteNumber(bucketCount, 1)));
+  const resolvedBucketCount = nextPowerOfTwo(targetBucketCount);
+  const bucketSlotCount = Math.max(1, resolvedBucketCount * slotCapacity);
+  return {
+    bucketCount: resolvedBucketCount,
+    bucketSlotCapacity: slotCapacity,
+    bucketSlotCount,
+    bucketCountByteLength: Math.max(4, resolvedBucketCount * Uint32Array.BYTES_PER_ELEMENT),
+    bucketSlotByteLength: Math.max(4, bucketSlotCount * Uint32Array.BYTES_PER_ELEMENT),
+    rowBucketSlotByteLength: Math.max(4, rowCount * Uint32Array.BYTES_PER_ELEMENT)
+  };
 }
 
 function clampInteger(value, min, max) {
@@ -517,9 +574,13 @@ export function createSchroederHierarchyAggregateNodeParamsArray({
   aggregateRowCount = 0,
   aggregateStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
   aggregateNodeStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
-  flags = 0
+  flags = 0,
+  bucketCount = 0,
+  bucketSlotCapacity = 0,
+  bucketSlotCount = 0,
+  aggregateReductionMode = SCHROEDER_EXACT_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE
 } = {}) {
-  const buffer = new ArrayBuffer(32);
+  const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(aggregateRowCount, 0))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
@@ -531,10 +592,18 @@ export function createSchroederHierarchyAggregateNodeParamsArray({
     SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
   ))), true);
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
-  view.setUint32(16, 0, true);
-  view.setUint32(20, 0, true);
-  view.setUint32(24, 0, true);
-  view.setUint32(28, 0, true);
+  view.setUint32(16, Math.max(0, Math.round(finiteNumber(bucketCount, 0))), true);
+  view.setUint32(20, Math.max(0, Math.round(finiteNumber(bucketSlotCapacity, 0))), true);
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(bucketSlotCount, 0))), true);
+  view.setUint32(28, aggregateNodeReductionModeId(aggregateReductionMode), true);
+  view.setUint32(32, 0, true);
+  view.setUint32(36, 0, true);
+  view.setUint32(40, 0, true);
+  view.setUint32(44, 0, true);
+  view.setUint32(48, 0, true);
+  view.setUint32(52, 0, true);
+  view.setUint32(56, 0, true);
+  view.setUint32(60, 0, true);
   return buffer;
 }
 
@@ -1265,10 +1334,20 @@ export function createSchroederHierarchyAggregatePlan({
 }
 
 export function createSchroederHierarchyAggregateNodePlan({
-  hierarchyAggregate
+  hierarchyAggregate,
+  aggregateReductionMode = SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY
 } = {}) {
   assertHierarchyAggregateInput(hierarchyAggregate);
   const aggregateRowCount = Math.max(0, Math.round(finiteNumber(hierarchyAggregate.aggregateRowCount, 0)));
+  const resolvedReductionMode = normalizeAggregateNodeReductionMode(aggregateReductionMode, aggregateRowCount);
+  const bucketPlan = aggregateNodeBucketPlan({
+    aggregateRowCount,
+    bucketCount,
+    bucketSlotCapacity
+  });
+  const bucketReduction = resolvedReductionMode === SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
   const aggregateNodeByteLength = Math.max(
     4,
     aggregateRowCount * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT
@@ -1287,10 +1366,24 @@ export function createSchroederHierarchyAggregateNodePlan({
     aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
     aggregateNodeStrideBytes: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     aggregateNodeByteLength,
-    outputCompaction: 'one-row-per-contribution-first-occurrence-nodes-active-duplicates-suppressed',
-    aggregateReductionStatus: 'exact-first-occurrence-global-scan',
-    aggregateReductionMode: 'gpu-exact-global-scan-o-n2',
-    capacityStatus: 'no-extra-capacity-required-output-row-per-input-row',
+    outputCompaction: bucketReduction
+      ? 'bucketed-first-occurrence-nodes-active-duplicates-suppressed'
+      : 'one-row-per-contribution-first-occurrence-nodes-active-duplicates-suppressed',
+    aggregateReductionStatus: bucketReduction
+      ? 'bucketed-bounded-slot-reduction-planned'
+      : 'exact-first-occurrence-global-scan',
+    aggregateReductionMode: resolvedReductionMode,
+    aggregateReductionModeId: aggregateNodeReductionModeId(resolvedReductionMode),
+    aggregateReductionAutoThreshold: DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
+    bucketCount: bucketReduction ? bucketPlan.bucketCount : 0,
+    bucketSlotCapacity: bucketReduction ? bucketPlan.bucketSlotCapacity : 0,
+    bucketSlotCount: bucketReduction ? bucketPlan.bucketSlotCount : 0,
+    bucketCountByteLength: bucketReduction ? bucketPlan.bucketCountByteLength : 0,
+    bucketSlotByteLength: bucketReduction ? bucketPlan.bucketSlotByteLength : 0,
+    rowBucketSlotByteLength: bucketReduction ? bucketPlan.rowBucketSlotByteLength : 0,
+    capacityStatus: bucketReduction
+      ? 'bucket-capacity-provisioned-fail-closed-on-overflow'
+      : 'no-extra-capacity-required-output-row-per-input-row',
     stateFamily: SCHROEDER_STATE_DELTA_MERGE_STATE_FAMILY,
     outputFamilies: [SCHROEDER_STATE_DELTA_OUTPUT_FAMILY, 'schroeder-hierarchy-aggregate-nodes'],
     stateMutationTarget: 'schroeder-retained-hierarchy-aggregate-node-buffer',
@@ -2722,13 +2815,22 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
   device,
   hierarchyAggregate,
   retainAggregateNodeBuffer = true,
-  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE
+  readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
+  aggregateReductionMode = SCHROEDER_AGGREGATE_NODE_REDUCTION_AUTO_MODE,
+  bucketCount = null,
+  bucketSlotCapacity = DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederHierarchyAggregateNodeReductionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
-  const plan = createSchroederHierarchyAggregateNodePlan({ hierarchyAggregate });
+  const plan = createSchroederHierarchyAggregateNodePlan({
+    hierarchyAggregate,
+    aggregateReductionMode,
+    bucketCount,
+    bucketSlotCapacity
+  });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const bucketReduction = plan.aggregateReductionMode === SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE;
   const borrowedAggregateBuffer = hierarchyAggregate?.aggregateBuffer || null;
   const aggregateRows = hierarchyAggregate?.aggregateRows instanceof Float32Array
     ? hierarchyAggregate.aggregateRows
@@ -2743,11 +2845,27 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
     size: plan.aggregateNodeByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
+  const paramsArray = createSchroederHierarchyAggregateNodeParamsArray(plan);
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-hierarchy-aggregate-node-params',
-    size: 32,
+    size: paramsArray.byteLength,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  const bucketCountBuffer = bucketReduction ? device.createBuffer({
+    label: 'ulg-schroeder-hierarchy-aggregate-node-bucket-counts',
+    size: plan.bucketCountByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  }) : null;
+  const bucketSlotBuffer = bucketReduction ? device.createBuffer({
+    label: 'ulg-schroeder-hierarchy-aggregate-node-bucket-slots',
+    size: plan.bucketSlotByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  }) : null;
+  const rowBucketSlotBuffer = bucketReduction ? device.createBuffer({
+    label: 'ulg-schroeder-hierarchy-aggregate-node-row-bucket-slots',
+    size: plan.rowBucketSlotByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  }) : null;
   const readBuffer = noFullReadback
     ? null
     : device.createBuffer({
@@ -2758,30 +2876,96 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
   let returnedRetainedAggregateNodeBuffer = false;
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createSchroederHierarchyAggregateNodeParamsArray(plan));
-    const bindings = [
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    if (bucketReduction) {
+      device.queue.writeBuffer(bucketCountBuffer, 0, new Uint32Array(plan.bucketCount));
+      const bucketSlots = new Uint32Array(plan.bucketSlotCount);
+      bucketSlots.fill(0xffffffff);
+      device.queue.writeBuffer(bucketSlotBuffer, 0, bucketSlots);
+      const rowBucketSlots = new Uint32Array(plan.aggregateRowCount);
+      rowBucketSlots.fill(0xffffffff);
+      device.queue.writeBuffer(rowBucketSlotBuffer, 0, rowBucketSlots);
+    }
+    const exactBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'uniform')
     ];
-    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+    const bucketBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'uniform')
+    ];
+    const exactPipeline = bucketReduction ? null : createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-reduction.v0',
       label: 'ulg-schroeder-hierarchy-aggregate-node-reduction',
       code: schroederHierarchyAggregateNodeReduceWgsl,
       entryPoint: 'main',
-      bindings
+      bindings: exactBindings
     });
+    const bucketClearPipeline = bucketReduction ? createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-bucket-reduction-clear.v0',
+      label: 'ulg-schroeder-hierarchy-aggregate-node-bucket-clear',
+      code: schroederHierarchyAggregateNodeBucketReduceWgsl,
+      entryPoint: 'clearBuckets',
+      bindings: bucketBindings
+    }) : null;
+    const bucketAssignPipeline = bucketReduction ? createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-bucket-reduction-assign.v0',
+      label: 'ulg-schroeder-hierarchy-aggregate-node-bucket-assign',
+      code: schroederHierarchyAggregateNodeBucketReduceWgsl,
+      entryPoint: 'assignBuckets',
+      bindings: bucketBindings
+    }) : null;
+    const bucketReducePipeline = bucketReduction ? createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-hierarchy-aggregate-node-bucket-reduction-reduce.v0',
+      label: 'ulg-schroeder-hierarchy-aggregate-node-bucket-reduce',
+      code: schroederHierarchyAggregateNodeBucketReduceWgsl,
+      entryPoint: 'reduceBuckets',
+      bindings: bucketBindings
+    }) : null;
     const bindGroup = device.createBindGroup({
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: aggregateBuffer } },
-        { binding: 1, resource: { buffer: aggregateNodeBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
-      ]
+      layout: bucketReduction ? bucketReducePipeline.bindGroupLayout : exactPipeline.bindGroupLayout,
+      entries: bucketReduction
+        ? [
+          { binding: 0, resource: { buffer: aggregateBuffer } },
+          { binding: 1, resource: { buffer: aggregateNodeBuffer } },
+          { binding: 2, resource: { buffer: bucketCountBuffer } },
+          { binding: 3, resource: { buffer: bucketSlotBuffer } },
+          { binding: 4, resource: { buffer: rowBucketSlotBuffer } },
+          { binding: 5, resource: { buffer: paramsBuffer } }
+        ]
+        : [
+          { binding: 0, resource: { buffer: aggregateBuffer } },
+          { binding: 1, resource: { buffer: aggregateNodeBuffer } },
+          { binding: 2, resource: { buffer: paramsBuffer } }
+        ]
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
+    if (bucketReduction) {
+      pass.setPipeline(bucketClearPipeline.pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.max(
+        1,
+        Math.ceil(
+          Math.max(plan.bucketCount, plan.bucketSlotCount, plan.aggregateRowCount)
+            / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE
+        )
+      ));
+      pass.setPipeline(bucketAssignPipeline.pipeline);
+      pass.dispatchWorkgroups(Math.max(
+        1,
+        Math.ceil(plan.aggregateRowCount / SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE)
+      ));
+      pass.setPipeline(bucketReducePipeline.pipeline);
+    } else {
+      pass.setPipeline(exactPipeline.pipeline);
+      pass.setBindGroup(0, bindGroup);
+    }
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.max(
       1,
@@ -2809,7 +2993,12 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
       hierarchyAggregateNodeSchema: plan.schema,
       status: 'schroeder-hierarchy-aggregate-node-reduction-submitted',
       backend: 'webgpu',
-      pipelineCacheStatus: cacheStatus,
+      pipelineCacheStatus: bucketReduction
+        ? bucketReducePipeline.cacheStatus
+        : exactPipeline.cacheStatus,
+      aggregateBucketClearPipelineCacheStatus: bucketClearPipeline?.cacheStatus ?? null,
+      aggregateBucketAssignPipelineCacheStatus: bucketAssignPipeline?.cacheStatus ?? null,
+      aggregateBucketReducePipelineCacheStatus: bucketReducePipeline?.cacheStatus ?? null,
       readbackMode: noFullReadback
         ? SCHROEDER_NO_FULL_READBACK_MODE
         : SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE,
@@ -2819,9 +3008,14 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
       retainedAggregateNodeBuffer: Boolean(retainAggregateNodeBuffer),
       aggregateNodeBufferByteLength: plan.aggregateNodeByteLength,
       aggregateNodeRows,
-      aggregateReductionStatus: 'exact-first-occurrence-global-scan',
-      aggregateReductionMode: 'gpu-exact-global-scan-o-n2',
-      capacityStatus: 'no-extra-capacity-required-output-row-per-input-row',
+      aggregateReductionStatus: bucketReduction
+        ? 'bucketed-bounded-slot-reduction-submitted'
+        : 'exact-first-occurrence-global-scan',
+      aggregateReductionMode: plan.aggregateReductionMode,
+      bucketCount: plan.bucketCount,
+      bucketSlotCapacity: plan.bucketSlotCapacity,
+      bucketSlotCount: plan.bucketSlotCount,
+      capacityStatus: plan.capacityStatus,
       conservativeTransferStatus: 'hierarchy-aggregate-nodes-submitted',
       stateMutationStatus: 'aggregate-node-buffer-submitted',
       stateAuthorityStatus: 'state-manager-admitted-aggregate-nodes-materialized',
@@ -2840,6 +3034,9 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
     const cleanup = () => {
       if (!borrowedAggregateBuffer) aggregateBuffer.destroy?.();
       if (!retainAggregateNodeBuffer || !returnedRetainedAggregateNodeBuffer) aggregateNodeBuffer.destroy?.();
+      bucketCountBuffer?.destroy?.();
+      bucketSlotBuffer?.destroy?.();
+      rowBucketSlotBuffer?.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };

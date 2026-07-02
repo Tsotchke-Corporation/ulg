@@ -56,6 +56,9 @@ import {
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_NO_FULL_READBACK_MODE,
+  SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE,
+  DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS,
+  DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
   SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
@@ -770,6 +773,36 @@ test('Schroeder hierarchy aggregate-node plan reduces duplicate parent keys on G
   assert.equal(view.getUint32(8, true), SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS);
 });
 
+test('Schroeder hierarchy aggregate-node plan selects bucketed reduction beyond diagnostic counts', () => {
+  const aggregateRowCount = DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS * 2;
+  const hierarchyAggregate = {
+    schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+    status: 'schroeder-hierarchy-aggregate-submitted',
+    aggregateRowCount,
+    aggregateStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+    aggregateBuffer: { label: 'large-hierarchy-aggregate-buffer' }
+  };
+  const plan = createSchroederHierarchyAggregateNodePlan({ hierarchyAggregate });
+  assert.equal(plan.aggregateReductionMode, SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE);
+  assert.equal(plan.aggregateReductionStatus, 'bucketed-bounded-slot-reduction-planned');
+  assert.equal(plan.outputCompaction, 'bucketed-first-occurrence-nodes-active-duplicates-suppressed');
+  assert.equal(plan.capacityStatus, 'bucket-capacity-provisioned-fail-closed-on-overflow');
+  assert.equal(plan.bucketSlotCapacity, DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY);
+  assert.ok(plan.bucketCount > 0);
+  assert.ok(plan.bucketSlotCount >= aggregateRowCount);
+  assert.ok(plan.bucketCountByteLength >= plan.bucketCount * Uint32Array.BYTES_PER_ELEMENT);
+  assert.ok(plan.bucketSlotByteLength >= plan.bucketSlotCount * Uint32Array.BYTES_PER_ELEMENT);
+  assert.ok(plan.rowBucketSlotByteLength >= aggregateRowCount * Uint32Array.BYTES_PER_ELEMENT);
+
+  const params = createSchroederHierarchyAggregateNodeParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(0, true), aggregateRowCount);
+  assert.equal(view.getUint32(16, true), plan.bucketCount);
+  assert.equal(view.getUint32(20, true), plan.bucketSlotCapacity);
+  assert.equal(view.getUint32(24, true), plan.bucketSlotCount);
+  assert.equal(view.getUint32(28, true), 2);
+});
+
 test('Schroeder phase-volume migration plan consumes aggregate nodes for water-to-steam scale changes', () => {
   const levelAssignment = {
     schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -1404,6 +1437,50 @@ test('Schroeder hierarchy aggregate-node reduction consumes retained aggregate c
   assert.equal(aggregateNode.stateAuthorityStatus, 'state-manager-admitted-aggregate-nodes-materialized');
   assert.deepEqual(device.dispatches, [[3, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederHierarchyAggregateNodeReduceParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder hierarchy aggregate-node bucket reduction keeps large reductions GPU-resident', async () => {
+  const device = createFakeWebGpuDevice();
+  const aggregateRowCount = DEFAULT_AGGREGATE_NODE_BUCKET_REDUCTION_MIN_ROWS * 2;
+  const hierarchyAggregate = {
+    schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
+    status: 'schroeder-hierarchy-aggregate-submitted',
+    aggregateRowCount,
+    aggregateStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_FLOATS,
+    aggregateBuffer: { label: 'retained-large-hierarchy-aggregate-buffer' }
+  };
+  const aggregateNode = await runSchroederHierarchyAggregateNodeReductionWebGpu({
+    device,
+    hierarchyAggregate
+  });
+
+  assert.equal(aggregateNode.schema, ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA);
+  assert.equal(aggregateNode.status, 'schroeder-hierarchy-aggregate-node-reduction-submitted');
+  assert.equal(aggregateNode.readbackMode, SCHROEDER_NO_FULL_READBACK_MODE);
+  assert.equal(aggregateNode.fullReadbackPerformed, false);
+  assert.equal(aggregateNode.fullParticleReadbackPerformed, false);
+  assert.equal(aggregateNode.normalHotLoopReadbackFree, true);
+  assert.equal(aggregateNode.retainedAggregateNodeBuffer, true);
+  assert.equal(aggregateNode.aggregateReductionStatus, 'bucketed-bounded-slot-reduction-submitted');
+  assert.equal(aggregateNode.aggregateReductionMode, SCHROEDER_BUCKETED_HIERARCHY_AGGREGATE_NODE_REDUCTION_MODE);
+  assert.equal(aggregateNode.capacityStatus, 'bucket-capacity-provisioned-fail-closed-on-overflow');
+  assert.equal(aggregateNode.bucketSlotCapacity, DEFAULT_AGGREGATE_NODE_BUCKET_SLOT_CAPACITY);
+  assert.ok(aggregateNode.bucketCount > 0);
+  assert.ok(aggregateNode.bucketSlotCount >= aggregateRowCount);
+  assert.equal(aggregateNode.aggregateNodeRows.length, 0);
+  assert.deepEqual(device.dispatches, [
+    [Math.ceil(aggregateNode.bucketSlotCount / 64), 1, 1],
+    [Math.ceil(aggregateRowCount / 64), 1, 1],
+    [Math.ceil(aggregateRowCount / 64), 1, 1]
+  ]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederHierarchyAggregateNodeBucketReduceParams')));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-hierarchy-aggregate-node-bucket-counts'));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-hierarchy-aggregate-node-bucket-slots'));
+  assert.ok(device.createdBuffers.some((buffer) => buffer.label === 'ulg-schroeder-hierarchy-aggregate-node-row-bucket-slots'));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false

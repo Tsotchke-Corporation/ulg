@@ -8278,6 +8278,7 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
           particleCount: stageOptions.particleCount ?? stageOptions.sphParticleState?.particleCount ?? stageOptions.sphParticleUpload?.particleCount ?? null,
           boxDimsM: stageOptions.boxDimsM || null,
           schroederLawQueue: stageOptions.schroederLawQueue || null,
+          schroederLawNeighborCandidates: stageOptions.schroederLawNeighborCandidates || null,
           retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
           contactKinematicsParticleBinMetadataReadback:
             stageOptions.contactKinematicsParticleBinMetadataReadback === true,
@@ -11161,6 +11162,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 pressureInterfaceForcePreview: stepOptions.pressureInterfaceForcePreview || null,
                 pressureInterfaceGasCellFieldImport: stepOptions.pressureInterfaceGasCellFieldImport || null,
                 pressureInterfaceGasCellFieldAdmission: stepOptions.pressureInterfaceGasCellFieldAdmission || null,
+                schroederLawQueue: stepOptions.schroederLawQueue || null,
+                schroederLawNeighborCandidates:
+                  stepOptions.schroederLawNeighborCandidates || null,
                 contactKinematicsParticleBinMetadataReadback:
                   stepOptions.contactKinematicsParticleBinMetadataReadback === true
               } : {}),
@@ -11176,6 +11180,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 reactionTable: stepOptions.reactionTable || null,
                 reactionStepOptions: {
                   ...(stepOptions.reactionStepOptions || {}),
+                  schroederLawQueue:
+                    stepOptions.reactionStepOptions?.schroederLawQueue
+                    || stepOptions.schroederLawQueue
+                    || null,
+                  schroederLawNeighborCandidates:
+                    stepOptions.reactionStepOptions?.schroederLawNeighborCandidates
+                    || stepOptions.schroederLawNeighborCandidates
+                    || null,
                   reactionParticleBinMetadataReadback:
                     stepOptions.reactionParticleBinMetadataReadback === true
                     || stepOptions.reactionStepOptions?.reactionParticleBinMetadataReadback === true
@@ -13217,6 +13229,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   mlsMpmParticleUpload = null,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
+  schroederLawQueue = null,
+  schroederLawNeighborCandidates = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -13551,6 +13565,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         boxDimsM: dims,
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
+        schroederLawQueue,
+        schroederLawNeighborCandidates,
         ...noFullReactionSummaryDefaults,
         ...reactionStepOptions,
         reactionParticleBinMetadataReadback:

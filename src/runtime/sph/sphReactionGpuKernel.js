@@ -1,5 +1,6 @@
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -12,6 +13,8 @@ import {
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_REACTION_CLOSURE_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -83,6 +86,7 @@ const REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
 const REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS = 64;
 const REACTION_PARTICLE_BIN_GRID_MAX_CELL_COUNT = REACTION_PARTICLE_BIN_GRID_MAX_AXIS_CELLS ** 3;
 const SCHROEDER_REACTION_LAW_MASK = 1;
+const SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS = SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
 const SCHROEDER_REACTION_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
@@ -1527,6 +1531,7 @@ function outputEnvelope({
   reactionParticleBinGrid = null,
   reactionParticleBins = null,
   schroederReactionLawQueue = null,
+  schroederReactionLawNeighborCandidates = null,
   reactionParticleBinOverflowStatus = null,
   reactionParticleBinOverflowCount = null,
   queueCompletionStatus = null,
@@ -1632,6 +1637,23 @@ function outputEnvelope({
     schroederLawQueueReactionMask: schroederReactionLawQueue?.reactionMask ?? null,
     schroederLawQueueReactionScopeStatus: schroederReactionLawQueue?.reactionScopeStatus ?? null,
     schroederLawQueueBufferConsumed: schroederReactionLawQueue?.lawQueueBufferConsumed === true,
+    schroederLawNeighborCandidateSchema: schroederReactionLawNeighborCandidates?.sourceSchema ?? null,
+    schroederLawNeighborCandidateSourceStatus: schroederReactionLawNeighborCandidates?.sourceStatus ?? null,
+    schroederLawNeighborCandidateStatus: schroederReactionLawNeighborCandidates?.status ?? null,
+    schroederLawNeighborCandidateConsumerStatus: schroederReactionLawNeighborCandidates?.consumerStatus ?? null,
+    schroederLawNeighborCandidateReason: schroederReactionLawNeighborCandidates?.reason ?? null,
+    schroederLawNeighborCandidateAvailable: schroederReactionLawNeighborCandidates?.available === true,
+    schroederLawNeighborCandidateAuthoritative: schroederReactionLawNeighborCandidates?.authoritative === true,
+    schroederLawNeighborCandidateCount: schroederReactionLawNeighborCandidates?.neighborCandidateCount ?? 0,
+    schroederLawNeighborCandidateStrideFloats: schroederReactionLawNeighborCandidates?.neighborCandidateStrideFloats ?? null,
+    schroederLawNeighborCandidateBudget: schroederReactionLawNeighborCandidates?.candidateBudget ?? null,
+    schroederLawNeighborCandidateLawQueueCount: schroederReactionLawNeighborCandidates?.lawQueueCount ?? null,
+    schroederLawNeighborCandidateEnabledLawMask: schroederReactionLawNeighborCandidates?.enabledLawMask ?? null,
+    schroederLawNeighborCandidateReactionMask: schroederReactionLawNeighborCandidates?.reactionMask ?? null,
+    schroederLawNeighborCandidateEnumerationMode: schroederReactionLawNeighborCandidates?.enumerationMode ?? null,
+    schroederLawNeighborCandidateTreeTraversalStatus: schroederReactionLawNeighborCandidates?.treeTraversalStatus ?? null,
+    schroederLawNeighborCandidateBufferObserved: schroederReactionLawNeighborCandidates?.neighborCandidateBufferObserved === true,
+    schroederLawNeighborCandidateBufferConsumed: schroederReactionLawNeighborCandidates?.neighborCandidateBufferConsumed === true,
     reactionParticleBinGridSchema: reactionParticleBins?.schema ?? null,
     reactionParticleBinGridStatus: reactionParticleBins?.status ?? reactionParticleBinGrid?.status ?? null,
     reactionParticleBinGridReason: reactionParticleBins?.reason ?? reactionParticleBinGrid?.reason ?? null,
@@ -1929,6 +1951,112 @@ function createSchroederReactionLawQueueParamsArray(schroederReactionLawQueue) {
   return buffer;
 }
 
+function resolveSchroederReactionLawNeighborCandidates(schroederLawNeighborCandidates = null) {
+  const base = {
+    sourceSchema: schroederLawNeighborCandidates?.schema ?? null,
+    sourceStatus: schroederLawNeighborCandidates?.status ?? null,
+    status: 'schroeder-reaction-law-neighbor-candidates-unavailable',
+    consumerStatus: 'schroeder-reaction-law-neighbor-candidates-not-provided',
+    reason: schroederLawNeighborCandidates
+      ? null
+      : 'No Schroeder law-neighbor candidate rows were provided to the reaction stage',
+    available: false,
+    authoritative: false,
+    neighborCandidateBuffer: null,
+    neighborCandidateBufferObserved: false,
+    neighborCandidateBufferConsumed: false,
+    neighborCandidateCount: 0,
+    neighborCandidateStrideFloats: SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    candidateBudget: 0,
+    lawQueueCount: 0,
+    enabledLawMask: 0,
+    reactionMask: SCHROEDER_REACTION_LAW_MASK,
+    enumerationMode: schroederLawNeighborCandidates?.enumerationMode ?? null,
+    treeTraversalStatus: schroederLawNeighborCandidates?.treeTraversalStatus ?? null
+  };
+  if (!schroederLawNeighborCandidates) return base;
+  const schemaAccepted = schroederLawNeighborCandidates.schema === ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA
+    || schroederLawNeighborCandidates.schema === ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA;
+  if (!schemaAccepted) {
+    return {
+      ...base,
+      status: 'schroeder-reaction-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-reaction-law-neighbor-candidates-schema-mismatch',
+      reason: 'Schroeder law-neighbor candidate schema is not compatible with the reaction consumer'
+    };
+  }
+  const neighborCandidateBuffer = schroederLawNeighborCandidates.neighborCandidateBuffer
+    || schroederLawNeighborCandidates.candidateBuffer
+    || schroederLawNeighborCandidates.buffer
+    || null;
+  if (!neighborCandidateBuffer) {
+    return {
+      ...base,
+      status: 'schroeder-reaction-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-reaction-law-neighbor-candidates-buffer-missing',
+      reason: 'Schroeder law-neighbor candidates did not expose a resident candidate buffer'
+    };
+  }
+  const neighborCandidateCount = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.neighborCandidateCount
+      ?? schroederLawNeighborCandidates.candidateCount
+      ?? schroederLawNeighborCandidates.rowCount,
+    0
+  )));
+  if (neighborCandidateCount <= 0) {
+    return {
+      ...base,
+      status: 'schroeder-reaction-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-reaction-law-neighbor-candidates-empty',
+      reason: 'Schroeder law-neighbor candidates have no rows',
+      neighborCandidateBuffer
+    };
+  }
+  const neighborCandidateStrideFloats = Math.max(
+    SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    Math.round(finiteNumber(
+      schroederLawNeighborCandidates.neighborCandidateStrideFloats
+        ?? schroederLawNeighborCandidates.candidateStrideFloats
+        ?? schroederLawNeighborCandidates.rowStrideFloats,
+      SCHROEDER_REACTION_LAW_NEIGHBOR_CANDIDATE_FLOATS
+    ))
+  );
+  const enabledLawMask = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.enabledLawMask
+      ?? schroederLawNeighborCandidates.lawMask
+      ?? SCHROEDER_REACTION_LAW_MASK,
+    SCHROEDER_REACTION_LAW_MASK
+  )));
+  if ((enabledLawMask & SCHROEDER_REACTION_LAW_MASK) === 0) {
+    return {
+      ...base,
+      status: 'schroeder-reaction-law-neighbor-candidates-bypassed',
+      consumerStatus: 'schroeder-reaction-law-neighbor-candidates-reaction-mask-disabled',
+      reason: 'Schroeder law-neighbor candidates are present but reaction law dispatch is disabled',
+      neighborCandidateBuffer,
+      neighborCandidateCount,
+      neighborCandidateStrideFloats,
+      enabledLawMask
+    };
+  }
+  return {
+    ...base,
+    status: 'schroeder-reaction-law-neighbor-candidates-ready',
+    consumerStatus: 'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative',
+    reason: 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
+    available: true,
+    authoritative: false,
+    neighborCandidateBuffer,
+    neighborCandidateBufferObserved: true,
+    neighborCandidateBufferConsumed: false,
+    neighborCandidateCount,
+    neighborCandidateStrideFloats,
+    candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
+    lawQueueCount: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.lawQueueCount, 0))),
+    enabledLawMask
+  };
+}
+
 function createReactionParticleBinBuffers({
   device,
   sphParticleState,
@@ -2104,7 +2232,8 @@ export async function runSphReactionStepWebGpu({
   readReactionGasSpeciesSummary = true,
   readReactionProductInventory = true,
   readReactionAtomResidual = true,
-  schroederLawQueue = null
+  schroederLawQueue = null,
+  schroederLawNeighborCandidates = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
@@ -2168,6 +2297,9 @@ export async function runSphReactionStepWebGpu({
   const schroederReactionLawQueue = resolveSchroederReactionLawQueue(schroederLawQueue, {
     particleCount: sphParticleState.particleCount
   });
+  const schroederReactionLawNeighborCandidates = resolveSchroederReactionLawNeighborCandidates(
+    schroederLawNeighborCandidates
+  );
   const borrowedSchroederLawQueueBuffer = schroederReactionLawQueue.enabled
     ? schroederReactionLawQueue.lawQueueBuffer
     : null;
@@ -2568,11 +2700,13 @@ export async function runSphReactionStepWebGpu({
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
     reactionProposalNeighborMode: [
       schroederReactionLawQueue.enabled ? 'schroeder-law-queue-gated' : null,
+      schroederReactionLawNeighborCandidates.available ? 'schroeder-law-neighbor-candidates-observed' : null,
       reactionParticleBins.enabled ? 'fixed-capacity-particle-bin-grid' : 'all-particle-scan-fallback'
     ].filter(Boolean).join('-'),
     reactionParticleBinGrid: reactionParticleBins.particleBinGrid,
     reactionParticleBins,
     schroederReactionLawQueue,
+    schroederReactionLawNeighborCandidates,
     reactionParticleBinOverflowStatus,
     reactionParticleBinOverflowCount
   });

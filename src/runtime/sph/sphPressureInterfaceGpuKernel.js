@@ -1,7 +1,10 @@
 import {
+  SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
   SCHROEDER_LAW_QUEUE_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
@@ -46,6 +49,8 @@ const SCHROEDER_PRESSURE_INTERFACE_LAW_CONTACT_MASK = 2;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_INTERFACE_MASK = 4;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK =
   SCHROEDER_PRESSURE_INTERFACE_LAW_CONTACT_MASK | SCHROEDER_PRESSURE_INTERFACE_LAW_INTERFACE_MASK;
+const SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS =
+  SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
@@ -793,6 +798,134 @@ function createSchroederPressureInterfaceLawQueueParamsArray(schroederLawQueue) 
   return buffer;
 }
 
+function resolveSchroederPressureInterfaceLawNeighborCandidates(schroederLawNeighborCandidates = null, {
+  device = null
+} = {}) {
+  const base = {
+    sourceSchema: schroederLawNeighborCandidates?.schema ?? null,
+    sourceStatus: schroederLawNeighborCandidates?.status ?? null,
+    status: 'schroeder-pressure-interface-law-neighbor-candidates-unavailable',
+    consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-not-provided',
+    reason: schroederLawNeighborCandidates
+      ? null
+      : 'No Schroeder law-neighbor candidate rows were provided to the pressure/interface stage',
+    available: false,
+    authoritative: false,
+    neighborCandidateBuffer: null,
+    neighborCandidateBufferObserved: false,
+    neighborCandidateBufferConsumed: false,
+    neighborCandidateCount: 0,
+    neighborCandidateStrideFloats: SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    candidateBudget: 0,
+    lawQueueCount: 0,
+    enabledLawMask: 0,
+    contactInterfaceMask: SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK,
+    enumerationMode: schroederLawNeighborCandidates?.enumerationMode ?? null,
+    treeTraversalStatus: schroederLawNeighborCandidates?.treeTraversalStatus ?? null,
+    sourceDeviceId: null,
+    consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null
+  };
+  if (!schroederLawNeighborCandidates) return base;
+  const schemaAccepted = schroederLawNeighborCandidates.schema === ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA
+    || schroederLawNeighborCandidates.schema === ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_SCHEMA;
+  if (!schemaAccepted) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-schema-mismatch',
+      reason: 'Schroeder law-neighbor candidate schema is not compatible with the pressure/interface consumer'
+    };
+  }
+  const neighborCandidateBuffer = schroederLawNeighborCandidates.neighborCandidateBuffer
+    || schroederLawNeighborCandidates.candidateBuffer
+    || schroederLawNeighborCandidates.buffer
+    || null;
+  if (!neighborCandidateBuffer) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-buffer-missing',
+      reason: 'Schroeder law-neighbor candidates did not expose a resident candidate buffer'
+    };
+  }
+  const mismatch = webGpuDeviceMismatchInfo({ buffer: neighborCandidateBuffer, device });
+  if (mismatch.mismatch) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-neighbor-candidates-rejected',
+      consumerStatus: 'blocked-cross-device-schroeder-pressure-interface-law-neighbor-candidates',
+      reason: 'Schroeder law-neighbor candidate buffer was created on a different WebGPU device',
+      neighborCandidateBuffer,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  const neighborCandidateCount = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.neighborCandidateCount
+      ?? schroederLawNeighborCandidates.candidateCount
+      ?? schroederLawNeighborCandidates.rowCount,
+    0
+  )));
+  if (neighborCandidateCount <= 0) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-neighbor-candidates-rejected',
+      consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-empty',
+      reason: 'Schroeder law-neighbor candidates have no rows',
+      neighborCandidateBuffer,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  const neighborCandidateStrideFloats = Math.max(
+    SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+    Math.round(finiteNumber(
+      schroederLawNeighborCandidates.neighborCandidateStrideFloats
+        ?? schroederLawNeighborCandidates.candidateStrideFloats
+        ?? schroederLawNeighborCandidates.rowStrideFloats,
+      SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS
+    ))
+  );
+  const enabledLawMask = Math.max(0, Math.round(finiteNumber(
+    schroederLawNeighborCandidates.enabledLawMask
+      ?? schroederLawNeighborCandidates.lawMask
+      ?? SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK,
+    SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK
+  )));
+  if ((enabledLawMask & SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK) === 0) {
+    return {
+      ...base,
+      status: 'schroeder-pressure-interface-law-neighbor-candidates-bypassed',
+      consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-contact-interface-mask-disabled',
+      reason: 'Schroeder law-neighbor candidates are present but contact/interface law dispatch is disabled',
+      neighborCandidateBuffer,
+      neighborCandidateCount,
+      neighborCandidateStrideFloats,
+      enabledLawMask,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  return {
+    ...base,
+    status: 'schroeder-pressure-interface-law-neighbor-candidates-ready',
+    consumerStatus: 'schroeder-pressure-interface-law-neighbor-candidates-observed-not-authoritative',
+    reason: 'Bounded law-neighbor candidate rows are validated but not authoritative until SS active-node/tree traversal replaces the source-window enumerator',
+    available: true,
+    authoritative: false,
+    neighborCandidateBuffer,
+    neighborCandidateBufferObserved: true,
+    neighborCandidateBufferConsumed: false,
+    neighborCandidateCount,
+    neighborCandidateStrideFloats,
+    candidateBudget: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.candidateBudget, 0))),
+    lawQueueCount: Math.max(0, Math.round(finiteNumber(schroederLawNeighborCandidates.lawQueueCount, 0))),
+    enabledLawMask,
+    sourceDeviceId: mismatch.sourceDeviceId,
+    consumerDeviceId: mismatch.consumerDeviceId
+  };
+}
+
 function resolveParticleKinematicsSource({
   device,
   sphParticleState = null,
@@ -1494,7 +1627,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   boxDimsM = null,
   retainForceRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE,
-  schroederLawQueue = null
+  schroederLawQueue = null,
+  schroederLawNeighborCandidates = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceForceRowsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1525,6 +1659,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     device,
     particleCount: particleSource.particleCount
   });
+  const schroederPressureInterfaceLawNeighborCandidates = resolveSchroederPressureInterfaceLawNeighborCandidates(
+    schroederLawNeighborCandidates,
+    { device }
+  );
   const contactKinematicsGpuDerivationEligible = canDeriveInterfaceContactKinematicsOnGpu({
     packedInterfaceElements: packed,
     packedContactPolicy,
@@ -1620,6 +1758,25 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         schroederLawQueueBufferConsumed: false,
         schroederLawQueueSourceDeviceId: schroederPressureInterfaceLawQueue.sourceDeviceId,
         schroederLawQueueConsumerDeviceId: schroederPressureInterfaceLawQueue.consumerDeviceId,
+        schroederLawNeighborCandidateSchema: schroederPressureInterfaceLawNeighborCandidates.sourceSchema,
+        schroederLawNeighborCandidateSourceStatus: schroederPressureInterfaceLawNeighborCandidates.sourceStatus,
+        schroederLawNeighborCandidateStatus: schroederPressureInterfaceLawNeighborCandidates.status,
+        schroederLawNeighborCandidateConsumerStatus: schroederPressureInterfaceLawNeighborCandidates.consumerStatus,
+        schroederLawNeighborCandidateReason: schroederPressureInterfaceLawNeighborCandidates.reason,
+        schroederLawNeighborCandidateAvailable: schroederPressureInterfaceLawNeighborCandidates.available === true,
+        schroederLawNeighborCandidateAuthoritative: schroederPressureInterfaceLawNeighborCandidates.authoritative === true,
+        schroederLawNeighborCandidateCount: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateCount,
+        schroederLawNeighborCandidateStrideFloats: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateStrideFloats,
+        schroederLawNeighborCandidateBudget: schroederPressureInterfaceLawNeighborCandidates.candidateBudget,
+        schroederLawNeighborCandidateLawQueueCount: schroederPressureInterfaceLawNeighborCandidates.lawQueueCount,
+        schroederLawNeighborCandidateEnabledLawMask: schroederPressureInterfaceLawNeighborCandidates.enabledLawMask,
+        schroederLawNeighborCandidateContactInterfaceMask: schroederPressureInterfaceLawNeighborCandidates.contactInterfaceMask,
+        schroederLawNeighborCandidateEnumerationMode: schroederPressureInterfaceLawNeighborCandidates.enumerationMode,
+        schroederLawNeighborCandidateTreeTraversalStatus: schroederPressureInterfaceLawNeighborCandidates.treeTraversalStatus,
+        schroederLawNeighborCandidateBufferObserved: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferObserved === true,
+        schroederLawNeighborCandidateBufferConsumed: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferConsumed === true,
+        schroederLawNeighborCandidateSourceDeviceId: schroederPressureInterfaceLawNeighborCandidates.sourceDeviceId,
+        schroederLawNeighborCandidateConsumerDeviceId: schroederPressureInterfaceLawNeighborCandidates.consumerDeviceId,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1858,6 +2015,25 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         ?? schroederPressureInterfaceLawQueue.sourceDeviceId,
       schroederLawQueueConsumerDeviceId: contactKinematicsGpuDerivation?.schroederLawQueueConsumerDeviceId
         ?? schroederPressureInterfaceLawQueue.consumerDeviceId,
+      schroederLawNeighborCandidateSchema: schroederPressureInterfaceLawNeighborCandidates.sourceSchema,
+      schroederLawNeighborCandidateSourceStatus: schroederPressureInterfaceLawNeighborCandidates.sourceStatus,
+      schroederLawNeighborCandidateStatus: schroederPressureInterfaceLawNeighborCandidates.status,
+      schroederLawNeighborCandidateConsumerStatus: schroederPressureInterfaceLawNeighborCandidates.consumerStatus,
+      schroederLawNeighborCandidateReason: schroederPressureInterfaceLawNeighborCandidates.reason,
+      schroederLawNeighborCandidateAvailable: schroederPressureInterfaceLawNeighborCandidates.available === true,
+      schroederLawNeighborCandidateAuthoritative: schroederPressureInterfaceLawNeighborCandidates.authoritative === true,
+      schroederLawNeighborCandidateCount: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateCount,
+      schroederLawNeighborCandidateStrideFloats: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateStrideFloats,
+      schroederLawNeighborCandidateBudget: schroederPressureInterfaceLawNeighborCandidates.candidateBudget,
+      schroederLawNeighborCandidateLawQueueCount: schroederPressureInterfaceLawNeighborCandidates.lawQueueCount,
+      schroederLawNeighborCandidateEnabledLawMask: schroederPressureInterfaceLawNeighborCandidates.enabledLawMask,
+      schroederLawNeighborCandidateContactInterfaceMask: schroederPressureInterfaceLawNeighborCandidates.contactInterfaceMask,
+      schroederLawNeighborCandidateEnumerationMode: schroederPressureInterfaceLawNeighborCandidates.enumerationMode,
+      schroederLawNeighborCandidateTreeTraversalStatus: schroederPressureInterfaceLawNeighborCandidates.treeTraversalStatus,
+      schroederLawNeighborCandidateBufferObserved: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferObserved === true,
+      schroederLawNeighborCandidateBufferConsumed: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferConsumed === true,
+      schroederLawNeighborCandidateSourceDeviceId: schroederPressureInterfaceLawNeighborCandidates.sourceDeviceId,
+      schroederLawNeighborCandidateConsumerDeviceId: schroederPressureInterfaceLawNeighborCandidates.consumerDeviceId,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -1936,6 +2112,15 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       schroederLawQueueConsumerStatus: contactKinematicsGpuDerivation?.schroederLawQueueConsumerStatus
         ?? schroederPressureInterfaceLawQueue.consumerStatus,
       schroederLawQueueBufferConsumed: contactKinematicsGpuDerivation?.schroederLawQueueBufferConsumed === true,
+      schroederLawNeighborCandidateStatus: schroederPressureInterfaceLawNeighborCandidates.status,
+      schroederLawNeighborCandidateConsumerStatus: schroederPressureInterfaceLawNeighborCandidates.consumerStatus,
+      schroederLawNeighborCandidateBufferObserved:
+        schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferObserved === true,
+      schroederLawNeighborCandidateBufferConsumed:
+        schroederPressureInterfaceLawNeighborCandidates.neighborCandidateBufferConsumed === true,
+      schroederLawNeighborCandidateAvailable: schroederPressureInterfaceLawNeighborCandidates.available === true,
+      schroederLawNeighborCandidateAuthoritative: schroederPressureInterfaceLawNeighborCandidates.authoritative === true,
+      schroederLawNeighborCandidateCount: schroederPressureInterfaceLawNeighborCandidates.neighborCandidateCount,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };

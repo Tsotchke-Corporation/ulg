@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -546,6 +547,18 @@ test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runne
     enabledLawMask: 1,
     reactionScopeStatus: 'sedenion-scope-preserved-for-reaction-queue'
   };
+  const schroederLawNeighborCandidates = {
+    schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-law-neighbor-candidates-submitted',
+    neighborCandidateBuffer: { label: 'retained-schroeder-law-neighbor-candidates' },
+    neighborCandidateCount: 12,
+    neighborCandidateStrideFloats: 16,
+    candidateBudget: 4,
+    lawQueueCount: 3,
+    enabledLawMask: 1,
+    enumerationMode: 'schroeder-law-queue-bounded-window-neighbor-enumeration',
+    treeTraversalStatus: 'placeholder-window-traversal-before-sorted-schroeder-tree-neighbor-walk'
+  };
   const execution = await runSphReactionStepWithOptionalWebGpu({
     ...packed,
     reactionTable: table,
@@ -554,8 +567,10 @@ test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runne
     device: {},
     readbackMode: 'no-full-readback',
     schroederLawQueue,
+    schroederLawNeighborCandidates,
     webGpuRunner(args) {
       assert.equal(args.schroederLawQueue, schroederLawQueue);
+      assert.equal(args.schroederLawNeighborCandidates, schroederLawNeighborCandidates);
       return {
         schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
         backend: 'webgpu',
@@ -575,7 +590,12 @@ test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runne
         schroederLawQueueStatus: 'schroeder-reaction-law-queue-ready',
         schroederLawQueueConsumerStatus: 'schroeder-reaction-law-queue-consumed',
         schroederLawQueueBufferConsumed: true,
-        reactionProposalNeighborMode: 'schroeder-law-queue-gated-fixed-capacity-particle-bin-grid'
+        schroederLawNeighborCandidateStatus: 'schroeder-reaction-law-neighbor-candidates-ready',
+        schroederLawNeighborCandidateConsumerStatus:
+          'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative',
+        schroederLawNeighborCandidateBufferObserved: true,
+        schroederLawNeighborCandidateBufferConsumed: false,
+        reactionProposalNeighborMode: 'schroeder-law-queue-gated-schroeder-law-neighbor-candidates-observed-fixed-capacity-particle-bin-grid'
       };
     }
   });
@@ -584,7 +604,17 @@ test('SPH reaction optional WebGPU forwards a Schroeder law queue into the runne
   assert.equal(execution.result.schroederLawQueueStatus, 'schroeder-reaction-law-queue-ready');
   assert.equal(execution.result.schroederLawQueueConsumerStatus, 'schroeder-reaction-law-queue-consumed');
   assert.equal(execution.result.schroederLawQueueBufferConsumed, true);
-  assert.equal(execution.result.reactionProposalNeighborMode, 'schroeder-law-queue-gated-fixed-capacity-particle-bin-grid');
+  assert.equal(execution.result.schroederLawNeighborCandidateStatus, 'schroeder-reaction-law-neighbor-candidates-ready');
+  assert.equal(
+    execution.result.schroederLawNeighborCandidateConsumerStatus,
+    'schroeder-reaction-law-neighbor-candidates-observed-not-authoritative'
+  );
+  assert.equal(execution.result.schroederLawNeighborCandidateBufferObserved, true);
+  assert.equal(execution.result.schroederLawNeighborCandidateBufferConsumed, false);
+  assert.equal(
+    execution.result.reactionProposalNeighborMode,
+    'schroeder-law-queue-gated-schroeder-law-neighbor-candidates-observed-fixed-capacity-particle-bin-grid'
+  );
 });
 
 test('SPH reaction parity rejects reaction output drift', () => {

@@ -16,6 +16,7 @@ import {
   packGasPressureCellRows,
   packMaterialInterfaceContactKinematicsRows,
   packMaterialInterfaceElementRows,
+  packMaterialInterfaceSourceKeyRows,
   resolvePressureInterfaceParticleBinGrid,
   SPH_ALGORITHM_CONTACT_POLICY_FLOATS,
   SPH_GAS_PRESSURE_CELL_FLOATS,
@@ -226,6 +227,17 @@ test('pressure/interface WebGPU producer packs material interface element rows',
   assert.equal(contactKinematics.readyCount, 2);
   assert.equal(contactKinematics.rowStrideFloats, SPH_INTERFACE_CONTACT_KINEMATICS_FLOATS);
   assert.deepEqual([...contactKinematics.rows.slice(0, 4)], [0.20000000298023224, 0, 0, 1]);
+  const sourceKeyField = interfaceFieldFixture();
+  sourceKeyField.elements[0].sourceParticleIndex = 4;
+  sourceKeyField.elements[1].sourceParticleIndex = 5;
+  const sourceKeys = packMaterialInterfaceSourceKeyRows(sourceKeyField);
+  assert.equal(sourceKeys.status, 'interface-source-key-rows-packed');
+  assert.equal(sourceKeys.rowCount, 2);
+  assert.equal(sourceKeys.readyCount, 2);
+  assert.deepEqual([...sourceKeys.rows], [
+    0, 4, 1, 0,
+    1, 5, 1, 0
+  ]);
 
   const kinematicsParams = createPressureInterfaceContactKinematicsParamsArray({
     elementCount: 2,
@@ -329,14 +341,18 @@ test('pressure/interface contact-kinematics WGSL can gate candidates from a Schr
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(11\)\s+var<uniform>\s+schroeder_contact_neighbor_candidate_params/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(12\)\s+var<storage,\s*read>\s+schroeder_contact_source_span_rows/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(13\)\s+var<uniform>\s+schroeder_contact_source_span_params/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(14\)\s+var<storage,\s*read>\s+interface_source_key_rows/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /@binding\(15\)\s+var<uniform>\s+interface_source_key_params/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_law_queue_allows_particle/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_neighbor_candidates_enabled/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_source_spans_enabled/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_candidate_span/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_schroeder_candidate_particle/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /fn\s+ck_interface_source_particle_index/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_CONTACT_ELIGIBLE_OFFSET/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /SCHROEDER_CONTACT_LAW_QUEUE_INTERFACE_ELIGIBLE_OFFSET/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /let\s+schroeder_span\s*=\s*ck_schroeder_candidate_span/);
+  assert.match(sphPressureInterfaceContactKinematicsWgsl, /ck_interface_source_particle_index\(element_index,\s*element_row0\.x\)/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /ck_schroeder_neighbor_candidates_enabled\(\)\s*&&\s*\(schroeder_span_ready\s*\|\|\s*schroeder_broad_candidate_fallback\)/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /else\s+if\s*\(\s*ck_particle_bin_ready\(\)\s*\)/);
   assert.match(sphPressureInterfaceContactKinematicsWgsl, /law_queue_gate_required:\s*bool/);
@@ -501,6 +517,16 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
     size: 2 * 4 * Float32Array.BYTES_PER_ELEMENT,
     usage: 128
   });
+  const interfaceSourceKeyBuffer = device.createBuffer({
+    label: 'test-interface-source-key-rows',
+    size: 2 * 4 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  fieldWithoutKinematics.interfaceSourceKeyBuffer = interfaceSourceKeyBuffer;
+  fieldWithoutKinematics.interfaceSourceKeyStatus = 'interface-source-key-retained';
+  fieldWithoutKinematics.interfaceSourceKeyRowCount = 2;
+  fieldWithoutKinematics.interfaceSourceKeyReadyCount = 2;
+  fieldWithoutKinematics.interfaceSourceKeyStrideFloats = 4;
 
   const result = await runSphPressureInterfaceForceRowsWebGpu({
     device,
@@ -608,6 +634,13 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
     result.pressureInterfaceForceSolver.pressureInterfaceSpatialIndexMode,
     'source-particle-candidate-span-table'
   );
+  assert.equal(result.pressureInterfaceForceSolver.interfaceSourceKeyStatus, 'interface-source-key-ready');
+  assert.equal(
+    result.pressureInterfaceForceSolver.interfaceSourceKeyConsumerStatus,
+    'retained-interface-source-key-buffer-consumed'
+  );
+  assert.equal(result.pressureInterfaceForceSolver.interfaceSourceKeyReadyCount, 2);
+  assert.equal(result.pressureInterfaceForceSolver.interfaceSourceKeyBufferConsumed, true);
   assert.equal(
     result.pressureInterfaceForceSolver.interfaceContactKinematicsDerivation,
     'schroeder-law-neighbor-candidates-authoritative-gpu-interface-element-candidate-contact-kinematics'
@@ -632,7 +665,7 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(device.bindGroups.length, 3);
   assert.equal(device.bindGroups[0].entries.length, 5);
   assert.equal(device.bindGroups[0].entries[0].resource.buffer, stateBuffer);
-  assert.equal(device.bindGroups[1].entries.length, 14);
+  assert.equal(device.bindGroups[1].entries.length, 16);
   assert.equal(device.bindGroups[1].entries[1].resource.buffer, stateBuffer);
   assert.equal(device.bindGroups[1].entries[2].resource.buffer, thermoBuffer);
   assert.equal(device.bindGroups[1].entries[6].resource.buffer.label, 'ulg-sph-pressure-interface-particle-bin-counts');
@@ -643,6 +676,8 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(device.bindGroups[1].entries[11].resource.buffer.label, 'ulg-sph-pressure-interface-schroeder-law-neighbor-candidates-params');
   assert.equal(device.bindGroups[1].entries[12].resource.buffer, schroederSourceCandidateSpanBuffer);
   assert.equal(device.bindGroups[1].entries[13].resource.buffer.label, 'ulg-sph-pressure-interface-schroeder-source-spans-params');
+  assert.equal(device.bindGroups[1].entries[14].resource.buffer, interfaceSourceKeyBuffer);
+  assert.equal(device.bindGroups[1].entries[15].resource.buffer.label, 'ulg-sph-pressure-interface-source-key-params');
   assert.equal(device.bindGroups[2].entries[5].resource.buffer.label, 'ulg-sph-pressure-interface-contact-kinematics-derived');
   const lawQueueParamsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-schroeder-law-queue-params');
   const lawQueueParamsView = new DataView(lawQueueParamsWrite.snapshot);
@@ -662,6 +697,12 @@ test('pressure/interface WebGPU producer derives contact kinematics from residen
   assert.equal(sourceSpanParamsView.getUint32(4, true), 2);
   assert.equal(sourceSpanParamsView.getUint32(8, true), 4);
   assert.equal(sourceSpanParamsView.getUint32(12, true), 0);
+  const sourceKeyParamsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-source-key-params');
+  const sourceKeyParamsView = new DataView(sourceKeyParamsWrite.snapshot);
+  assert.equal(sourceKeyParamsView.getUint32(0, true), 1);
+  assert.equal(sourceKeyParamsView.getUint32(4, true), 2);
+  assert.equal(sourceKeyParamsView.getUint32(8, true), 4);
+  assert.equal(sourceKeyParamsView.getUint32(12, true), 1);
   assert.deepEqual(device.dispatches, [1, 1, 1]);
   assert.equal(device.copies.length, 1);
   assert.equal(device.copies[0].source.label, 'ulg-sph-pressure-interface-particle-bin-metadata');

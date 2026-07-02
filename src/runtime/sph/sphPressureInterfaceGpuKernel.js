@@ -27,6 +27,8 @@ export const ULG_ALGORITHM_CONTACT_PAIR_RESPONSE_SCHEMA =
   'peercompute.ulg.algorithm-material-contact-pair-response.v0';
 export const ULG_INTERFACE_CONTACT_KINEMATICS_SCHEMA =
   'peercompute.ulg.sph-interface-contact-kinematics.v0';
+export const ULG_INTERFACE_SOURCE_KEY_SCHEMA =
+  'peercompute.ulg.sph-interface-source-key.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -52,6 +54,7 @@ const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_MASK =
 const SCHROEDER_PRESSURE_INTERFACE_LAW_NEIGHBOR_CANDIDATE_FLOATS =
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT.length;
 const SCHROEDER_PRESSURE_INTERFACE_LAW_QUEUE_FLOATS = SCHROEDER_LAW_QUEUE_ROW_LAYOUT.length;
+const SPH_INTERFACE_SOURCE_KEY_FLOATS = 4;
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -625,6 +628,47 @@ export function packMaterialInterfaceElementRows(materialInterfaceField = null) 
   };
 }
 
+function sourceParticleIndexForInterfaceElement(element = {}) {
+  return finiteOptionalNumber(
+    element.sourceParticleIndex
+      ?? element.sourceParticle?.index
+      ?? element.sourceParticleId
+      ?? element.sourceParticleID
+  );
+}
+
+export function packMaterialInterfaceSourceKeyRows(materialInterfaceField = null) {
+  const elements = readyInterfaceElements(materialInterfaceField);
+  const rows = new Float32Array(elements.length * SPH_INTERFACE_SOURCE_KEY_FLOATS);
+  let readyCount = 0;
+  for (const [index, element] of elements.entries()) {
+    const offset = index * SPH_INTERFACE_SOURCE_KEY_FLOATS;
+    const sourceParticleIndex = sourceParticleIndexForInterfaceElement(element);
+    const ready = sourceParticleIndex != null && sourceParticleIndex >= 0;
+    if (ready) readyCount += 1;
+    rows.set([
+      index,
+      ready ? sourceParticleIndex : 0,
+      ready ? 1 : 0,
+      0
+    ], offset);
+  }
+  return {
+    schema: ULG_INTERFACE_SOURCE_KEY_SCHEMA,
+    status: readyCount > 0
+      ? 'interface-source-key-rows-packed'
+      : (elements.length > 0
+          ? 'interface-source-key-rows-unavailable'
+          : 'interface-source-key-rows-empty'),
+    rows,
+    rowCount: elements.length,
+    readyCount,
+    rowStrideFloats: SPH_INTERFACE_SOURCE_KEY_FLOATS,
+    rowByteLength: rows.byteLength,
+    source: 'material-interface-elements'
+  };
+}
+
 export function createPressureInterfaceParamsArray({
   elementCount = 0,
   pressurePa = 0,
@@ -834,6 +878,19 @@ function createSchroederPressureInterfaceSourceSpanParamsArray(schroederLawNeigh
     4
   ))), true);
   view.setUint32(12, schroederLawNeighborCandidates?.broadCandidateScanFallback === true ? 1 : 0, true);
+  return buffer;
+}
+
+function createPressureInterfaceSourceKeyParamsArray(interfaceSourceKeys) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, interfaceSourceKeys?.sourceKeyBufferConsumed ? 1 : 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(interfaceSourceKeys?.rowCount, 0))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    interfaceSourceKeys?.rowStrideFloats,
+    SPH_INTERFACE_SOURCE_KEY_FLOATS
+  ))), true);
+  view.setUint32(12, interfaceSourceKeys?.surfaceIndexFallbackEnabled === false ? 0 : 1, true);
   return buffer;
 }
 
@@ -1100,6 +1157,107 @@ function resolveParticleKinematicsSource({
     sourceDeviceId: stateMismatch.sourceDeviceId || thermoMismatch.sourceDeviceId,
     consumerDeviceId: stateMismatch.consumerDeviceId || thermoMismatch.consumerDeviceId,
     reason: null
+  };
+}
+
+function resolvePressureInterfaceSourceKeys(interfaceSourceKeys = null, {
+  device,
+  elementCount = 0
+} = {}) {
+  const base = {
+    schema: interfaceSourceKeys?.schema ?? null,
+    sourceStatus: interfaceSourceKeys?.status ?? null,
+    status: 'interface-source-key-unavailable',
+    consumerStatus: 'interface-source-key-not-provided',
+    reason: interfaceSourceKeys
+      ? null
+      : 'No explicit interface source-key rows were provided',
+    sourceKeyBuffer: null,
+    sourceKeyBufferObserved: false,
+    sourceKeyBufferConsumed: false,
+    rowCount: 0,
+    readyCount: 0,
+    rowStrideFloats: SPH_INTERFACE_SOURCE_KEY_FLOATS,
+    surfaceIndexFallbackEnabled: true,
+    sourceDeviceId: null,
+    consumerDeviceId: device ? webGpuDeviceMismatchInfo({ device }).consumerDeviceId : null,
+    cleanupBuffers: []
+  };
+  if (!interfaceSourceKeys) return base;
+  const rowCount = Math.max(0, Math.round(finiteNumber(
+    interfaceSourceKeys.rowCount
+      ?? interfaceSourceKeys.sourceKeyRowCount
+      ?? elementCount,
+    0
+  )));
+  const readyCount = Math.max(0, Math.round(finiteNumber(interfaceSourceKeys.readyCount, rowCount)));
+  const rowStrideFloats = Math.max(SPH_INTERFACE_SOURCE_KEY_FLOATS, Math.round(finiteNumber(
+    interfaceSourceKeys.rowStrideFloats
+      ?? interfaceSourceKeys.sourceKeyStrideFloats,
+    SPH_INTERFACE_SOURCE_KEY_FLOATS
+  )));
+  const sourceKeyBuffer = interfaceSourceKeys.sourceKeyBuffer
+    || interfaceSourceKeys.interfaceSourceKeyBuffer
+    || interfaceSourceKeys.buffer
+    || null;
+  const sourceRows = interfaceSourceKeys.rows instanceof Float32Array
+    ? interfaceSourceKeys.rows
+    : (interfaceSourceKeys.sourceKeyRows instanceof Float32Array
+        ? interfaceSourceKeys.sourceKeyRows
+        : null);
+  let resolvedBuffer = sourceKeyBuffer;
+  let borrowed = Boolean(sourceKeyBuffer);
+  if (!resolvedBuffer && sourceRows?.byteLength > 0 && readyCount > 0) {
+    resolvedBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-source-key-rows', sourceRows);
+    borrowed = false;
+  }
+  if (!resolvedBuffer || rowCount <= 0 || readyCount <= 0) {
+    return {
+      ...base,
+      status: 'interface-source-key-unavailable',
+      consumerStatus: 'interface-source-key-empty-or-unresolved',
+      reason: 'Explicit interface source-key rows are absent or have no ready rows',
+      rowCount,
+      readyCount,
+      rowStrideFloats,
+      surfaceIndexFallbackEnabled: interfaceSourceKeys.surfaceIndexFallbackEnabled !== false
+    };
+  }
+  const mismatch = webGpuDeviceMismatchInfo({ buffer: resolvedBuffer, device });
+  if (mismatch.mismatch) {
+    if (!borrowed) resolvedBuffer.destroy?.();
+    return {
+      ...base,
+      status: 'interface-source-key-rejected',
+      consumerStatus: 'blocked-cross-device-interface-source-key-buffer',
+      reason: 'Interface source-key buffer was created on a different WebGPU device',
+      sourceKeyBuffer: resolvedBuffer,
+      sourceKeyBufferObserved: true,
+      rowCount,
+      readyCount,
+      rowStrideFloats,
+      surfaceIndexFallbackEnabled: interfaceSourceKeys.surfaceIndexFallbackEnabled !== false,
+      sourceDeviceId: mismatch.sourceDeviceId,
+      consumerDeviceId: mismatch.consumerDeviceId
+    };
+  }
+  return {
+    ...base,
+    status: 'interface-source-key-ready',
+    consumerStatus: borrowed
+      ? 'retained-interface-source-key-buffer-consumed'
+      : 'packed-interface-source-key-buffer-consumed',
+    reason: null,
+    sourceKeyBuffer: resolvedBuffer,
+    sourceKeyBufferObserved: true,
+    sourceKeyBufferConsumed: true,
+    rowCount,
+    readyCount,
+    rowStrideFloats,
+    surfaceIndexFallbackEnabled: interfaceSourceKeys.surfaceIndexFallbackEnabled !== false,
+    sourceDeviceId: mismatch.sourceDeviceId,
+    consumerDeviceId: mismatch.consumerDeviceId,
+    cleanupBuffers: borrowed ? [] : [resolvedBuffer]
   };
 }
 
@@ -1447,7 +1605,8 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
   maxSearchRadiusM = DEFAULT_CONTACT_KINEMATICS_MAX_SEARCH_RADIUS_M,
   gapFloorM = DEFAULT_CONTACT_KINEMATICS_GAP_FLOOR_M,
   schroederLawQueue = null,
-  schroederLawNeighborCandidates = null
+  schroederLawNeighborCandidates = null,
+  interfaceSourceKeys = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphPressureInterfaceContactKinematicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -1548,6 +1707,28 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     0,
     createSchroederPressureInterfaceSourceSpanParamsArray(consumedSchroederLawNeighborCandidates)
   );
+  const resolvedInterfaceSourceKeys = resolvePressureInterfaceSourceKeys(interfaceSourceKeys, {
+    device,
+    elementCount: packedInterfaceElements.rowCount
+  });
+  const localInterfaceSourceKeyBuffer = resolvedInterfaceSourceKeys.sourceKeyBufferConsumed
+    ? null
+    : writeStorageBuffer(
+      device,
+      'ulg-sph-pressure-interface-source-key-disabled',
+      new Float32Array(SPH_INTERFACE_SOURCE_KEY_FLOATS)
+    );
+  const interfaceSourceKeyBuffer = resolvedInterfaceSourceKeys.sourceKeyBuffer || localInterfaceSourceKeyBuffer;
+  const interfaceSourceKeyParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-pressure-interface-source-key-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  }), device);
+  device.queue.writeBuffer(
+    interfaceSourceKeyParamsBuffer,
+    0,
+    createPressureInterfaceSourceKeyParamsArray(resolvedInterfaceSourceKeys)
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceContactKinematicsParamsArray({
     elementCount: packedInterfaceElements.rowCount,
     particleCount: particleSource.particleCount,
@@ -1558,7 +1739,7 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
     particleBinGrid: resolvedParticleBins.enabled ? resolvedParticleBins.particleBinGrid : null
   }));
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v2',
+    cacheKey: 'ulg-sph-pressure-interface-contact-kinematics.v3',
     label: 'ulg-sph-pressure-interface-contact-kinematics',
     code: sphPressureInterfaceContactKinematicsWgsl,
     entryPoint: 'main',
@@ -1576,7 +1757,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(10, 'read-only-storage'),
       computeBufferBinding(11, 'uniform'),
       computeBufferBinding(12, 'read-only-storage'),
-      computeBufferBinding(13, 'uniform')
+      computeBufferBinding(13, 'uniform'),
+      computeBufferBinding(14, 'read-only-storage'),
+      computeBufferBinding(15, 'uniform')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1595,7 +1778,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       { binding: 10, resource: { buffer: schroederLawNeighborCandidateBuffer } },
       { binding: 11, resource: { buffer: schroederLawNeighborCandidateParamsBuffer } },
       { binding: 12, resource: { buffer: schroederSourceSpanBuffer } },
-      { binding: 13, resource: { buffer: schroederSourceSpanParamsBuffer } }
+      { binding: 13, resource: { buffer: schroederSourceSpanParamsBuffer } },
+      { binding: 14, resource: { buffer: interfaceSourceKeyBuffer } },
+      { binding: 15, resource: { buffer: interfaceSourceKeyParamsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1672,6 +1857,20 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       consumedSchroederLawNeighborCandidates?.pressureInterfaceSpatialIndexMode ?? null,
     pressureInterfaceBroadCandidateScanFallback:
       consumedSchroederLawNeighborCandidates?.broadCandidateScanFallback === true,
+    interfaceSourceKeySchema: resolvedInterfaceSourceKeys.schema,
+    interfaceSourceKeySourceStatus: resolvedInterfaceSourceKeys.sourceStatus,
+    interfaceSourceKeyStatus: resolvedInterfaceSourceKeys.status,
+    interfaceSourceKeyConsumerStatus: resolvedInterfaceSourceKeys.consumerStatus,
+    interfaceSourceKeyReason: resolvedInterfaceSourceKeys.reason,
+    interfaceSourceKeyRowCount: resolvedInterfaceSourceKeys.rowCount,
+    interfaceSourceKeyReadyCount: resolvedInterfaceSourceKeys.readyCount,
+    interfaceSourceKeyStrideFloats: resolvedInterfaceSourceKeys.rowStrideFloats,
+    interfaceSourceKeyBufferObserved: resolvedInterfaceSourceKeys.sourceKeyBufferObserved === true,
+    interfaceSourceKeyBufferConsumed: resolvedInterfaceSourceKeys.sourceKeyBufferConsumed === true,
+    interfaceSourceKeySurfaceIndexFallbackEnabled:
+      resolvedInterfaceSourceKeys.surfaceIndexFallbackEnabled !== false,
+    interfaceSourceKeySourceDeviceId: resolvedInterfaceSourceKeys.sourceDeviceId,
+    interfaceSourceKeyConsumerDeviceId: resolvedInterfaceSourceKeys.consumerDeviceId,
     schroederLawNeighborCandidateSourceDeviceId: consumedSchroederLawNeighborCandidates?.sourceDeviceId ?? null,
     schroederLawNeighborCandidateConsumerDeviceId: consumedSchroederLawNeighborCandidates?.consumerDeviceId ?? null,
     queueCompletionStatus: 'queue-submitted',
@@ -1690,6 +1889,9 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       schroederLawNeighborCandidateParamsBuffer,
       localSchroederSourceSpanBuffer,
       schroederSourceSpanParamsBuffer,
+      localInterfaceSourceKeyBuffer,
+      interfaceSourceKeyParamsBuffer,
+      ...(resolvedInterfaceSourceKeys.cleanupBuffers || []),
       ...(resolvedParticleBins.cleanupBuffers || [])
     ],
     destroyContactKinematicsBuffer() {
@@ -1883,6 +2085,18 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     : gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
   const packedContactKinematics = packMaterialInterfaceContactKinematicsRows(materialInterfaceField);
+  const packedInterfaceSourceKeys = materialInterfaceField?.interfaceSourceKeyBuffer
+    || materialInterfaceField?.sourceKeyBuffer
+    ? {
+        schema: materialInterfaceField.interfaceSourceKeySchema || ULG_INTERFACE_SOURCE_KEY_SCHEMA,
+        status: materialInterfaceField.interfaceSourceKeyStatus || 'interface-source-key-retained',
+        sourceKeyBuffer: materialInterfaceField.interfaceSourceKeyBuffer || materialInterfaceField.sourceKeyBuffer,
+        rowCount: materialInterfaceField.interfaceSourceKeyRowCount ?? packed.rowCount,
+        readyCount: materialInterfaceField.interfaceSourceKeyReadyCount ?? packed.rowCount,
+        rowStrideFloats: materialInterfaceField.interfaceSourceKeyStrideFloats ?? SPH_INTERFACE_SOURCE_KEY_FLOATS,
+        surfaceIndexFallbackEnabled: materialInterfaceField.interfaceSourceKeySurfaceIndexFallbackEnabled !== false
+      }
+    : packMaterialInterfaceSourceKeyRows(materialInterfaceField);
   const cpuPackedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
   const packedGasPressureCells = retainedGasPressureRowsReady
     ? {
@@ -2004,6 +2218,15 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         interfaceContactKinematicsParticleBinGridAverageOccupancy: contactKinematicsParticleBinGrid?.averageOccupancy || 0,
         interfaceContactKinematicsParticleBinGridEstimatedOverflowRisk: contactKinematicsParticleBinGrid?.estimatedOverflowRisk === true,
         interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
+        interfaceSourceKeySchema: packedInterfaceSourceKeys.schema,
+        interfaceSourceKeyStatus: packedInterfaceSourceKeys.status,
+        interfaceSourceKeyRowCount: packedInterfaceSourceKeys.rowCount,
+        interfaceSourceKeyReadyCount: packedInterfaceSourceKeys.readyCount,
+        interfaceSourceKeyStrideFloats: packedInterfaceSourceKeys.rowStrideFloats,
+        interfaceSourceKeyBufferObserved: Boolean(packedInterfaceSourceKeys.sourceKeyBuffer),
+        interfaceSourceKeyBufferConsumed: false,
+        interfaceSourceKeySurfaceIndexFallbackEnabled:
+          packedInterfaceSourceKeys.surfaceIndexFallbackEnabled !== false,
         schroederLawQueueSchema: schroederPressureInterfaceLawQueue.sourceSchema,
         schroederLawQueueSourceStatus: schroederPressureInterfaceLawQueue.sourceStatus,
         schroederLawQueueStatus: schroederPressureInterfaceLawQueue.status,
@@ -2099,7 +2322,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       maxSearchRadiusM: contactKinematicsMaxSearchRadiusM,
       gapFloorM: contactKinematicsGapFloorM,
       schroederLawQueue: schroederPressureInterfaceLawQueue,
-      schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates
+      schroederLawNeighborCandidates: schroederPressureInterfaceLawNeighborCandidates,
+      interfaceSourceKeys: packedInterfaceSourceKeys
     });
     contactKinematicsBuffer = contactKinematicsGpuDerivation.buffer;
     contactKinematicsGpuDerived = true;
@@ -2274,6 +2498,27 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      interfaceSourceKeySchema: contactKinematicsGpuDerivation?.interfaceSourceKeySchema
+        ?? packedInterfaceSourceKeys.schema,
+      interfaceSourceKeySourceStatus: contactKinematicsGpuDerivation?.interfaceSourceKeySourceStatus
+        ?? packedInterfaceSourceKeys.status,
+      interfaceSourceKeyStatus: contactKinematicsGpuDerivation?.interfaceSourceKeyStatus
+        ?? packedInterfaceSourceKeys.status,
+      interfaceSourceKeyConsumerStatus: contactKinematicsGpuDerivation?.interfaceSourceKeyConsumerStatus
+        ?? null,
+      interfaceSourceKeyReason: contactKinematicsGpuDerivation?.interfaceSourceKeyReason
+        ?? null,
+      interfaceSourceKeyRowCount: contactKinematicsGpuDerivation?.interfaceSourceKeyRowCount
+        ?? packedInterfaceSourceKeys.rowCount,
+      interfaceSourceKeyReadyCount: contactKinematicsGpuDerivation?.interfaceSourceKeyReadyCount
+        ?? packedInterfaceSourceKeys.readyCount,
+      interfaceSourceKeyStrideFloats: contactKinematicsGpuDerivation?.interfaceSourceKeyStrideFloats
+        ?? packedInterfaceSourceKeys.rowStrideFloats,
+      interfaceSourceKeyBufferObserved: contactKinematicsGpuDerivation?.interfaceSourceKeyBufferObserved === true
+        || Boolean(packedInterfaceSourceKeys.sourceKeyBuffer),
+      interfaceSourceKeyBufferConsumed: contactKinematicsGpuDerivation?.interfaceSourceKeyBufferConsumed === true,
+      interfaceSourceKeySurfaceIndexFallbackEnabled:
+        contactKinematicsGpuDerivation?.interfaceSourceKeySurfaceIndexFallbackEnabled !== false,
       schroederLawQueueSchema: contactKinematicsGpuDerivation?.schroederLawQueueSchema
         ?? schroederPressureInterfaceLawQueue.sourceSchema,
       schroederLawQueueSourceStatus: contactKinematicsGpuDerivation?.schroederLawQueueSourceStatus
@@ -2416,6 +2661,14 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       interfaceContactKinematicsParticleBinGridIndexBufferByteLength: contactKinematicsGpuDerivation?.particleBinGridIndexBufferByteLength || contactKinematicsParticleBinGrid?.indexBufferByteLength || 0,
       interfaceContactKinematicsParticleBinOverflowStatus: particleBinOverflowStatus,
       interfaceContactKinematicsParticleBinOverflowCount: particleBinOverflowCount,
+      interfaceSourceKeyStatus: solver.interfaceSourceKeyStatus,
+      interfaceSourceKeyConsumerStatus: solver.interfaceSourceKeyConsumerStatus,
+      interfaceSourceKeyRowCount: solver.interfaceSourceKeyRowCount,
+      interfaceSourceKeyReadyCount: solver.interfaceSourceKeyReadyCount,
+      interfaceSourceKeyBufferObserved: solver.interfaceSourceKeyBufferObserved,
+      interfaceSourceKeyBufferConsumed: solver.interfaceSourceKeyBufferConsumed,
+      interfaceSourceKeySurfaceIndexFallbackEnabled:
+        solver.interfaceSourceKeySurfaceIndexFallbackEnabled,
       schroederLawQueueStatus: contactKinematicsGpuDerivation?.schroederLawQueueStatus
         ?? schroederPressureInterfaceLawQueue.status,
       schroederLawQueueConsumerStatus: contactKinematicsGpuDerivation?.schroederLawQueueConsumerStatus

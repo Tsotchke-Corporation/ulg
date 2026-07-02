@@ -298,7 +298,11 @@ Suggested schemas:
   source-candidate span rows directly into the pressure contact-kinematics
   kernel, advertises the span table as the pressure/interface spatial-index
   descriptor, and prevents implicit full candidate scans when a retained
-  source-span descriptor is absent.
+  source-span descriptor is absent. The follow-up interface-source checkpoint
+  adds explicit `sph-interface-source-key` sidecar rows so pressure contact
+  kinematics can resolve source-span keys from retained interface/source
+  descriptors instead of overloading `surfaceIndex`; legacy fields still have a
+  controlled surface-index fallback.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -416,6 +420,9 @@ Suggested schemas:
    - keep pressure/interface contact kinematics on retained source-span indexed
      candidate ranges; no implicit full candidate scan without an explicit
      broad-fallback flag;
+   - feed pressure/interface contact kinematics explicit interface source-key
+     descriptors when available, preserving surface-index fallback only for
+     legacy/non-particle-backed interface fields;
    - keep compact traversal diagnostics as the escalation input rather than
      making sorted/radix the unconditional small-scene path;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
@@ -465,13 +472,13 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS pressure/interface interface-source indexing**:
+The next code slice on `SS` is **SS material-interface source-key production**:
 
-1. Add an explicit retained interface/source-particle key descriptor for
-   material-interface rows so pressure contact kinematics no longer overloads
-   `surfaceIndex` as the candidate source-span lookup key.
-2. Feed that descriptor into the pressure contact kernel alongside retained
-   source spans, preserving source-span bounded iteration and the particle-bin
-   fallback for non-particle-backed interface elements.
+1. Extend the GPU material-interface candidate/source-field extraction path to
+   emit retained interface source-key rows next to interface elements or
+   resident candidate summaries.
+2. Thread those retained source-key descriptors through scene and worker
+   pressure-interface scheduling so mounted hot-loop runs do not rely on
+   CPU-packed element source keys.
 3. Keep descriptor-only PeerCompute replay artifacts and no-full-readback
    validation as the default path.

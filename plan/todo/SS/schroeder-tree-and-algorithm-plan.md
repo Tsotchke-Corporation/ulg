@@ -257,7 +257,9 @@ Suggested schemas:
   overlay indexing and same-level next-tick overlay descriptors landed in
   `4a4e6f0`; same-device scene feedback caching, resident-step scheduling
   consumption, local-only summary diagnostics, and retained overlay preservation
-  landed in `f06ed2d`.
+  landed in `f06ed2d`; browser-mounted admission threading, following-tick
+  feedback consumption proof, status-line telemetry, and a browser WGSL
+  reserved-identifier fix landed in `fa9aed0`.
 - Drive support/level changes from phase/density/temperature/pressure changes.
 - Use water-to-steam expansion as the first visible stress case.
 - Coarsen coherent bulk steam without exploding particle count.
@@ -449,8 +451,8 @@ Suggested schemas:
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 4. Phase-volume migration:
-   - wire same-level next-tick overlay descriptors into the scene/resident
-     authority scheduler as the following resident tick's active-node overlay;
+   - replace test-local phase-volume/state-delta admission descriptors with
+     resident authority publication and PeerCompute-configured admission policy;
    - make water-to-steam expansion visibly migrate levels without particle
      explosion;
    - preserve fine representation near surfaces, reactions, and walls.
@@ -494,15 +496,16 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS phase-volume feedback browser proof and
-active-node telemetry**:
+The next code slice on `SS` is **SS resident-authority phase-volume admission
+publisher**:
 
-1. Add a mounted-demo/browser diagnostic gate that drives a visible
-   water-to-steam phase-volume update, then verifies the following resident tick
-   reports `schroederPhaseVolumeAssignmentOverlayFeedbackReady=true` and active
-   node selection consumes the cached overlay.
-2. Surface the scene/userData telemetry needed to distinguish row-aligned
-   overlays from sparse auto-indexed overlays without publishing raw `GPUBuffer`
-   handles across PeerCompute or worker boundaries.
-3. Capture a fresh VPN-visible browser run with no black-screen regression,
-   retained animation, and no full-particle readback in the normal SS hot path.
+1. Publish phase-volume migration and state-delta merge admissions from the
+   resident authority host instead of constructing browser/test-local admission
+   descriptors at the scene call site.
+2. Make the admission policy configurable by PeerCompute use case while keeping
+   raw `GPUBuffer` handles same-device/local-only and publishing only compact
+   descriptor summaries across StateManager boundaries.
+3. Keep the browser feedback gate as the live regression proof: the first
+   admitted tick retains the next-tick overlay, and the following resident tick
+   consumes that cached overlay for active-node level selection with
+   no-full-readback hot-loop telemetry.

@@ -34367,3 +34367,41 @@ Next:
 - Add the contact/interface consumers for retained `schroederLawQueue` rows.
 - Add a dedicated SS queue-neighbor kernel so reaction candidate enumeration can
   move off the fixed particle-bin/all-scan paths after the queue gate.
+
+## 2026-07-01 AKDT - SS Pressure/Interface Law Queue Consumer
+
+Status:
+
+- Added the pressure/interface retained SS law-queue consumer. The
+  contact-kinematics WGSL now accepts `schroeder_contact_law_queue_rows` plus a
+  compact params uniform and gates candidate particles by row status, law mask,
+  and contact/interface eligibility.
+- `runSphPressureInterfaceForceRowsWebGpu` now accepts `schroederLawQueue`,
+  validates the SS queue schema, checks same-device ownership for the retained
+  queue buffer, binds the queue into the contact-kinematics pass, and reports
+  `schroederLawQueueStatus`, `schroederLawQueueConsumerStatus`, and
+  `schroederLawQueueBufferConsumed`.
+- The pressure/interface stage compute task now forwards `schroederLawQueue`
+  into the WebGPU producer, so same-level SS orchestration can reach this
+  consumer.
+- This is still a queue gate over the existing particle-bin/all-particle
+  enumerator. The dedicated SS queue-neighbor kernel is the next law-queue
+  implementation slice.
+
+Validation:
+
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs` with `8/8`
+  passing.
+- PASS: `node --test tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with
+  `20/20` passing.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `73/73` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `40/40`
+  passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `831` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Build the dedicated SS queue-neighbor kernel for reaction/contact/interface
+  candidate enumeration.
+- After that, move to direct active-node consumption inside same-level P2G/G2P.

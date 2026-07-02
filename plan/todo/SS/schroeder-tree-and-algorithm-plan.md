@@ -258,15 +258,16 @@ Suggested schemas:
 - Status: retained active-node local law-queue descriptors landed in `f7cf080`.
   Same-level mechanics orchestration and resident backend forwarding landed in
   `8491fb5`. SPH reaction proposal gating over retained queue rows landed in
-  `6e275e0`.
+  `6e275e0`. Pressure/interface contact-kinematics queue gating landed in
+  `b1b2206`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
-- Current caveat: reaction now consumes queue eligibility as a proposal gate,
-  but still uses the existing particle-bin/all-scan neighbor enumeration behind
-  that gate. Contact/interface kernels still need their own consumers, and a
-  dedicated queue-neighbor kernel remains future work.
+- Current caveat: reaction and pressure/interface contact now consume queue
+  eligibility gates, but still use the existing particle-bin/all-scan neighbor
+  enumeration behind those gates. A dedicated queue-neighbor kernel remains
+  future work.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -284,10 +285,8 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - consume retained `schroederLawQueue` rows in contact/interface candidate
-     generation;
-   - replace reaction's current queue-gated particle-bin/all-scan neighbor
-     enumeration with a dedicated SS queue-neighbor kernel;
+   - replace reaction/contact/interface queue-gated particle-bin/all-scan
+     neighbor enumeration with a dedicated SS queue-neighbor kernel;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -342,9 +341,11 @@ Suggested schemas:
 The next code slice on `SS` is **SS law work queues/contact-interface
 consumers**:
 
-1. Consume retained law queue rows in pressure/contact/interface GPU kernels.
-2. Add a dedicated SS queue-neighbor kernel so reaction no longer depends on
-   fixed particle-bin/all-particle enumeration after the queue gate.
+1. Add a dedicated SS queue-neighbor kernel so reaction/contact/interface no
+   longer depend on fixed particle-bin/all-particle enumeration after the queue
+   gate.
+2. Preserve pressure/interface same-device retained-buffer checks and stage-task
+   pass-through while moving enumeration to SS rows.
 3. Preserve existing strict reaction discovery and exact small-scene behavior as
    validation anchors, not as the hot path.
 4. Keep queue outputs GPU-resident and StateManager-admission-aware.

@@ -82,10 +82,13 @@ Landed checkpoints:
 22. `6e275e0` gates SPH reaction proposal generation with retained
     `schroederLawQueue` rows, preserving strict reaction/sedenion checks while
     keeping the reaction stage resident and no-full-readback.
+23. `b1b2206` gates pressure/interface contact-kinematics candidate particles
+    with retained `schroederLawQueue` rows and threads the queue through the
+    pressure/interface stage task.
 
 Next implementation queue:
 
-1. Wire retained `schroederLawQueue` rows into contact/interface consumer
-   kernels.
+1. Replace queue-gated fixed bin/all-scan law enumeration with a dedicated SS
+   queue-neighbor kernel.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

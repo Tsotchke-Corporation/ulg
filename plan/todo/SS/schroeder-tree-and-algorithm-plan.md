@@ -657,14 +657,25 @@ Completed in this slice:
 3. Kept missing local refs fail-closed for the stage scheduler and added tests
    for both valid same-device resolver consumption and unresolved-ref blocking.
 
-The next code slice on `SS` is **SS adopted storage resident-host resolver
-hookup**:
+Completed in this slice:
 
-1. Add a browser resident-host resolver surface that maps admitted
-   adopted-storage descriptor refs to local retained buffers on the same device.
-2. Thread that resolver into browser-mounted resident scheduling so descriptor
-   hot-buffer publication, continuation planning, and mechanics stage execution
-   form one local same-device path.
-3. Add integration tests proving host-planned same-device refs resolve locally
-   while missing refs and cross-peer consumers remain blocked without portable
-   materialization evidence.
+1. Added a browser resident-host same-device local retained-buffer resolver
+   registry for admitted adopted-storage descriptor refs.
+2. Kept StateManager hot-buffer and warm-delta records descriptor-only while
+   local handles stay in host memory, keyed by adopted-storage hot-buffer key.
+3. Auto-attached a complete local resolver when `runMechanicsStageTaskChain`
+   requests same-device adopted-storage continuation, and left incomplete
+   local resolver sets fail-closed.
+4. Added integration coverage for publication-side local resolver registration,
+   host summary readiness, automatic stage-chain resolver injection, missing
+   local refs, and cross-peer portable-materialization gating.
+
+The next code slice on `SS` is **SS adopted storage scene scheduling hookup**:
+
+1. Publish adopted particle-storage descriptors from browser resident
+   executions together with their same-device local retained particle buffers.
+2. Feed the resulting hot-buffer key into mounted resident mechanics scheduling
+   so the next same-device stage-chain tick consumes the host resolver
+   automatically.
+3. Add browser/scene diagnostics proving descriptor publication, local resolver
+   readiness, scheduler consumption, and no raw GPUBuffer PeerCompute transfer.

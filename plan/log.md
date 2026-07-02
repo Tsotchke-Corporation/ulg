@@ -35959,3 +35959,38 @@ Next:
 - Add the browser resident-host resolver hookup so admitted adopted-storage
   descriptor refs can resolve to same-device retained buffers automatically
   when scheduling resident mechanics stages.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Resident-Host Resolver Hookup
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-local-retained-buffer-resolver.v0`.
+- Browser resident authority hosts now keep a private same-device local
+  retained-buffer resolver registry keyed by adopted particle-storage
+  hot-buffer key.
+- Adopted particle-storage descriptor publication can register local retained
+  SPH state, SPH thermo, and MLS-MPM mechanics handles without serializing them
+  into StateManager hot-buffer records or warm deltas.
+- `runMechanicsStageTaskChain` now auto-attaches a complete host-local resolver
+  when same-device adopted-storage continuation is requested; incomplete local
+  resolver sets remain fail-closed.
+- Host summaries expose the resolver surface and local registry count, while
+  cross-peer consumers still require portable materialization evidence.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  with `18/18` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `105/105` passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `946/949` passing and `3` skipped.
+
+Next:
+
+- Thread adopted particle-storage descriptor publication and same-device local
+  resolver registration into browser scene scheduling so the next mounted
+  resident mechanics tick can consume the host resolver automatically.

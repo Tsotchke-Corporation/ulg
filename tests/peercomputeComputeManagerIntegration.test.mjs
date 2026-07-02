@@ -92,6 +92,7 @@ import {
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3469,6 +3470,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentSchroederPhaseVolumeMigrationAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStoragePublicationReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStorageContinuationPlannerReady, true);
+  assert.equal(summary.residentSchroederAdoptedParticleStorageLocalResolverReady, true);
   assert.equal(summary.residentSchroederPortableSummaryReplayDescriptorReady, true);
 
   const schroederPortableSummary = {
@@ -3680,8 +3682,34 @@ test('ULG resident authority host admits worker-retained mechanics output descri
       'schroeder-particle-storage'
     ]
   };
+  const localAdoptedStateBuffer = { label: 'local-adopted-state-buffer' };
+  const localAdoptedThermoBuffer = { label: 'local-adopted-thermo-buffer' };
+  const localAdoptedMechanicsBuffer = { label: 'local-adopted-mechanics-buffer' };
   const adoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
     descriptor: adoptedParticleStorageDescriptor,
+    localRetainedBuffers: [
+      {
+        retainedBufferRef: 'sph-state-buffer',
+        buffer: localAdoptedStateBuffer,
+        byteLength: 4 * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        particleCount: 4,
+        status: 'local-retained-buffer-ready'
+      },
+      {
+        retainedBufferRef: 'sph-thermo-buffer',
+        buffer: localAdoptedThermoBuffer,
+        byteLength: 4 * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        particleCount: 4,
+        status: 'local-retained-buffer-ready'
+      },
+      {
+        retainedBufferRef: 'mls-mpm-mechanics-buffer',
+        buffer: localAdoptedMechanicsBuffer,
+        byteLength: 4 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        particleCount: 4,
+        status: 'local-retained-buffer-ready'
+      }
+    ],
     sourceTaskId: 'ulg:test:schroeder-adopted-storage-source',
     taskId: 'ulg:test:schroeder-adopted-storage-publication'
   });
@@ -3696,6 +3724,15 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(adoptedStoragePublication.accepted, true);
   assert.equal(adoptedStoragePublication.committed, true);
   assert.equal(adoptedStoragePublication.rawGpuBufferTransferDetected, false);
+  assert.equal(adoptedStoragePublication.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady, true);
+  assert.equal(
+    adoptedStoragePublication.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus,
+    'schroeder-adopted-particle-storage-local-retained-buffer-resolver-ready'
+  );
+  assert.equal(
+    adoptedStoragePublication.schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount,
+    3
+  );
   assert.equal(adoptedStoragePublication.authoritativeParticleCount, 4);
   assert.deepEqual(adoptedStoragePublication.retainedBufferRefs, [
     'sph-state-buffer',
@@ -3718,6 +3755,30 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA
   );
   assert.equal(JSON.stringify(adoptedStorageHotBuffer).includes('raw-gpu-buffer-label'), false);
+  assert.equal(JSON.stringify(adoptedStorageHotBuffer).includes('local-adopted-state-buffer'), false);
+  const localAdoptedStorageResolver = host.createSchroederAdoptedParticleStorageRetainedBufferResolver({
+    hotBufferKey: adoptedStoragePublication.hotBufferKey
+  });
+  assert.equal(
+    localAdoptedStorageResolver.schema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA
+  );
+  assert.equal(
+    localAdoptedStorageResolver.status,
+    'schroeder-adopted-particle-storage-local-retained-buffer-resolver-ready'
+  );
+  assert.equal(localAdoptedStorageResolver.ready, true);
+  assert.equal(localAdoptedStorageResolver.sameDeviceOnly, true);
+  assert.equal(localAdoptedStorageResolver.peerComputePortable, false);
+  assert.equal(localAdoptedStorageResolver.rawGpuBufferPeerComputeTransfer, false);
+  assert.equal(
+    localAdoptedStorageResolver.retainedBufferResolver.get('sph-state-buffer').buffer,
+    localAdoptedStateBuffer
+  );
+  assert.equal(
+    summarizePeerComputeResidentAuthorityHost(host).residentSchroederAdoptedParticleStorageLocalResolverCount,
+    1
+  );
   const sameDeviceAdoptedStoragePlan = host.planSchroederAdoptedParticleStorageContinuation({
     hotBufferKey: adoptedStoragePublication.hotBufferKey,
     consumerMode: 'same-device'
@@ -3740,6 +3801,38 @@ test('ULG resident authority host admits worker-retained mechanics output descri
     'sph-thermo-buffer',
     'mls-mpm-mechanics-buffer'
   ]);
+  const adoptedStorageMechanicsStageChain = await host.runMechanicsStageTaskChain({
+    ...packedSingleMechanicsParticle(),
+    stageTaskIdPrefix: 'ulg:test:schroeder-adopted-storage-local-resolver-chain',
+    useNativeTaskGraph: false,
+    useGpuResidentLaneStagePlan: false,
+    useGpuHubResidentStageExecutors: false,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    schroederAdoptedParticleStorageContinuationHotBufferKey:
+      adoptedStoragePublication.hotBufferKey,
+    schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'
+  });
+  assert.equal(
+    adoptedStorageMechanicsStageChain.mechanicsStageTaskChain
+      .schroederAdoptedParticleStorageLocalResolverStatus,
+    'schroeder-adopted-particle-storage-local-resolver-ready'
+  );
+  assert.equal(
+    adoptedStorageMechanicsStageChain.mechanicsStageTaskChain
+      .schroederAdoptedParticleStorageLocalResolverReady,
+    true
+  );
+  assert.equal(
+    adoptedStorageMechanicsStageChain.mechanicsStageTaskChain
+      .schroederAdoptedParticleStorageLocalResolverRawGpuBufferPeerComputeTransfer,
+    false
+  );
+  assert.equal(
+    adoptedStorageMechanicsStageChain.mechanicsStageTaskChain
+      .submittedStageTasks.length,
+    3
+  );
 
   const crossPeerAdoptedStoragePlan = host.planSchroederAdoptedParticleStorageContinuation({
     hotBufferKey: adoptedStoragePublication.hotBufferKey,
@@ -3774,6 +3867,72 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(crossPeerSeededPlan.crossPeerContinuationReady, true);
   assert.equal(crossPeerSeededPlan.portableMaterializationSeedAvailable, true);
   assert.equal(crossPeerSeededPlan.crossPeerReplayBlocker, null);
+
+  const missingLocalAdoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
+    descriptor: {
+      ...adoptedParticleStorageDescriptor,
+      cacheKey: 'ulg:test:schroeder-adopted-storage-missing-local-cache',
+      stateKey: 'ulg:test:schroeder-adopted-storage-missing-local-state'
+    },
+    localRetainedBuffers: [
+      {
+        retainedBufferRef: 'sph-state-buffer',
+        buffer: { label: 'local-adopted-missing-state-buffer' },
+        byteLength: SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        particleCount: 1,
+        status: 'local-retained-buffer-ready'
+      }
+    ],
+    sourceTaskId: 'ulg:test:schroeder-adopted-storage-missing-local-source',
+    taskId: 'ulg:test:schroeder-adopted-storage-missing-local-publication'
+  });
+  assert.equal(missingLocalAdoptedStoragePublication.accepted, true);
+  assert.equal(
+    missingLocalAdoptedStoragePublication.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady,
+    false
+  );
+  const missingLocalAdoptedStorageResolver = host.createSchroederAdoptedParticleStorageRetainedBufferResolver({
+    hotBufferKey: missingLocalAdoptedStoragePublication.hotBufferKey
+  });
+  assert.equal(
+    missingLocalAdoptedStorageResolver.status,
+    'blocked-schroeder-adopted-particle-storage-local-retained-buffer-resolver'
+  );
+  assert.deepEqual(missingLocalAdoptedStorageResolver.missingRetainedBufferRefs, [
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  const missingLocalAdoptedStorageStageChain = await host.runMechanicsStageTaskChain({
+    ...packedSingleMechanicsParticle(),
+    stageTaskIdPrefix: 'ulg:test:schroeder-adopted-storage-missing-local-chain',
+    useNativeTaskGraph: false,
+    useGpuResidentLaneStagePlan: false,
+    useGpuHubResidentStageExecutors: false,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    schroederAdoptedParticleStorageContinuationHotBufferKey:
+      missingLocalAdoptedStoragePublication.hotBufferKey,
+    schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'
+  });
+  assert.equal(
+    missingLocalAdoptedStorageStageChain.mechanicsStageTaskChain.schedulerStatus,
+    'blocked-schroeder-adopted-particle-storage-continuation'
+  );
+  assert.equal(
+    missingLocalAdoptedStorageStageChain.mechanicsStageTaskChain
+      .schroederAdoptedParticleStorageLocalResolverStatus,
+    'blocked-schroeder-adopted-particle-storage-local-resolver'
+  );
+  assert.deepEqual(
+    missingLocalAdoptedStorageStageChain.mechanicsStageTaskChain
+      .schroederAdoptedParticleStorageLocalResolverMissingResolvedRefs,
+    ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer']
+  );
+  assert.equal(
+    missingLocalAdoptedStorageStageChain.mechanicsStageTaskChain.submittedStageTasks.length,
+    0
+  );
 
   const rejectedAdoptedStoragePublication = host.publishSchroederAdoptedParticleStorageDescriptor({
     descriptor: {

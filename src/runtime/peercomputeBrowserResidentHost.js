@@ -105,6 +105,8 @@ export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE =
   'ulg-schroeder-adopted-particle-storage-publications';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-local-retained-buffer-resolver.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_REPLAY_SEED_SCHEMA =
@@ -3458,6 +3460,222 @@ function validateSchroederAdoptedParticleStorageDescriptor(descriptor = null) {
     retainedBufferRefs,
     outputFamilies,
     authoritativeParticleCount
+  };
+}
+
+function adoptedStorageLocalBufferEntry({
+  ref = null,
+  role = null,
+  source = null,
+  fallbackByteLength = 0,
+  fallbackParticleCount = 0
+} = {}) {
+  if (!ref || !source) return null;
+  const buffer = source.buffer || source.gpuBuffer || null;
+  if (!buffer) return null;
+  return {
+    ref,
+    retainedBufferRef: ref,
+    role,
+    buffer,
+    gpuBuffer: buffer,
+    byteLength: Math.max(0, Math.round(finiteSeedNumber(source.byteLength, fallbackByteLength))),
+    strideBytes: Math.max(0, Math.round(finiteSeedNumber(source.strideBytes, 0))),
+    strideFloats: Math.max(0, Math.round(finiteSeedNumber(source.strideFloats, 0))),
+    particleCount: Math.max(0, Math.round(finiteSeedNumber(source.particleCount, fallbackParticleCount))),
+    status: source.status || 'local-retained-buffer-ready',
+    resourceKey: source.resourceKey || ref
+  };
+}
+
+function addAdoptedStorageLocalBufferEntry(target, options = {}) {
+  const entry = adoptedStorageLocalBufferEntry(options);
+  if (entry) target.set(entry.retainedBufferRef, entry);
+}
+
+function addAdoptedStorageResolverEntries(target, resolver = null, retainedRefs = []) {
+  if (!resolver) return;
+  if (resolver instanceof Map) {
+    for (const ref of retainedRefs) {
+      addAdoptedStorageLocalBufferEntry(target, {
+        ref,
+        source: resolver.get(ref)
+      });
+    }
+    return;
+  }
+  if (typeof resolver === 'function') {
+    for (const ref of retainedRefs) {
+      addAdoptedStorageLocalBufferEntry(target, {
+        ref,
+        source: resolver(ref, { retainedBufferRef: ref })
+      });
+    }
+    return;
+  }
+  if (resolver && typeof resolver === 'object') {
+    const source = resolver.retainedBufferResolver || resolver;
+    if (source instanceof Map || typeof source === 'function') {
+      addAdoptedStorageResolverEntries(target, source, retainedRefs);
+      return;
+    }
+    const buffers = Array.isArray(source.buffers)
+      ? source.buffers
+      : (Array.isArray(source) ? source : []);
+    for (const entry of buffers) {
+      const ref = normalizeString(
+        entry?.retainedBufferRef || entry?.ref || entry?.resourceKey,
+        null
+      );
+      addAdoptedStorageLocalBufferEntry(target, {
+        ref,
+        role: entry?.role || null,
+        source: entry
+      });
+    }
+    for (const ref of retainedRefs) {
+      addAdoptedStorageLocalBufferEntry(target, {
+        ref,
+        source: source[ref] || null
+      });
+    }
+  }
+}
+
+function createSchroederAdoptedParticleStorageLocalRetainedBufferResolver({
+  hotBufferKey = null,
+  publication = null,
+  descriptor = null,
+  retainedBufferResolver = null,
+  localRetainedBuffers = null,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  residentExecution = null,
+  finalStep = null,
+  source = 'peercompute-browser-resident-authority-host'
+} = {}) {
+  const storageDescriptor =
+    descriptor
+    || publication?.schroederAdoptedParticleStorageDescriptor
+    || null;
+  const validation = validateSchroederAdoptedParticleStorageDescriptor(storageDescriptor);
+  const retainedRefs = validation.retainedBufferRefs;
+  const resolvedHotBufferKey = normalizeString(
+    hotBufferKey
+      || publication?.hotBufferKey
+      || publication?.sourceHotBufferKey
+      || storageDescriptor?.hotBufferKey,
+    null
+  );
+  const final = finalStep || residentExecution?.finalStep || residentExecution || null;
+  const finalUploads = final?.nextParticleUploads || residentExecution?.nextParticleUploads || null;
+  const resolvedSphUpload = sphParticleUpload || finalUploads?.sphParticleUpload || null;
+  const resolvedMlsUpload = mlsMpmParticleUpload || finalUploads?.mlsMpmParticleUpload || null;
+  const retainedBufferMap = new Map();
+  addAdoptedStorageResolverEntries(retainedBufferMap, localRetainedBuffers, retainedRefs);
+  addAdoptedStorageResolverEntries(retainedBufferMap, retainedBufferResolver, retainedRefs);
+  addAdoptedStorageLocalBufferEntry(retainedBufferMap, {
+    ref: 'sph-state-buffer',
+    role: 'state',
+    source: resolvedSphUpload?.stateBuffer
+      ? {
+          buffer: resolvedSphUpload.stateBuffer,
+          byteLength: resolvedSphUpload.stateBufferByteLength,
+          particleCount: resolvedSphUpload.particleCount,
+          status: resolvedSphUpload.status || 'webgpu-uploaded'
+        }
+      : null,
+    fallbackByteLength: resolvedSphUpload?.stateBufferByteLength,
+    fallbackParticleCount: resolvedSphUpload?.particleCount
+  });
+  addAdoptedStorageLocalBufferEntry(retainedBufferMap, {
+    ref: 'sph-thermo-buffer',
+    role: 'thermo',
+    source: resolvedSphUpload?.thermoBuffer
+      ? {
+          buffer: resolvedSphUpload.thermoBuffer,
+          byteLength: resolvedSphUpload.thermoBufferByteLength,
+          particleCount: resolvedSphUpload.particleCount,
+          status: resolvedSphUpload.status || 'webgpu-uploaded'
+        }
+      : null,
+    fallbackByteLength: resolvedSphUpload?.thermoBufferByteLength,
+    fallbackParticleCount: resolvedSphUpload?.particleCount
+  });
+  addAdoptedStorageLocalBufferEntry(retainedBufferMap, {
+    ref: 'mls-mpm-mechanics-buffer',
+    role: 'mechanics',
+    source: resolvedMlsUpload?.mechanicsBuffer
+      ? {
+          buffer: resolvedMlsUpload.mechanicsBuffer,
+          byteLength: resolvedMlsUpload.mechanicsBufferByteLength,
+          particleCount: resolvedMlsUpload.particleCount,
+          status: resolvedMlsUpload.status || 'webgpu-uploaded'
+        }
+      : null,
+    fallbackByteLength: resolvedMlsUpload?.mechanicsBufferByteLength,
+    fallbackParticleCount: resolvedMlsUpload?.particleCount
+  });
+  const missingRetainedBufferRefs = retainedRefs.filter((ref) => !retainedBufferMap.has(ref));
+  const ready = Boolean(validation.accepted && retainedRefs.length > 0 && missingRetainedBufferRefs.length === 0);
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA,
+    status: ready
+      ? 'schroeder-adopted-particle-storage-local-retained-buffer-resolver-ready'
+      : 'blocked-schroeder-adopted-particle-storage-local-retained-buffer-resolver',
+    ready,
+    blocker: ready
+      ? null
+      : (validation.reason || (retainedRefs.length === 0
+          ? 'schroeder-adopted-particle-storage-retained-buffer-refs-missing'
+          : 'schroeder-adopted-particle-storage-local-retained-buffer-ref-missing')),
+    source,
+    hotBufferKey: resolvedHotBufferKey,
+    descriptorSchema: storageDescriptor?.schema || null,
+    descriptorStatus: storageDescriptor?.status || null,
+    descriptorReady: storageDescriptor?.ready === true,
+    sameDeviceOnly: true,
+    peerComputePortable: false,
+    descriptorOnlyPeerComputeHandoff: true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferPeerComputeTransfer: false,
+    retainedBufferRefs: retainedRefs,
+    retainedBufferRefCount: retainedRefs.length,
+    resolvedRetainedBufferRefs: retainedRefs.filter((ref) => retainedBufferMap.has(ref)),
+    resolvedRetainedBufferRefCount: retainedRefs.filter((ref) => retainedBufferMap.has(ref)).length,
+    missingRetainedBufferRefs,
+    missingRetainedBufferRefCount: missingRetainedBufferRefs.length,
+    authoritativeParticleCount: validation.authoritativeParticleCount,
+    outputFamilies: validation.outputFamilies,
+    retainedBufferResolver: retainedBufferMap,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function summarizeAdoptedStorageLocalRetainedBufferResolver(resolver = null) {
+  if (!resolver || typeof resolver !== 'object') return null;
+  return {
+    schema: resolver.schema || ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_LOCAL_RETAINED_BUFFER_RESOLVER_SCHEMA,
+    status: resolver.status || null,
+    ready: resolver.ready === true,
+    blocker: resolver.blocker || null,
+    source: resolver.source || null,
+    hotBufferKey: resolver.hotBufferKey || null,
+    sameDeviceOnly: resolver.sameDeviceOnly === true,
+    peerComputePortable: resolver.peerComputePortable === true,
+    descriptorOnlyPeerComputeHandoff: resolver.descriptorOnlyPeerComputeHandoff === true,
+    rawGpuBufferTransferAllowed: resolver.rawGpuBufferTransferAllowed === true,
+    rawGpuBufferPeerComputeTransfer: resolver.rawGpuBufferPeerComputeTransfer === true,
+    retainedBufferRefs: [...(resolver.retainedBufferRefs || [])],
+    retainedBufferRefCount: resolver.retainedBufferRefCount ?? 0,
+    resolvedRetainedBufferRefs: [...(resolver.resolvedRetainedBufferRefs || [])],
+    resolvedRetainedBufferRefCount: resolver.resolvedRetainedBufferRefCount ?? 0,
+    missingRetainedBufferRefs: [...(resolver.missingRetainedBufferRefs || [])],
+    missingRetainedBufferRefCount: resolver.missingRetainedBufferRefCount ?? 0,
+    authoritativeParticleCount: resolver.authoritativeParticleCount ?? 0,
+    outputFamilies: [...(resolver.outputFamilies || [])]
   };
 }
 
@@ -6883,6 +7101,7 @@ export async function createPeerComputeResidentAuthorityHost({
   const solverRegistration = registerUlgResidentSolverDescriptors(computeManager, {
     computeTaskModulePath
   });
+  const schroederAdoptedParticleStorageLocalRetainedBufferResolvers = new Map();
   computeManager.ulgLawFamilyPromotionAdmissionId = 'ulg-law-family-promotion-admission';
   computeManager.ulgLawFamilyPromotionAdmission = (request = {}) => createUlgLawFamilyPromotionAdmission({
     computeManager,
@@ -6948,13 +7167,89 @@ export async function createPeerComputeResidentAuthorityHost({
     });
     return computeManager.submitTask(task);
   };
-  computeManager.runUlgMechanicsStageTaskChain = (request = {}) => runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
-    computeManager,
-    nodeKernel,
-    modulePath: computeTaskModulePath,
-    residentAuthorityHost: host,
-    ...request
-  });
+  const registerSchroederAdoptedParticleStorageLocalResolver = (options = {}) => {
+    const sourceRecord = adoptedParticleStorageDescriptorSource({
+      stateManager,
+      hotBufferKey: options.hotBufferKey,
+      publication: options.publication,
+      descriptor: options.descriptor || options.adoptedParticleStorageDescriptor
+    });
+    const resolver = createSchroederAdoptedParticleStorageLocalRetainedBufferResolver({
+      hotBufferKey: sourceRecord.hotBufferKey || options.hotBufferKey,
+      publication: options.publication || sourceRecord.source,
+      descriptor:
+        options.descriptor
+        || options.adoptedParticleStorageDescriptor
+        || sourceRecord.descriptor,
+      retainedBufferResolver: options.retainedBufferResolver,
+      localRetainedBuffers: options.localRetainedBuffers,
+      sphParticleUpload: options.sphParticleUpload,
+      mlsMpmParticleUpload: options.mlsMpmParticleUpload,
+      residentExecution: options.residentExecution,
+      finalStep: options.finalStep,
+      source: options.source || 'peercompute-browser-resident-authority-host'
+    });
+    if (resolver.ready && resolver.hotBufferKey) {
+      schroederAdoptedParticleStorageLocalRetainedBufferResolvers.set(
+        resolver.hotBufferKey,
+        resolver
+      );
+    }
+    return resolver;
+  };
+  const resolveSchroederAdoptedParticleStorageLocalResolver = (options = {}) => {
+    const sourceRecord = adoptedParticleStorageDescriptorSource({
+      stateManager,
+      hotBufferKey: options.hotBufferKey,
+      publication: options.publication,
+      descriptor: options.descriptor || options.adoptedParticleStorageDescriptor
+    });
+    const hotBufferKey = sourceRecord.hotBufferKey || options.hotBufferKey || null;
+    if (hotBufferKey && schroederAdoptedParticleStorageLocalRetainedBufferResolvers.has(hotBufferKey)) {
+      return schroederAdoptedParticleStorageLocalRetainedBufferResolvers.get(hotBufferKey);
+    }
+    return registerSchroederAdoptedParticleStorageLocalResolver({
+      ...options,
+      hotBufferKey,
+      publication: options.publication || sourceRecord.source,
+      descriptor:
+        options.descriptor
+        || options.adoptedParticleStorageDescriptor
+        || sourceRecord.descriptor,
+      source: options.source || 'peercompute-browser-resident-authority-host-resolver-lookup'
+    });
+  };
+  computeManager.runUlgMechanicsStageTaskChain = (request = {}) => {
+    const adoptedContinuationRequested = Boolean(
+      request.schroederAdoptedParticleStorageContinuationHotBufferKey
+      || request.schroederAdoptedParticleStorageContinuationPublication
+      || request.schroederAdoptedParticleStorageContinuationDescriptor
+      || request.schroederAdoptedParticleStorageContinuationPlan
+    );
+    const localResolver = request.schroederAdoptedParticleStorageRetainedBufferResolver
+      ? null
+      : (adoptedContinuationRequested
+          ? resolveSchroederAdoptedParticleStorageLocalResolver({
+              hotBufferKey: request.schroederAdoptedParticleStorageContinuationHotBufferKey,
+              publication: request.schroederAdoptedParticleStorageContinuationPublication,
+              descriptor: request.schroederAdoptedParticleStorageContinuationDescriptor,
+              source: 'peercompute-browser-resident-authority-host-stage-chain'
+            })
+          : null);
+    return runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+      computeManager,
+      nodeKernel,
+      modulePath: computeTaskModulePath,
+      residentAuthorityHost: host,
+      ...request,
+      ...(localResolver?.ready
+        ? {
+            schroederAdoptedParticleStorageRetainedBufferResolver:
+              localResolver.retainedBufferResolver
+          }
+        : {})
+    });
+  };
   const createUlgMechanicsResidentStageWorkerRunner = (options = {}) => {
     if (typeof createResidentStageWorkerBackend !== 'function') {
       throw new Error('PeerCompute createResidentStageWorkerBackend is not available');
@@ -7022,6 +7317,8 @@ export async function createPeerComputeResidentAuthorityHost({
     gpuHub,
     nodeKernel,
     bridge,
+    schroederAdoptedParticleStorageLocalRetainedBufferResolverRegistryStatus:
+      'host-local-same-device-only',
     createdAtMs: nowMs(),
     getComputeManager() {
       return computeManager;
@@ -7031,6 +7328,9 @@ export async function createPeerComputeResidentAuthorityHost({
     },
     getGPUHub() {
       return gpuHub;
+    },
+    getSchroederAdoptedParticleStorageLocalRetainedBufferResolverCount() {
+      return schroederAdoptedParticleStorageLocalRetainedBufferResolvers.size;
     },
     setRenderOwnershipPolicy(policy = null) {
       host.renderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
@@ -7126,17 +7426,45 @@ export async function createPeerComputeResidentAuthorityHost({
       });
     },
     publishSchroederAdoptedParticleStorageDescriptor(options = {}) {
-      return publishUlgSchroederAdoptedParticleStorageDescriptor({
+      const publication = publishUlgSchroederAdoptedParticleStorageDescriptor({
         stateManager,
         nodeKernel,
         ...options
       });
+      const localResolver = registerSchroederAdoptedParticleStorageLocalResolver({
+        ...options,
+        hotBufferKey: publication.hotBufferKey || options.hotBufferKey,
+        publication,
+        descriptor:
+          options.descriptor
+          || options.adoptedParticleStorageDescriptor
+          || publication.schroederAdoptedParticleStorageDescriptor,
+        source: 'peercompute-browser-resident-authority-host-publication'
+      });
+      const localResolverSummary = summarizeAdoptedStorageLocalRetainedBufferResolver(localResolver);
+      return {
+        ...publication,
+        schroederAdoptedParticleStorageLocalRetainedBufferResolver:
+          localResolverSummary,
+        schroederAdoptedParticleStorageLocalRetainedBufferResolverReady:
+          localResolverSummary?.ready === true,
+        schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus:
+          localResolverSummary?.status || null,
+        schroederAdoptedParticleStorageLocalRetainedBufferResolvedRefCount:
+          localResolverSummary?.resolvedRetainedBufferRefCount ?? 0
+      };
     },
     planSchroederAdoptedParticleStorageContinuation(options = {}) {
       return planSchroederAdoptedParticleStorageContinuation({
         stateManager,
         ...options
       });
+    },
+    registerSchroederAdoptedParticleStorageLocalRetainedBuffers(options = {}) {
+      return registerSchroederAdoptedParticleStorageLocalResolver(options);
+    },
+    createSchroederAdoptedParticleStorageRetainedBufferResolver(options = {}) {
+      return resolveSchroederAdoptedParticleStorageLocalResolver(options);
     },
     createSchroederPortableSummaryReplayDescriptor(options = {}) {
       return createSchroederPortableSummaryReplayDescriptor({
@@ -7958,6 +8286,14 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.publishSchroederAdoptedParticleStorageDescriptor === 'function',
     residentSchroederAdoptedParticleStorageContinuationPlannerReady:
       typeof host?.planSchroederAdoptedParticleStorageContinuation === 'function',
+    residentSchroederAdoptedParticleStorageLocalResolverReady:
+      typeof host?.createSchroederAdoptedParticleStorageRetainedBufferResolver === 'function',
+    residentSchroederAdoptedParticleStorageLocalResolverRegistryStatus:
+      host?.schroederAdoptedParticleStorageLocalRetainedBufferResolverRegistryStatus || null,
+    residentSchroederAdoptedParticleStorageLocalResolverCount:
+      typeof host?.getSchroederAdoptedParticleStorageLocalRetainedBufferResolverCount === 'function'
+        ? host.getSchroederAdoptedParticleStorageLocalRetainedBufferResolverCount()
+        : null,
     residentSchroederPortableSummaryReplayDescriptorReady:
       typeof host?.createSchroederPortableSummaryReplayDescriptor === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:

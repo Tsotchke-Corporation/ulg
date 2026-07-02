@@ -1,5 +1,42 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Far-Aggregate Force Summaries
+
+Status:
+
+- Added `peercompute.ulg.schroeder-far-aggregate-force-summary.v0` and
+  execution schema with a 32-float retained row layout.
+- Added a GPU-first WebGPU reducer over
+  `schroeder-far-aggregate-candidate` rows. It emits one read-only
+  gravity-like acceleration/potential summary per active source, including
+  accepted/active candidate counts, overflow count, opening-ratio/error-bound
+  telemetry, and explicit `stateMutationRequired=false` fields.
+- Same-level SS orchestration now runs the force-summary pass after
+  far-aggregate candidate generation, forwards it to the resident backend, and
+  exposes descriptor-only refs through portable summaries.
+- Force application remains intentionally unimplemented until a later
+  StateManager-admitted mutation contract defines conservation and energy
+  handling.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `70/70`
+  passing.
+- PASS:
+  `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  with `30/30` passing.
+
+Next:
+
+- Add compact far-field summary diagnostics for overflow, active counts,
+  opening-ratio pressure, and declared error-bound pressure without full
+  particle readback.
+
 ## 2026-07-01 AKDT - SS Far-Aggregate Candidate Traversal
 
 Status:

@@ -301,16 +301,18 @@ Suggested schemas:
 
 - Status: retained far-aggregate candidate row ABI, WGSL producer, WebGPU
   runner, same-level orchestration forwarding, and descriptor-only portable
-  summary propagation landed in `0fee1ef`.
+  summary propagation landed in `0fee1ef`; retained read-only far-aggregate
+  force-summary rows landed in `0773c25`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
 - Do not use aggregate traversal for local incompressibility or reactions.
 - Current caveat: `0fee1ef` emits read-only aggregate-admissible candidate
   descriptors from active nodes and retained hierarchy aggregate nodes. It does
-  not yet apply a law-specific force, radiation, plasma, or gas-summary update;
-  those consumers must declare physical error bounds and StateManager admission
-  before mutating state.
+  not yet apply a law-specific force, radiation, plasma, or gas-summary update.
+  `0773c25` adds the first read-only gravity-like acceleration/potential
+  summary over those candidate rows with explicit error-bound telemetry. Any
+  future force application remains a separate StateManager-admitted mutation.
 
 ### Slice 8: Render And Distribution
 
@@ -344,13 +346,15 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - add the first read-only far-field consumer over
-     `schroeder-far-aggregate-candidate` rows with an explicit error-bound
-     contract;
+   - add compact far-field diagnostics over `schroeder-far-aggregate-force-summary`
+     rows so force quality, overflow, opening-ratio, and error-bound pressure
+     can be observed without full particle readback;
+   - keep force application disabled until StateManager admission and a
+     conservation/energy policy are explicit;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
-   - expose compact far-field candidate diagnostics without full particle
-     readback.
+   - later add radiation, plasma/electromagnetic approximation, and gas-summary
+     consumers with law-specific admissibility.
 2. Render and distribution:
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep StateManager admissions and replay descriptors descriptor-only across

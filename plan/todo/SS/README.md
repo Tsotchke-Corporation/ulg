@@ -213,12 +213,17 @@ Landed checkpoints:
     aggregate nodes, forwards descriptor-only far-field refs through portable
     summaries, excludes near-field/local laws, and keeps the default hot path
     no-full-readback.
+56. `0773c25` adds retained GPU far-aggregate force-summary rows. The pass
+    reduces far-aggregate candidates into read-only gravity-like
+    acceleration/potential summaries with explicit error-bound telemetry,
+    forwards descriptor-only refs through same-level/portable-summary paths, and
+    keeps force application as a future StateManager-admitted mutation.
 
 Next implementation queue:
 
-1. Continue Slice 7 by adding law-specific far-aggregate consumers with
-   explicit physical error bounds, starting with read-only force/summary
-   adapters rather than state mutation.
+1. Continue Slice 7 by adding law-specific far-aggregate diagnostics and then a
+   StateManager-admitted force-application path only after the error-bound
+   contract is visible and accepted.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
 3. Keep render/distribution descriptor-only and no-full-readback while far-field

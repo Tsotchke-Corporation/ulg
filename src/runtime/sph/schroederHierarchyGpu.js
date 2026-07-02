@@ -6484,6 +6484,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       aggregateNodeCount: resolvedPortableSummary.aggregateNodeCount,
       lawQueueCount: resolvedPortableSummary.lawQueueCount,
       lawNeighborCandidateCount: resolvedPortableSummary.lawNeighborCandidateCount,
+      retainedRefs: Array.isArray(resolvedPortableSummary.retainedRefs)
+        ? resolvedPortableSummary.retainedRefs.map((entry) => ({
+          family: entry.family,
+          role: entry.role,
+          schema: entry.schema,
+          status: entry.status,
+          rowCount: entry.rowCount,
+          strideFloats: entry.strideFloats,
+          byteLength: entry.byteLength,
+          retained: Boolean(entry.retained),
+          retainedBufferRef: entry.retainedBufferRef || null,
+          transferMode: entry.transferMode
+        }))
+        : [],
       renderLodStatus: resolvedPortableSummary.renderLodStatus,
       renderLodMode: resolvedPortableSummary.renderLodMode,
       renderLod: resolvedPortableSummary.renderLod ? {

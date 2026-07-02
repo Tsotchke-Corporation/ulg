@@ -3181,6 +3181,12 @@ test('Schroeder same-level mechanics can emit portable render LOD summary', asyn
   assert.equal(result.portableSummary.transferMode, 'peercompute-portable-summary-descriptors');
   assert.equal(result.portableSummary.retainedRefCount, 2);
   assert.equal(result.portableSummary.retainedBufferRefCount, 2);
+  assert.equal(result.portableSummary.retainedRefs.length, 2);
+  assert.equal(result.portableSummary.retainedRefs[1].family, 'schroeder-active-node-list');
+  assert.equal(result.portableSummary.retainedRefs[1].role, 'render-lod-leaf-source');
+  assert.equal(result.portableSummary.retainedRefs[1].transferMode, 'descriptor-only-no-raw-gpubuffer-transfer');
+  assert.equal(Object.hasOwn(result.portableSummary.retainedRefs[1], 'buffer'), false);
+  assert.equal(Object.hasOwn(result.portableSummary.retainedRefs[1], 'gpuBuffer'), false);
   assert.equal(result.portableSummary.activeNodeCount, 3);
   assert.equal(result.portableSummary.aggregateNodeCount, 0);
   assert.equal(result.portableSummary.lawQueueCount, 0);

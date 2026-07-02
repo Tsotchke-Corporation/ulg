@@ -260,15 +260,19 @@ Suggested schemas:
   `8491fb5`. SPH reaction proposal gating over retained queue rows landed in
   `6e275e0`. Pressure/interface contact-kinematics queue gating landed in
   `b1b2206`. Retained GPU `schroeder-law-neighbor-candidate` rows and
-  same-level orchestration forwarding landed in `ae7f7d3`.
+  same-level orchestration forwarding landed in `ae7f7d3`. Reaction and
+  pressure/interface consumers now validate and observe retained neighbor
+  candidate artifacts in `9f6f961`, but still fail closed because the first
+  producer is not yet active-node/tree authoritative.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
 - Current caveat: reaction and pressure/interface contact now consume queue
-  eligibility gates. A first GPU-resident queue-neighbor producer exists, but it
-  is a bounded source-window enumerator; true active-node/tree traversal and
-  direct consumer replacement remain future work.
+  eligibility gates and observe candidate artifacts. A first GPU-resident
+  queue-neighbor producer exists, but it is a bounded source-window enumerator;
+  true active-node/tree traversal and direct consumer replacement remain future
+  work.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -288,8 +292,8 @@ Suggested schemas:
 1. Law work queues:
    - replace the bounded queue-neighbor window with true active-node/tree
      traversal over SS rows;
-   - route retained SS neighbor-candidate rows into reaction/contact/interface
-     consumers in place of particle-bin/all-scan enumeration;
+   - promote retained SS neighbor-candidate rows from observed fail-closed
+     metadata into authoritative reaction/contact/interface input;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -346,9 +350,9 @@ mechanics consumption**:
 
 1. Replace the bounded law-neighbor candidate source-window with SS active-node
    / tree traversal that respects support-inflated level tiles.
-2. Feed retained law-neighbor candidate rows into reaction/contact/interface
-   consumers so the fixed particle-bin/all-particle enumeration can become a
-   diagnostic fallback.
+2. Make reaction/contact/interface consumers use those traversal-backed rows as
+   authoritative input so fixed particle-bin/all-particle enumeration can become
+   a diagnostic fallback.
 3. Consume retained active-node rows directly inside same-level P2G/G2P instead
    of only filtering by level assignment.
 4. Keep all new outputs GPU-resident, no-full-readback, and

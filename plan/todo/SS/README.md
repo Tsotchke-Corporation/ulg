@@ -88,11 +88,14 @@ Landed checkpoints:
 24. `ae7f7d3` adds retained GPU `schroeder-law-neighbor-candidate` rows, a
     no-full-readback WebGPU producer, and same-level orchestration forwarding to
     the resident backend.
+25. `9f6f961` routes retained `schroeder-law-neighbor-candidate` artifacts into
+    reaction and pressure/interface consumers as validated, observed, fail-closed
+    metadata.
 
 Next implementation queue:
 
 1. Replace the bounded queue-neighbor window with true Schroeder active-node /
-   tree traversal and then feed those rows directly into reaction/contact/
-   interface consumers.
+   tree traversal over support-inflated level tiles, then promote candidate rows
+   from observed metadata to authoritative reaction/contact/interface input.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

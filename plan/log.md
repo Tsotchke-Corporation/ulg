@@ -34439,3 +34439,37 @@ Next:
   consumers so their fixed particle-bin/all-scan paths become diagnostic
   fallbacks.
 - Consume retained SS active-node rows directly inside same-level P2G/G2P.
+
+## 2026-07-01 AKDT - SS Law Neighbor Candidate Consumer Routing
+
+Status:
+
+- Routed retained `schroeder-law-neighbor-candidate` artifacts into the SPH
+  reaction and pressure/interface WebGPU entry points.
+- Both consumers now validate the retained candidate schema, row stride, law
+  mask, queue count, and same-device ownership where applicable, then report
+  explicit observed-but-not-authoritative metadata.
+- The candidate rows are intentionally not bound into reaction/contact physics
+  yet. The current producer is a bounded queue-window enumerator, so consumers
+  fail closed until the source becomes true SS active-node/tree traversal.
+- The resident stage worker and same-level mechanics forwarding now preserve
+  both `schroederLawQueue` and `schroederLawNeighborCandidates` through
+  pressure/interface and reaction stage options.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphReactionGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --test tests/sphReactionGpuKernel.test.mjs tests/sphPressureInterfaceGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/schroederHierarchyGpu.test.mjs` with `140/140` passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `833` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Replace the bounded source-window neighbor producer with SS active-node/tree
+  traversal over support-inflated level tiles.
+- After traversal rows are authoritative, bind retained candidate rows directly
+  into reaction/contact/interface candidate generation and demote the fixed
+  particle-bin/all-particle enumerators to diagnostic fallbacks.

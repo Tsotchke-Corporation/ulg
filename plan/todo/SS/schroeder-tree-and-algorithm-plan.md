@@ -257,14 +257,16 @@ Suggested schemas:
 
 - Status: retained active-node local law-queue descriptors landed in `f7cf080`.
   Same-level mechanics orchestration and resident backend forwarding landed in
-  `8491fb5`.
+  `8491fb5`. SPH reaction proposal gating over retained queue rows landed in
+  `6e275e0`.
 - Replace fixed reaction/contact/interface neighbor bins with SS near-exact
   queues.
 - Preserve sedenion/reaction scoping and strict reaction gates.
 - Add aggregate masks to skip impossible pairs before exact validation.
-- Current caveat: the GPU descriptors are produced, retained, and forwarded
-  without full readback, but reaction/contact/interface kernels still need to
-  consume them.
+- Current caveat: reaction now consumes queue eligibility as a proposal gate,
+  but still uses the existing particle-bin/all-scan neighbor enumeration behind
+  that gate. Contact/interface kernels still need their own consumers, and a
+  dedicated queue-neighbor kernel remains future work.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -282,8 +284,10 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Law work queues:
-   - consume retained `schroederLawQueue` rows in reaction/contact/interface
-     candidate generation;
+   - consume retained `schroederLawQueue` rows in contact/interface candidate
+     generation;
+   - replace reaction's current queue-gated particle-bin/all-scan neighbor
+     enumeration with a dedicated SS queue-neighbor kernel;
    - preserve strict reaction gates, sedenion scoping, and material/phase masks;
    - keep exact near-field candidates for small diagnostic scenes.
 2. Active-node mechanics consumption:
@@ -335,11 +339,12 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS law work queues**:
+The next code slice on `SS` is **SS law work queues/contact-interface
+consumers**:
 
-1. Introduce GPU-first law queue planning over retained SS active-node rows.
-2. Start with reaction/contact/interface queue descriptors and compact
-   candidate counters.
+1. Consume retained law queue rows in pressure/contact/interface GPU kernels.
+2. Add a dedicated SS queue-neighbor kernel so reaction no longer depends on
+   fixed particle-bin/all-particle enumeration after the queue gate.
 3. Preserve existing strict reaction discovery and exact small-scene behavior as
    validation anchors, not as the hot path.
 4. Keep queue outputs GPU-resident and StateManager-admission-aware.

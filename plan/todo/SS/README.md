@@ -79,10 +79,13 @@ Landed checkpoints:
 21. `8491fb5` routes retained SS law queues through the same-level mechanics
     prepass chain and forwards them to the resident backend as
     `schroederLawQueue`, with a per-use-case disable switch.
+22. `6e275e0` gates SPH reaction proposal generation with retained
+    `schroederLawQueue` rows, preserving strict reaction/sedenion checks while
+    keeping the reaction stage resident and no-full-readback.
 
 Next implementation queue:
 
-1. Wire retained `schroederLawQueue` rows into reaction/contact/interface
-   consumer kernels.
+1. Wire retained `schroederLawQueue` rows into contact/interface consumer
+   kernels.
 2. Consume retained SS active-node rows directly inside same-level P2G/G2P.
 3. Add render LOD and PeerCompute portable SS summaries.

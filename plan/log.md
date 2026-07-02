@@ -34332,3 +34332,38 @@ Next:
   `measureGpuQueueFence=false`, while completion-evidence mode with
   `ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1` should still report
   `queueFenceStatus.fusedMechanicsSequence=complete`.
+
+## 2026-07-01 AKDT - SS Reaction Law Queue Consumer
+
+Status:
+
+- Added the first retained SS law-queue consumer. The SPH reaction WGSL now
+  accepts `schroeder_reaction_law_queue_rows` plus a compact params uniform and
+  gates reaction proposal work by queue status, law mask, and
+  `reactionQueueEligible`.
+- `runSphReactionStepWebGpu` now accepts `schroederLawQueue`, validates the SS
+  law-queue schema/buffer contract, binds resident queue rows into the reaction
+  proposal pipeline, and reports consumer metadata such as
+  `schroederLawQueueStatus`, `schroederLawQueueConsumerStatus`, and
+  `schroederLawQueueBufferConsumed`.
+- This preserves existing strict reaction/sedenion/material/phase gates. It is
+  not yet the final SS neighbor generator: the reaction stage is queue-gated but
+  still enumerates exact candidates through the current particle-bin or
+  all-particle fallback path.
+
+Validation:
+
+- PASS: `node --test tests/sphReactionGpuKernel.test.mjs` with `17/17`
+  passing.
+- PASS: `node --test tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs` with
+  `20/20` passing.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `40/40`
+  passing.
+- PASS: `git diff --check`.
+- PASS: `npm test` with `830` passing, `3` skipped, `0` failed.
+
+Next:
+
+- Add the contact/interface consumers for retained `schroederLawQueue` rows.
+- Add a dedicated SS queue-neighbor kernel so reaction candidate enumeration can
+  move off the fixed particle-bin/all-scan paths after the queue gate.

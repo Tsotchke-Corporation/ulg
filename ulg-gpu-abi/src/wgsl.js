@@ -10176,6 +10176,184 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const schroederFarAggregateDiagnosticSummaryWgsl = `
+struct SchroederFarAggregateDiagnosticSummaryParams {
+  force_summary_row_count: u32,
+  force_summary_stride: u32,
+  diagnostic_stride: u32,
+  flags: u32,
+  opening_theta: f32,
+  far_field_error_bound: f32,
+  acceleration_pressure_threshold: f32,
+  queue_epoch: f32,
+  state_family_id: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> force_summary_rows: array<f32>;
+@group(0) @binding(1) var<storage, read_write> diagnostic_summary_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: SchroederFarAggregateDiagnosticSummaryParams;
+
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE_FOR_DIAGNOSTICS: u32 = 32u;
+const SCHROEDER_DEFAULT_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_STRIDE: u32 = 32u;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  let force_summary_stride = max(
+    params.force_summary_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_FORCE_SUMMARY_STRIDE_FOR_DIAGNOSTICS
+  );
+  let diagnostic_stride = max(
+    params.diagnostic_stride,
+    SCHROEDER_DEFAULT_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_STRIDE
+  );
+  let diagnostic_offset = 0u * diagnostic_stride;
+
+  var active_source_count = 0.0;
+  var empty_source_count = 0.0;
+  var overflow_source_count = 0.0;
+  var blocked_source_count = 0.0;
+  var total_accepted_candidate_count = 0.0;
+  var total_active_candidate_count = 0.0;
+  var total_overflow_candidate_count = 0.0;
+  var total_blocked_candidate_count = 0.0;
+  var total_candidate_budget = 0.0;
+  var max_opening_ratio = 0.0;
+  var max_far_field_error_bound = 0.0;
+  var max_acceleration_magnitude = 0.0;
+  var max_potential_magnitude = 0.0;
+  var total_aggregate_mass = 0.0;
+  var min_distance = 3.402823e38;
+  var max_candidate_budget = 0.0;
+  var enabled_far_law_mask = 0.0;
+  var queue_epoch = params.queue_epoch;
+  var state_family_id = params.state_family_id;
+  var max_acceleration_source_particle = -1.0;
+  var acceleration_pressure_source_count = 0.0;
+  var error_bound_pressure_source_count = 0.0;
+  var opening_ratio_pressure_source_count = 0.0;
+
+  for (var row_index = 0u; row_index < params.force_summary_row_count; row_index = row_index + 1u) {
+    let row_offset = row_index * force_summary_stride;
+    let candidate_budget = max(force_summary_rows[row_offset + 5u], 0.0);
+    let accepted_candidate_count = max(force_summary_rows[row_offset + 6u], 0.0);
+    let active_candidate_count = max(force_summary_rows[row_offset + 7u], 0.0);
+    let acceleration = vec3<f32>(
+      force_summary_rows[row_offset + 8u],
+      force_summary_rows[row_offset + 9u],
+      force_summary_rows[row_offset + 10u]
+    );
+    let potential_magnitude = abs(force_summary_rows[row_offset + 11u]);
+    let aggregate_mass = max(force_summary_rows[row_offset + 12u], 0.0);
+    let distance_m = force_summary_rows[row_offset + 13u];
+    let opening_ratio = max(force_summary_rows[row_offset + 14u], 0.0);
+    let far_error_bound = max(force_summary_rows[row_offset + 15u], 0.0);
+    let overflow_count = max(force_summary_rows[row_offset + 16u], 0.0);
+    let blocked_count = max(force_summary_rows[row_offset + 17u], 0.0);
+    let row_status = force_summary_rows[row_offset + 18u];
+    let acceleration_magnitude = length(acceleration);
+    let active_source = row_status > 0.0 && row_status < 32.0 && active_candidate_count > 0.0;
+    let empty_source = row_status >= 32.0 || active_candidate_count <= 0.0;
+    let overflow_source = overflow_count > 0.0 || row_status >= 128.0;
+    let blocked_source = blocked_count > 0.0;
+
+    active_source_count = active_source_count + select(0.0, 1.0, active_source);
+    empty_source_count = empty_source_count + select(0.0, 1.0, empty_source);
+    overflow_source_count = overflow_source_count + select(0.0, 1.0, overflow_source);
+    blocked_source_count = blocked_source_count + select(0.0, 1.0, blocked_source);
+    total_accepted_candidate_count = total_accepted_candidate_count + accepted_candidate_count;
+    total_active_candidate_count = total_active_candidate_count + active_candidate_count;
+    total_overflow_candidate_count = total_overflow_candidate_count + overflow_count;
+    total_blocked_candidate_count = total_blocked_candidate_count + blocked_count;
+    total_candidate_budget = total_candidate_budget + candidate_budget;
+    max_opening_ratio = max(max_opening_ratio, opening_ratio);
+    max_far_field_error_bound = max(max_far_field_error_bound, far_error_bound);
+    max_potential_magnitude = max(max_potential_magnitude, potential_magnitude);
+    total_aggregate_mass = total_aggregate_mass + aggregate_mass;
+    max_candidate_budget = max(max_candidate_budget, candidate_budget);
+    enabled_far_law_mask = max(enabled_far_law_mask, force_summary_rows[row_offset + 3u]);
+    queue_epoch = max(queue_epoch, force_summary_rows[row_offset + 19u]);
+    state_family_id = max(state_family_id, force_summary_rows[row_offset + 20u]);
+    if (active_source && distance_m > 0.0) {
+      min_distance = min(min_distance, distance_m);
+    }
+    if (acceleration_magnitude > max_acceleration_magnitude) {
+      max_acceleration_magnitude = acceleration_magnitude;
+      max_acceleration_source_particle = force_summary_rows[row_offset + 0u];
+    }
+    acceleration_pressure_source_count = acceleration_pressure_source_count + select(
+      0.0,
+      1.0,
+      params.acceleration_pressure_threshold > 0.0
+        && acceleration_magnitude > params.acceleration_pressure_threshold
+    );
+    error_bound_pressure_source_count = error_bound_pressure_source_count + select(
+      0.0,
+      1.0,
+      far_error_bound > params.far_field_error_bound
+    );
+    opening_ratio_pressure_source_count = opening_ratio_pressure_source_count + select(
+      0.0,
+      1.0,
+      opening_ratio > params.opening_theta
+    );
+  }
+
+  let final_min_distance = select(0.0, min_distance, min_distance < 3.402823e38);
+  let source_denominator = max(f32(params.force_summary_row_count), 1.0);
+  let active_source_denominator = max(active_source_count, 1.0);
+  let overflow_pressure_ratio = overflow_source_count / source_denominator;
+  let active_candidate_pressure_ratio = total_active_candidate_count / max(total_candidate_budget, 1.0);
+  let error_bound_pressure_ratio = error_bound_pressure_source_count / active_source_denominator;
+  let opening_ratio_pressure_ratio = opening_ratio_pressure_source_count / active_source_denominator;
+  var summary_status = select(32.0, 1.0, active_source_count > 0.0);
+  if (overflow_source_count > 0.0 || total_overflow_candidate_count > 0.0) {
+    summary_status = 128.0;
+  } else if (error_bound_pressure_source_count > 0.0 || opening_ratio_pressure_source_count > 0.0) {
+    summary_status = 64.0;
+  }
+
+  diagnostic_summary_rows[diagnostic_offset + 0u] = f32(params.force_summary_row_count);
+  diagnostic_summary_rows[diagnostic_offset + 1u] = active_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 2u] = empty_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 3u] = overflow_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 4u] = blocked_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 5u] = total_accepted_candidate_count;
+  diagnostic_summary_rows[diagnostic_offset + 6u] = total_active_candidate_count;
+  diagnostic_summary_rows[diagnostic_offset + 7u] = total_overflow_candidate_count;
+  diagnostic_summary_rows[diagnostic_offset + 8u] = total_blocked_candidate_count;
+  diagnostic_summary_rows[diagnostic_offset + 9u] = max_opening_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 10u] = max_far_field_error_bound;
+  diagnostic_summary_rows[diagnostic_offset + 11u] = max_acceleration_magnitude;
+  diagnostic_summary_rows[diagnostic_offset + 12u] = max_potential_magnitude;
+  diagnostic_summary_rows[diagnostic_offset + 13u] = total_aggregate_mass;
+  diagnostic_summary_rows[diagnostic_offset + 14u] = final_min_distance;
+  diagnostic_summary_rows[diagnostic_offset + 15u] = max_candidate_budget;
+  diagnostic_summary_rows[diagnostic_offset + 16u] = enabled_far_law_mask;
+  diagnostic_summary_rows[diagnostic_offset + 17u] = queue_epoch;
+  diagnostic_summary_rows[diagnostic_offset + 18u] = state_family_id;
+  diagnostic_summary_rows[diagnostic_offset + 19u] = max_acceleration_source_particle;
+  diagnostic_summary_rows[diagnostic_offset + 20u] = acceleration_pressure_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 21u] = error_bound_pressure_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 22u] = opening_ratio_pressure_source_count;
+  diagnostic_summary_rows[diagnostic_offset + 23u] = overflow_pressure_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 24u] = active_candidate_pressure_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 25u] = error_bound_pressure_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 26u] = opening_ratio_pressure_ratio;
+  diagnostic_summary_rows[diagnostic_offset + 27u] = 1.0;
+  diagnostic_summary_rows[diagnostic_offset + 28u] = summary_status;
+  diagnostic_summary_rows[diagnostic_offset + 29u] = 0.0;
+  diagnostic_summary_rows[diagnostic_offset + 30u] = 0.0;
+  diagnostic_summary_rows[diagnostic_offset + 31u] = 0.0;
+}
+`;
+
 export const schroederPhaseVolumeMigrationWgsl = `
 struct SchroederPhaseVolumeMigrationParams {
   particle_count: u32,

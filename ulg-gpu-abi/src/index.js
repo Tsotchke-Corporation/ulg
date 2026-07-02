@@ -85,6 +85,8 @@ export const ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA = 'peercompute.ulg.sch
 export const ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-candidate-execution.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-summary.v0';
 export const ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-force-summary-execution.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary.v0';
+export const ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary-execution.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics.v0';
 export const ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-same-level-mechanics-execution.v0';
 export const ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA = 'peercompute.ulg.schroeder-cross-level-coupling.v0';
@@ -884,6 +886,40 @@ export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT = Object.freeze([
   'fullParticleReadbackRequired:f32',
   'pad0:f32',
   'pad1:f32'
+]);
+export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'forceSummaryRowCount:f32',
+  'activeSourceCount:f32',
+  'emptySourceCount:f32',
+  'overflowSourceCount:f32',
+  'blockedSourceCount:f32',
+  'totalAcceptedCandidateCount:f32',
+  'totalActiveCandidateCount:f32',
+  'totalOverflowCandidateCount:f32',
+  'totalBlockedCandidateCount:f32',
+  'maxOpeningRatio:f32',
+  'maxFarFieldErrorBound:f32',
+  'maxAccelerationMagnitudeMPerS2:f32',
+  'maxPotentialMagnitudeJPerKg:f32',
+  'totalAggregateMassKg:f32',
+  'minDistanceM:f32',
+  'maxCandidateBudget:f32',
+  'enabledFarLawMask:f32',
+  'queueEpoch:f32',
+  'stateFamilyId:f32',
+  'maxAccelerationSourceParticleIndex:f32',
+  'accelerationPressureSourceCount:f32',
+  'errorBoundPressureSourceCount:f32',
+  'openingRatioPressureSourceCount:f32',
+  'overflowPressureRatio:f32',
+  'activeCandidatePressureRatio:f32',
+  'errorBoundPressureRatio:f32',
+  'openingRatioPressureRatio:f32',
+  'summaryModeId:f32',
+  'status:f32',
+  'fullParticleReadbackRequired:f32',
+  'stateMutationRequired:f32',
+  'pad0:f32'
 ]);
 export const SCHROEDER_CROSS_LEVEL_COUPLING_ROW_LAYOUT = Object.freeze([
   'sourceParticleIndex:f32',

@@ -7,6 +7,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
@@ -36,6 +37,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
@@ -76,6 +79,7 @@ import {
   schroederCrossLevelStateDeltaWgsl,
   schroederCrossLevelTransferWgsl,
   schroederFarAggregateCandidateWgsl,
+  schroederFarAggregateDiagnosticSummaryWgsl,
   schroederFarAggregateForceSummaryWgsl,
   schroederLevelAssignmentWgsl,
   schroederLawNeighborCandidateWgsl,
@@ -111,6 +115,8 @@ export {
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
@@ -147,6 +153,8 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_FLOATS = SCHROEDER_CROSS_LE
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_FLOATS = SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT.length;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_FLOATS = SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS = SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT.length;
+export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS =
+  SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
 export const SCHROEDER_HIERARCHY_AGGREGATE_FLOATS = SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT.length;
@@ -166,6 +174,7 @@ export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_MERGE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_STATE_DELTA_WORKGROUP_SIZE = 64;
 export const SCHROEDER_CROSS_LEVEL_TRANSFER_WORKGROUP_SIZE = 64;
 export const SCHROEDER_FAR_AGGREGATE_CANDIDATE_WORKGROUP_SIZE = 64;
+export const SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_WORKGROUP_SIZE = 1;
 export const SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_NODE_WORKGROUP_SIZE = 64;
 export const SCHROEDER_HIERARCHY_AGGREGATE_WORKGROUP_SIZE = 64;
@@ -194,6 +203,8 @@ export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_MERGE_READBACK_MODE = 'full-
 export const SCHROEDER_FULL_CROSS_LEVEL_STATE_DELTA_READBACK_MODE = 'full-cross-level-state-delta-readback';
 export const SCHROEDER_FULL_CROSS_LEVEL_TRANSFER_READBACK_MODE = 'full-cross-level-transfer-readback';
 export const SCHROEDER_FULL_FAR_AGGREGATE_CANDIDATE_READBACK_MODE = 'full-schroeder-far-aggregate-candidate-readback';
+export const SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE =
+  'compact-schroeder-far-aggregate-diagnostic-summary-readback';
 export const SCHROEDER_FULL_FAR_AGGREGATE_FORCE_SUMMARY_READBACK_MODE = 'full-schroeder-far-aggregate-force-summary-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_NODE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-node-readback';
 export const SCHROEDER_FULL_HIERARCHY_AGGREGATE_READBACK_MODE = 'full-schroeder-hierarchy-aggregate-readback';
@@ -243,6 +254,7 @@ export const DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND = 0.01;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_GRAVITATIONAL_CONSTANT = 6.67430e-11;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_SOFTENING_LENGTH_M = 1e-3;
 export const DEFAULT_SCHROEDER_FAR_AGGREGATE_FORCE_SCALE = 1;
+export const DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD = 0;
 
 const DEFAULT_MIN_LEVEL = -8;
 const DEFAULT_MAX_LEVEL = 8;
@@ -846,6 +858,49 @@ export function createSchroederFarAggregateForceSummaryParamsArray({
   view.setFloat32(52, finiteNumber(stateFamilyId, 1), true);
   view.setFloat32(56, 0, true);
   view.setFloat32(60, 0, true);
+  return buffer;
+}
+
+export function createSchroederFarAggregateDiagnosticSummaryParamsArray({
+  forceSummaryRowCount = 0,
+  forceSummaryStrideFloats = SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+  diagnosticSummaryStrideFloats = SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+  flags = 0,
+  openingTheta = DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  farFieldErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  accelerationPressureThreshold = DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
+  queueEpoch = 0,
+  stateFamilyId = 1
+} = {}) {
+  const buffer = new ArrayBuffer(48);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.round(finiteNumber(forceSummaryRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(
+    forceSummaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(
+    diagnosticSummaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS
+  ))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
+  view.setFloat32(16, Math.max(0, finiteNumber(
+    openingTheta,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+  )), true);
+  view.setFloat32(20, Math.max(0, finiteNumber(
+    farFieldErrorBound,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+  )), true);
+  view.setFloat32(24, Math.max(0, finiteNumber(
+    accelerationPressureThreshold,
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD
+  )), true);
+  view.setFloat32(28, finiteNumber(queueEpoch, 0), true);
+  view.setFloat32(32, finiteNumber(stateFamilyId, 1), true);
+  view.setFloat32(36, 0, true);
+  view.setFloat32(40, 0, true);
+  view.setFloat32(44, 0, true);
   return buffer;
 }
 
@@ -1966,6 +2021,31 @@ function assertFarAggregateForceSummaryInput(farAggregateForceSummary) {
   }
 }
 
+function assertFarAggregateDiagnosticSummaryInput(farAggregateDiagnosticSummary) {
+  if (
+    farAggregateDiagnosticSummary?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+    && farAggregateDiagnosticSummary?.schema !== ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA
+  ) {
+    throw new TypeError('Schroeder portable summary requires a Schroeder far-aggregate diagnostic summary input');
+  }
+  const summaryRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateDiagnosticSummary.diagnosticSummaryRowCount
+      ?? farAggregateDiagnosticSummary.summaryRowCount,
+    0
+  )));
+  if (summaryRowCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate diagnostic summary input requires at least one summary row');
+  }
+  const stride = Math.max(0, Math.round(finiteNumber(
+    farAggregateDiagnosticSummary.diagnosticSummaryStrideFloats
+      ?? farAggregateDiagnosticSummary.summaryStrideFloats,
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS
+  )));
+  if (stride !== SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS) {
+    throw new RangeError('Schroeder far-aggregate diagnostic summary input requires the current row layout');
+  }
+}
+
 function assertPhaseVolumeMigrationInput(phaseVolumeMigration) {
   if (
     phaseVolumeMigration?.schema !== ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA
@@ -2839,6 +2919,72 @@ export function createSchroederFarAggregateForceSummaryPlan({
   };
 }
 
+export function createSchroederFarAggregateDiagnosticSummaryPlan({
+  farAggregateForceSummary,
+  openingTheta = farAggregateForceSummary?.openingTheta ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  farFieldErrorBound = farAggregateForceSummary?.farFieldErrorBound ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  accelerationPressureThreshold = DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
+  queueEpoch = farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateForceSummary?.stateFamilyId ?? 1
+} = {}) {
+  assertFarAggregateForceSummaryInput(farAggregateForceSummary);
+  const forceSummaryRowCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateForceSummary.forceSummaryRowCount ?? farAggregateForceSummary.activeNodeCount,
+    0
+  )));
+  if (forceSummaryRowCount <= 0) {
+    throw new RangeError('Schroeder far-aggregate diagnostic summary requires at least one force-summary row');
+  }
+  const diagnosticSummaryByteLength =
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  return {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA,
+    status: 'schroeder-far-aggregate-diagnostic-summary-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-gpu-far-aggregate-diagnostic-summary',
+    sourceFarAggregateForceSummarySchema: farAggregateForceSummary.schema,
+    sourceFarAggregateForceSummaryStatus: farAggregateForceSummary.status ?? null,
+    forceSummaryRowCount,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    diagnosticSummaryRowLayout: [...SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT],
+    diagnosticSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+    diagnosticSummaryStrideBytes: diagnosticSummaryByteLength,
+    diagnosticSummaryByteLength,
+    diagnosticSummaryRowCount: 1,
+    summaryRowCount: 1,
+    openingTheta: Math.max(0, finiteNumber(
+      openingTheta,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA
+    )),
+    farFieldErrorBound: Math.max(0, finiteNumber(
+      farFieldErrorBound,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND
+    )),
+    accelerationPressureThreshold: Math.max(0, finiteNumber(
+      accelerationPressureThreshold,
+      DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD
+    )),
+    queueEpoch: finiteNumber(queueEpoch, 0),
+    stateFamilyId: finiteNumber(stateFamilyId, 1),
+    outputCompaction: 'one-compact-far-aggregate-diagnostic-summary-row',
+    diagnosticStatus: 'far-aggregate-diagnostics-ready',
+    farFieldQualityStatus: 'far-aggregate-force-quality-pressure-ready',
+    readbackPolicy: 'compact-summary-only-no-particle-readback',
+    conservationStatus: 'diagnostic-summary-only-no-state-mutation',
+    stateMutationRequired: false,
+    stateMutationStatus: 'far-aggregate-diagnostic-summary-only-no-state-mutation',
+    stateAuthorityStatus: 'state-manager-admission-required-before-any-far-force-application',
+    outputFamilies: [
+      'schroeder-far-aggregate-diagnostics',
+      'schroeder-far-aggregate-force-summary'
+    ],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
 export function createSchroederPhaseVolumeMigrationPlan({
   levelAssignment,
   hierarchyAggregateNode,
@@ -3197,6 +3343,7 @@ export function createSchroederPortableSummaryPlan({
   lawNeighborCandidates = null,
   farAggregateCandidates = null,
   farAggregateForceSummary = null,
+  farAggregateDiagnosticSummary = null,
   hierarchyAggregateNode = null,
   conservationSummary = null,
   phaseVolumeDiagnosticSummary = null,
@@ -3216,6 +3363,7 @@ export function createSchroederPortableSummaryPlan({
   if (lawQueue) assertLawQueueInput(lawQueue);
   if (farAggregateCandidates) assertFarAggregateCandidateInput(farAggregateCandidates);
   if (farAggregateForceSummary) assertFarAggregateForceSummaryInput(farAggregateForceSummary);
+  if (farAggregateDiagnosticSummary) assertFarAggregateDiagnosticSummaryInput(farAggregateDiagnosticSummary);
   if (hierarchyAggregateNode) assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
 
   const activeNodeCount = Math.max(0, Math.round(finiteNumber(
@@ -3237,6 +3385,11 @@ export function createSchroederPortableSummaryPlan({
   )));
   const farAggregateForceSummaryCount = Math.max(0, Math.round(finiteNumber(
     farAggregateForceSummary?.forceSummaryRowCount ?? farAggregateForceSummary?.activeNodeCount,
+    0
+  )));
+  const farAggregateDiagnosticSummaryCount = Math.max(0, Math.round(finiteNumber(
+    farAggregateDiagnosticSummary?.diagnosticSummaryRowCount
+      ?? farAggregateDiagnosticSummary?.summaryRowCount,
     0
   )));
   const phaseDiagnosticRowsAvailable = phaseVolumeDiagnosticSummary?.summaryRows instanceof Float32Array
@@ -3317,6 +3470,16 @@ export function createSchroederPortableSummaryPlan({
         ?? farAggregateForceSummary.forceSummaryByteLength,
       retained: Boolean(farAggregateForceSummary.forceSummaryBuffer)
     }) : null,
+    farAggregateDiagnosticSummary ? schroederPortableRetainedRef({
+      family: 'schroeder-far-aggregate-diagnostic-summary',
+      role: 'far-field-force-quality-diagnostics',
+      artifact: farAggregateDiagnosticSummary,
+      rowCount: farAggregateDiagnosticSummaryCount,
+      strideFloats: SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+      byteLength: farAggregateDiagnosticSummary.diagnosticSummaryBufferByteLength
+        ?? farAggregateDiagnosticSummary.diagnosticSummaryByteLength,
+      retained: Boolean(farAggregateDiagnosticSummary.diagnosticSummaryBuffer)
+    }) : null,
     hierarchyAggregateNode ? schroederPortableRetainedRef({
       family: 'schroeder-hierarchy-aggregate-node',
       role: 'coherent-aggregate-render-proxy-source',
@@ -3363,6 +3526,7 @@ export function createSchroederPortableSummaryPlan({
     lawQueueProxyCount: lawQueueCount,
     farAggregateCandidateProxyCount: farAggregateCandidateCount,
     farAggregateForceSummaryCount,
+    farAggregateDiagnosticSummaryCount,
     phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
     opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
     geometryPolicy: aggregateNodeCount > 0
@@ -3388,6 +3552,7 @@ export function createSchroederPortableSummaryPlan({
     lawNeighborCandidateCount,
     farAggregateCandidateCount,
     farAggregateForceSummaryCount,
+    farAggregateDiagnosticSummaryCount,
     retainedRefs,
     retainedRefCount: retainedRefs.length,
     retainedBufferRefCount,
@@ -6175,6 +6340,159 @@ export async function runSchroederFarAggregateForceSummaryWebGpu({
   }
 }
 
+export async function runSchroederFarAggregateDiagnosticSummaryWebGpu({
+  device,
+  farAggregateForceSummary,
+  openingTheta = farAggregateForceSummary?.openingTheta ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
+  farFieldErrorBound = farAggregateForceSummary?.farFieldErrorBound ?? DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
+  accelerationPressureThreshold = DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
+  queueEpoch = farAggregateForceSummary?.queueEpoch ?? 0,
+  stateFamilyId = farAggregateForceSummary?.stateFamilyId ?? 1,
+  retainDiagnosticSummaryBuffer = true,
+  readbackMode = SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('runSchroederFarAggregateDiagnosticSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const plan = createSchroederFarAggregateDiagnosticSummaryPlan({
+    farAggregateForceSummary,
+    openingTheta,
+    farFieldErrorBound,
+    accelerationPressureThreshold,
+    queueEpoch,
+    stateFamilyId
+  });
+  const compactSummaryReadback = readbackMode === SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE;
+  const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
+  const borrowedForceSummaryBuffer = farAggregateForceSummary?.forceSummaryBuffer || null;
+  const forceSummaryRows = farAggregateForceSummary?.forceSummaryRows instanceof Float32Array
+    ? farAggregateForceSummary.forceSummaryRows
+    : null;
+  if (!borrowedForceSummaryBuffer && !(forceSummaryRows instanceof Float32Array)) {
+    throw new TypeError('Schroeder far-aggregate diagnostic summary requires a retained force-summary buffer or explicit rows');
+  }
+
+  const forceSummaryBuffer = borrowedForceSummaryBuffer
+    || writeStorageBuffer(device, 'ulg-schroeder-far-aggregate-diagnostic-summary-in', forceSummaryRows);
+  const diagnosticSummaryBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-diagnostic-summary-out',
+    size: plan.diagnosticSummaryByteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsArray = createSchroederFarAggregateDiagnosticSummaryParamsArray(plan);
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-far-aggregate-diagnostic-summary-params',
+    size: paramsArray.byteLength,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readBuffer = compactSummaryReadback
+    ? device.createBuffer({
+      label: 'ulg-schroeder-far-aggregate-diagnostic-summary-readback',
+      size: plan.diagnosticSummaryByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    })
+    : null;
+  let returnedRetainedDiagnosticSummaryBuffer = false;
+
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    const bindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'uniform')
+    ];
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-far-aggregate-diagnostic-summary.v0',
+      label: 'ulg-schroeder-far-aggregate-diagnostic-summary',
+      code: schroederFarAggregateDiagnosticSummaryWgsl,
+      entryPoint: 'main',
+      bindings
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: forceSummaryBuffer } },
+        { binding: 1, resource: { buffer: diagnosticSummaryBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    if (compactSummaryReadback) {
+      encoder.copyBufferToBuffer(
+        diagnosticSummaryBuffer,
+        0,
+        readBuffer,
+        0,
+        plan.diagnosticSummaryByteLength
+      );
+    }
+    device.queue.submit([encoder.finish()]);
+
+    let diagnosticSummaryRows = new Float32Array();
+    if (compactSummaryReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      diagnosticSummaryRows = new Float32Array(readBuffer.getMappedRange()).slice(
+        0,
+        SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS
+      );
+      readBuffer.unmap();
+    }
+
+    const result = {
+      ...plan,
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+      farAggregateDiagnosticSummarySchema: plan.schema,
+      status: 'schroeder-far-aggregate-diagnostic-summary-submitted',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode,
+      compactSummaryReadbackPerformed: compactSummaryReadback,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: noFullReadback,
+      retainedDiagnosticSummaryBuffer: Boolean(retainDiagnosticSummaryBuffer),
+      diagnosticSummaryBufferByteLength: plan.diagnosticSummaryByteLength,
+      diagnosticSummaryRows,
+      summaryRows: diagnosticSummaryRows,
+      diagnosticStatus: 'far-aggregate-diagnostics-submitted',
+      farFieldQualityStatus: 'far-aggregate-force-quality-pressure-submitted',
+      conservationStatus: 'diagnostic-summary-only-no-state-mutation',
+      stateMutationRequired: false,
+      stateMutationStatus: plan.stateMutationStatus,
+      stateAuthorityStatus: plan.stateAuthorityStatus,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainDiagnosticSummaryBuffer) {
+      result.diagnosticSummaryBuffer = diagnosticSummaryBuffer;
+      result.destroyDiagnosticSummaryBuffer = () => diagnosticSummaryBuffer.destroy?.();
+      returnedRetainedDiagnosticSummaryBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!borrowedForceSummaryBuffer) forceSummaryBuffer.destroy?.();
+      if (!retainDiagnosticSummaryBuffer || !returnedRetainedDiagnosticSummaryBuffer) {
+        diagnosticSummaryBuffer.destroy?.();
+      }
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback || compactSummaryReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
+  }
+}
+
 export async function runSchroederPhaseVolumeMigrationWebGpu({
   device,
   levelAssignment,
@@ -6661,6 +6979,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   lawNeighborCandidates = null,
   farAggregateCandidates = null,
   farAggregateForceSummary = null,
+  farAggregateDiagnosticSummary = null,
   crossLevelCoupling = null,
   conservationSummary = null,
   crossLevelTransfer = null,
@@ -6708,6 +7027,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableHierarchyAggregateNodeReduction = enableHierarchyAggregate,
   enableFarAggregateCandidates = enableHierarchyAggregateNodeReduction,
   enableFarAggregateForceSummary = enableFarAggregateCandidates,
+  enableFarAggregateDiagnosticSummary = enableFarAggregateForceSummary,
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
@@ -6728,6 +7048,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   farAggregateNearFieldSupportScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_NEAR_FIELD_SUPPORT_SCALE,
   farAggregateErrorBound = DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
   farAggregateForceSummaryReadbackMode = null,
+  farAggregateDiagnosticReadbackMode = SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
+  farAggregateDiagnosticAccelerationPressureThreshold =
+    DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
   farAggregateGravitationalConstant = DEFAULT_SCHROEDER_FAR_AGGREGATE_GRAVITATIONAL_CONSTANT,
   farAggregateSofteningLengthM = DEFAULT_SCHROEDER_FAR_AGGREGATE_SOFTENING_LENGTH_M,
   farAggregateForceScale = DEFAULT_SCHROEDER_FAR_AGGREGATE_FORCE_SCALE,
@@ -6749,6 +7072,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   hierarchyAggregateNodeReductionRunner = runSchroederHierarchyAggregateNodeReductionWebGpu,
   farAggregateCandidateRunner = runSchroederFarAggregateCandidateWebGpu,
   farAggregateForceSummaryRunner = runSchroederFarAggregateForceSummaryWebGpu,
+  farAggregateDiagnosticSummaryRunner = runSchroederFarAggregateDiagnosticSummaryWebGpu,
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
@@ -6842,6 +7166,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof farAggregateForceSummaryRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateForceSummaryRunner function');
+  }
+  if (
+    enableCrossLevelCoupling
+    && enableCrossLevelTransfer
+    && enableCrossLevelStateDelta
+    && enableCrossLevelStateDeltaMerge
+    && enableHierarchyAggregate
+    && enableHierarchyAggregateNodeReduction
+    && enableFarAggregateCandidates
+    && enableFarAggregateForceSummary
+    && enableFarAggregateDiagnosticSummary
+    && typeof farAggregateDiagnosticSummaryRunner !== 'function'
+  ) {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a farAggregateDiagnosticSummaryRunner function');
   }
   if (
     enableCrossLevelCoupling
@@ -7085,6 +7423,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainForceSummaryBuffer: true,
       readbackMode: farAggregateForceSummaryReadbackMode ?? readbackMode
     });
+  const resolvedFarAggregateDiagnosticSummary = !resolvedFarAggregateForceSummary || !enableFarAggregateDiagnosticSummary
+    ? null
+    : farAggregateDiagnosticSummary || await farAggregateDiagnosticSummaryRunner({
+      device,
+      farAggregateForceSummary: resolvedFarAggregateForceSummary,
+      openingTheta: farAggregateOpeningTheta,
+      farFieldErrorBound: farAggregateErrorBound,
+      accelerationPressureThreshold: farAggregateDiagnosticAccelerationPressureThreshold,
+      queueEpoch: mergeEpoch,
+      retainDiagnosticSummaryBuffer: true,
+      readbackMode: farAggregateDiagnosticReadbackMode
+    });
   const resolvedPhaseVolumeMigration = !resolvedLevelAssignment || !resolvedHierarchyAggregateNode || !enablePhaseVolumeMigration
     ? null
     : phaseVolumeMigration || await phaseVolumeMigrationRunner({
@@ -7135,6 +7485,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       lawNeighborCandidates: resolvedLawNeighborCandidates,
       farAggregateCandidates: resolvedFarAggregateCandidates,
       farAggregateForceSummary: resolvedFarAggregateForceSummary,
+      farAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary,
       hierarchyAggregateNode: resolvedHierarchyAggregateNode,
       conservationSummary: resolvedConservationSummary,
       phaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
@@ -7168,6 +7519,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederLawNeighborCandidates: resolvedLawNeighborCandidates,
     schroederFarAggregateCandidates: resolvedFarAggregateCandidates,
     schroederFarAggregateForceSummary: resolvedFarAggregateForceSummary,
+    schroederFarAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary,
     schroederCrossLevelCoupling: resolvedCrossLevelCoupling,
     schroederConservationSummary: resolvedConservationSummary,
     schroederCrossLevelTransfer: resolvedCrossLevelTransfer,
@@ -7358,6 +7710,26 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedFarAggregateForceSummary.forceSummaryByteLength
         ?? 0
     } : null,
+    farAggregateDiagnosticSummary: resolvedFarAggregateDiagnosticSummary ? {
+      schema: resolvedFarAggregateDiagnosticSummary.schema,
+      status: resolvedFarAggregateDiagnosticSummary.status,
+      forceSummaryRowCount: resolvedFarAggregateDiagnosticSummary.forceSummaryRowCount,
+      diagnosticSummaryRowCount: resolvedFarAggregateDiagnosticSummary.diagnosticSummaryRowCount,
+      outputCompaction: resolvedFarAggregateDiagnosticSummary.outputCompaction,
+      diagnosticStatus: resolvedFarAggregateDiagnosticSummary.diagnosticStatus,
+      farFieldQualityStatus: resolvedFarAggregateDiagnosticSummary.farFieldQualityStatus,
+      readbackPolicy: resolvedFarAggregateDiagnosticSummary.readbackPolicy,
+      compactSummaryReadbackPerformed: resolvedFarAggregateDiagnosticSummary.compactSummaryReadbackPerformed,
+      conservationStatus: resolvedFarAggregateDiagnosticSummary.conservationStatus,
+      stateMutationRequired: resolvedFarAggregateDiagnosticSummary.stateMutationRequired === true,
+      retainedDiagnosticSummaryBuffer: Boolean(resolvedFarAggregateDiagnosticSummary.diagnosticSummaryBuffer),
+      diagnosticSummaryBufferByteLength: resolvedFarAggregateDiagnosticSummary.diagnosticSummaryBufferByteLength
+        ?? resolvedFarAggregateDiagnosticSummary.diagnosticSummaryByteLength
+        ?? 0,
+      diagnosticSummaryRows: resolvedFarAggregateDiagnosticSummary.diagnosticSummaryRows instanceof Float32Array
+        ? Array.from(resolvedFarAggregateDiagnosticSummary.diagnosticSummaryRows)
+        : []
+    } : null,
     crossLevelCoupling: resolvedCrossLevelCoupling ? {
       schema: resolvedCrossLevelCoupling.schema,
       status: resolvedCrossLevelCoupling.status,
@@ -7510,6 +7882,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       lawNeighborCandidateCount: resolvedPortableSummary.lawNeighborCandidateCount,
       farAggregateCandidateCount: resolvedPortableSummary.farAggregateCandidateCount,
       farAggregateForceSummaryCount: resolvedPortableSummary.farAggregateForceSummaryCount,
+      farAggregateDiagnosticSummaryCount: resolvedPortableSummary.farAggregateDiagnosticSummaryCount,
       retainedRefs: Array.isArray(resolvedPortableSummary.retainedRefs)
         ? resolvedPortableSummary.retainedRefs.map((entry) => ({
           family: entry.family,
@@ -7537,6 +7910,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         lawQueueProxyCount: resolvedPortableSummary.renderLod.lawQueueProxyCount,
         farAggregateCandidateProxyCount: resolvedPortableSummary.renderLod.farAggregateCandidateProxyCount,
         farAggregateForceSummaryCount: resolvedPortableSummary.renderLod.farAggregateForceSummaryCount,
+        farAggregateDiagnosticSummaryCount: resolvedPortableSummary.renderLod.farAggregateDiagnosticSummaryCount,
         phaseVolumeDiagnosticRowsAvailable: resolvedPortableSummary.renderLod.phaseVolumeDiagnosticRowsAvailable,
         opticalPolicy: resolvedPortableSummary.renderLod.opticalPolicy,
         geometryPolicy: resolvedPortableSummary.renderLod.geometryPolicy,
@@ -7591,6 +7965,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     farAggregateForceSummaryConsumerStatus: resolvedFarAggregateForceSummary
       ? 'far-aggregate-force-summary-forwarded-to-resident-backend'
       : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates'),
+    farAggregateDiagnosticSummaryStatus: resolvedFarAggregateDiagnosticSummary?.status ?? (
+      resolvedFarAggregateForceSummary
+        ? 'disabled-far-aggregate-diagnostic-summary'
+        : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates')
+    ),
+    farAggregateDiagnosticSummaryConsumerStatus: resolvedFarAggregateDiagnosticSummary
+      ? 'far-aggregate-diagnostic-summary-forwarded-to-resident-backend'
+      : (resolvedFarAggregateForceSummary
+        ? 'disabled-far-aggregate-diagnostic-summary'
+        : (resolvedFarAggregateCandidates ? 'disabled-far-aggregate-force-summary' : 'disabled-far-aggregate-candidates')),
     crossLevelCouplingStatus: resolvedCrossLevelCoupling
       ? 'candidate-generation-submitted-not-yet-consumed-by-mls-mpm-grid-transfer'
       : 'disabled-same-level-only-mechanics',

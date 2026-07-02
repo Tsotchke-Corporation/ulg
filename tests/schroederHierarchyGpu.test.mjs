@@ -9,6 +9,7 @@ import {
   SCHROEDER_CROSS_LEVEL_STATE_DELTA_ROW_LAYOUT,
   SCHROEDER_CROSS_LEVEL_TRANSFER_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_CANDIDATE_ROW_LAYOUT,
+  SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT,
@@ -38,6 +39,8 @@ import {
   ULG_SCHROEDER_CROSS_LEVEL_TRANSFER_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_CANDIDATE_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_HIERARCHY_AGGREGATE_EXECUTION_SCHEMA,
@@ -79,6 +82,7 @@ import {
   SCHROEDER_LAW_NEIGHBOR_SOURCE_SPAN_FLOATS,
   SCHROEDER_LAW_QUEUE_FLOATS,
   SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+  SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_LAW_NEIGHBOR_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   SCHROEDER_FULL_ACTIVE_NODE_SORTED_INDEX_READBACK_MODE,
@@ -100,6 +104,7 @@ import {
   DEFAULT_SCHROEDER_LAW_NEIGHBOR_FALLBACK_SCAN_RATIO_THRESHOLD,
   DEFAULT_SCHROEDER_LAW_QUEUE_CANDIDATE_BUDGET,
   DEFAULT_SCHROEDER_FAR_AGGREGATE_CANDIDATE_BUDGET,
+  DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD,
   DEFAULT_SCHROEDER_FAR_AGGREGATE_ERROR_BOUND,
   DEFAULT_SCHROEDER_FAR_AGGREGATE_FORCE_SCALE,
   DEFAULT_SCHROEDER_FAR_AGGREGATE_GRAVITATIONAL_CONSTANT,
@@ -107,6 +112,7 @@ import {
   DEFAULT_SCHROEDER_FAR_AGGREGATE_OPENING_THETA,
   DEFAULT_SCHROEDER_FAR_AGGREGATE_SOFTENING_LENGTH_M,
   SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS,
+  SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
   SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
   SCHROEDER_FAR_AGGREGATE_LAW_MASK,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
@@ -131,6 +137,8 @@ import {
   createSchroederCrossLevelTransferPlan,
   createSchroederFarAggregateCandidateParamsArray,
   createSchroederFarAggregateCandidatePlan,
+  createSchroederFarAggregateDiagnosticSummaryParamsArray,
+  createSchroederFarAggregateDiagnosticSummaryPlan,
   createSchroederFarAggregateForceSummaryParamsArray,
   createSchroederFarAggregateForceSummaryPlan,
   createSchroederHierarchyAggregateParamsArray,
@@ -164,6 +172,7 @@ import {
   runSchroederCrossLevelStateDeltaWebGpu,
   runSchroederCrossLevelTransferWebGpu,
   runSchroederFarAggregateCandidateWebGpu,
+  runSchroederFarAggregateDiagnosticSummaryWebGpu,
   runSchroederFarAggregateForceSummaryWebGpu,
   runSchroederHierarchyAggregateNodeReductionWebGpu,
   runSchroederHierarchyAggregateWebGpu,
@@ -425,6 +434,20 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS
   );
   assert.equal(SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA,
+    'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-far-aggregate-diagnostic-summary-execution.v0'
+  );
+  assert.equal(SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS, 32);
+  assert.equal(
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_ROW_LAYOUT.length,
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS
+  );
+  assert.equal(SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS % 4, 0);
   assert.equal(ULG_SCHROEDER_CROSS_LEVEL_COUPLING_SCHEMA, 'peercompute.ulg.schroeder-cross-level-coupling.v0');
   assert.equal(
     ULG_SCHROEDER_CROSS_LEVEL_COUPLING_EXECUTION_SCHEMA,
@@ -1662,6 +1685,66 @@ test('Schroeder far-aggregate force summary plan reduces candidates into read-on
   assert.equal(view.getFloat32(52, true), 3);
 });
 
+test('Schroeder far-aggregate diagnostic summary plan compacts force-quality pressure', () => {
+  const farAggregateForceSummary = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-force-summary-submitted',
+    activeNodeCount: 4,
+    forceSummaryRowCount: 4,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    forceSummaryBuffer: { label: 'fake-far-aggregate-force-summary-buffer' }
+  };
+  const plan = createSchroederFarAggregateDiagnosticSummaryPlan({
+    farAggregateForceSummary,
+    openingTheta: 0.75,
+    farFieldErrorBound: 0.03,
+    accelerationPressureThreshold: 12,
+    queueEpoch: 14,
+    stateFamilyId: 4
+  });
+
+  assert.equal(plan.schema, ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA);
+  assert.equal(plan.status, 'schroeder-far-aggregate-diagnostic-summary-plan-ready');
+  assert.equal(plan.sourceFarAggregateForceSummarySchema, ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA);
+  assert.equal(plan.forceSummaryRowCount, 4);
+  assert.equal(plan.diagnosticSummaryRowCount, 1);
+  assert.equal(plan.summaryRowCount, 1);
+  assert.equal(plan.forceSummaryStrideFloats, SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS);
+  assert.equal(plan.diagnosticSummaryStrideFloats, SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS);
+  assert.equal(plan.diagnosticSummaryByteLength, 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(plan.openingTheta, 0.75);
+  assert.equal(plan.farFieldErrorBound, 0.03);
+  assert.equal(plan.accelerationPressureThreshold, 12);
+  assert.equal(plan.outputCompaction, 'one-compact-far-aggregate-diagnostic-summary-row');
+  assert.equal(plan.diagnosticStatus, 'far-aggregate-diagnostics-ready');
+  assert.equal(plan.farFieldQualityStatus, 'far-aggregate-force-quality-pressure-ready');
+  assert.equal(plan.readbackPolicy, 'compact-summary-only-no-particle-readback');
+  assert.equal(plan.conservationStatus, 'diagnostic-summary-only-no-state-mutation');
+  assert.equal(plan.stateMutationRequired, false);
+  assert.equal(plan.stateMutationStatus, 'far-aggregate-diagnostic-summary-only-no-state-mutation');
+  assert.equal(plan.stateAuthorityStatus, 'state-manager-admission-required-before-any-far-force-application');
+  assert.deepEqual(plan.outputFamilies, [
+    'schroeder-far-aggregate-diagnostics',
+    'schroeder-far-aggregate-force-summary'
+  ]);
+  assert.equal(plan.gpuFirst, true);
+  assert.equal(plan.cpuReferenceRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+
+  const params = createSchroederFarAggregateDiagnosticSummaryParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(params.byteLength, 48);
+  assert.equal(view.getUint32(0, true), 4);
+  assert.equal(view.getUint32(4, true), SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS);
+  assert.equal(view.getUint32(8, true), SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS);
+  assert.equal(view.getFloat32(16, true), 0.75);
+  assert.equal(Math.round(view.getFloat32(20, true) * 100), 3);
+  assert.equal(view.getFloat32(24, true), 12);
+  assert.equal(view.getFloat32(28, true), 14);
+  assert.equal(view.getFloat32(32, true), 4);
+  assert.equal(DEFAULT_SCHROEDER_FAR_AGGREGATE_ACCELERATION_PRESSURE_THRESHOLD, 0);
+});
+
 test('Schroeder phase-volume migration plan consumes aggregate nodes for water-to-steam scale changes', () => {
   const levelAssignment = {
     schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
@@ -1854,6 +1937,8 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
     12 * SCHROEDER_FAR_AGGREGATE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const farAggregateForceSummaryByteLength =
     3 * SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const farAggregateDiagnosticSummaryByteLength =
+    SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const aggregateNodeByteLength = 2 * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const summaryByteLength = SCHROEDER_CONSERVATION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const phaseDiagnosticByteLength =
@@ -1908,6 +1993,15 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
       forceSummaryBuffer: { label: 'retained-far-aggregate-force-summary' },
       forceSummaryBufferByteLength: farAggregateForceSummaryByteLength
     },
+    farAggregateDiagnosticSummary: {
+      schema: ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+      status: 'schroeder-far-aggregate-diagnostic-summary-submitted',
+      diagnosticSummaryRowCount: 1,
+      diagnosticSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS,
+      diagnosticSummaryRows: new Float32Array(SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_FLOATS),
+      diagnosticSummaryBuffer: { label: 'retained-far-aggregate-diagnostic-summary' },
+      diagnosticSummaryBufferByteLength: farAggregateDiagnosticSummaryByteLength
+    },
     hierarchyAggregateNode: {
       schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
       status: 'schroeder-hierarchy-aggregate-node-submitted',
@@ -1952,8 +2046,9 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.lawNeighborCandidateCount, 9);
   assert.equal(plan.farAggregateCandidateCount, 12);
   assert.equal(plan.farAggregateForceSummaryCount, 3);
-  assert.equal(plan.retainedRefCount, 9);
-  assert.equal(plan.retainedBufferRefCount, 9);
+  assert.equal(plan.farAggregateDiagnosticSummaryCount, 1);
+  assert.equal(plan.retainedRefCount, 10);
+  assert.equal(plan.retainedBufferRefCount, 10);
   assert.equal(
     plan.retainedRefs.find((entry) => entry.family === 'schroeder-active-node-list')?.retainedBufferRef,
     'schroeder-active-node-list:render-lod-leaf-source'
@@ -1970,6 +2065,10 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
     plan.retainedRefs.find((entry) => entry.family === 'schroeder-far-aggregate-force-summary')?.retainedBufferRef,
     'schroeder-far-aggregate-force-summary:read-only-far-field-force-summary'
   );
+  assert.equal(
+    plan.retainedRefs.find((entry) => entry.family === 'schroeder-far-aggregate-diagnostic-summary')?.retainedBufferRef,
+    'schroeder-far-aggregate-diagnostic-summary:far-field-force-quality-diagnostics'
+  );
   assert.equal(plan.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
   assert.equal(plan.renderLod.status, 'schroeder-render-lod-summary-planned');
   assert.equal(plan.renderLod.activeLeafProxyCount, 3);
@@ -1977,6 +2076,7 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.renderLod.lawQueueProxyCount, 3);
   assert.equal(plan.renderLod.farAggregateCandidateProxyCount, 12);
   assert.equal(plan.renderLod.farAggregateForceSummaryCount, 3);
+  assert.equal(plan.renderLod.farAggregateDiagnosticSummaryCount, 1);
   assert.equal(plan.renderLod.phaseVolumeDiagnosticRowsAvailable, true);
   assert.equal(plan.renderLod.fullParticleReadbackRequired, false);
   assert.equal(plan.fullParticleReadbackRequired, false);
@@ -3243,6 +3343,78 @@ test('Schroeder far-aggregate force summaries reduce retained candidates without
   );
 });
 
+test('Schroeder far-aggregate diagnostic summaries compact force pressure without particle readback', async () => {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  const forceSummaryBuffer = device.createBuffer({
+    label: 'retained-far-aggregate-force-summary-buffer',
+    size: 4 * SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+  const farAggregateForceSummary = {
+    schema: ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA,
+    status: 'schroeder-far-aggregate-force-summary-submitted',
+    activeNodeCount: 4,
+    forceSummaryRowCount: 4,
+    forceSummaryStrideFloats: SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_FLOATS,
+    forceSummaryBuffer
+  };
+  const diagnostics = await runSchroederFarAggregateDiagnosticSummaryWebGpu({
+    device,
+    farAggregateForceSummary,
+    openingTheta: 0.75,
+    farFieldErrorBound: 0.03,
+    accelerationPressureThreshold: 12,
+    queueEpoch: 14,
+    stateFamilyId: 4
+  });
+
+  assert.equal(diagnostics.schema, ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA);
+  assert.equal(
+    diagnostics.farAggregateDiagnosticSummarySchema,
+    ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_SCHEMA
+  );
+  assert.equal(diagnostics.status, 'schroeder-far-aggregate-diagnostic-summary-submitted');
+  assert.equal(
+    diagnostics.sourceFarAggregateForceSummarySchema,
+    ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA
+  );
+  assert.equal(diagnostics.readbackMode, SCHROEDER_COMPACT_FAR_AGGREGATE_DIAGNOSTIC_READBACK_MODE);
+  assert.equal(diagnostics.compactSummaryReadbackPerformed, true);
+  assert.equal(diagnostics.fullReadbackPerformed, false);
+  assert.equal(diagnostics.fullParticleReadbackPerformed, false);
+  assert.equal(diagnostics.normalHotLoopReadbackFree, false);
+  assert.equal(diagnostics.forceSummaryRowCount, 4);
+  assert.equal(diagnostics.diagnosticSummaryRowCount, 1);
+  assert.equal(diagnostics.retainedDiagnosticSummaryBuffer, true);
+  assert.ok(diagnostics.diagnosticSummaryBuffer);
+  assert.equal(diagnostics.diagnosticSummaryBuffer.destroyed, false);
+  assert.equal(diagnostics.diagnosticSummaryBufferByteLength, 32 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(diagnostics.diagnosticSummaryRows.length, 32);
+  assert.equal(diagnostics.summaryRows.length, 32);
+  assert.equal(diagnostics.diagnosticStatus, 'far-aggregate-diagnostics-submitted');
+  assert.equal(diagnostics.farFieldQualityStatus, 'far-aggregate-force-quality-pressure-submitted');
+  assert.equal(diagnostics.readbackPolicy, 'compact-summary-only-no-particle-readback');
+  assert.equal(diagnostics.conservationStatus, 'diagnostic-summary-only-no-state-mutation');
+  assert.equal(diagnostics.stateMutationRequired, false);
+  assert.equal(diagnostics.stateMutationStatus, 'far-aggregate-diagnostic-summary-only-no-state-mutation');
+  assert.equal(diagnostics.stateAuthorityStatus, 'state-manager-admission-required-before-any-far-force-application');
+  assert.deepEqual(device.dispatches.slice(-1), [[1, 1, 1]]);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederFarAggregateDiagnosticSummaryParams')));
+  assert.ok(device.shaderModules.some((module) => module.code.includes('opening_ratio_pressure_source_count')));
+  assert.ok(device.writes.some((write) => (
+    write.label === 'ulg-schroeder-far-aggregate-diagnostic-summary-params'
+    && write.byteLength === 48
+  )));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-far-aggregate-diagnostic-summary-out'
+    && buffer.size === 32 * Float32Array.BYTES_PER_ELEMENT
+  )));
+  assert.ok(device.createdBuffers.some((buffer) => (
+    buffer.label === 'ulg-schroeder-far-aggregate-diagnostic-summary-readback'
+    && buffer.size === 32 * Float32Array.BYTES_PER_ELEMENT
+  )));
+});
+
 test('Schroeder phase-volume migration consumes retained aggregate nodes without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const levelAssignment = {
@@ -4087,7 +4259,7 @@ test('Schroeder same-level mechanics builds sorted active-node index from traver
 });
 
 test('Schroeder same-level mechanics can run admitted state-delta merge before resident backend', async () => {
-  const device = createFakeWebGpuDevice();
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
   const calls = [];
   const result = await runSchroederSameLevelMechanicsWebGpu({
@@ -4110,6 +4282,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
         hasHierarchyAggregateNode: Boolean(options.schroederHierarchyAggregateNode),
         hasFarAggregateCandidates: Boolean(options.schroederFarAggregateCandidates),
         hasFarAggregateForceSummary: Boolean(options.schroederFarAggregateForceSummary),
+        hasFarAggregateDiagnosticSummary: Boolean(options.schroederFarAggregateDiagnosticSummary),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
         hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
@@ -4148,6 +4321,14 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.farAggregateForceSummary.forceMode, 'read-only-gravity-like-far-aggregate-acceleration-summary');
   assert.equal(result.farAggregateForceSummary.stateMutationRequired, false);
   assert.equal(result.farAggregateForceSummary.conservationStatus, 'read-only-force-summary-no-state-mutation');
+  assert.equal(result.farAggregateDiagnosticSummary.retainedDiagnosticSummaryBuffer, true);
+  assert.equal(result.farAggregateDiagnosticSummary.forceSummaryRowCount, 3);
+  assert.equal(result.farAggregateDiagnosticSummary.diagnosticSummaryRowCount, 1);
+  assert.equal(result.farAggregateDiagnosticSummary.compactSummaryReadbackPerformed, true);
+  assert.equal(result.farAggregateDiagnosticSummary.diagnosticStatus, 'far-aggregate-diagnostics-submitted');
+  assert.equal(result.farAggregateDiagnosticSummary.farFieldQualityStatus, 'far-aggregate-force-quality-pressure-submitted');
+  assert.equal(result.farAggregateDiagnosticSummary.stateMutationRequired, false);
+  assert.equal(result.farAggregateDiagnosticSummary.conservationStatus, 'diagnostic-summary-only-no-state-mutation');
   assert.equal(result.phaseVolumeMigration.retainedMigrationBuffer, true);
   assert.equal(result.phaseVolumeMigration.particleCount, 3);
   assert.equal(result.phaseVolumeMigration.aggregateNodeCount, 3);
@@ -4169,6 +4350,11 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.farAggregateCandidateConsumerStatus, 'far-aggregate-candidates-forwarded-to-resident-backend');
   assert.equal(result.farAggregateForceSummaryStatus, 'schroeder-far-aggregate-force-summary-submitted');
   assert.equal(result.farAggregateForceSummaryConsumerStatus, 'far-aggregate-force-summary-forwarded-to-resident-backend');
+  assert.equal(result.farAggregateDiagnosticSummaryStatus, 'schroeder-far-aggregate-diagnostic-summary-submitted');
+  assert.equal(
+    result.farAggregateDiagnosticSummaryConsumerStatus,
+    'far-aggregate-diagnostic-summary-forwarded-to-resident-backend'
+  );
   assert.equal(result.phaseVolumeMigrationStatus, 'schroeder-phase-volume-migration-submitted');
   assert.equal(result.phaseVolumeLevelUpdateStatus, 'disabled-phase-volume-level-update-admission-not-provided');
   assert.equal(result.phaseVolumeDiagnosticSummaryStatus, 'disabled-phase-volume-level-update-admission-not-provided');
@@ -4180,6 +4366,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(result.residentStep.hasHierarchyAggregateNode, true);
   assert.equal(result.residentStep.hasFarAggregateCandidates, true);
   assert.equal(result.residentStep.hasFarAggregateForceSummary, true);
+  assert.equal(result.residentStep.hasFarAggregateDiagnosticSummary, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, false);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, false);
@@ -4205,6 +4392,10 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
     ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA
   );
   assert.equal(
+    calls[0].schroederFarAggregateDiagnosticSummary.schema,
+    ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+  );
+  assert.equal(
     calls[0].schroederPhaseVolumeMigration.schema,
     ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA
   );
@@ -4212,7 +4403,7 @@ test('Schroeder same-level mechanics can run admitted state-delta merge before r
   assert.equal(calls[0].schroederPhaseVolumeDiagnosticSummary, null);
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 
@@ -4238,6 +4429,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
         status: 'resident-step-stubbed',
         hasFarAggregateCandidates: Boolean(options.schroederFarAggregateCandidates),
         hasFarAggregateForceSummary: Boolean(options.schroederFarAggregateForceSummary),
+        hasFarAggregateDiagnosticSummary: Boolean(options.schroederFarAggregateDiagnosticSummary),
         hasPhaseVolumeMigration: Boolean(options.schroederPhaseVolumeMigration),
         hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate),
         hasPhaseVolumeDiagnosticSummary: Boolean(options.schroederPhaseVolumeDiagnosticSummary)
@@ -4252,6 +4444,10 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   assert.equal(result.farAggregateForceSummary.retainedForceSummaryBuffer, true);
   assert.equal(result.farAggregateForceSummary.forceSummaryRowCount, 3);
   assert.equal(result.farAggregateForceSummaryStatus, 'schroeder-far-aggregate-force-summary-submitted');
+  assert.equal(result.farAggregateDiagnosticSummary.retainedDiagnosticSummaryBuffer, true);
+  assert.equal(result.farAggregateDiagnosticSummary.forceSummaryRowCount, 3);
+  assert.equal(result.farAggregateDiagnosticSummary.diagnosticSummaryRowCount, 1);
+  assert.equal(result.farAggregateDiagnosticSummaryStatus, 'schroeder-far-aggregate-diagnostic-summary-submitted');
   assert.equal(result.phaseVolumeLevelUpdate.retainedLevelUpdateBuffer, true);
   assert.equal(result.phaseVolumeLevelUpdate.migrationRowCount, 3);
   assert.equal(result.phaseVolumeLevelUpdate.outputCompaction, 'one-admitted-phase-volume-level-update-row-per-migration-row');
@@ -4279,6 +4475,7 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
   assert.equal(result.stateAuthorityStatus, 'state-manager-admitted-phase-volume-level-update-materialized');
   assert.equal(result.residentStep.hasFarAggregateCandidates, true);
   assert.equal(result.residentStep.hasFarAggregateForceSummary, true);
+  assert.equal(result.residentStep.hasFarAggregateDiagnosticSummary, true);
   assert.equal(result.residentStep.hasPhaseVolumeMigration, true);
   assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, true);
   assert.equal(result.residentStep.hasPhaseVolumeDiagnosticSummary, true);
@@ -4296,12 +4493,16 @@ test('Schroeder same-level mechanics can apply admitted phase-volume level updat
     ULG_SCHROEDER_FAR_AGGREGATE_FORCE_SUMMARY_EXECUTION_SCHEMA
   );
   assert.equal(
+    calls[0].schroederFarAggregateDiagnosticSummary.schema,
+    ULG_SCHROEDER_FAR_AGGREGATE_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
+  );
+  assert.equal(
     calls[0].schroederPhaseVolumeDiagnosticSummary.schema,
     ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA
   );
   assert.deepEqual(
     device.dispatches,
-    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
 });
 

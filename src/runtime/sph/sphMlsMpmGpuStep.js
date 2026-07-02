@@ -620,6 +620,52 @@ function summarizeSchroederAdoptedParticleStorageLocalResolverBinding(binding = 
   };
 }
 
+function isGpuHandleLikeValue(value) {
+  if (!value || typeof value !== 'object') return false;
+  const ctor = value.constructor?.name || '';
+  if (/^GPU/.test(ctor)) return true;
+  return typeof value.mapAsync === 'function' && typeof value.destroy === 'function';
+}
+
+function workerTransportableStructuredCloneValue(value, seen = new Set(), depth = 0) {
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'function' ? undefined : value;
+  }
+  if (isGpuHandleLikeValue(value)) return undefined;
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  if (seen.has(value) || depth > 12) return undefined;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      const cloned = workerTransportableStructuredCloneValue(entry, seen, depth + 1);
+      return cloned === undefined ? null : cloned;
+    });
+  }
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const cloned = workerTransportableStructuredCloneValue(entry, seen, depth + 1);
+    if (cloned !== undefined) out[key] = cloned;
+  }
+  return out;
+}
+
+function workerTransportableMaterialInterfaceField(field = null) {
+  if (!field || typeof field !== 'object') return field ?? null;
+  const hadRetainedSourceKeyBuffer = Boolean(field.interfaceSourceKeyBuffer);
+  const transportable = workerTransportableStructuredCloneValue(field);
+  if (!transportable || typeof transportable !== 'object') return null;
+  if (hadRetainedSourceKeyBuffer) {
+    // The retained sph-interface-source-key GPU buffer stays main-thread
+    // owned; the worker-side pressure stage keeps its legacy non-sidecar
+    // fallback when this transport marker is present without the buffer.
+    transportable.interfaceSourceKeyBufferRetained = true;
+    transportable.interfaceSourceKeyBufferMainThreadRetained = true;
+    transportable.interfaceSourceKeyBufferTransport =
+      'main-thread-retained-not-worker-clonable';
+  }
+  return transportable;
+}
+
 function normalizeSameDeviceRetainedBufferImportDescriptor(source = null) {
   if (!source || typeof source !== 'object' || source.sameDevice !== true) return null;
   const sourceHotBufferKey = typeof source.sourceHotBufferKey === 'string' && source.sourceHotBufferKey.trim()
@@ -5346,10 +5392,21 @@ function createSchroederParticleStorageAdoption({
     source.sourceParticleCount ?? sphParticleState?.particleCount,
     sphParticleState?.particleCount ?? 0
   )));
-  const authoritativeParticleCount = Math.max(0, Math.round(finiteNumber(
+  const outputParticleCapacity = Math.max(sourceParticleCount, Math.round(finiteNumber(
     source.outputParticleCapacity ?? source.particleCapacity ?? sourceParticleCount,
     sourceParticleCount
   )));
+  // Capacity is buffer headroom, not live particles. The authoritative count
+  // only grows past the source count through an explicitly admitted
+  // split/merge count delta; without one, adoption must not claim growth.
+  const admittedParticleCountDelta = Math.round(finiteNumber(
+    source.admittedParticleCountDelta,
+    0
+  ));
+  const authoritativeParticleCount = Math.min(
+    outputParticleCapacity,
+    Math.max(0, sourceParticleCount + admittedParticleCountDelta)
+  );
   const adopted = blockers.length === 0;
   return {
     schema: ULG_SCHROEDER_PARTICLE_STORAGE_ADOPTION_SCHEMA,
@@ -5370,7 +5427,8 @@ function createSchroederParticleStorageAdoption({
     particleStorageMaterializationAdmissionApproved: admitted,
     retainedParticleBuffers,
     sourceParticleCount,
-    outputParticleCapacity: authoritativeParticleCount,
+    outputParticleCapacity,
+    admittedParticleCountDelta,
     authoritativeParticleCount,
     sourceMlsMpmParticleCount: Math.max(0, Math.round(finiteNumber(
       mlsMpmParticleState?.particleCount,
@@ -5463,6 +5521,10 @@ export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = n
     adoption.authoritativeParticleCount ?? step?.nextParticleCount,
     0
   )));
+  const outputParticleCapacity = Math.max(authoritativeParticleCount, Math.round(finiteNumber(
+    adoption.outputParticleCapacity,
+    authoritativeParticleCount
+  )));
   const retainedBufferRefs = uniqueNonEmptyStrings([
     'sph-state-buffer',
     'sph-thermo-buffer',
@@ -5475,7 +5537,7 @@ export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = n
       family: 'sph-particle-state',
       byteLength: adoption.stateBufferByteLength,
       strideBytes: adoption.stateStrideBytes,
-      particleCount: authoritativeParticleCount,
+      particleCount: outputParticleCapacity,
       retained: Boolean(adoption.stateBuffer)
     }),
     particleStorageRetainedRefDescriptor({
@@ -5484,7 +5546,7 @@ export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = n
       family: 'sph-particle-thermo',
       byteLength: adoption.thermoBufferByteLength,
       strideBytes: adoption.thermoStrideBytes,
-      particleCount: authoritativeParticleCount,
+      particleCount: outputParticleCapacity,
       retained: Boolean(adoption.thermoBuffer)
     }),
     particleStorageRetainedRefDescriptor({
@@ -5493,7 +5555,7 @@ export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = n
       family: 'mls-mpm-particle-mechanics',
       byteLength: adoption.mechanicsBufferByteLength,
       strideBytes: adoption.mechanicsStrideBytes,
-      particleCount: authoritativeParticleCount,
+      particleCount: outputParticleCapacity,
       retained: Boolean(adoption.mechanicsBuffer)
     })
   ];
@@ -5520,7 +5582,7 @@ export function createSchroederAdoptedParticleStorageDescriptorFromStep(step = n
     replacementPolicy: adoption.replacementPolicy || null,
     sourceParticleCount: Math.max(0, Math.round(finiteNumber(adoption.sourceParticleCount, 0))),
     sourceMlsMpmParticleCount: Math.max(0, Math.round(finiteNumber(adoption.sourceMlsMpmParticleCount, 0))),
-    outputParticleCapacity: authoritativeParticleCount,
+    outputParticleCapacity,
     authoritativeParticleCount,
     targetStateFamilies: uniqueNonEmptyStrings(
       adoption.targetStateFamilies?.length
@@ -12037,7 +12099,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             schroederAdoptedParticleStorageContinuationPortableMaterializationSeed
         })
       : null);
-  const schroederAdoptedParticleStorageContinuationSchedule =
+  const baseSchroederAdoptedParticleStorageContinuationSchedule =
     createSchroederAdoptedParticleStorageContinuationSchedule({
       continuationPlan: resolvedSchroederAdoptedParticleStorageContinuationPlan,
       consumerMode: schroederAdoptedParticleStorageContinuationConsumerMode,
@@ -12046,6 +12108,31 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       laneId: laneStagePlanId,
       stateKey: laneStagePlanStateKey
     });
+  // Same-device continuation resolves main-thread GPUBuffer handles. When a
+  // dedicated stage worker runner owns stage execution, the lane stage plan
+  // is posted to that worker and raw GPUBuffer handles cannot be cloned
+  // across the boundary. Fail closed with explicit telemetry instead of
+  // binding refs that would poison the worker payload; worker-lane
+  // consumption needs a worker-owned rematerialization path.
+  const schroederAdoptedParticleStorageWorkerLaneBlocked = Boolean(
+    baseSchroederAdoptedParticleStorageContinuationSchedule.scheduled === true
+    && baseSchroederAdoptedParticleStorageContinuationSchedule.consumerMode === 'same-device'
+    && gpuHubResidentStageWorkerRunner
+  );
+  const schroederAdoptedParticleStorageContinuationSchedule =
+    schroederAdoptedParticleStorageWorkerLaneBlocked
+      ? {
+          ...baseSchroederAdoptedParticleStorageContinuationSchedule,
+          status: 'blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs',
+          scheduled: false,
+          failClosed: requireSchroederAdoptedParticleStorageContinuation === true,
+          workerLaneBlocked: true,
+          reason: 'stage-worker-lane-cannot-consume-main-thread-retained-gpubuffer-refs',
+          sameDevicePrivateLaneRefs: [],
+          retainedBufferRefs: [],
+          retainedBufferRefCount: 0
+        }
+      : baseSchroederAdoptedParticleStorageContinuationSchedule;
   const sphParticleState = stepOptions.sphParticleState;
   const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
   const schroederAdoptedParticleStorageLocalResolverBinding =
@@ -13016,7 +13103,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 pressureFeedback: stepOptions.pressureFeedback || null,
                 pressureSummary: stepOptions.pressureSummary || null,
                 gasPressureSummary: stepOptions.gasPressureSummary || null,
-                materialInterfaceField: stepOptions.materialInterfaceField || null,
+                materialInterfaceField: workerTransportableMaterialInterfaceField(
+                  stepOptions.materialInterfaceField
+                ),
                 algorithmMaterialContactRows: stepOptions.algorithmMaterialContactRows
                   || mlsMpmParticleState?.algorithmMaterialContactRows
                   || null,

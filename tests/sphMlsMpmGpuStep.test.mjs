@@ -2112,10 +2112,12 @@ test('MLS-MPM resident step adopts admitted Schroeder materialized particle stor
     'state-manager-admitted-retained-particle-buffer-swap'
   );
   assert.equal(step.schroederParticleStorageMaterializationStatus, 'schroeder-particle-storage-materialization-submitted');
-  assert.equal(step.schroederParticleStorageAuthoritativeParticleCount, outputParticleCapacity);
-  assert.equal(step.nextParticleCount, outputParticleCapacity);
-  assert.equal(step.nextParticleUploads.sphParticleUpload.particleCount, outputParticleCapacity);
-  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.particleCount, outputParticleCapacity);
+  // Adopted buffers carry capacity headroom, but the live particle count only
+  // grows through an explicitly admitted split/merge count delta.
+  assert.equal(step.schroederParticleStorageAuthoritativeParticleCount, buffers.sphParticleState.particleCount);
+  assert.equal(step.nextParticleCount, buffers.sphParticleState.particleCount);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.particleCount, buffers.sphParticleState.particleCount);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.particleCount, buffers.sphParticleState.particleCount);
   assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, materializedStateBuffer);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, materializedThermoBuffer);
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer, materializedMechanicsBuffer);
@@ -2146,7 +2148,7 @@ test('MLS-MPM resident step adopts admitted Schroeder materialized particle stor
   assert.equal(step.diagnostics.schroederParticleStorageAdopted, true);
   assert.equal(
     step.diagnostics.schroederParticleStorageAuthoritativeParticleCount,
-    outputParticleCapacity
+    buffers.sphParticleState.particleCount
   );
   assert.equal(step.residentBufferLeaseActiveLeaseCount, 3);
   assert.equal(tracker.destroyed, 0);
@@ -5493,7 +5495,9 @@ test('MLS-MPM resident steps commit delta carries descriptor-only Schroeder adop
 
   assert.equal(result.completedStepCount, 1);
   assert.equal(result.finalStep.schroederParticleStorageAdopted, true);
-  assert.equal(result.finalStep.nextParticleCount, outputParticleCapacity);
+  // Adoption swaps buffers with headroom capacity, but the live particle
+  // count only grows through an explicitly admitted split/merge count delta.
+  assert.equal(result.finalStep.nextParticleCount, buffers.sphParticleState.particleCount);
   assert.equal(result.schroederParticleStorageContinuationAvailable, true);
   const descriptor = result.schroederAdoptedParticleStorageDescriptor;
   assert.equal(descriptor.schema, ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA);
@@ -5506,7 +5510,8 @@ test('MLS-MPM resident steps commit delta carries descriptor-only Schroeder adop
   assert.equal(descriptor.crossPeerReplayReady, false);
   assert.equal(descriptor.portableSnapshotRequired, true);
   assert.equal(descriptor.authoritativeStateMutation, true);
-  assert.equal(descriptor.authoritativeParticleCount, outputParticleCapacity);
+  assert.equal(descriptor.authoritativeParticleCount, buffers.sphParticleState.particleCount);
+  assert.equal(descriptor.outputParticleCapacity, outputParticleCapacity);
   assert.equal(descriptor.stateBufferRef, 'sph-state-buffer');
   assert.equal(descriptor.thermoBufferRef, 'sph-thermo-buffer');
   assert.equal(descriptor.mechanicsBufferRef, 'mls-mpm-mechanics-buffer');
@@ -5535,9 +5540,12 @@ test('MLS-MPM resident steps commit delta carries descriptor-only Schroeder adop
   assert.equal(result.commitDelta.payload.finalStep.schroederParticleStorageAdopted, true);
   assert.equal(
     result.commitDelta.payload.finalStep.schroederParticleStorageAuthoritativeParticleCount,
-    outputParticleCapacity
+    buffers.sphParticleState.particleCount
   );
-  assert.equal(result.commitDelta.payload.finalStep.nextParticleCount, outputParticleCapacity);
+  assert.equal(
+    result.commitDelta.payload.finalStep.nextParticleCount,
+    buffers.sphParticleState.particleCount
+  );
   const portablePayload = JSON.stringify(payloadDescriptor);
   assert.doesNotMatch(portablePayload, /schroeder-materialized-state/);
   assert.doesNotMatch(portablePayload, /schroeder-materialized-thermo/);

@@ -38,7 +38,11 @@ import {
   uploadSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
 import {
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
@@ -99,6 +103,22 @@ export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATI
   'peercompute.ulg.schroeder-phase-volume-migration-admission-hot-buffer-publication.v0';
 export const ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE =
   'ulg-schroeder-phase-volume-migration-admissions';
+export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-phase-volume-split-merge-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCOPE =
+  'ulg-schroeder-phase-volume-split-merge-admissions';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-allocator-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCOPE =
+  'ulg-schroeder-particle-storage-allocator-admissions';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-slot-assignment-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCOPE =
+  'ulg-schroeder-particle-storage-slot-assignment-admissions';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-materialization-admission-hot-buffer-publication.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCOPE =
+  'ulg-schroeder-particle-storage-materialization-admissions';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-hot-buffer-publication.v0';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE =
@@ -3382,6 +3402,396 @@ export function publishUlgSchroederPhaseVolumeMigrationAdmission({
     commitDeltaScope: deltaScope,
     commitDeltaTimestamp: committedAt
   };
+}
+
+const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES = Object.freeze([
+  'sph-particle-state',
+  'mls-mpm-particle-mechanics',
+  'sph-particle-thermo'
+]);
+
+function firstFinitePositiveIntegerFromObject(source = {}, keys = [], fallback = 0) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const number = Math.trunc(finiteSeedNumber(source[key], NaN));
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  const fallbackNumber = Math.trunc(finiteSeedNumber(fallback, 0));
+  return Number.isFinite(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : 0;
+}
+
+function publishUlgSchroederAdmissionDescriptor({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  source = null,
+  rowCount = null,
+  rowCountKeys = [],
+  rowCountFields = [],
+  outputFamilies = [],
+  defaultOutputFamilies = [],
+  targetStateFamilies = [],
+  peerComputeUseCase = null,
+  sourceTaskId = null,
+  sourceNodeId = null,
+  sourceStage = null,
+  scope = null,
+  taskId = null,
+  version = null,
+  admissionSchema,
+  publicationSchema,
+  admissionPropertyName,
+  statusPrefix,
+  sourceMode,
+  approvalFields = {},
+  extraAdmissionFields = {},
+  stateMutationFamily = 'schroeder-hierarchy'
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError(`${statusPrefix || 'Schroeder'} admission publication requires StateManager hot storage and commitDelta`);
+  }
+  const sourceObject = source && typeof source === 'object' ? source : {};
+  const resolvedRowCount = firstFinitePositiveIntegerFromObject(
+    { ...sourceObject, rowCount },
+    ['rowCount', ...rowCountKeys],
+    rowCount
+  );
+  if (resolvedRowCount <= 0) {
+    throw new TypeError(`${statusPrefix || 'Schroeder'} admission requires a positive row budget`);
+  }
+  const resolvedCacheKey = normalizeString(
+    cacheKey,
+    sourceObject.cacheKey || sourceObject.peerComputeUseCase || peerComputeUseCase || null
+  );
+  const resolvedStateKey = normalizeString(stateKey, sourceObject.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const resolvedOutputFamilies = uniqueStringList([
+    ...normalizeStringList(outputFamilies),
+    ...normalizeStringList(sourceObject.outputFamilies),
+    ...normalizeStringList(defaultOutputFamilies)
+  ]);
+  const resolvedTargetStateFamilies = uniqueStringList([
+    ...normalizeStringList(targetStateFamilies),
+    ...normalizeStringList(sourceObject.targetStateFamilies)
+  ]);
+  const committedAt = Date.now();
+  const rowFields = uniqueStringList(rowCountFields);
+  const rowFieldValues = Object.fromEntries(rowFields.map((field) => [field, resolvedRowCount]));
+  const admission = {
+    schema: admissionSchema,
+    status: `${statusPrefix}-admission-admitted`,
+    ...approvalFields,
+    stateManagerAdmitted: true,
+    committed: true,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    peerComputeUseCase: peerComputeUseCase || sourceObject.peerComputeUseCase || null,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    ...rowFieldValues,
+    outputFamilies: resolvedOutputFamilies,
+    ...(resolvedTargetStateFamilies.length ? { targetStateFamilies: resolvedTargetStateFamilies } : {}),
+    ...extraAdmissionFields,
+    admissionMode: 'state-manager-warm-delta-plus-hot-buffer-ref',
+    publicationMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: false,
+    authoritativeStateMutation: true,
+    stateMutationFamily,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  const hotBufferRecord = {
+    schema: publicationSchema,
+    status: `${statusPrefix}-admission-hot-buffer-source-stored`,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode,
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    [admissionPropertyName]: cloneSerializableValue(admission)
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, `${statusPrefix}-admissions`);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-${statusPrefix}-admission:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: publicationSchema,
+    status: `${statusPrefix}-admission-admitted`,
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sourceMode,
+    sourceSchema: sourceObject.schema || null,
+    sourceStatus: sourceObject.status || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    [admissionPropertyName]: cloneSerializableValue(admission)
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: `${statusPrefix}-admission-published`,
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgSchroederPhaseVolumeSplitMergeAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  proposalRowCount = null,
+  schroederPhaseVolumeSplitMergeProposalRowCount = null,
+  schroederPhaseVolumeSplitMergeRowCount = null,
+  outputFamilies = [],
+  hotBufferKeyPrefix = 'ulg:schroeder-phase-volume-split-merge-admission',
+  scope = ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCOPE,
+  sourceNodeId = 'schroeder-phase-volume-split-merge',
+  sourceStage = 'schroederPhaseVolumeSplitMerge',
+  ...options
+} = {}) {
+  return publishUlgSchroederAdmissionDescriptor({
+    stateManager,
+    nodeKernel,
+    ...options,
+    rowCount:
+      schroederPhaseVolumeSplitMergeProposalRowCount
+      ?? schroederPhaseVolumeSplitMergeRowCount
+      ?? proposalRowCount,
+    rowCountKeys: [
+      'schroederPhaseVolumeSplitMergeProposalRowCount',
+      'schroederPhaseVolumeSplitMergeRowCount',
+      'proposalRowCount',
+      'particleCount'
+    ],
+    rowCountFields: [
+      'schroederPhaseVolumeSplitMergeProposalRowCount',
+      'schroederPhaseVolumeSplitMergeRowCount',
+      'proposalRowCount'
+    ],
+    outputFamilies,
+    defaultOutputFamilies: ['schroeder-phase-volume-split-merge-apply'],
+    hotBufferKeyPrefix,
+    scope,
+    sourceNodeId,
+    sourceStage,
+    admissionSchema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+    publicationSchema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    admissionPropertyName: 'schroederPhaseVolumeSplitMergeAdmission',
+    statusPrefix: 'schroeder-phase-volume-split-merge',
+    sourceMode: 'state-manager-schroeder-phase-volume-split-merge-admission',
+    approvalFields: { phaseVolumeSplitMergeApproved: true },
+    stateMutationFamily: 'schroeder-phase-volume'
+  });
+}
+
+export function publishUlgSchroederParticleStorageAllocatorAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  allocationRowCount = null,
+  schroederParticleStorageAllocationRowCount = null,
+  currentParticleCapacity = null,
+  requiredParticleCapacity = null,
+  targetStateFamilies = SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+  outputFamilies = [],
+  hotBufferKeyPrefix = 'ulg:schroeder-particle-storage-allocator-admission',
+  scope = ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCOPE,
+  sourceNodeId = 'schroeder-particle-storage-allocator',
+  sourceStage = 'schroederParticleStorageAllocator',
+  ...options
+} = {}) {
+  const resolvedRequiredCapacity = Math.max(1, Math.trunc(finiteSeedNumber(
+    requiredParticleCapacity ?? options.source?.requiredParticleCapacity,
+    allocationRowCount ?? schroederParticleStorageAllocationRowCount ?? options.source?.particleCount ?? 1
+  )));
+  const resolvedCurrentCapacity = Math.max(0, Math.trunc(finiteSeedNumber(
+    currentParticleCapacity ?? options.source?.currentParticleCapacity ?? options.source?.particleCount,
+    resolvedRequiredCapacity
+  )));
+  return publishUlgSchroederAdmissionDescriptor({
+    stateManager,
+    nodeKernel,
+    ...options,
+    rowCount: schroederParticleStorageAllocationRowCount ?? allocationRowCount,
+    rowCountKeys: [
+      'schroederParticleStorageAllocationRowCount',
+      'allocationRowCount',
+      'applyRowCount',
+      'particleCount'
+    ],
+    rowCountFields: [
+      'schroederParticleStorageAllocationRowCount',
+      'allocationRowCount',
+      'applyRowCount'
+    ],
+    outputFamilies,
+    defaultOutputFamilies: ['schroeder-particle-storage-allocation'],
+    targetStateFamilies,
+    hotBufferKeyPrefix,
+    scope,
+    sourceNodeId,
+    sourceStage,
+    admissionSchema: ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+    publicationSchema: ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    admissionPropertyName: 'schroederParticleStorageAllocatorAdmission',
+    statusPrefix: 'schroeder-particle-storage-allocator',
+    sourceMode: 'state-manager-schroeder-particle-storage-allocator-admission',
+    approvalFields: {
+      particleStorageAllocationApproved: true,
+      particleCapacityApproved: true
+    },
+    extraAdmissionFields: {
+      currentParticleCapacity: resolvedCurrentCapacity,
+      requiredParticleCapacity: resolvedRequiredCapacity,
+      particleCapacity: Math.max(resolvedCurrentCapacity, resolvedRequiredCapacity)
+    },
+    stateMutationFamily: 'schroeder-particle-storage'
+  });
+}
+
+export function publishUlgSchroederParticleStorageSlotAssignmentAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  slotAssignmentRowCount = null,
+  schroederParticleStorageSlotAssignmentRowCount = null,
+  targetStateFamilies = SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+  outputFamilies = [],
+  hotBufferKeyPrefix = 'ulg:schroeder-particle-storage-slot-assignment-admission',
+  scope = ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCOPE,
+  sourceNodeId = 'schroeder-particle-storage-slot-assignment',
+  sourceStage = 'schroederParticleStorageSlotAssignment',
+  ...options
+} = {}) {
+  return publishUlgSchroederAdmissionDescriptor({
+    stateManager,
+    nodeKernel,
+    ...options,
+    rowCount: schroederParticleStorageSlotAssignmentRowCount ?? slotAssignmentRowCount,
+    rowCountKeys: [
+      'schroederParticleStorageSlotAssignmentRowCount',
+      'slotAssignmentRowCount',
+      'allocationRowCount',
+      'particleCount'
+    ],
+    rowCountFields: [
+      'schroederParticleStorageSlotAssignmentRowCount',
+      'slotAssignmentRowCount',
+      'allocationRowCount'
+    ],
+    outputFamilies,
+    defaultOutputFamilies: ['schroeder-particle-storage-slot-assignment'],
+    targetStateFamilies,
+    hotBufferKeyPrefix,
+    scope,
+    sourceNodeId,
+    sourceStage,
+    admissionSchema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
+    publicationSchema: ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    admissionPropertyName: 'schroederParticleStorageSlotAssignmentAdmission',
+    statusPrefix: 'schroeder-particle-storage-slot-assignment',
+    sourceMode: 'state-manager-schroeder-particle-storage-slot-assignment-admission',
+    approvalFields: {
+      particleStorageSlotAssignmentApproved: true,
+      freeListDescriptorApproved: true
+    },
+    stateMutationFamily: 'schroeder-particle-storage'
+  });
+}
+
+export function publishUlgSchroederParticleStorageMaterializationAdmission({
+  stateManager = null,
+  nodeKernel = null,
+  materializationRowCount = null,
+  schroederParticleStorageMaterializationRowCount = null,
+  requiredParticleCapacity = null,
+  targetStateFamilies = SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+  outputFamilies = [],
+  hotBufferKeyPrefix = 'ulg:schroeder-particle-storage-materialization-admission',
+  scope = ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCOPE,
+  sourceNodeId = 'schroeder-particle-storage-materialization',
+  sourceStage = 'schroederParticleStorageMaterialization',
+  ...options
+} = {}) {
+  const resolvedRequiredCapacity = Math.max(1, Math.trunc(finiteSeedNumber(
+    requiredParticleCapacity ?? options.source?.requiredParticleCapacity,
+    materializationRowCount ?? schroederParticleStorageMaterializationRowCount ?? options.source?.particleCount ?? 1
+  )));
+  return publishUlgSchroederAdmissionDescriptor({
+    stateManager,
+    nodeKernel,
+    ...options,
+    rowCount: schroederParticleStorageMaterializationRowCount ?? materializationRowCount,
+    rowCountKeys: [
+      'schroederParticleStorageMaterializationRowCount',
+      'materializationRowCount',
+      'assignmentRowCount',
+      'particleCount'
+    ],
+    rowCountFields: [
+      'schroederParticleStorageMaterializationRowCount',
+      'materializationRowCount',
+      'assignmentRowCount'
+    ],
+    outputFamilies,
+    defaultOutputFamilies: ['schroeder-particle-storage-materialization'],
+    targetStateFamilies,
+    hotBufferKeyPrefix,
+    scope,
+    sourceNodeId,
+    sourceStage,
+    admissionSchema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+    publicationSchema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+    admissionPropertyName: 'schroederParticleStorageMaterializationAdmission',
+    statusPrefix: 'schroeder-particle-storage-materialization',
+    sourceMode: 'state-manager-schroeder-particle-storage-materialization-admission',
+    approvalFields: {
+      particleStorageMaterializationApproved: true,
+      slotAssignmentDescriptorApproved: true
+    },
+    extraAdmissionFields: {
+      requiredParticleCapacity: resolvedRequiredCapacity
+    },
+    stateMutationFamily: 'schroeder-particle-storage'
+  });
 }
 
 function descriptorContainsRawGpuBufferHandle(value, depth = 0) {
@@ -7582,6 +7992,34 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishSchroederPhaseVolumeSplitMergeAdmission(options = {}) {
+      return publishUlgSchroederPhaseVolumeSplitMergeAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
+    publishSchroederParticleStorageAllocatorAdmission(options = {}) {
+      return publishUlgSchroederParticleStorageAllocatorAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
+    publishSchroederParticleStorageSlotAssignmentAdmission(options = {}) {
+      return publishUlgSchroederParticleStorageSlotAssignmentAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
+    publishSchroederParticleStorageMaterializationAdmission(options = {}) {
+      return publishUlgSchroederParticleStorageMaterializationAdmission({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     publishSchroederAdoptedParticleStorageDescriptor(options = {}) {
       const publication = publishUlgSchroederAdoptedParticleStorageDescriptor({
         stateManager,
@@ -8439,6 +8877,14 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       typeof host?.publishSchroederStateDeltaMergeAdmission === 'function',
     residentSchroederPhaseVolumeMigrationAdmissionPublicationReady:
       typeof host?.publishSchroederPhaseVolumeMigrationAdmission === 'function',
+    residentSchroederPhaseVolumeSplitMergeAdmissionPublicationReady:
+      typeof host?.publishSchroederPhaseVolumeSplitMergeAdmission === 'function',
+    residentSchroederParticleStorageAllocatorAdmissionPublicationReady:
+      typeof host?.publishSchroederParticleStorageAllocatorAdmission === 'function',
+    residentSchroederParticleStorageSlotAssignmentAdmissionPublicationReady:
+      typeof host?.publishSchroederParticleStorageSlotAssignmentAdmission === 'function',
+    residentSchroederParticleStorageMaterializationAdmissionPublicationReady:
+      typeof host?.publishSchroederParticleStorageMaterializationAdmission === 'function',
     residentSchroederAdoptedParticleStoragePublicationReady:
       typeof host?.publishSchroederAdoptedParticleStorageDescriptor === 'function',
     residentSchroederAdoptedParticleStorageContinuationPlannerReady:

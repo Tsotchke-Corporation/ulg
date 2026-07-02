@@ -237,6 +237,14 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'schroederLawQueue',
   'schroederLawNeighbors',
   'schroederLawNeighborCandidates',
+  'schroederParticleStorageMaterialization',
+  'ssParticleStorageMaterialization',
+  'schroederParticleStorageRowBudget',
+  'schroederParticleStorageRequiredCapacity',
+  'schroederParticleStorageCapacityMargin',
+  'schroederParticleStorageFreeListSlotCapacity',
+  'schroederParticleStorageFreeListAvailableSlotCount',
+  'schroederParticleStorageFreeListMaxSlotsPerRow',
   'schroederLawNeighborTraversal',
   'schroederTraversal',
   'schroederLawNeighborCandidateReadback',
@@ -2155,6 +2163,54 @@ export async function mountSphPhaseDemoOverlay({
     ),
     true
   );
+  const initialSchroederParticleStorageMaterializationEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageMaterialization', 'ssParticleStorageMaterialization'],
+      [
+        'enableParticleStorageMaterialization',
+        'schroederEnableParticleStorageMaterialization',
+        'particleStorageMaterialization',
+        'enableParticleStorageAdoption'
+      ]
+    ),
+    false
+  );
+  const initialSchroederParticleStorageAdmissionRowBudget = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageRowBudget', 'schroederParticleStorageAdmissionRowBudget'],
+      ['particleStorageAdmissionRowBudget', 'schroederParticleStorageAdmissionRowBudget']
+    )
+  );
+  const initialSchroederParticleStorageRequiredCapacity = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageRequiredCapacity'],
+      ['particleStorageRequiredCapacity', 'schroederParticleStorageRequiredCapacity']
+    )
+  );
+  const initialSchroederParticleStorageCapacityMargin = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageCapacityMargin'],
+      ['particleStorageCapacityMargin', 'schroederParticleStorageCapacityMargin']
+    )
+  );
+  const initialSchroederParticleStorageFreeListSlotCapacity = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageFreeListSlotCapacity'],
+      ['particleStorageFreeListSlotCapacity', 'schroederParticleStorageFreeListSlotCapacity']
+    )
+  );
+  const initialSchroederParticleStorageFreeListAvailableSlotCount = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageFreeListAvailableSlotCount'],
+      ['particleStorageFreeListAvailableSlotCount', 'schroederParticleStorageFreeListAvailableSlotCount']
+    )
+  );
+  const initialSchroederParticleStorageFreeListMaxSlotsPerRow = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederParticleStorageFreeListMaxSlotsPerRow'],
+      ['particleStorageFreeListMaxSlotsPerRow', 'schroederParticleStorageFreeListMaxSlotsPerRow']
+    )
+  );
   const initialSchroederActiveNodeSortedIndexPolicyMode = optionalStringParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederActiveNodeSortedIndexPolicy'],
@@ -2198,6 +2254,13 @@ export async function mountSphPhaseDemoOverlay({
     enableCrossLevelCoupling: initialSchroederCrossLevelCouplingEnabled,
     enableLawQueue: initialSchroederLawQueueEnabled,
     enableLawNeighborCandidates: initialSchroederLawNeighborCandidatesEnabled,
+    enableParticleStorageMaterialization: initialSchroederParticleStorageMaterializationEnabled,
+    particleStorageAdmissionRowBudget: initialSchroederParticleStorageAdmissionRowBudget,
+    particleStorageRequiredCapacity: initialSchroederParticleStorageRequiredCapacity,
+    particleStorageCapacityMargin: initialSchroederParticleStorageCapacityMargin,
+    particleStorageFreeListSlotCapacity: initialSchroederParticleStorageFreeListSlotCapacity,
+    particleStorageFreeListAvailableSlotCount: initialSchroederParticleStorageFreeListAvailableSlotCount,
+    particleStorageFreeListMaxSlotsPerRow: initialSchroederParticleStorageFreeListMaxSlotsPerRow,
     source: initialUrlParamValue(['schroederSimulation', 'schroeder', 'ss']) != null
       ? 'url'
       : (peerSchroederSimulationPolicy ? 'peercompute-policy' : 'default')
@@ -2238,7 +2301,14 @@ export async function mountSphPhaseDemoOverlay({
       schroederLawNeighborCandidateReadbackMode: config.lawNeighborCandidateReadbackMode,
       schroederEnableCrossLevelCoupling: config.enableCrossLevelCoupling,
       schroederEnableLawQueue: config.enableLawQueue,
-      schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates
+      schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates,
+      schroederEnableParticleStorageMaterialization: config.enableParticleStorageMaterialization,
+      schroederParticleStorageAdmissionRowBudget: config.particleStorageAdmissionRowBudget,
+      schroederParticleStorageRequiredCapacity: config.particleStorageRequiredCapacity,
+      schroederParticleStorageCapacityMargin: config.particleStorageCapacityMargin,
+      schroederParticleStorageFreeListSlotCapacity: config.particleStorageFreeListSlotCapacity,
+      schroederParticleStorageFreeListAvailableSlotCount: config.particleStorageFreeListAvailableSlotCount,
+      schroederParticleStorageFreeListMaxSlotsPerRow: config.particleStorageFreeListMaxSlotsPerRow
     };
   }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
@@ -2598,6 +2668,30 @@ export async function mountSphPhaseDemoOverlay({
       if (!initialSchroederCrossLevelCouplingEnabled) q.set('schroederCrossLevelCoupling', '0');
       if (!initialSchroederLawQueueEnabled) q.set('schroederLawQueue', '0');
       if (!initialSchroederLawNeighborCandidatesEnabled) q.set('schroederLawNeighborCandidates', '0');
+      if (initialSchroederParticleStorageMaterializationEnabled) {
+        q.set('schroederParticleStorageMaterialization', '1');
+      }
+      if (initialSchroederParticleStorageAdmissionRowBudget != null) {
+        q.set('schroederParticleStorageRowBudget', String(initialSchroederParticleStorageAdmissionRowBudget));
+      }
+      if (initialSchroederParticleStorageRequiredCapacity != null) {
+        q.set('schroederParticleStorageRequiredCapacity', String(initialSchroederParticleStorageRequiredCapacity));
+      }
+      if (initialSchroederParticleStorageCapacityMargin != null) {
+        q.set('schroederParticleStorageCapacityMargin', String(initialSchroederParticleStorageCapacityMargin));
+      }
+      if (initialSchroederParticleStorageFreeListSlotCapacity != null) {
+        q.set('schroederParticleStorageFreeListSlotCapacity', String(initialSchroederParticleStorageFreeListSlotCapacity));
+      }
+      if (initialSchroederParticleStorageFreeListAvailableSlotCount != null) {
+        q.set(
+          'schroederParticleStorageFreeListAvailableSlotCount',
+          String(initialSchroederParticleStorageFreeListAvailableSlotCount)
+        );
+      }
+      if (initialSchroederParticleStorageFreeListMaxSlotsPerRow != null) {
+        q.set('schroederParticleStorageFreeListMaxSlotsPerRow', String(initialSchroederParticleStorageFreeListMaxSlotsPerRow));
+      }
       if (initialSchroederLawNeighborTraversalPolicyMode) q.set('schroederTraversal', initialSchroederLawNeighborTraversalPolicyMode);
       if (initialSchroederLawNeighborCandidateReadbackMode) {
         q.set('schroederLawNeighborCandidateReadback', initialSchroederLawNeighborCandidateReadbackMode);
@@ -4611,7 +4705,14 @@ export async function mountSphPhaseDemoOverlay({
     schroederLawNeighborCandidateReadbackMode = null,
     schroederEnableCrossLevelCoupling = true,
     schroederEnableLawQueue = true,
-    schroederEnableLawNeighborCandidates = true
+    schroederEnableLawNeighborCandidates = true,
+    schroederEnableParticleStorageMaterialization = false,
+    schroederParticleStorageAdmissionRowBudget = null,
+    schroederParticleStorageRequiredCapacity = null,
+    schroederParticleStorageCapacityMargin = null,
+    schroederParticleStorageFreeListSlotCapacity = null,
+    schroederParticleStorageFreeListAvailableSlotCount = null,
+    schroederParticleStorageFreeListMaxSlotsPerRow = null
   } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
@@ -4647,7 +4748,14 @@ export async function mountSphPhaseDemoOverlay({
       `ssCandidateReadback=${schroederLawNeighborCandidateReadbackMode ?? 'default'}`,
       `ssCross=${Boolean(schroederEnableCrossLevelCoupling) ? 1 : 0}`,
       `ssLawQueue=${Boolean(schroederEnableLawQueue) ? 1 : 0}`,
-      `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`
+      `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`,
+      `ssParticleStorage=${Boolean(schroederEnableParticleStorageMaterialization) ? 1 : 0}`,
+      `ssParticleStorageRows=${schroederParticleStorageAdmissionRowBudget ?? 'auto'}`,
+      `ssParticleStorageCapacity=${schroederParticleStorageRequiredCapacity ?? 'auto'}`,
+      `ssParticleStorageMargin=${schroederParticleStorageCapacityMargin ?? 'auto'}`,
+      `ssParticleStorageFreeSlotCapacity=${schroederParticleStorageFreeListSlotCapacity ?? 'auto'}`,
+      `ssParticleStorageFreeAvailable=${schroederParticleStorageFreeListAvailableSlotCount ?? 'auto'}`,
+      `ssParticleStorageFreeSlotsPerRow=${schroederParticleStorageFreeListMaxSlotsPerRow ?? 'auto'}`
     ].join('|');
   }
 

@@ -10,6 +10,13 @@ Primary plan:
 
 - `schroeder-tree-and-algorithm-plan.md`
 
+Active execution plan (2026-07-02):
+
+- `fable-plan-2026-07-02.md` — land the runtime-policy checkpoint, then a
+  physics-first checkpoint (real cross-level coupling operator, two-level
+  co-simulation with numeric conservation gates, one admitted split/merge).
+  The portable cross-peer rematerializer is deferred until after that.
+
 Supporting routing:
 
 - `todo-routing.md`

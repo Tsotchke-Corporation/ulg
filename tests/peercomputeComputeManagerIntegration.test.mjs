@@ -37,7 +37,11 @@ import {
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
@@ -89,6 +93,14 @@ import {
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCOPE,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCOPE,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_PLAN_SCHEMA,
@@ -3470,6 +3482,10 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, true);
   assert.equal(summary.residentSchroederStateDeltaMergeAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederPhaseVolumeMigrationAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederPhaseVolumeSplitMergeAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederParticleStorageAllocatorAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederParticleStorageSlotAssignmentAdmissionPublicationReady, true);
+  assert.equal(summary.residentSchroederParticleStorageMaterializationAdmissionPublicationReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStoragePublicationReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStorageContinuationPlannerReady, true);
   assert.equal(summary.residentSchroederAdoptedParticleStorageLocalResolverReady, true);
@@ -3646,6 +3662,141 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   );
   assert.equal(
     host.stateManager.getHotBuffer(phaseVolumeAdmissionPublication.hotBufferKey).copyMode,
+    'descriptor-only-no-raw-gpubuffer-transfer'
+  );
+
+  const phaseVolumeSplitMergeAdmissionPublication =
+    host.publishSchroederPhaseVolumeSplitMergeAdmission({
+      cacheKey: 'ulg:test:schroeder-phase-volume-split-merge-admission-cache',
+      stateKey: 'ulg:test:schroeder-phase-volume-split-merge-admission-state',
+      hotBufferKey: 'ulg:test:schroeder-phase-volume-split-merge-admission-hot-buffer',
+      peerComputeUseCase: 'integration-schroeder-particle-storage',
+      proposalRowCount: 64,
+      sourceTaskId: 'ulg:test:schroeder-phase-volume-split-merge-source'
+    });
+  assert.equal(
+    phaseVolumeSplitMergeAdmissionPublication.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    phaseVolumeSplitMergeAdmissionPublication.status,
+    'schroeder-phase-volume-split-merge-admission-published'
+  );
+  assert.equal(
+    phaseVolumeSplitMergeAdmissionPublication.schroederPhaseVolumeSplitMergeAdmission.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    phaseVolumeSplitMergeAdmissionPublication.schroederPhaseVolumeSplitMergeAdmission.schroederPhaseVolumeSplitMergeProposalRowCount,
+    64
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCOPE)
+      [phaseVolumeSplitMergeAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-phase-volume-split-merge-admission-admitted'
+  );
+
+  const particleStorageAllocatorAdmissionPublication =
+    host.publishSchroederParticleStorageAllocatorAdmission({
+      cacheKey: 'ulg:test:schroeder-particle-storage-allocator-admission-cache',
+      stateKey: 'ulg:test:schroeder-particle-storage-allocator-admission-state',
+      hotBufferKey: 'ulg:test:schroeder-particle-storage-allocator-admission-hot-buffer',
+      peerComputeUseCase: 'integration-schroeder-particle-storage',
+      allocationRowCount: 64,
+      currentParticleCapacity: 8,
+      requiredParticleCapacity: 72,
+      sourceTaskId: 'ulg:test:schroeder-particle-storage-allocator-source'
+    });
+  assert.equal(
+    particleStorageAllocatorAdmissionPublication.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    particleStorageAllocatorAdmissionPublication.schroederParticleStorageAllocatorAdmission.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    particleStorageAllocatorAdmissionPublication.schroederParticleStorageAllocatorAdmission.requiredParticleCapacity,
+    72
+  );
+  assert.deepEqual(
+    particleStorageAllocatorAdmissionPublication.schroederParticleStorageAllocatorAdmission.targetStateFamilies,
+    ['sph-particle-state', 'mls-mpm-particle-mechanics', 'sph-particle-thermo']
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCOPE)
+      [particleStorageAllocatorAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-particle-storage-allocator-admission-admitted'
+  );
+
+  const particleStorageSlotAssignmentAdmissionPublication =
+    host.publishSchroederParticleStorageSlotAssignmentAdmission({
+      cacheKey: 'ulg:test:schroeder-particle-storage-slot-assignment-admission-cache',
+      stateKey: 'ulg:test:schroeder-particle-storage-slot-assignment-admission-state',
+      hotBufferKey: 'ulg:test:schroeder-particle-storage-slot-assignment-admission-hot-buffer',
+      peerComputeUseCase: 'integration-schroeder-particle-storage',
+      slotAssignmentRowCount: 64,
+      sourceTaskId: 'ulg:test:schroeder-particle-storage-slot-assignment-source'
+    });
+  assert.equal(
+    particleStorageSlotAssignmentAdmissionPublication.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    particleStorageSlotAssignmentAdmissionPublication.schroederParticleStorageSlotAssignmentAdmission.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    particleStorageSlotAssignmentAdmissionPublication.schroederParticleStorageSlotAssignmentAdmission.freeListDescriptorApproved,
+    true
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCOPE)
+      [particleStorageSlotAssignmentAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-particle-storage-slot-assignment-admission-admitted'
+  );
+
+  const particleStorageMaterializationAdmissionPublication =
+    host.publishSchroederParticleStorageMaterializationAdmission({
+      cacheKey: 'ulg:test:schroeder-particle-storage-materialization-admission-cache',
+      stateKey: 'ulg:test:schroeder-particle-storage-materialization-admission-state',
+      hotBufferKey: 'ulg:test:schroeder-particle-storage-materialization-admission-hot-buffer',
+      peerComputeUseCase: 'integration-schroeder-particle-storage',
+      materializationRowCount: 64,
+      requiredParticleCapacity: 72,
+      sourceTaskId: 'ulg:test:schroeder-particle-storage-materialization-source'
+    });
+  assert.equal(
+    particleStorageMaterializationAdmissionPublication.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA
+  );
+  assert.equal(
+    particleStorageMaterializationAdmissionPublication.schroederParticleStorageMaterializationAdmission.schema,
+    ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA
+  );
+  assert.equal(
+    particleStorageMaterializationAdmissionPublication.schroederParticleStorageMaterializationAdmission.slotAssignmentDescriptorApproved,
+    true
+  );
+  assert.equal(
+    host.stateManager
+      .getWarmDeltas(ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCOPE)
+      [particleStorageMaterializationAdmissionPublication.commitDeltaTaskId]
+      .payload
+      .status,
+    'schroeder-particle-storage-materialization-admission-admitted'
+  );
+  assert.equal(
+    host.stateManager.getHotBuffer(particleStorageMaterializationAdmissionPublication.hotBufferKey).copyMode,
     'descriptor-only-no-raw-gpubuffer-transfer'
   );
 

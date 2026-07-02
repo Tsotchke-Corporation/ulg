@@ -76,7 +76,11 @@ import {
   runMlsMpmResidentStepsWithOptionalWebGpu,
   submitMlsMpmResidentStepsComputeTask
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
-import { runSchroederSameLevelMechanicsWebGpu } from '../runtime/sph/schroederHierarchyGpu.js';
+import {
+  SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+  createSchroederParticleStorageFreeListPlan,
+  runSchroederSameLevelMechanicsWebGpu
+} from '../runtime/sph/schroederHierarchyGpu.js';
 import {
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
@@ -12935,6 +12939,7 @@ export function createSphPhaseScene(container, {
     schroederPhaseVolumeMigrationAdmissionRowCount = 0,
     schroederPhaseVolumeSplitMergeAdmissionStatus = null,
     schroederPhaseVolumeSplitMergeAdmissionRowCount = 0,
+    schroederParticleStorageMaterializationPolicyEnabled = false,
     schroederParticleStorageAllocatorAdmissionStatus = null,
     schroederParticleStorageAllocationRowCount = 0,
     schroederParticleStorageSlotAssignmentAdmissionStatus = null,
@@ -12979,6 +12984,7 @@ export function createSphPhaseScene(container, {
       `ssPvSplitMergeAdmissionRows=${Math.max(0, Math.round(Number(
         schroederPhaseVolumeSplitMergeAdmissionRowCount
       ) || 0))}`,
+      `ssParticleStoragePolicy=${Boolean(schroederParticleStorageMaterializationPolicyEnabled) ? 1 : 0}`,
       `ssParticleStorageAllocatorAdmission=${schroederParticleStorageAllocatorAdmissionStatus || 'none'}`,
       `ssParticleStorageAllocationRows=${Math.max(0, Math.round(Number(
         schroederParticleStorageAllocationRowCount
@@ -19258,6 +19264,13 @@ export function createSphPhaseScene(container, {
     schroederEnableLawNeighborCandidates = true,
     schroederStateDeltaMergeAdmission = null,
     schroederPhaseVolumeMigrationAdmission = null,
+    schroederEnableParticleStorageMaterialization = false,
+    schroederParticleStorageAdmissionRowBudget = null,
+    schroederParticleStorageRequiredCapacity = null,
+    schroederParticleStorageCapacityMargin = null,
+    schroederParticleStorageFreeListSlotCapacity = null,
+    schroederParticleStorageFreeListAvailableSlotCount = null,
+    schroederParticleStorageFreeListMaxSlotsPerRow = 2,
     schroederPhaseVolumeSplitMergeAdmission = null,
     schroederParticleStorageAllocatorAdmission = null,
     schroederParticleStorageFreeList = null,
@@ -19342,12 +19355,27 @@ export function createSphPhaseScene(container, {
       || schroederAdmissionResidentAuthorityHost?.schroederPolicy
       || null;
     const schroederPackedParticleCount = (() => {
+      // Resident continuation can grow the particle count past the CPU-packed
+      // scene state (e.g. reaction products), and the Schroeder execution
+      // consumes the continuation state when available. Admission row budgets
+      // must cover the larger of the two or fail-closed row checks block the
+      // whole particle-storage chain.
+      const continuationCount = continueFromResidentState
+        && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+        ? Math.max(0, Math.round(Number(
+          mlsMpmResidentSteps?.nextSphParticleState?.particleCount
+            ?? mlsMpmResidentSteps?.nextMlsMpmParticleState?.particleCount
+            ?? 0
+        ) || 0))
+        : 0;
       const explicitCount = Math.max(0, Math.round(Number(
         sphGpuParticleState?.particleCount
           ?? mlsMpmGpuParticleState?.particleCount
           ?? 0
       ) || 0));
-      if (explicitCount > 0) return explicitCount;
+      if (explicitCount > 0 || continuationCount > 0) {
+        return Math.max(explicitCount, continuationCount);
+      }
       const stateStrideFloats = Math.max(0, Math.floor(Number(sphGpuParticleState?.stateStrideFloats) || 0));
       const stateLength = Math.max(0, Math.floor(Number(sphGpuParticleState?.state?.length) || 0));
       return stateStrideFloats > 0 ? Math.floor(stateLength / stateStrideFloats) : 0;
@@ -19362,18 +19390,96 @@ export function createSphPhaseScene(container, {
       }
       return fallback;
     };
-    const schroederStateDeltaMergeAdmissionRowBudget = schroederAdmissionPolicyNumber([
-      'stateDeltaMergeAdmissionRowBudget',
-      'schroederStateDeltaMergeAdmissionRowBudget',
-      'stateDeltaRowBudget',
-      'admissionRowBudget'
-    ]);
-    const schroederPhaseVolumeMigrationAdmissionRowBudget = schroederAdmissionPolicyNumber([
-      'phaseVolumeMigrationAdmissionRowBudget',
-      'schroederPhaseVolumeMigrationAdmissionRowBudget',
-      'phaseVolumeMigrationRowBudget',
-      'admissionRowBudget'
-    ]);
+    const schroederAdmissionPolicyBoolean = (keys = [], fallback = false) => {
+      if (!schroederAdmissionPolicy || typeof schroederAdmissionPolicy !== 'object') return fallback;
+      for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(schroederAdmissionPolicy, key)) continue;
+        const value = schroederAdmissionPolicy[key];
+        if (typeof value === 'boolean') return value;
+        const normalized = String(value).trim().toLowerCase();
+        if (!normalized) return fallback;
+        return !['0', 'false', 'off', 'no', 'manual', 'disabled'].includes(normalized);
+      }
+      return fallback;
+    };
+    // Configured row budgets are minimum headroom, not caps: the pipeline's
+    // fail-closed admission checks require one admitted row per source
+    // particle, so every budget floors at the packed particle count.
+    const schroederStateDeltaMergeAdmissionRowBudget = Math.max(
+      schroederDefaultAdmissionRowBudget,
+      schroederAdmissionPolicyNumber([
+        'stateDeltaMergeAdmissionRowBudget',
+        'schroederStateDeltaMergeAdmissionRowBudget',
+        'stateDeltaRowBudget',
+        'admissionRowBudget'
+      ])
+    );
+    const schroederPhaseVolumeMigrationAdmissionRowBudget = Math.max(
+      schroederDefaultAdmissionRowBudget,
+      schroederAdmissionPolicyNumber([
+        'phaseVolumeMigrationAdmissionRowBudget',
+        'schroederPhaseVolumeMigrationAdmissionRowBudget',
+        'phaseVolumeMigrationRowBudget',
+        'admissionRowBudget'
+      ])
+    );
+    const requestedSchroederEnableParticleStorageMaterialization = requestedSchroederSimulation && Boolean(
+      schroederEnableParticleStorageMaterialization
+      || schroederAdmissionPolicyBoolean([
+        'enableParticleStorageMaterialization',
+        'schroederEnableParticleStorageMaterialization',
+        'particleStorageMaterialization',
+        'enableParticleStorageAdoption',
+        'adoptMaterializedParticleStorage'
+      ], false)
+    );
+    const resolvedSchroederParticleStorageAdmissionRowBudget = Math.max(
+      schroederDefaultAdmissionRowBudget,
+      schroederAdmissionPolicyNumber([
+        'particleStorageAdmissionRowBudget',
+        'schroederParticleStorageAdmissionRowBudget',
+        'particleStorageRowBudget',
+        'particleStorageMaterializationRowBudget',
+        'admissionRowBudget'
+      ], Math.max(1, Math.round(Number(schroederParticleStorageAdmissionRowBudget) || 0) || schroederDefaultAdmissionRowBudget))
+    );
+    const resolvedSchroederParticleStorageCapacityMargin = schroederAdmissionPolicyNumber([
+      'particleStorageCapacityMargin',
+      'schroederParticleStorageCapacityMargin',
+      'particleStorageFreeSlotMargin'
+    ], Math.max(1, Math.round(Number(schroederParticleStorageCapacityMargin) || 0) || resolvedSchroederParticleStorageAdmissionRowBudget));
+    const resolvedSchroederParticleStorageRequiredCapacity = schroederAdmissionPolicyNumber([
+      'particleStorageRequiredCapacity',
+      'schroederParticleStorageRequiredCapacity',
+      'requiredParticleCapacity'
+    ], Math.max(
+      schroederPackedParticleCount + resolvedSchroederParticleStorageCapacityMargin,
+      schroederPackedParticleCount + resolvedSchroederParticleStorageAdmissionRowBudget,
+      resolvedSchroederParticleStorageAdmissionRowBudget
+    ));
+    const resolvedSchroederParticleStorageFreeListAvailableSlotCount = schroederAdmissionPolicyNumber([
+      'particleStorageFreeListAvailableSlotCount',
+      'schroederParticleStorageFreeListAvailableSlotCount',
+      'particleStorageAvailableSlotCount',
+      'availableSlotCount'
+    ], Math.max(
+      resolvedSchroederParticleStorageAdmissionRowBudget,
+      resolvedSchroederParticleStorageRequiredCapacity - schroederPackedParticleCount
+    ));
+    const resolvedSchroederParticleStorageFreeListSlotCapacity = schroederAdmissionPolicyNumber([
+      'particleStorageFreeListSlotCapacity',
+      'schroederParticleStorageFreeListSlotCapacity',
+      'particleStorageSlotCapacity',
+      'slotCapacity'
+    ], Math.max(
+      resolvedSchroederParticleStorageRequiredCapacity,
+      schroederPackedParticleCount + resolvedSchroederParticleStorageFreeListAvailableSlotCount
+    ));
+    const resolvedSchroederParticleStorageFreeListMaxSlotsPerRow = schroederAdmissionPolicyNumber([
+      'particleStorageFreeListMaxSlotsPerRow',
+      'schroederParticleStorageFreeListMaxSlotsPerRow',
+      'maxSlotsPerRow'
+    ], Math.max(1, Math.round(Number(schroederParticleStorageFreeListMaxSlotsPerRow) || 2)));
     const schroederAdmissionCacheKey = [
       'ulg:scene:schroeder-admission',
       schroederPortableSummaryPeerComputeUseCase || 'default-use-case',
@@ -19478,12 +19584,50 @@ export function createSphPhaseScene(container, {
           ?? 0
       ) || 0)
     );
-    const requestedSchroederPhaseVolumeSplitMergeAdmission =
+    let schroederPhaseVolumeSplitMergeAdmissionPublication = null;
+    let schroederParticleStorageAllocatorAdmissionPublication = null;
+    let schroederParticleStorageSlotAssignmentAdmissionPublication = null;
+    let schroederParticleStorageMaterializationAdmissionPublication = null;
+    let requestedSchroederPhaseVolumeSplitMergeAdmission =
       requestedSchroederSimulation
       && schroederPhaseVolumeSplitMergeAdmission
       && typeof schroederPhaseVolumeSplitMergeAdmission === 'object'
         ? schroederPhaseVolumeSplitMergeAdmission
         : null;
+    if (
+      requestedSchroederEnableParticleStorageMaterialization
+      && !requestedSchroederPhaseVolumeSplitMergeAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederPhaseVolumeSplitMergeAdmission === 'function'
+    ) {
+      try {
+        schroederPhaseVolumeSplitMergeAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederPhaseVolumeSplitMergeAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:phase-volume-split-merge`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            proposalRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederPhaseVolumeSplitMerge',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-phase-volume-split-merge-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              proposalRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-phase-volume-split-merge-apply']
+            }
+          });
+        requestedSchroederPhaseVolumeSplitMergeAdmission =
+          schroederPhaseVolumeSplitMergeAdmissionPublication?.schroederPhaseVolumeSplitMergeAdmission || null;
+      } catch (error) {
+        schroederPhaseVolumeSplitMergeAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-phase-volume-split-merge-admission-publication-error.v0',
+          status: 'schroeder-phase-volume-split-merge-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederPhaseVolumeSplitMergeAdmissionRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19493,12 +19637,52 @@ export function createSphPhaseScene(container, {
           ?? 0
       ) || 0)
     );
-    const requestedSchroederParticleStorageAllocatorAdmission =
+    let requestedSchroederParticleStorageAllocatorAdmission =
       requestedSchroederSimulation
       && schroederParticleStorageAllocatorAdmission
       && typeof schroederParticleStorageAllocatorAdmission === 'object'
         ? schroederParticleStorageAllocatorAdmission
         : null;
+    if (
+      requestedSchroederEnableParticleStorageMaterialization
+      && !requestedSchroederParticleStorageAllocatorAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederParticleStorageAllocatorAdmission === 'function'
+    ) {
+      try {
+        schroederParticleStorageAllocatorAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederParticleStorageAllocatorAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:particle-storage-allocator`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            allocationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+            currentParticleCapacity: schroederPackedParticleCount,
+            requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
+            targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederParticleStorageAllocator',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-particle-storage-allocator-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              allocationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+              currentParticleCapacity: schroederPackedParticleCount,
+              requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-particle-storage-allocation'],
+              targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES
+            }
+          });
+        requestedSchroederParticleStorageAllocatorAdmission =
+          schroederParticleStorageAllocatorAdmissionPublication?.schroederParticleStorageAllocatorAdmission || null;
+      } catch (error) {
+        schroederParticleStorageAllocatorAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-particle-storage-allocator-admission-publication-error.v0',
+          status: 'schroeder-particle-storage-allocator-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederParticleStorageAllocationRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19513,6 +19697,9 @@ export function createSphPhaseScene(container, {
       Math.round(Number(
         requestedSchroederParticleStorageAllocatorAdmission?.requiredParticleCapacity
           ?? requestedSchroederParticleStorageAllocatorAdmission?.particleCapacity
+          ?? (requestedSchroederEnableParticleStorageMaterialization
+            ? resolvedSchroederParticleStorageRequiredCapacity
+            : 0)
           ?? 0
       ) || 0)
     );
@@ -19521,13 +19708,57 @@ export function createSphPhaseScene(container, {
       && schroederParticleStorageFreeList
       && typeof schroederParticleStorageFreeList === 'object'
         ? schroederParticleStorageFreeList
-        : null;
-    const requestedSchroederParticleStorageSlotAssignmentAdmission =
+        : (requestedSchroederEnableParticleStorageMaterialization
+            ? createSchroederParticleStorageFreeListPlan({
+                baseSlotIndex: schroederPackedParticleCount,
+                slotCapacity: resolvedSchroederParticleStorageFreeListSlotCapacity,
+                availableSlotCount: resolvedSchroederParticleStorageFreeListAvailableSlotCount,
+                maxSlotsPerRow: resolvedSchroederParticleStorageFreeListMaxSlotsPerRow
+              })
+            : null);
+    let requestedSchroederParticleStorageSlotAssignmentAdmission =
       requestedSchroederSimulation
       && schroederParticleStorageSlotAssignmentAdmission
       && typeof schroederParticleStorageSlotAssignmentAdmission === 'object'
         ? schroederParticleStorageSlotAssignmentAdmission
         : null;
+    if (
+      requestedSchroederEnableParticleStorageMaterialization
+      && !requestedSchroederParticleStorageSlotAssignmentAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederParticleStorageSlotAssignmentAdmission === 'function'
+    ) {
+      try {
+        schroederParticleStorageSlotAssignmentAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederParticleStorageSlotAssignmentAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:particle-storage-slot-assignment`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            slotAssignmentRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+            targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederParticleStorageSlotAssignment',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-particle-storage-slot-assignment-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              slotAssignmentRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-particle-storage-slot-assignment'],
+              targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+              freeListStatus: requestedSchroederParticleStorageFreeList?.status ?? null
+            }
+          });
+        requestedSchroederParticleStorageSlotAssignmentAdmission =
+          schroederParticleStorageSlotAssignmentAdmissionPublication?.schroederParticleStorageSlotAssignmentAdmission || null;
+      } catch (error) {
+        schroederParticleStorageSlotAssignmentAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-particle-storage-slot-assignment-admission-publication-error.v0',
+          status: 'schroeder-particle-storage-slot-assignment-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederParticleStorageSlotAssignmentRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19537,12 +19768,52 @@ export function createSphPhaseScene(container, {
           ?? 0
       ) || 0)
     );
-    const requestedSchroederParticleStorageMaterializationAdmission =
+    let requestedSchroederParticleStorageMaterializationAdmission =
       requestedSchroederSimulation
       && schroederParticleStorageMaterializationAdmission
       && typeof schroederParticleStorageMaterializationAdmission === 'object'
         ? schroederParticleStorageMaterializationAdmission
         : null;
+    if (
+      requestedSchroederEnableParticleStorageMaterialization
+      && !requestedSchroederParticleStorageMaterializationAdmission
+      && typeof schroederAdmissionResidentAuthorityHost?.publishSchroederParticleStorageMaterializationAdmission === 'function'
+    ) {
+      try {
+        schroederParticleStorageMaterializationAdmissionPublication =
+          schroederAdmissionResidentAuthorityHost.publishSchroederParticleStorageMaterializationAdmission({
+            cacheKey: `${schroederAdmissionCacheKey}:particle-storage-materialization`,
+            stateKey: schroederAdmissionStateKey,
+            peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+            materializationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+            requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
+            targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+            sourceTaskId: computeTaskLaneId,
+            sourceNodeId: 'sph-phase-scene-schroeder-scheduler',
+            sourceStage: 'schroederParticleStorageMaterialization',
+            source: {
+              schema: 'peercompute.ulg.sph-scene-schroeder-admission-request.v0',
+              status: 'schroeder-particle-storage-materialization-admission-requested',
+              particleCount: schroederPackedParticleCount,
+              materializationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
+              requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
+              peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
+              outputFamilies: ['schroeder-particle-storage-materialization'],
+              targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
+              slotAssignmentAdmissionStatus:
+                requestedSchroederParticleStorageSlotAssignmentAdmission?.status ?? null
+            }
+          });
+        requestedSchroederParticleStorageMaterializationAdmission =
+          schroederParticleStorageMaterializationAdmissionPublication?.schroederParticleStorageMaterializationAdmission || null;
+      } catch (error) {
+        schroederParticleStorageMaterializationAdmissionPublication = {
+          schema: 'peercompute.ulg.schroeder-particle-storage-materialization-admission-publication-error.v0',
+          status: 'schroeder-particle-storage-materialization-admission-publication-error',
+          blocker: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     const requestedSchroederParticleStorageMaterializationRowCount = Math.max(
       0,
       Math.round(Number(
@@ -19628,6 +19899,10 @@ export function createSphPhaseScene(container, {
       schroederSimulation: requestedSchroederSimulation,
       schroederSelectedLevel: requestedSchroederSelectedLevel,
       schroederPortableSummaryEnabled: requestedSchroederEnablePortableSummary,
+      schroederParticleStorageMaterializationPolicyEnabled:
+        requestedSchroederEnableParticleStorageMaterialization,
+      schroederParticleStorageAdmissionRowBudget:
+        resolvedSchroederParticleStorageAdmissionRowBudget,
       schroederActiveNodeIndexEnabled: requestedSchroederEnableActiveNodeIndex,
       schroederActiveNodeSortedIndexEnabled: requestedSchroederEnableActiveNodeSortedIndex,
       schroederPhaseVolumeAssignmentOverlayFeedbackStatus:
@@ -19664,24 +19939,58 @@ export function createSphPhaseScene(container, {
         requestedSchroederPhaseVolumeSplitMergeAdmission?.status ?? null,
       schroederPhaseVolumeSplitMergeAdmissionRows:
         requestedSchroederPhaseVolumeSplitMergeAdmissionRowCount,
+      schroederPhaseVolumeSplitMergeAdmissionPublicationStatus:
+        schroederPhaseVolumeSplitMergeAdmissionPublication?.status ?? (
+          requestedSchroederPhaseVolumeSplitMergeAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederPhaseVolumeSplitMergeAdmissionSourceHotBufferKey:
+        requestedSchroederPhaseVolumeSplitMergeAdmission?.sourceHotBufferKey
+        || requestedSchroederPhaseVolumeSplitMergeAdmission?.hotBufferKey
+        || null,
       schroederParticleStorageAllocatorAdmissionStatus:
         requestedSchroederParticleStorageAllocatorAdmission?.status ?? null,
       schroederParticleStorageAllocationRows:
         requestedSchroederParticleStorageAllocationRowCount,
       schroederParticleStorageRequiredCapacity:
         requestedSchroederParticleStorageRequiredCapacity,
+      schroederParticleStorageAllocatorAdmissionPublicationStatus:
+        schroederParticleStorageAllocatorAdmissionPublication?.status ?? (
+          requestedSchroederParticleStorageAllocatorAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederParticleStorageAllocatorAdmissionSourceHotBufferKey:
+        requestedSchroederParticleStorageAllocatorAdmission?.sourceHotBufferKey
+        || requestedSchroederParticleStorageAllocatorAdmission?.hotBufferKey
+        || null,
       schroederParticleStorageFreeListStatus:
         requestedSchroederParticleStorageFreeList?.status ?? null,
       schroederParticleStorageFreeListSlotCapacity:
         requestedSchroederParticleStorageFreeList?.slotCapacity ?? null,
+      schroederParticleStorageFreeListAvailableSlotCount:
+        requestedSchroederParticleStorageFreeList?.availableSlotCount ?? null,
       schroederParticleStorageSlotAssignmentAdmissionStatus:
         requestedSchroederParticleStorageSlotAssignmentAdmission?.status ?? null,
       schroederParticleStorageSlotAssignmentRows:
         requestedSchroederParticleStorageSlotAssignmentRowCount,
+      schroederParticleStorageSlotAssignmentAdmissionPublicationStatus:
+        schroederParticleStorageSlotAssignmentAdmissionPublication?.status ?? (
+          requestedSchroederParticleStorageSlotAssignmentAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederParticleStorageSlotAssignmentAdmissionSourceHotBufferKey:
+        requestedSchroederParticleStorageSlotAssignmentAdmission?.sourceHotBufferKey
+        || requestedSchroederParticleStorageSlotAssignmentAdmission?.hotBufferKey
+        || null,
       schroederParticleStorageMaterializationAdmissionStatus:
         requestedSchroederParticleStorageMaterializationAdmission?.status ?? null,
       schroederParticleStorageMaterializationRows:
-        requestedSchroederParticleStorageMaterializationRowCount
+        requestedSchroederParticleStorageMaterializationRowCount,
+      schroederParticleStorageMaterializationAdmissionPublicationStatus:
+        schroederParticleStorageMaterializationAdmissionPublication?.status ?? (
+          requestedSchroederParticleStorageMaterializationAdmission ? 'explicit-admission-supplied' : null
+        ),
+      schroederParticleStorageMaterializationAdmissionSourceHotBufferKey:
+        requestedSchroederParticleStorageMaterializationAdmission?.sourceHotBufferKey
+        || requestedSchroederParticleStorageMaterializationAdmission?.hotBufferKey
+        || null
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
@@ -19769,6 +20078,8 @@ export function createSphPhaseScene(container, {
         requestedSchroederPhaseVolumeSplitMergeAdmission?.status ?? null,
       schroederPhaseVolumeSplitMergeAdmissionRowCount:
         requestedSchroederPhaseVolumeSplitMergeAdmissionRowCount,
+      schroederParticleStorageMaterializationPolicyEnabled:
+        requestedSchroederEnableParticleStorageMaterialization,
       schroederParticleStorageAllocatorAdmissionStatus:
         requestedSchroederParticleStorageAllocatorAdmission?.status ?? null,
       schroederParticleStorageAllocationRowCount:
@@ -20690,6 +21001,8 @@ export function createSphPhaseScene(container, {
               requestedSchroederPhaseVolumeSplitMergeAdmission?.status ?? null,
             schroederPhaseVolumeSplitMergeAdmissionRowCount:
               requestedSchroederPhaseVolumeSplitMergeAdmissionRowCount,
+            schroederParticleStorageMaterializationPolicyEnabled:
+              requestedSchroederEnableParticleStorageMaterialization,
             schroederParticleStorageAllocatorAdmissionStatus:
               requestedSchroederParticleStorageAllocatorAdmission?.status ?? null,
             schroederParticleStorageAllocationRowCount:

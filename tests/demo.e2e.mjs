@@ -9158,6 +9158,133 @@ test('SPH phase mounted Schroeder materialized storage publishes adopted descrip
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase mounted SS storage policy materializes adopted storage and fail-closes worker-lane continuation', async ({ page }) => {
+  // Worker-lane *consumption* of adopted storage requires a worker-owned
+  // rematerialization path (future slice). This proof covers the runtime
+  // policy contract: admissions publish, materialization and adoption happen,
+  // the descriptor publication and host-local resolver are ready, and the
+  // stage worker lane still publishes while the same-device continuation is
+  // explicitly fail-closed (main-thread GPUBuffer refs cannot cross the
+  // worker boundary).
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|Compute pass/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=500&baset=500&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  // The mounted scheduler republishes the lane report every schedule tick, so
+  // capture the published lane snapshot atomically inside the wait predicate
+  // instead of racing a follow-up evaluate against the next tick.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const lane = overlay?.__sphMountedMechanicsStageWorkerLane || null;
+    const ready = Boolean(
+      execution?.finalStep?.schroederParticleStorageAdoptionStatus === 'schroeder-particle-storage-adopted'
+      && lane?.status === 'worker-stage-lane-published'
+    );
+    if (ready && !globalThis.__ssStoragePolicyPublishedLane) {
+      globalThis.__ssStoragePolicyPublishedLane = lane;
+    }
+    return ready;
+  }, null, { timeout: 160_000 });
+
+  const result = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const lane = globalThis.__ssStoragePolicyPublishedLane
+      || overlay?.__sphMountedMechanicsStageWorkerLane
+      || null;
+    const policy = execution?.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || {};
+    const publication = execution?.schroederAdoptedParticleStoragePublication || null;
+    const host = globalThis.__ulgResidentAuthorityHost || null;
+    const hotRecord = publication?.hotBufferKey
+      ? host?.stateManager?.getHotBuffer?.(publication.hotBufferKey)
+      : null;
+    await overlay?.__sphScene?.dispose?.();
+    await host?.destroy?.();
+    globalThis.__ulgResidentAuthorityHost = null;
+    return {
+      executionStatus: execution?.status ?? null,
+      backend: execution?.backend ?? null,
+      schroederSimulation: execution?.schroederSimulation === true,
+      materializationPolicyEnabled: policy?.schroederParticleStorageMaterializationPolicyEnabled === true,
+      phaseSplitMergePublicationStatus:
+        policy?.schroederPhaseVolumeSplitMergeAdmissionPublicationStatus ?? null,
+      allocatorPublicationStatus:
+        policy?.schroederParticleStorageAllocatorAdmissionPublicationStatus ?? null,
+      slotAssignmentPublicationStatus:
+        policy?.schroederParticleStorageSlotAssignmentAdmissionPublicationStatus ?? null,
+      materializationPublicationStatus:
+        policy?.schroederParticleStorageMaterializationAdmissionPublicationStatus ?? null,
+      freeListStatus: policy?.schroederParticleStorageFreeListStatus ?? null,
+      materializationStatus:
+        execution?.finalStep?.schroederParticleStorageMaterializationStatus ?? null,
+      adoptionStatus:
+        execution?.finalStep?.schroederParticleStorageAdoptionStatus ?? null,
+      adopted: execution?.finalStep?.schroederParticleStorageAdopted === true,
+      publicationStatus: publication?.status ?? null,
+      publicationAccepted: publication?.accepted === true,
+      publicationLocalResolverReady:
+        publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverReady === true,
+      hotRecordCopyMode: hotRecord?.copyMode ?? null,
+      laneStatus: lane?.status ?? null,
+      laneAdoptedPublicationStatus:
+        lane?.schroederAdoptedParticleStoragePublicationStatus ?? null,
+      laneAdoptedLocalResolverReady:
+        lane?.schroederAdoptedParticleStorageLocalResolverReady === true,
+      laneAdoptedScheduleStatus:
+        lane?.schroederAdoptedParticleStorageContinuationScheduleStatus ?? null,
+      laneAdoptedStageLocalResolverReady:
+        lane?.schroederAdoptedParticleStorageStageLocalResolverReady === true,
+      laneAdoptedRawGpuBufferTransfer:
+        lane?.schroederAdoptedParticleStorageRawGpuBufferPeerComputeTransfer === true,
+      laneStageChainStatus: lane?.stageChainStatus ?? null,
+      laneStageOrder: lane?.gpuResidentLaneStageExecutionStageOrder ?? []
+    };
+  });
+
+  expect(result.executionStatus).toBe('resident-steps-executed');
+  expect(result.backend).toBe('webgpu');
+  expect(result.schroederSimulation).toBe(true);
+  expect(result.materializationPolicyEnabled).toBe(true);
+  expect(result.phaseSplitMergePublicationStatus)
+    .toBe('schroeder-phase-volume-split-merge-admission-published');
+  expect(result.allocatorPublicationStatus)
+    .toBe('schroeder-particle-storage-allocator-admission-published');
+  expect(result.slotAssignmentPublicationStatus)
+    .toBe('schroeder-particle-storage-slot-assignment-admission-published');
+  expect(result.materializationPublicationStatus)
+    .toBe('schroeder-particle-storage-materialization-admission-published');
+  expect(result.freeListStatus).toBe('schroeder-particle-storage-free-list-ready');
+  expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+  expect(result.adoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.adopted).toBe(true);
+  expect(result.publicationStatus).toBe('schroeder-adopted-particle-storage-descriptor-published');
+  expect(result.publicationAccepted).toBe(true);
+  expect(result.publicationLocalResolverReady).toBe(true);
+  expect(result.hotRecordCopyMode).toBe('descriptor-only-no-raw-gpubuffer-transfer');
+  expect(result.laneStatus).toBe('worker-stage-lane-published');
+  expect(result.laneAdoptedPublicationStatus)
+    .toBe('schroeder-adopted-particle-storage-descriptor-published');
+  expect(result.laneAdoptedLocalResolverReady).toBe(true);
+  expect(result.laneAdoptedScheduleStatus)
+    .toBe('blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs');
+  expect(result.laneAdoptedStageLocalResolverReady).toBe(false);
+  expect(result.laneAdoptedRawGpuBufferTransfer).toBe(false);
+  expect(result.laneStageChainStatus).toBe('compute-manager-stage-task-chain-executed');
+  expect(result.laneStageOrder).toEqual(['p2g', 'gridUpdate', 'g2p']);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase resident steps can use the real browser PeerCompute resident authority host', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');

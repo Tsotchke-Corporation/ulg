@@ -36091,3 +36091,70 @@ Next:
   GPUBuffer transfer.
 - Add an automatic mounted `residentStageWorkers=1` proof that the scheduled
   worker lane consumes real adopted storage after SS materialization.
+
+## 2026-07-02 AKDT - SS Adopted-Storage Runtime Policy Checkpoint (Fable)
+
+Landed the runtime-policy slice from the codex handoff after fixing three
+defects found by live-browser probing, and rescoped its e2e proof to the
+honest worker-lane contract. Active plan: `plan/todo/SS/fable-plan-2026-07-02.md`.
+
+Fixes:
+
+- Scene admission sizing is continuation-aware: `schroederPackedParticleCount`
+  now includes `mlsMpmResidentSteps.nextSphParticleState` when resident
+  continuation is active, and configured row budgets floor at that count
+  instead of capping admissions below the fail-closed per-particle row
+  requirement (`sphPhaseScene.js`).
+- SS particle-storage adoption no longer conflates buffer capacity with live
+  particle count: `authoritativeParticleCount` is now
+  `sourceParticleCount + admittedParticleCountDelta` (delta defaults to 0
+  until an admitted split/merge readback exists) with
+  `outputParticleCapacity` kept as a separate field. Previously adoption
+  silently grew the live count to capacity (16 -> 48 with zero admitted
+  splits), violating the `growth <= 1` gate and re-blocking admissions from
+  step 2 of every fused sequence (`sphMlsMpmGpuStep.js`).
+- The mechanics stage chain fails closed when same-device adopted-storage
+  continuation is requested while a dedicated stage worker runner owns stage
+  execution (`blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs`),
+  and the worker-bound stage context now carries a worker-transportable
+  material-interface field: the retained `sph-interface-source-key` GPUBuffer,
+  destroy callbacks, and buffer-pool device references previously leaked into
+  the worker `postMessage` payload and killed worker publication with
+  `DataCloneError`, leaving the lane stuck unpublished.
+
+Proof rescope:
+
+- `SPH phase mounted SS storage policy materializes adopted storage and
+  fail-closes worker-lane continuation` now asserts policy publication of all
+  four admissions, free-list readiness, materialization, adoption,
+  descriptor publication, host-local resolver readiness, published worker
+  lane, explicit worker-lane-blocked continuation, and raw-transfer=false.
+  Worker-lane consumption of adopted storage remains future worker-owned
+  rematerialization work. The published-lane snapshot is captured atomically
+  inside the wait predicate to avoid racing scheduler republication.
+
+Known pre-existing failure (verified against `afa0e60` via stash):
+
+- `SPH phase mounted resident scheduler can publish worker-retained mechanics
+  stage lane` fails on `residentComputeManagerTaskStatus` being null in the
+  non-SS mounted path. Unrelated to this slice; not chased here.
+
+Validation:
+
+- PASS: `node --check` on all touched files.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  `18/18`, `tests/nativeSurfaceHarness.test.mjs` `15/15`,
+  `tests/sphMlsMpmGpuStep.test.mjs` `85/85`.
+- PASS: targeted Playwright `mounted Schroeder materialized storage` `1/1`.
+- PASS: targeted Playwright `mounted SS storage policy` `1/1` (23.9s).
+- PASS: `npm test` `947/950`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next:
+
+- Physics-first checkpoint per `fable-plan-2026-07-02.md` Phase 1: a real
+  adjacent-level restriction/prolongation operator in a new module, a
+  two-level co-simulation proof with numeric mass/momentum conservation
+  assertions from compact readbacks, and one admitted split/merge that
+  changes live particle count by an explicit admitted delta.
+- Portable cross-peer rematerializer explicitly deferred until Phase 1 lands.

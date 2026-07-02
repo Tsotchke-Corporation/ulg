@@ -233,13 +233,18 @@ Landed checkpoints:
     velocity deltas into a retained fused state buffer, routes thermal/reaction
     sidecars from that state, and records `schroeder-far-force` authority in
     the resident StateManager ledger without default full particle readback.
+60. `4a586fc` adds StateManager-admitted retained far-aggregate law-consumer
+    rows. The pass consumes retained far-force summary rows and compact
+    diagnostics, emits read-only radiation/plasma/gas-summary proxy rows,
+    forwards the retained descriptor through same-level/resident paths, and
+    publishes descriptor-only portable refs without mutating particle state.
 
 Next implementation queue:
 
-1. Continue Slice 7 by adding law-specific far-aggregate consumers behind
-   explicit admissibility, compact diagnostics, and StateManager admission.
+1. Continue Slice 7 by deciding whether a far-field consumer should remain
+   read-only summary plumbing or graduate into a new admitted state-delta path.
 2. Keep pressure/interface exact-near-field work separate from far-aggregate
    traversal.
-3. Add radiation, plasma/electromagnetic approximation, and gas-summary
-   consumers only behind explicit law admissibility, compact diagnostics, and
+3. Keep radiation, plasma/electromagnetic approximation, and gas-summary
+   adapters behind explicit law admissibility, compact diagnostics, and
    StateManager admission.

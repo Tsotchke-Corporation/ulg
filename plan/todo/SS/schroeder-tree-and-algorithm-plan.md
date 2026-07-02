@@ -305,7 +305,9 @@ Suggested schemas:
   force-summary rows landed in `0773c25`; compact far-aggregate diagnostic
   summaries over those force rows landed in `70e21ce`; StateManager-admitted
   retained far-force application delta rows landed in `f91259b`; resident
-  SPH-state fusion of admitted far-force deltas landed in `ed15162`.
+  SPH-state fusion of admitted far-force deltas landed in `ed15162`;
+  StateManager-admitted read-only radiation/plasma/gas-summary consumer rows
+  landed in `4a586fc`.
 - Add Barnes-Hut/FMM-style traversal for laws with physical aggregate error
   bounds: gravity, radiation, plasma/electromagnetic approximations, gas
   far-field summaries.
@@ -319,8 +321,9 @@ Suggested schemas:
   acceleration/potential, and readback-free descriptor propagation. `f91259b`
   adds the first admitted application stage, and `ed15162` fuses those admitted
   rows into a retained resident SPH state buffer after G2P without default full
-  particle readback. Radiation, plasma/electromagnetic approximation, and
-  gas-summary consumers remain future law-specific adapters.
+  particle readback. `4a586fc` adds the first read-only law-consumer adapter
+  rows for radiation, plasma/electromagnetic approximation, and gas-summary
+  proxies. Those rows are not yet authoritative state mutations.
 
 ### Slice 8: Render And Distribution
 
@@ -354,13 +357,12 @@ Suggested schemas:
 ## Current Implementation Queue
 
 1. Far-field aggregate laws:
-   - add law-specific far-aggregate consumers with explicit admissibility,
-     compact diagnostic pressure, conservation/error policy, and fail-closed
-     StateManager admission;
+   - decide which law-consumer outputs remain read-only compact summaries and
+     which require a future admitted state-delta mutation path;
    - keep local incompressibility, reaction, contact, and interface laws on the
      exact-near-field queue path;
-   - later add radiation, plasma/electromagnetic approximation, and gas-summary
-     consumers with law-specific admissibility.
+   - keep radiation, plasma/electromagnetic approximation, and gas-summary
+     consumers under law-specific admissibility and compact diagnostics.
 2. Render and distribution:
    - keep draw sources closure/PBR-derived and no-full-readback by default;
    - keep StateManager admissions and replay descriptors descriptor-only across
@@ -415,11 +417,11 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **law-specific far-aggregate consumers**:
+The next code slice on `SS` is **far-field consumer authority policy**:
 
-1. Start with an aggregate-admissible adapter that can consume retained
-   far-aggregate candidate/summary/diagnostic rows without becoming a local
-   incompressibility, reaction, or contact solver.
+1. Decide whether any admitted law-consumer row should produce an authoritative
+   state delta, or whether the next step should widen read-only compact
+   summaries first.
 2. Preserve the current fail-closed behavior: summaries and diagnostics may be
    read-only, but state mutation requires explicit admission and retained delta
    rows.

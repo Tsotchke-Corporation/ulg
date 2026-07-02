@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-07-01 AKDT - SS Far-Aggregate Law Consumers
+
+Status:
+
+- Added `peercompute.ulg.schroeder-far-aggregate-law-consumer.v0`,
+  execution, and admission schemas with a 32-float retained law-consumer row.
+- Added a GPU-first WebGPU pass that consumes retained far-aggregate force
+  summary rows plus compact diagnostic rows, requires StateManager admission,
+  and emits read-only radiation/plasma/gas-summary proxy rows without mutating
+  particle state.
+- Same-level SS orchestration can now run the admitted law-consumer stage after
+  compact far-field diagnostics, forward its retained descriptor to the resident
+  backend, and include it in descriptor-only portable summaries.
+- Local incompressibility, reaction, contact, and interface work remain on the
+  near-field queue path; this stage is aggregate-admissible far-field summary
+  plumbing only.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/index.js`.
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/schroederHierarchyGpu.js`.
+- PASS: `node --check tests/schroederHierarchyGpu.test.mjs`.
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` with `81/81`
+  passing.
+- PASS:
+  `node --test tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/schroederHierarchyGpu.test.mjs`
+  with `163/163` passing.
+- PASS: `git diff --check`.
+
+Next:
+
+- Decide the next far-field adapter target: either promote one consumer into a
+  real admitted state-delta path, or continue widening read-only compact
+  summaries for radiation/plasma/gas before any mutation path.
+
 ## 2026-07-01 AKDT - SS Resident Far-Force Delta Fusion
 
 Status:

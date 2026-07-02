@@ -75,6 +75,7 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
@@ -196,6 +197,7 @@ import {
   createSchroederLevelAssignmentPlan,
   createSchroederPhaseVolumeDiagnosticSummaryParamsArray,
   createSchroederPhaseVolumeDiagnosticSummaryPlan,
+  createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan,
   createSchroederPhaseVolumeLevelUpdateParamsArray,
   createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
@@ -730,6 +732,10 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
     'peercompute.ulg.schroeder-phase-volume-level-update-execution.v0'
   );
+  assert.equal(
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
+    'peercompute.ulg.schroeder-phase-volume-level-update-assignment-overlay.v0'
+  );
   assert.equal(SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS, 32);
   assert.equal(
     SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ROW_LAYOUT.length,
@@ -862,6 +868,66 @@ test('Schroeder active-node plan uses retained level assignments as unsorted til
   assert.equal(view.getUint32(0, true), 5);
   assert.equal(view.getUint32(4, true), 4);
   assert.equal(view.getFloat32(16, true), 2);
+  assert.equal(view.getUint32(32, true), 0);
+  assert.equal(view.getUint32(36, true), SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS);
+  assert.equal(view.getUint32(40, true), 0);
+});
+
+test('Schroeder phase-volume level update assignment overlay targets active-node level selection', () => {
+  const levelAssignment = {
+    schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+    status: 'schroeder-level-assignment-submitted',
+    particleCount: 5,
+    assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+    assignmentBuffer: { label: 'fake-assignment-buffer' }
+  };
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 5,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    levelUpdateBuffer: { label: 'fake-phase-volume-level-update-buffer' },
+    levelUpdateBufferByteLength: 5 * SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  };
+  const overlay = createSchroederPhaseVolumeLevelUpdateAssignmentOverlayPlan({
+    phaseVolumeLevelUpdate,
+    levelAssignment,
+    selectedLevel: 1
+  });
+  assert.equal(overlay.schema, ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA);
+  assert.equal(overlay.status, 'schroeder-phase-volume-level-update-assignment-overlay-ready');
+  assert.equal(overlay.phaseVolumeAssignmentOverlayEnabled, true);
+  assert.equal(overlay.selectedLevelSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(overlay.nativeLevelSource, 'phase-volume-level-update-target-level');
+  assert.equal(overlay.overlayIndexMode, 'row-aligned-source-particle-index');
+  assert.equal(overlay.sparseOverlayIndexStatus, 'not-required-row-aligned-level-update-rows');
+  assert.equal(overlay.rawGpuBufferTransferAllowed, false);
+  assert.equal(overlay.fullParticleReadbackRequired, false);
+
+  const plan = createSchroederActiveNodeListPlan({
+    levelAssignment,
+    phaseVolumeAssignmentOverlay: overlay,
+    tileCellCount: 4,
+    supportInflateCells: 2
+  });
+  assert.equal(plan.phaseVolumeAssignmentOverlayStatus, overlay.status);
+  assert.equal(
+    plan.phaseVolumeAssignmentOverlayConsumerStatus,
+    'phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection'
+  );
+  assert.equal(plan.phaseVolumeAssignmentOverlayEnabled, true);
+  assert.equal(plan.phaseVolumeAssignmentOverlayRowCount, 5);
+  assert.equal(plan.phaseVolumeAssignmentOverlayRetainedBuffer, true);
+  assert.equal(plan.phaseVolumeAssignmentOverlayRawGpuBufferTransferAllowed, false);
+  assert.equal(plan.phaseVolumeAssignmentOverlayFullParticleReadbackRequired, false);
+  assert.equal(plan.phaseVolumeLevelSelectionSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(plan.phaseVolumeNativeLevelSource, 'phase-volume-level-update-target-level');
+
+  const params = createSchroederActiveNodeParamsArray(plan);
+  const view = new DataView(params);
+  assert.equal(view.getUint32(32, true), 5);
+  assert.equal(view.getUint32(36, true), SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS);
+  assert.equal(view.getUint32(40, true), 1);
 });
 
 test('Schroeder active-node index plan builds a retained bucket indirection table', () => {
@@ -2608,6 +2674,61 @@ test('Schroeder WebGPU active-node list consumes retained assignments without de
   assert.equal(activeNodes.activeNodes.length, 0);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
   assert.ok(device.shaderModules.some((module) => module.code.includes('SchroederActiveNodeParams')));
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
+    false
+  );
+});
+
+test('Schroeder WebGPU active-node list consumes retained phase-volume assignment overlay', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3 });
+  const levelAssignment = await runSchroederLevelAssignmentWebGpu({
+    device,
+    ...buffers,
+    baseGridSpacingM: 0.5,
+    targetSupportCells: 1,
+    minLevel: -2,
+    maxLevel: 4
+  });
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 3,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    levelUpdateBuffer: { label: 'retained-phase-volume-level-update-buffer' },
+    levelUpdateBufferByteLength: 3 * SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  };
+  const activeNodes = await runSchroederActiveNodeListWebGpu({
+    device,
+    levelAssignment,
+    phaseVolumeLevelUpdate,
+    selectedLevel: 1,
+    tileCellCount: 4,
+    supportInflateCells: 1
+  });
+
+  assert.equal(activeNodes.schema, ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA);
+  assert.equal(
+    activeNodes.phaseVolumeAssignmentOverlayStatus,
+    'schroeder-phase-volume-level-update-assignment-overlay-ready'
+  );
+  assert.equal(
+    activeNodes.phaseVolumeAssignmentOverlayConsumerStatus,
+    'phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection'
+  );
+  assert.equal(activeNodes.phaseVolumeAssignmentOverlayEnabled, true);
+  assert.equal(activeNodes.phaseVolumeAssignmentOverlayRowCount, 3);
+  assert.equal(activeNodes.phaseVolumeAssignmentOverlayRetainedBuffer, true);
+  assert.equal(activeNodes.phaseVolumeLevelSelectionSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(activeNodes.phaseVolumeNativeLevelSource, 'phase-volume-level-update-target-level');
+  assert.equal(activeNodes.fullParticleReadbackPerformed, false);
+  assert.equal(activeNodes.phaseVolumeAssignmentOverlayRawGpuBufferTransferAllowed, false);
+  assert.equal(activeNodes.phaseVolumeAssignmentOverlayFullParticleReadbackRequired, false);
+  assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
+  assert.equal(device.bindGroups.at(-1).entries.length, 4);
+  assert.equal(device.bindGroups.at(-1).entries[3].resource.buffer, phaseVolumeLevelUpdate.levelUpdateBuffer);
+  assert.ok(device.shaderModules.some((module) => module.code.includes('phase_volume_level_updates')));
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('readback')),
     false
@@ -5066,6 +5187,78 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
     device.dispatches,
     [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
+});
+
+test('Schroeder same-level mechanics consumes prior phase-volume level update as active-node overlay', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const phaseVolumeLevelUpdate = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA,
+    status: 'schroeder-phase-volume-level-update-submitted',
+    migrationRowCount: 3,
+    levelUpdateStrideFloats: SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS,
+    levelUpdateBuffer: { label: 'retained-phase-volume-level-update-buffer' },
+    levelUpdateBufferByteLength: 3 * SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    phaseVolumeMigrationAdmissionApproved: true,
+    conservativeTransferStatus: 'phase-volume-level-update-submitted',
+    stateMutationStatus: 'phase-volume-level-update-buffer-submitted',
+    stateAuthorityStatus: 'state-manager-admitted-phase-volume-level-update-materialized'
+  };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 4,
+    tileCellCount: 4,
+    phaseVolumeLevelUpdate,
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasPhaseVolumeAssignmentOverlay: Boolean(options.schroederPhaseVolumeAssignmentOverlay),
+        hasPhaseVolumeLevelUpdate: Boolean(options.schroederPhaseVolumeLevelUpdate)
+      };
+    }
+  });
+
+  assert.equal(result.phaseVolumeAssignmentOverlayEnabled, true);
+  assert.equal(
+    result.phaseVolumeAssignmentOverlayStatus,
+    'schroeder-phase-volume-level-update-assignment-overlay-ready'
+  );
+  assert.equal(
+    result.phaseVolumeAssignmentOverlayConsumerStatus,
+    'phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection'
+  );
+  assert.equal(result.phaseVolumeAssignmentOverlayRetainedBuffer, true);
+  assert.equal(result.phaseVolumeAssignmentOverlayRowCount, 3);
+  assert.equal(result.phaseVolumeAssignmentOverlayRawGpuBufferTransferAllowed, false);
+  assert.equal(result.phaseVolumeAssignmentOverlayFullParticleReadbackRequired, false);
+  assert.equal(result.phaseVolumeLevelSelectionSource, 'state-manager-admitted-phase-volume-level-update');
+  assert.equal(result.activeNodeList.phaseVolumeAssignmentOverlayEnabled, true);
+  assert.equal(
+    result.activeNodeList.phaseVolumeAssignmentOverlayConsumerStatus,
+    'phase-volume-level-update-assignment-overlay-consumed-by-active-node-selection'
+  );
+  assert.equal(result.activeNodeList.phaseVolumeNativeLevelSource, 'phase-volume-level-update-target-level');
+  assert.equal(result.phaseVolumeLevelUpdateStatus, 'schroeder-phase-volume-level-update-submitted');
+  assert.equal(result.phaseVolumeLevelUpdateConsumerStatus, 'phase-volume-level-update-forwarded-to-resident-backend');
+  assert.equal(result.residentStep.hasPhaseVolumeAssignmentOverlay, true);
+  assert.equal(result.residentStep.hasPhaseVolumeLevelUpdate, true);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].schroederPhaseVolumeAssignmentOverlay.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA
+  );
+  assert.equal(
+    calls[0].schroederPhaseVolumeLevelUpdate.schema,
+    ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_EXECUTION_SCHEMA
+  );
+  assert.equal(device.bindGroups[1].entries[3].resource.buffer, phaseVolumeLevelUpdate.levelUpdateBuffer);
 });
 
 test('Schroeder same-level mechanics can emit portable render LOD summary', async () => {

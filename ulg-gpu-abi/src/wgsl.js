@@ -7915,14 +7915,21 @@ struct SchroederActiveNodeParams {
   min_tile_spacing_m: f32,
   max_tile_spacing_m: f32,
   pad1: f32,
+  phase_volume_level_update_row_count: u32,
+  phase_volume_level_update_stride: u32,
+  phase_volume_level_update_enabled: u32,
+  pad2: u32,
+  pad3: vec4<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
 @group(0) @binding(1) var<storage, read_write> active_nodes: array<f32>;
 @group(0) @binding(2) var<uniform> params: SchroederActiveNodeParams;
+@group(0) @binding(3) var<storage, read> phase_volume_level_updates: array<f32>;
 
 const SCHROEDER_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_ACTIVE_NODE_STRIDE: u32 = 16u;
+const SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_STRIDE: u32 = 32u;
 
 fn ss_active_positive(value: f32) -> bool {
   return value == value && value > 0.0;
@@ -7948,22 +7955,66 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let assignment_offset = particle_index * SCHROEDER_ASSIGNMENT_STRIDE;
   let node_offset = particle_index * SCHROEDER_ACTIVE_NODE_STRIDE;
-  let level = level_assignments[assignment_offset + 0u];
-  let native_dx = max(level_assignments[assignment_offset + 1u], 0.000001);
-  let support_radius = max(level_assignments[assignment_offset + 2u], 0.0);
-  let assignment_status = level_assignments[assignment_offset + 10u];
+  var level = level_assignments[assignment_offset + 0u];
+  var native_dx = max(level_assignments[assignment_offset + 1u], 0.000001);
+  var support_radius = max(level_assignments[assignment_offset + 2u], 0.0);
+  var assignment_status = level_assignments[assignment_offset + 10u];
   let position = vec3<f32>(
     level_assignments[assignment_offset + 12u],
     level_assignments[assignment_offset + 13u],
     level_assignments[assignment_offset + 14u]
   );
   let chart_id = level_assignments[assignment_offset + 15u];
+  var overlay_applied = false;
+  var overlay_rejected = false;
+  if (
+    params.phase_volume_level_update_enabled != 0u
+    && particle_index < params.phase_volume_level_update_row_count
+  ) {
+    let update_stride = max(
+      params.phase_volume_level_update_stride,
+      SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_STRIDE
+    );
+    let update_offset = particle_index * update_stride;
+    let source_particle_index = u32(max(round(phase_volume_level_updates[update_offset + 0u]), 0.0));
+    let target_level = phase_volume_level_updates[update_offset + 2u];
+    let update_status = phase_volume_level_updates[update_offset + 3u];
+    let target_support_radius = phase_volume_level_updates[update_offset + 5u];
+    let admission_approved = phase_volume_level_updates[update_offset + 17u];
+    let target_grid_spacing_m = phase_volume_level_updates[update_offset + 21u];
+    if (
+      source_particle_index == particle_index
+      && update_status > 0.0
+      && admission_approved > 0.0
+    ) {
+      let assignment_level = level;
+      level = target_level;
+      if (ss_active_positive(target_grid_spacing_m)) {
+        native_dx = target_grid_spacing_m;
+      } else {
+        native_dx = max(native_dx * exp2(target_level - assignment_level), 0.000001);
+      }
+      if (ss_active_positive(target_support_radius)) {
+        support_radius = target_support_radius;
+      }
+      assignment_status = max(assignment_status, 1.0);
+      overlay_applied = true;
+    } else {
+      overlay_rejected = true;
+    }
+  }
   let tile_spacing = ss_active_tile_spacing(native_dx);
   let support_inflation = max(params.support_inflate_cells, 0.0) * native_dx;
   let expanded_support = support_radius + support_inflation;
   let min_tile = floor((position - vec3<f32>(expanded_support)) / tile_spacing);
   let max_tile = floor((position + vec3<f32>(expanded_support)) / tile_spacing);
-  let status = select(32.0, 1.0, assignment_status > 0.0 && support_radius >= 0.0);
+  var status = select(32.0, 1.0, assignment_status > 0.0 && support_radius >= 0.0);
+  if (overlay_applied) {
+    status = status + 64.0;
+  }
+  if (overlay_rejected) {
+    status = status + 128.0;
+  }
 
   active_nodes[node_offset + 0u] = level;
   active_nodes[node_offset + 1u] = min_tile.x;

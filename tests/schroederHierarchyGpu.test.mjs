@@ -996,7 +996,11 @@ test('Schroeder law-neighbor traversal policy preserves bucket mode without diag
   assert.equal(policy.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(policy.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.smallSceneDefaultIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.bucketFirstDefault, true);
   assert.equal(policy.sortedRadixIndexRequired, false);
+  assert.equal(policy.sortedRadixEscalationAllowed, false);
+  assert.equal(policy.sortedRadixEscalationTrigger, null);
   assert.equal(policy.diagnosticCountersAvailable, false);
   assert.equal(policy.diagnosticReadbackRecommended, true);
   assert.equal(policy.fullParticleReadbackRequired, false);
@@ -1027,7 +1031,11 @@ test('Schroeder law-neighbor traversal policy requires sorted radix when counter
   assert.equal(policy.appliedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
   assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
   assert.equal(policy.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.smallSceneDefaultIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.bucketFirstDefault, true);
   assert.equal(policy.sortedRadixIndexRequired, true);
+  assert.equal(policy.sortedRadixEscalationAllowed, true);
+  assert.equal(policy.sortedRadixEscalationTrigger, 'compact-law-neighbor-diagnostics');
   assert.equal(policy.sortedRadixIndexStatus, 'sorted-radix-active-node-index-required-pending-implementation');
   assert.equal(policy.diagnosticCountersAvailable, true);
   assert.equal(policy.diagnosticReadbackRecommended, false);
@@ -1059,7 +1067,9 @@ test('Schroeder law-neighbor traversal policy keeps forced bucket mode explicit'
 
   assert.equal(policy.status, 'traversal-policy-forced-bucketed-active-node-index');
   assert.equal(policy.recommendedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(policy.bucketFirstDefault, false);
   assert.equal(policy.sortedRadixIndexRequired, false);
+  assert.equal(policy.sortedRadixEscalationTrigger, null);
 });
 
 test('Schroeder active-node sorted index selection waits for compact diagnostics in auto mode', () => {
@@ -1075,6 +1085,11 @@ test('Schroeder active-node sorted index selection waits for compact diagnostics
   assert.equal(selection.status, 'active-node-sorted-index-policy-pending-compact-diagnostics');
   assert.equal(selection.selected, false);
   assert.equal(selection.shouldBuild, false);
+  assert.equal(selection.smallSceneDefaultIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE);
+  assert.equal(selection.bucketFirstDefault, true);
+  assert.equal(selection.sortedRadixBuildTrigger, null);
+  assert.equal(selection.sortedRadixBuildAllowedByPolicy, true);
+  assert.equal(selection.sortedRadixEscalationTrigger, null);
   assert.equal(selection.diagnosticReadbackRecommended, true);
   assert.equal(selection.sortedRadixTraversalAvailable, false);
   assert.equal(selection.fullParticleReadbackRequired, false);
@@ -1104,6 +1119,9 @@ test('Schroeder active-node sorted index selection uses diagnostics to escalate'
   assert.equal(selection.diagnosticDrivenBuild, true);
   assert.equal(selection.sortedRadixIndexRequired, true);
   assert.equal(selection.sortedRadixIndexStatus, 'sorted-radix-active-node-index-selected-for-construction');
+  assert.equal(selection.bucketFirstDefault, false);
+  assert.equal(selection.sortedRadixBuildTrigger, 'compact-law-neighbor-diagnostics');
+  assert.equal(selection.sortedRadixEscalationTrigger, 'compact-law-neighbor-diagnostics');
   assert.equal(selection.selectedTraversalIndexMode, SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE);
   assert.equal(selection.peerComputeConfigStatus, 'peercompute-use-case-config-allows-sorted-radix-index');
 });
@@ -1118,6 +1136,8 @@ test('Schroeder active-node sorted index selection honors PeerCompute force and 
   assert.equal(forced.selected, true);
   assert.equal(forced.shouldBuild, true);
   assert.equal(forced.forcedByUseCaseConfig, true);
+  assert.equal(forced.sortedRadixBuildTrigger, 'peercompute-use-case-force');
+  assert.equal(forced.bucketFirstDefault, false);
 
   const disabled = createSchroederActiveNodeSortedIndexSelection({
     activeNodeSortedIndexPolicyMode: SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_DISABLED_MODE,
@@ -1128,6 +1148,9 @@ test('Schroeder active-node sorted index selection honors PeerCompute force and 
   assert.equal(disabled.selected, false);
   assert.equal(disabled.shouldBuild, false);
   assert.equal(disabled.forcedByTraversalPolicy, true);
+  assert.equal(disabled.sortedRadixBuildAllowedByPolicy, false);
+  assert.equal(disabled.sortedRadixBuildTrigger, 'forced-traversal-policy');
+  assert.equal(disabled.bucketFirstDefault, false);
   assert.equal(disabled.peerComputeConfigStatus, 'peercompute-use-case-config-disables-sorted-radix-index');
 });
 

@@ -1249,6 +1249,14 @@ export function createSchroederLawNeighborTraversalPolicy({
   const forcedSortedRadix = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE;
   const forcedBucket = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE;
   const forcedExactScan = mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
+  const smallSceneDefaultIndexMode = activeNodeIndexEnabled
+    ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+    : SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
+  const bucketFirstDefault = Boolean(
+    mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE
+      && activeNodeIndexEnabled
+      && !activeNodeSortedIndexEnabled
+  );
   const diagnosticSortedRadixPressure = diagnosticCountersAvailable
     && mode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE
     && (
@@ -1256,6 +1264,11 @@ export function createSchroederLawNeighborTraversalPolicy({
       || bucketPressureRatio > bucketPressureThreshold
     );
   const sortedRadixIndexRequired = forcedSortedRadix || diagnosticSortedRadixPressure;
+  const sortedRadixEscalationTrigger = forcedSortedRadix
+    ? 'forced-traversal-policy'
+    : (diagnosticSortedRadixPressure
+      ? 'compact-law-neighbor-diagnostics'
+      : (activeNodeSortedIndexEnabled ? 'supplied-retained-sorted-index' : null));
   const recommendedTraversalIndexMode = sortedRadixIndexRequired
     ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
     : (forcedExactScan
@@ -1300,7 +1313,11 @@ export function createSchroederLawNeighborTraversalPolicy({
     appliedTraversalIndexMode,
     recommendedTraversalIndexMode,
     selectedTraversalIndexMode,
+    smallSceneDefaultIndexMode,
+    bucketFirstDefault,
     sortedRadixIndexRequired,
+    sortedRadixEscalationAllowed: Boolean(sortedRadixIndexRequired || activeNodeSortedIndexEnabled),
+    sortedRadixEscalationTrigger,
     sortedRadixIndexStatus,
     sortedRadixTraversalAvailable: Boolean(sortedRadixTraversalAvailable || activeNodeSortedIndexEnabled),
     diagnosticCountersAvailable,
@@ -1362,6 +1379,9 @@ export function createSchroederActiveNodeSortedIndexSelection({
     && traversalPolicy.sortedRadixIndexRequired
   );
   const policyAllowsBuild = !disabledByUseCaseConfig || forcedByLegacyFlag || suppliedRetainedIndex;
+  const smallSceneDefaultIndexMode = activeNodeIndexEnabled
+    ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_BUCKET_MODE
+    : SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_EXACT_SCAN_MODE;
   const selected = suppliedRetainedIndex
     || forcedByLegacyFlag
     || (policyAllowsBuild && (
@@ -1395,14 +1415,33 @@ export function createSchroederActiveNodeSortedIndexSelection({
     status = 'active-node-sorted-index-policy-pending-compact-diagnostics';
     buildReason = 'compact-law-neighbor-diagnostic-counters-needed';
   }
+  const sortedRadixBuildTrigger = suppliedRetainedIndex
+    ? 'supplied-retained-sorted-index'
+    : (forcedByLegacyFlag
+      ? 'legacy-enable-active-node-sorted-index-flag'
+      : (forcedByUseCaseConfig
+        ? 'peercompute-use-case-force'
+        : (forcedByTraversalPolicy
+          ? 'forced-traversal-policy'
+          : (diagnosticDrivenBuild ? 'compact-law-neighbor-diagnostics' : null))));
+  const bucketFirstDefault = Boolean(
+    policyMode === SCHROEDER_ACTIVE_NODE_SORTED_INDEX_POLICY_AUTO_MODE
+      && traversalPolicyMode === SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_AUTO_MODE
+      && activeNodeIndexEnabled
+      && !selected
+  );
 
   return {
     policyMode,
     status,
     selected,
     shouldBuild,
+    smallSceneDefaultIndexMode,
+    bucketFirstDefault,
     suppliedRetainedIndex,
     buildReason,
+    sortedRadixBuildTrigger,
+    sortedRadixBuildAllowedByPolicy: policyAllowsBuild,
     forcedByUseCaseConfig,
     forcedByLegacyFlag,
     forcedByTraversalPolicy,
@@ -1416,6 +1455,7 @@ export function createSchroederActiveNodeSortedIndexSelection({
     selectedTraversalIndexMode: selected
       ? SCHROEDER_LAW_NEIGHBOR_TRAVERSAL_POLICY_SORTED_RADIX_MODE
       : traversalPolicy.selectedTraversalIndexMode,
+    sortedRadixEscalationTrigger: traversalPolicy.sortedRadixEscalationTrigger,
     sortedRadixIndexRequired: traversalPolicy.sortedRadixIndexRequired || forcedByTraversalPolicy || forcedByUseCaseConfig,
     sortedRadixIndexStatus: selected
       ? 'sorted-radix-active-node-index-selected-for-construction'

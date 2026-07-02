@@ -311,6 +311,11 @@ Suggested schemas:
   pressure-interface input descriptor in ComputeManager GPU lane tasks, worker
   stage retained refs, pressure-stage evidence, and worker publication
   summaries; older material-interface fields remain valid without the sidecar.
+  SS source-key replay diagnostics landed in `fbc05ee`: pressure-interface
+  tasks now expose descriptor-only source-key replay inputs, scene/demo
+  summaries show source-key production, retained-ref publication, and pressure
+  consumer status together, and portable replay diagnostics explicitly avoid
+  raw `GPUBuffer` serialization.
 
 ### Slice 7: Far-Field Aggregate Laws
 
@@ -480,14 +485,14 @@ Suggested schemas:
 
 ## Current Work Target
 
-The next code slice on `SS` is **SS source-key replay diagnostics**:
+The next code slice on `SS` is **SS phase-volume migration visibility and
+level-update consumption**:
 
-1. Add compact scene/demo diagnostics that show source-key production,
-   retained-ref publication, and pressure contact-kinematics consumption in the
-   same derived summary.
-2. Add a replay-style worker/PeerCompute fixture proving a pressure-interface
-   task can observe the `sph-interface-source-key-buffer` descriptor without
-   serializing a raw GPUBuffer in the portable payload.
-3. Keep the current same-device hot-loop path as the fast path: source-local
-   source-index buffer -> compact candidate source-key sidecar -> pressure
-   contact-kinematics binding, with no full material-interface readback.
+1. Trace admitted retained phase-volume level-update rows from the SS path into
+   the same-level mechanics/render summaries as the current native level source,
+   without falling back to full particle readback.
+2. Add compact scene/demo diagnostics that compare material-derived support,
+   represented volume, phase, and selected SS level for water-to-steam cases.
+3. Add a replay-style fixture showing a `~700x` water-to-steam volume expansion
+   migrates about three hierarchy levels without increasing particle count,
+   while preserving fine representation near surfaces/reaction fronts.

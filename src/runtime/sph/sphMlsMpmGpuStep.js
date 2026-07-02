@@ -215,6 +215,8 @@ export const ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA = 'peercompute.ulg.ml
 export const ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-solver-task-bridge.v0';
 export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.schroeder-adopted-particle-storage-descriptor.v0';
+export const ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA =
+  'peercompute.ulg.schroeder-adopted-particle-storage-continuation-schedule.v0';
 const SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_NAMES = Object.freeze([
   'sph-particle-state',
   'mls-mpm-particle-mechanics',
@@ -317,6 +319,103 @@ function uniqueNonEmptyStrings(values = []) {
   return [...new Set((Array.isArray(values) ? values : [])
     .map((value) => String(value ?? '').trim())
     .filter(Boolean))];
+}
+
+function normalizeSchroederAdoptedParticleStorageConsumerMode(value = 'same-device') {
+  const mode = String(value || 'same-device').trim().toLowerCase();
+  return ['cross-peer', 'remote-peer', 'distributed-peer'].includes(mode)
+    ? 'cross-peer'
+    : 'same-device';
+}
+
+function createSchroederAdoptedParticleStorageContinuationSchedule({
+  continuationPlan = null,
+  consumerMode = 'same-device',
+  required = false,
+  taskIdPrefix = null,
+  laneId = null,
+  stateKey = null
+} = {}) {
+  const plan = continuationPlan && typeof continuationPlan === 'object' ? continuationPlan : null;
+  const requested = Boolean(plan || required);
+  const mode = normalizeSchroederAdoptedParticleStorageConsumerMode(plan?.consumerMode || consumerMode);
+  const sameDeviceReady = Boolean(
+    plan
+    && mode === 'same-device'
+    && plan.ready === true
+    && plan.sameDeviceContinuationReady === true
+  );
+  const crossPeerReady = Boolean(
+    plan
+    && mode === 'cross-peer'
+    && plan.ready === true
+    && plan.crossPeerContinuationReady === true
+  );
+  const scheduled = sameDeviceReady || crossPeerReady;
+  const retainedBufferRefs = scheduled
+    ? uniqueNonEmptyStrings(plan?.sameDevicePrivateLaneRefs?.length
+        ? plan.sameDevicePrivateLaneRefs
+        : plan?.retainedBufferRefs)
+    : [];
+  const crossPeerBlocked = Boolean(plan && mode === 'cross-peer' && !crossPeerReady);
+  const requiredBlocked = Boolean(required && !scheduled);
+  const failClosed = crossPeerBlocked || requiredBlocked;
+  const reason = scheduled
+    ? null
+    : (
+        plan?.reason
+        || plan?.crossPeerReplayBlocker
+        || (mode === 'cross-peer'
+          ? 'cross-peer-portable-materialization-required'
+          : 'same-device-private-lane-continuation-not-ready')
+      );
+  return {
+    schema: ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA,
+    status: !requested
+      ? 'schroeder-adopted-particle-storage-continuation-not-requested'
+      : scheduled
+        ? (mode === 'cross-peer'
+            ? 'schroeder-adopted-particle-storage-cross-peer-scheduled'
+            : 'schroeder-adopted-particle-storage-same-device-scheduled')
+        : (mode === 'cross-peer'
+            ? 'blocked-schroeder-adopted-particle-storage-cross-peer-scheduling'
+            : 'blocked-schroeder-adopted-particle-storage-same-device-scheduling'),
+    requested,
+    scheduled,
+    failClosed,
+    reason,
+    consumerMode: mode,
+    taskIdPrefix,
+    laneId,
+    stateKey,
+    sourceHotBufferKey: plan?.hotBufferKey || plan?.sourceHotBufferKey || null,
+    sourceStateKey: plan?.stateKey || null,
+    sourceCacheKey: plan?.cacheKey || null,
+    continuationPlan,
+    continuationPlanSchema: plan?.schema || null,
+    continuationPlanStatus: plan?.status || null,
+    continuationPlanReady: plan?.ready === true,
+    sameDeviceContinuationReady: plan?.sameDeviceContinuationReady === true,
+    sameDevicePrivateLaneContinuation: sameDeviceReady,
+    sameDevicePrivateLaneRefs: mode === 'same-device' ? retainedBufferRefs : [],
+    retainedBufferRefs,
+    retainedBufferRefCount: retainedBufferRefs.length,
+    crossPeerContinuationReady: plan?.crossPeerContinuationReady === true,
+    crossPeerReplayReady: plan?.crossPeerReplayReady === true,
+    crossPeerReplayStatus: plan?.crossPeerReplayStatus || null,
+    crossPeerReplayBlocker: plan?.crossPeerReplayBlocker || null,
+    portableSnapshotRequired: plan?.portableSnapshotRequired === true,
+    portableSnapshotAvailable: plan?.portableSnapshotAvailable === true,
+    portableMaterializationSeedAvailable: plan?.portableMaterializationSeedAvailable === true,
+    portableReplayAvailable: plan?.portableReplayAvailable === true,
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: plan?.rawGpuBufferTransferDetected === true,
+    descriptorOnlyPeerComputeHandoff: true,
+    authoritativeStateMutation: false,
+    schedulerPolicy: mode === 'cross-peer'
+      ? 'fail-closed-until-portable-snapshot-or-materialization-seed'
+      : 'same-device-private-lane-descriptor-continuation'
+  };
 }
 
 function normalizeSameDeviceRetainedBufferImportDescriptor(source = null) {
@@ -11574,6 +11673,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerRetainedContinuationSource = null,
   gpuHubResidentStageWorkerRetainedContinuationHotBufferKey = null,
   gpuHubResidentStageWorkerRetainedAccessContract = null,
+  schroederAdoptedParticleStorageContinuationPlan = null,
+  schroederAdoptedParticleStorageContinuationHotBufferKey = null,
+  schroederAdoptedParticleStorageContinuationPublication = null,
+  schroederAdoptedParticleStorageContinuationDescriptor = null,
+  schroederAdoptedParticleStorageContinuationConsumerMode = 'same-device',
+  schroederAdoptedParticleStorageContinuationPortableSnapshot = null,
+  schroederAdoptedParticleStorageContinuationPortableMaterializationSeed = null,
+  requireSchroederAdoptedParticleStorageContinuation = false,
   sameDeviceRetainedBufferImport = null,
   localSameDeviceRetainedBufferImport = null,
   residentAuthorityHost = null,
@@ -11703,6 +11810,35 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       : null);
   const useWorkerRetainedG2pInput = gpuHubResidentStageWorkerUseRetainedInput === true
     || workerRetainedContinuationPlan?.useWorkerRetainedInput === true;
+  const resolvedSchroederAdoptedParticleStorageContinuationPlan =
+    schroederAdoptedParticleStorageContinuationPlan
+    || (typeof residentAuthorityHost?.planSchroederAdoptedParticleStorageContinuation === 'function'
+      && (
+        schroederAdoptedParticleStorageContinuationHotBufferKey
+        || schroederAdoptedParticleStorageContinuationPublication
+        || schroederAdoptedParticleStorageContinuationDescriptor
+      )
+      ? residentAuthorityHost.planSchroederAdoptedParticleStorageContinuation({
+          hotBufferKey: schroederAdoptedParticleStorageContinuationHotBufferKey,
+          publication: schroederAdoptedParticleStorageContinuationPublication,
+          descriptor: schroederAdoptedParticleStorageContinuationDescriptor,
+          consumerMode: schroederAdoptedParticleStorageContinuationConsumerMode,
+          portableSnapshot: schroederAdoptedParticleStorageContinuationPortableSnapshot,
+          portableMaterializationSeed:
+            schroederAdoptedParticleStorageContinuationPortableMaterializationSeed
+        })
+      : null);
+  const schroederAdoptedParticleStorageContinuationSchedule =
+    createSchroederAdoptedParticleStorageContinuationSchedule({
+      continuationPlan: resolvedSchroederAdoptedParticleStorageContinuationPlan,
+      consumerMode: schroederAdoptedParticleStorageContinuationConsumerMode,
+      required: requireSchroederAdoptedParticleStorageContinuation,
+      taskIdPrefix,
+      laneId: laneStagePlanId,
+      stateKey: laneStagePlanStateKey
+    });
+  const schroederAdoptedParticleStorageContinuationBlocksStageTasks =
+    schroederAdoptedParticleStorageContinuationSchedule.failClosed === true;
   const sphParticleState = stepOptions.sphParticleState;
   const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
   const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -11717,6 +11853,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     ? nodeKernel
     : computeManager;
   const canUseNativeTaskGraph = useNativeTaskGraph !== false
+    && schroederAdoptedParticleStorageContinuationBlocksStageTasks !== true
     && typeof nativeTaskGraphSubmitter.submitTaskGraph === 'function'
     && stepOptions.preferWebGpu !== true
     && includeSpatialGasLedgerProducerStage !== true
@@ -11878,6 +12015,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     Object.assign(stageResults, nativeTaskGraph.nodeResults || {});
   }
   const canUseGpuResidentLaneStagePlan = useGpuResidentLaneStagePlan !== false
+    && schroederAdoptedParticleStorageContinuationBlocksStageTasks !== true
     && typeof computeManager.acquireGpuResidentLaneLease === 'function'
     && typeof computeManager.executeGpuResidentLaneStagePlan === 'function'
     && typeof computeManager.completeGpuResidentLaneLease === 'function'
@@ -12130,7 +12268,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         domainKey: gpuResidentLaneDomainKey,
         preferWebGpu: stepOptions.preferWebGpu === true,
         readbackMode,
-        sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport
+        sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
+        schroederAdoptedParticleStorageContinuationSchedule:
+          schroederAdoptedParticleStorageContinuationSchedule.scheduled === true
+            ? schroederAdoptedParticleStorageContinuationSchedule
+            : null
       });
       return {
         value: result,
@@ -12372,6 +12514,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   };
   const gpuHubForStageExecutors = resolveMechanicsStageGpuHub(computeManager);
   const canUseGpuHubResidentStageExecutors = useGpuHubResidentStageExecutors !== false
+    && schroederAdoptedParticleStorageContinuationBlocksStageTasks !== true
     && !nativeTaskGraph
     && gpuHubForStageExecutors
     && typeof gpuHubForStageExecutors.registerResidentStageExecutor === 'function'
@@ -12549,6 +12692,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuHubResidentStageExecutorMode = gpuHubResidentStageExecutorRegistrations.length === laneStagePlanContract.passDagStages.length
       ? 'registered'
       : 'partial-registration';
+  } else if (schroederAdoptedParticleStorageContinuationBlocksStageTasks) {
+    gpuHubResidentStageExecutorMode = 'blocked-schroeder-adopted-particle-storage-continuation';
   } else if (useGpuHubResidentStageExecutors === false) {
     gpuHubResidentStageExecutorMode = 'disabled';
   } else if (nativeTaskGraph) {
@@ -12558,6 +12703,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   }
   const useRegisteredGpuHubStageExecutors = gpuHubResidentStageExecutorMode === 'registered';
   const canExecuteStageTasksThroughLanePlan = useGpuResidentLaneStagePlan !== false
+    && schroederAdoptedParticleStorageContinuationBlocksStageTasks !== true
     && !gpuResidentLaneStagePlanExecution
     && typeof computeManager.acquireGpuResidentLaneLease === 'function'
     && typeof computeManager.executeGpuResidentLaneStagePlan === 'function'
@@ -12593,6 +12739,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             readbackMode,
             useWorkerRetainedG2pInput,
             workerRetainedContinuationPlan,
+            useSchroederAdoptedParticleStorageContinuationInput:
+              schroederAdoptedParticleStorageContinuationSchedule.scheduled === true,
+            schroederAdoptedParticleStorageContinuationSchedule,
+            schroederAdoptedParticleStorageContinuationPlan:
+              resolvedSchroederAdoptedParticleStorageContinuationPlan,
             common: {
               sphParticleState,
               mlsMpmParticleState,
@@ -12672,7 +12823,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           source: nativeTaskGraph
             ? 'ulg-mechanics-stage-chain-native-task-graph-results'
             : 'ulg-mechanics-stage-chain-lane-executor-stage-tasks',
-          taskIdPrefix
+          taskIdPrefix,
+          schroederAdoptedParticleStorageContinuationSchedule
         },
         context: {
           nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
@@ -12681,6 +12833,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           stageTasksSubmittedByLaneExecutor: !nativeTaskGraph,
           gpuHubResidentStageExecutorMode,
           gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
+          schroederAdoptedParticleStorageContinuationSchedule,
           ...(mechanicsResidentStageWorkerContext
             ? { ulgMechanicsResidentStageWorker: mechanicsResidentStageWorkerContext }
             : {})
@@ -12720,21 +12873,33 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
     ...stepOptions,
     sameDeviceRetainedBufferImport: normalizedSameDeviceRetainedBufferImport,
-    p2gStageRunner: (stageOptions) => submitStageTask(
-      'p2g',
-      createMlsMpmMechanicsP2gStageComputeTask,
-      stageOptions
-    ),
-    gridUpdateStageRunner: (stageOptions) => submitStageTask(
-      'gridUpdate',
-      createMlsMpmMechanicsGridUpdateStageComputeTask,
-      stageOptions
-    ),
-    g2pStageRunner: (stageOptions) => submitStageTask(
-      'g2p',
-      createMlsMpmMechanicsG2pStageComputeTask,
-      stageOptions
-    )
+    p2gStageRunner: schroederAdoptedParticleStorageContinuationBlocksStageTasks
+      ? null
+      : (stageOptions) => submitStageTask(
+          'p2g',
+          createMlsMpmMechanicsP2gStageComputeTask,
+          {
+            ...stageOptions,
+            schroederAdoptedParticleStorageContinuationSchedule:
+              schroederAdoptedParticleStorageContinuationSchedule.scheduled === true
+                ? schroederAdoptedParticleStorageContinuationSchedule
+                : null
+          }
+        ),
+    gridUpdateStageRunner: schroederAdoptedParticleStorageContinuationBlocksStageTasks
+      ? null
+      : (stageOptions) => submitStageTask(
+          'gridUpdate',
+          createMlsMpmMechanicsGridUpdateStageComputeTask,
+          stageOptions
+        ),
+    g2pStageRunner: schroederAdoptedParticleStorageContinuationBlocksStageTasks
+      ? null
+      : (stageOptions) => submitStageTask(
+          'g2p',
+          createMlsMpmMechanicsG2pStageComputeTask,
+          stageOptions
+        )
   });
   const stageTaskBoundaries = { ...(step.mechanicsOnlySplitPath?.stageTaskBoundaries || {}) };
   const evidence = step.mechanicsOnlySplitPath?.stageTaskEvidence || {};
@@ -12976,7 +13141,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     schema: ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
     status: 'compute-manager-stage-task-chain-executed',
     source: 'runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks',
-    schedulerStatus: nativeTaskGraph
+    schedulerStatus: schroederAdoptedParticleStorageContinuationBlocksStageTasks
+      ? 'blocked-schroeder-adopted-particle-storage-continuation'
+      : nativeTaskGraph
       ? 'peercompute-native-task-graph-used'
       : 'ulg-helper-stage-runners-used-awaiting-gpu-graph-semantics',
     taskIdPrefix,
@@ -13129,6 +13296,35 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     workerRetainedContinuationPlanRequiredOutputFamilies: workerRetainedContinuationPlan?.requiredOutputFamilies || [],
     workerRetainedContinuationPlanOutputFamilies: workerRetainedContinuationPlan?.outputFamilies || [],
     workerRetainedContinuationPlanMissingOutputFamilies: workerRetainedContinuationPlan?.missingOutputFamilies || [],
+    schroederAdoptedParticleStorageContinuationPlan:
+      resolvedSchroederAdoptedParticleStorageContinuationPlan,
+    schroederAdoptedParticleStorageContinuationPlanSchema:
+      resolvedSchroederAdoptedParticleStorageContinuationPlan?.schema || null,
+    schroederAdoptedParticleStorageContinuationPlanStatus:
+      resolvedSchroederAdoptedParticleStorageContinuationPlan?.status || null,
+    schroederAdoptedParticleStorageContinuationPlanReady:
+      resolvedSchroederAdoptedParticleStorageContinuationPlan?.ready === true,
+    schroederAdoptedParticleStorageContinuationSchedule,
+    schroederAdoptedParticleStorageContinuationScheduleSchema:
+      schroederAdoptedParticleStorageContinuationSchedule.schema,
+    schroederAdoptedParticleStorageContinuationScheduleStatus:
+      schroederAdoptedParticleStorageContinuationSchedule.status,
+    schroederAdoptedParticleStorageContinuationScheduled:
+      schroederAdoptedParticleStorageContinuationSchedule.scheduled === true,
+    schroederAdoptedParticleStorageContinuationScheduleFailClosed:
+      schroederAdoptedParticleStorageContinuationSchedule.failClosed === true,
+    schroederAdoptedParticleStorageContinuationScheduleReason:
+      schroederAdoptedParticleStorageContinuationSchedule.reason || null,
+    schroederAdoptedParticleStorageContinuationConsumerMode:
+      schroederAdoptedParticleStorageContinuationSchedule.consumerMode,
+    schroederAdoptedParticleStorageContinuationSourceHotBufferKey:
+      schroederAdoptedParticleStorageContinuationSchedule.sourceHotBufferKey || null,
+    schroederAdoptedParticleStorageContinuationRetainedBufferRefs:
+      schroederAdoptedParticleStorageContinuationSchedule.retainedBufferRefs || [],
+    schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs:
+      schroederAdoptedParticleStorageContinuationSchedule.sameDevicePrivateLaneRefs || [],
+    schroederAdoptedParticleStorageContinuationPortableReplayAvailable:
+      schroederAdoptedParticleStorageContinuationSchedule.portableReplayAvailable === true,
     gpuHubResidentStageExecutorMode,
     gpuHubResidentStageExecutorRegisteredCount: gpuHubResidentStageExecutorRegistrations.length,
     gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
@@ -13391,6 +13587,26 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageExecutionRequestedWorkerResidency: stageTaskChain.gpuResidentLaneStageExecutionRequestedWorkerResidency,
       gpuResidentLaneStageExecutionWorkerRunnerSupplied: stageTaskChain.gpuResidentLaneStageExecutionWorkerRunnerSupplied,
       gpuResidentLaneStageExecutionWorkerModuleUrl: stageTaskChain.gpuResidentLaneStageExecutionWorkerModuleUrl,
+      schroederAdoptedParticleStorageContinuationScheduleSchema:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationScheduleSchema,
+      schroederAdoptedParticleStorageContinuationScheduleStatus:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationScheduleStatus,
+      schroederAdoptedParticleStorageContinuationScheduled:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationScheduled,
+      schroederAdoptedParticleStorageContinuationScheduleFailClosed:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationScheduleFailClosed,
+      schroederAdoptedParticleStorageContinuationScheduleReason:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationScheduleReason,
+      schroederAdoptedParticleStorageContinuationConsumerMode:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationConsumerMode,
+      schroederAdoptedParticleStorageContinuationSourceHotBufferKey:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationSourceHotBufferKey,
+      schroederAdoptedParticleStorageContinuationRetainedBufferRefs:
+        [...stageTaskChain.schroederAdoptedParticleStorageContinuationRetainedBufferRefs],
+      schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs:
+        [...stageTaskChain.schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs],
+      schroederAdoptedParticleStorageContinuationPortableReplayAvailable:
+        stageTaskChain.schroederAdoptedParticleStorageContinuationPortableReplayAvailable,
       gpuHubResidentStageExecutorMode: stageTaskChain.gpuHubResidentStageExecutorMode,
       gpuHubResidentStageExecutorRegisteredCount: stageTaskChain.gpuHubResidentStageExecutorRegisteredCount,
       gpuHubResidentStageExecutorStageIds: [...stageTaskChain.gpuHubResidentStageExecutorStageIds],

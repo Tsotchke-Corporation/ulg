@@ -37,6 +37,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
   ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_DESCRIPTOR_SCHEMA,
+  ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA,
   ULG_MLS_MPM_WEBGPU_OCEAN_HOT_LOOP_BUDGET_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -3563,6 +3564,161 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   assert.equal(pressureLaneSummary.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(pressureLaneSummary.pressureInterfaceGasPressureCellRowCount, 2);
   assert.ok(pressureLaneSummary.pressureInterfaceGasPressureCellRowByteLength > 0);
+});
+
+test('MLS-MPM stage scheduler uses same-device Schroeder adopted storage continuation from hot-buffer plan', async () => {
+  const buffers = manualBuffers();
+  const submittedTasks = [];
+  const computeManager = {
+    async submitTask(task) {
+      submittedTasks.push(task);
+      const data = { ...task.data, preferWebGpu: false };
+      if (task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+        return runMlsMpmMechanicsP2gStageComputeTask(data);
+      }
+      if (task.exportName === 'runMlsMpmMechanicsGridUpdateStageComputeTask') {
+        return runMlsMpmMechanicsGridUpdateStageComputeTask(data);
+      }
+      if (task.exportName === 'runMlsMpmMechanicsG2pStageComputeTask') {
+        return runMlsMpmMechanicsG2pStageComputeTask(data);
+      }
+      throw new Error(`unexpected task export ${task.exportName}`);
+    }
+  };
+  const planCalls = [];
+  const sameDeviceRefs = ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer'];
+  const residentAuthorityHost = {
+    planSchroederAdoptedParticleStorageContinuation(options) {
+      planCalls.push(options);
+      return {
+        schema: 'peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0',
+        status: 'schroeder-adopted-particle-storage-same-device-continuation-ready',
+        ready: true,
+        consumerMode: 'same-device',
+        hotBufferKey: options.hotBufferKey,
+        stateKey: 'ulg:test:ss-adopted-same-device-state',
+        cacheKey: 'ulg:test:ss-adopted-same-device-cache',
+        sameDeviceContinuationReady: true,
+        sameDevicePrivateLaneContinuation: true,
+        sameDevicePrivateLaneRefs: sameDeviceRefs,
+        retainedBufferRefs: sameDeviceRefs,
+        retainedBufferRefCount: sameDeviceRefs.length,
+        crossPeerContinuationReady: false,
+        crossPeerReplayReady: false,
+        portableReplayAvailable: false,
+        rawGpuBufferTransferDetected: false
+      };
+    }
+  };
+
+  const step = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...buffers,
+    computeManager,
+    residentAuthorityHost,
+    modulePath: './sphMlsMpmGpuStep.js',
+    stageTaskIdPrefix: 'ulg:test:ss-adopted-same-device-stage-chain',
+    useNativeTaskGraph: false,
+    useGpuResidentLaneStagePlan: false,
+    useGpuHubResidentStageExecutors: false,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    schroederAdoptedParticleStorageContinuationHotBufferKey:
+      'ulg:test:ss-adopted-storage-hot-buffer',
+    schroederAdoptedParticleStorageContinuationConsumerMode: 'same-device'
+  });
+
+  assert.equal(planCalls.length, 1);
+  assert.equal(planCalls[0].hotBufferKey, 'ulg:test:ss-adopted-storage-hot-buffer');
+  assert.equal(planCalls[0].consumerMode, 'same-device');
+  assert.equal(
+    step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleSchema,
+    ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_CONTINUATION_SCHEDULE_SCHEMA
+  );
+  assert.equal(
+    step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleStatus,
+    'schroeder-adopted-particle-storage-same-device-scheduled'
+  );
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduled, true);
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleFailClosed, false);
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationConsumerMode, 'same-device');
+  assert.equal(
+    step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationSourceHotBufferKey,
+    'ulg:test:ss-adopted-storage-hot-buffer'
+  );
+  assert.deepEqual(
+    step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs,
+    sameDeviceRefs
+  );
+  assert.equal(submittedTasks.length, 3);
+  const p2gTask = submittedTasks.find((task) => task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask');
+  assert.equal(
+    p2gTask.data.schroederAdoptedParticleStorageContinuationSchedule.status,
+    'schroeder-adopted-particle-storage-same-device-scheduled'
+  );
+  assert.deepEqual(
+    step.mechanicsOnlySplitPath.stageTaskChain.schroederAdoptedParticleStorageContinuationSameDevicePrivateLaneRefs,
+    sameDeviceRefs
+  );
+});
+
+test('MLS-MPM stage scheduler refuses cross-peer Schroeder adopted storage without portable replay', async () => {
+  const buffers = manualBuffers();
+  const submittedTasks = [];
+  const computeManager = {
+    async submitTask(task) {
+      submittedTasks.push(task);
+      throw new Error(`blocked cross-peer schedule should not submit ${task.exportName}`);
+    }
+  };
+  const blocker = 'materialized-gpu-buffers-remain-device-local';
+  const step = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...buffers,
+    computeManager,
+    modulePath: './sphMlsMpmGpuStep.js',
+    stageTaskIdPrefix: 'ulg:test:ss-adopted-cross-peer-blocked-stage-chain',
+    useNativeTaskGraph: false,
+    useGpuResidentLaneStagePlan: false,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    schroederAdoptedParticleStorageContinuationPlan: {
+      schema: 'peercompute.ulg.schroeder-adopted-particle-storage-continuation-plan.v0',
+      status: 'blocked-schroeder-adopted-particle-storage-cross-peer-continuation',
+      ready: false,
+      reason: blocker,
+      consumerMode: 'cross-peer',
+      hotBufferKey: 'ulg:test:ss-adopted-storage-hot-buffer',
+      sameDeviceContinuationReady: false,
+      crossPeerContinuationReady: false,
+      crossPeerReplayReady: false,
+      crossPeerReplayBlocker: blocker,
+      portableSnapshotRequired: true,
+      portableReplayAvailable: false,
+      rawGpuBufferTransferDetected: false
+    }
+  });
+
+  assert.equal(submittedTasks.length, 0);
+  assert.equal(
+    step.mechanicsStageTaskChain.schedulerStatus,
+    'blocked-schroeder-adopted-particle-storage-continuation'
+  );
+  assert.equal(
+    step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleStatus,
+    'blocked-schroeder-adopted-particle-storage-cross-peer-scheduling'
+  );
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduled, false);
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleFailClosed, true);
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationScheduleReason, blocker);
+  assert.equal(step.mechanicsStageTaskChain.schroederAdoptedParticleStorageContinuationConsumerMode, 'cross-peer');
+  assert.equal(
+    step.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode,
+    'blocked-schroeder-adopted-particle-storage-continuation'
+  );
+  assert.deepEqual(step.mechanicsStageTaskChain.submittedStageTasks, []);
+  assert.equal(
+    step.mechanicsOnlySplitPath.stageTaskChain.schroederAdoptedParticleStorageContinuationScheduleStatus,
+    'blocked-schroeder-adopted-particle-storage-cross-peer-scheduling'
+  );
 });
 
 test('SPH pressure interface stage compute task declares retained force-row output without authority mutation', async () => {

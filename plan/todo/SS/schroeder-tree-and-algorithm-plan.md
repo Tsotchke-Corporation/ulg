@@ -635,7 +635,7 @@ Completed in this slice:
    continuation evidence. Cross-peer consumers stay blocked until a portable
    snapshot or peer-local materialization seed is supplied.
 
-The next code slice on `SS` is **SS adopted storage continuation scheduling**:
+Completed in this slice:
 
 1. Feed the continuation plan into resident task construction so same-device
    use cases can request the adopted storage hot-buffer descriptor explicitly.
@@ -644,3 +644,14 @@ The next code slice on `SS` is **SS adopted storage continuation scheduling**:
 3. Add tests proving the scheduler chooses same-device continuation for local
    descriptor refs and refuses cross-peer adopted-storage execution without a
    portable replay source.
+
+The next code slice on `SS` is **SS adopted storage resolver binding**:
+
+1. Bind scheduled same-device adopted-storage descriptor refs to a local
+   retained-buffer resolver for the mechanics P2G/G2P path instead of relying on
+   stale CPU particle mirrors.
+2. Keep the resolver same-device-only and descriptor-only; cross-peer execution
+   must still require a portable snapshot or peer-local materialization seed.
+3. Add tests proving missing retained refs block resolver-backed consumption and
+   valid local refs reach the resident stage worker/P2G task without raw
+   GPUBuffer transfer through PeerCompute.

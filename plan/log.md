@@ -35891,3 +35891,35 @@ Next:
   same-device use cases can explicitly request descriptor-backed continuation
   while cross-peer adopted-storage execution remains blocked without portable
   replay evidence.
+
+## 2026-07-02 AKDT - SS Adopted Particle-Storage Continuation Scheduling
+
+Status:
+
+- Added
+  `peercompute.ulg.schroeder-adopted-particle-storage-continuation-schedule.v0`.
+- Resident mechanics stage-chain construction now resolves adopted storage
+  continuation plans from an explicit hot-buffer descriptor request.
+- Same-device plans are scheduled as descriptor-backed private-lane inputs and
+  carried into P2G task metadata, stage-plan context, worker context, and
+  task-chain diagnostics.
+- Cross-peer plans remain fail-closed unless portable replay evidence is ready;
+  blocked cross-peer requests suppress PeerCompute stage task submission instead
+  of treating device-local retained refs as portable.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` with `84/84`
+  passing.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/peercomputeResidentCommitBridge.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  with `104/104` passing.
+- PASS: `npm test` with `945/948` passing and `3` skipped.
+
+Next:
+
+- Bind scheduled same-device descriptor refs to a local retained-buffer
+  resolver for the mechanics path so valid local adopted storage can feed
+  resident stages without using stale CPU mirrors or raw GPUBuffer PeerCompute
+  transfer.

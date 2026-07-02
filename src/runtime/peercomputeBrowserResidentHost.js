@@ -36,7 +36,11 @@ import {
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from './sph/sphGpuBuffers.js';
-import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
+import {
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  hashPayload
+} from '../../ulg-gpu-abi/src/index.js';
 import {
   ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA,
   resolvePeerComputeRenderOwnershipPolicy
@@ -80,6 +84,10 @@ export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-state-promotion-admission.v0';
 export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_ADMISSION_SCOPE =
   'ulg-presentation-worker-retained-state-promotion-admissions';
+export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA =
+  'peercompute.ulg.schroeder-portable-summary-admission.v0';
+export const ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE =
+  'ulg-schroeder-portable-summary-admissions';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
 export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0';
@@ -2671,6 +2679,235 @@ export function admitPresentationWorkerRetainedStatePromotionCandidate({
     status: 'presentation-worker-retained-state-promotion-admission-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(mechanicsPublication.hotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+function validateSchroederPortableSummaryAdmissionInput(portableSummary = null) {
+  const issues = [];
+  if (!portableSummary || typeof portableSummary !== 'object') {
+    return {
+      accepted: false,
+      issues: ['portable-summary-not-object'],
+      reason: 'portable-summary-not-object',
+      renderLod: null,
+      outputFamilies: []
+    };
+  }
+  if (portableSummary.schema !== ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA) {
+    issues.push('unexpected-portable-summary-schema');
+  }
+  if (portableSummary.transferMode !== 'peercompute-portable-summary-descriptors') {
+    issues.push('portable-summary-transfer-mode-not-descriptor-only');
+  }
+  if (portableSummary.fullParticleReadbackRequired === true) {
+    issues.push('portable-summary-requires-full-particle-readback');
+  }
+  const retainedRefs = Array.isArray(portableSummary.retainedRefs)
+    ? portableSummary.retainedRefs
+    : [];
+  const rawGpuBufferTransferDetected = retainedRefs.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    return Object.hasOwn(entry, 'buffer')
+      || Object.hasOwn(entry, 'gpuBuffer')
+      || (
+        entry.transferMode
+        && entry.transferMode !== 'descriptor-only-no-raw-gpubuffer-transfer'
+      );
+  });
+  if (rawGpuBufferTransferDetected) {
+    issues.push('portable-summary-raw-gpubuffer-transfer-detected');
+  }
+  const renderLod = portableSummary.renderLod && typeof portableSummary.renderLod === 'object'
+    ? portableSummary.renderLod
+    : null;
+  if (!renderLod) {
+    issues.push('render-lod-summary-missing');
+  } else if (renderLod.schema !== ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA) {
+    issues.push('unexpected-render-lod-summary-schema');
+  }
+  if (renderLod?.fullParticleReadbackRequired === true) {
+    issues.push('render-lod-summary-requires-full-particle-readback');
+  }
+  const outputFamilies = uniqueStringList(
+    portableSummary.outputFamilies || [
+      'schroeder-portable-summary',
+      'schroeder-render-lod-summary',
+      'schroeder-retained-buffer-descriptors'
+    ]
+  );
+  return {
+    accepted: issues.length === 0,
+    issues,
+    reason: issues[0] || null,
+    renderLod,
+    outputFamilies,
+    retainedRefs,
+    rawGpuBufferTransferDetected
+  };
+}
+
+export function admitSchroederPortableSummary({
+  stateManager = null,
+  nodeKernel = null,
+  portableSummary = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  sourceTaskId = null,
+  sourceNodeId = 'schroeder-portable-summary',
+  sourceStage = 'schroeder-same-level-mechanics',
+  scope = ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('admitSchroederPortableSummary requires StateManager hot storage and commitDelta');
+  }
+  const validation = validateSchroederPortableSummaryAdmissionInput(portableSummary);
+  const committedAt = Date.now();
+  const base = {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA,
+    accepted: validation.accepted,
+    reason: validation.reason,
+    issues: [...validation.issues],
+    committed: false,
+    portableState: true,
+    portableSummarySchema: portableSummary?.schema || null,
+    portableSummaryStatus: portableSummary?.status || null,
+    portableSummaryTransferMode: portableSummary?.transferMode || null,
+    renderLodSchema: validation.renderLod?.schema || null,
+    renderLodStatus: validation.renderLod?.status || null,
+    renderLodMode: validation.renderLod?.mode || null,
+    activeLeafProxyCount: Math.max(0, Math.round(finiteSeedNumber(
+      validation.renderLod?.activeLeafProxyCount,
+      0
+    ))),
+    aggregateProxyCount: Math.max(0, Math.round(finiteSeedNumber(
+      validation.renderLod?.aggregateProxyCount,
+      0
+    ))),
+    lawQueueProxyCount: Math.max(0, Math.round(finiteSeedNumber(
+      validation.renderLod?.lawQueueProxyCount,
+      0
+    ))),
+    retainedRefCount: Math.max(0, Math.round(finiteSeedNumber(
+      portableSummary?.retainedRefCount,
+      validation.retainedRefs?.length || 0
+    ))),
+    retainedBufferRefCount: Math.max(0, Math.round(finiteSeedNumber(
+      portableSummary?.retainedBufferRefCount,
+      0
+    ))),
+    rawGpuBufferTransferAllowed: false,
+    rawGpuBufferTransferDetected: validation.rawGpuBufferTransferDetected === true,
+    fullParticleReadbackRequired:
+      portableSummary?.fullParticleReadbackRequired === true
+      || validation.renderLod?.fullParticleReadbackRequired === true,
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false,
+    presentationAuthority:
+      portableSummary?.presentationAuthority
+      || 'presentation-consumes-render-lod-summary-not-physics-state',
+    stateAuthorityStatus:
+      portableSummary?.stateAuthorityStatus
+      || 'state-manager-admission-required-before-authoritative-remote-replay',
+    portableMaterializationStatus:
+      portableSummary?.portableMaterializationStatus
+      || 'compact-summary-descriptor-ready-no-gpubuffer-transfer',
+    crossPeerReplayReady: validation.accepted,
+    crossPeerReplayStatus: validation.accepted
+      ? 'schroeder-portable-summary-descriptor-admitted-for-replay'
+      : 'blocked-schroeder-portable-summary-admission',
+    crossPeerReplayBlocker: validation.reason,
+    outputFamilies: validation.outputFamilies,
+    updatedAtMs: nowMs(),
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (!validation.accepted) {
+    return {
+      ...base,
+      status: 'schroeder-portable-summary-admission-rejected'
+    };
+  }
+  const resolvedCacheKey = normalizeString(cacheKey, portableSummary.cacheKey || portableSummary.peerComputeUseCase || null);
+  const resolvedStateKey = normalizeString(stateKey, portableSummary.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:schroeder-portable-summary',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey
+  });
+  const summaryHash = hashPayload({
+    schema: portableSummary.schema,
+    status: portableSummary.status,
+    transferMode: portableSummary.transferMode,
+    activeNodeCount: portableSummary.activeNodeCount,
+    aggregateNodeCount: portableSummary.aggregateNodeCount,
+    retainedRefCount: portableSummary.retainedRefCount,
+    retainedBufferRefCount: portableSummary.retainedBufferRefCount,
+    renderLod: validation.renderLod
+  });
+  const hotBufferRecord = {
+    ...base,
+    status: 'schroeder-portable-summary-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    summaryHash,
+    sourceMode: 'schroeder-portable-summary-descriptor',
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    portableSummary: cloneSerializableValue(portableSummary),
+    renderLod: cloneSerializableValue(validation.renderLod),
+    retainedRefs: cloneSerializableValue(validation.retainedRefs)
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-schroeder-portable-summary-admission:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    ...base,
+    status: 'schroeder-portable-summary-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    summaryHash,
+    sourceMode: 'schroeder-portable-summary-descriptor',
+    copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+    portableSummary: cloneSerializableValue(portableSummary),
+    renderLod: cloneSerializableValue(validation.renderLod),
+    retainedRefs: cloneSerializableValue(validation.retainedRefs)
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'schroeder-portable-summary-admission-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
     commitDeltaScope: deltaScope,
     commitDeltaTimestamp: committedAt
@@ -5993,6 +6230,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    admitSchroederPortableSummary(options = {}) {
+      return admitSchroederPortableSummary({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     refreshWorkerRetainedMechanicsPublicationHotBuffers(options = {}) {
       return refreshUlgSphMlsMpmHotBuffersFromWorkerRetainedMechanicsPublication({
         stateManager,
@@ -6766,6 +7010,30 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       host?.renderOwnershipPolicy?.residentComputeManagerModeExplicit ?? null,
     renderOwnershipTransitionalRenderRowsActive:
       host?.renderOwnershipPolicy?.transitionalRenderRowsActive ?? null,
+    renderOwnershipSchroederPortableSummaryPresent:
+      host?.renderOwnershipPolicy?.schroederPortableSummaryPresent ?? null,
+    renderOwnershipSchroederPortableSummaryStatus:
+      host?.renderOwnershipPolicy?.schroederPortableSummaryStatus ?? null,
+    renderOwnershipSchroederPortableSummaryTransferMode:
+      host?.renderOwnershipPolicy?.schroederPortableSummaryTransferMode ?? null,
+    renderOwnershipSchroederPortableSummaryDescriptorOnlyTransfer:
+      host?.renderOwnershipPolicy?.schroederPortableSummaryDescriptorOnlyTransfer ?? null,
+    renderOwnershipSchroederPortableSummaryRawGpuBufferTransferDetected:
+      host?.renderOwnershipPolicy?.schroederPortableSummaryRawGpuBufferTransferDetected ?? null,
+    renderOwnershipSchroederRenderLodStatus:
+      host?.renderOwnershipPolicy?.schroederRenderLodStatus ?? null,
+    renderOwnershipSchroederRenderLodPresentationReady:
+      host?.renderOwnershipPolicy?.schroederRenderLodPresentationReady ?? null,
+    renderOwnershipSchroederRenderLodPresentationSourceMode:
+      host?.renderOwnershipPolicy?.schroederRenderLodPresentationSourceMode ?? null,
+    renderOwnershipSchroederRenderLodActiveLeafProxyCount:
+      host?.renderOwnershipPolicy?.schroederRenderLodActiveLeafProxyCount ?? null,
+    renderOwnershipSchroederRenderLodAggregateProxyCount:
+      host?.renderOwnershipPolicy?.schroederRenderLodAggregateProxyCount ?? null,
+    renderOwnershipSchroederRenderLodStateAuthorityStatus:
+      host?.renderOwnershipPolicy?.schroederRenderLodStateAuthorityStatus ?? null,
+    renderOwnershipSchroederRenderLodFullParticleReadbackAvoided:
+      host?.renderOwnershipPolicy?.schroederRenderLodFullParticleReadbackAvoided ?? null,
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,
     residentMechanicsStageWorkerRunnerFactoryReady: typeof host?.createUlgMechanicsResidentStageWorkerRunner === 'function',
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
@@ -6773,6 +7041,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
     residentPresentationWorkerRetainedStateAdmissionReady:
       typeof host?.admitPresentationWorkerRetainedStatePromotionCandidate === 'function',
+    residentSchroederPortableSummaryAdmissionReady:
+      typeof host?.admitSchroederPortableSummary === 'function',
     residentWorkerRetainedMechanicsPublicationRefreshReady:
       typeof host?.refreshWorkerRetainedMechanicsPublicationHotBuffers === 'function',
     residentWorkerRetainedContinuationPlannerReady: typeof host?.planWorkerRetainedContinuation === 'function',

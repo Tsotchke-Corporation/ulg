@@ -36,6 +36,8 @@ import {
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -76,6 +78,8 @@ import {
   ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_SEED_NODE_SCHEMA,
   ULG_REMOTE_TASK_GRAPH_SUBMIT_REFRESH_REPORT_SCHEMA,
   ULG_REMOTE_TASK_GRAPH_STATE_SEED_PAYLOAD_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
@@ -3448,6 +3452,76 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationReady, true);
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationRefreshReady, true);
   assert.equal(summary.residentWorkerRetainedContinuationPlannerReady, true);
+  assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, true);
+
+  const schroederPortableSummary = {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+    status: 'schroeder-portable-summary-plan-ready',
+    peerComputeUseCase: 'integration-schroeder-render-lod',
+    portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
+    transferMode: 'peercompute-portable-summary-descriptors',
+    retainedRefCount: 2,
+    retainedBufferRefCount: 2,
+    activeNodeCount: 8,
+    aggregateNodeCount: 2,
+    lawQueueCount: 1,
+    fullParticleReadbackRequired: false,
+    portableMaterializationStatus: 'compact-summary-descriptor-ready-no-gpubuffer-transfer',
+    presentationAuthority: 'presentation-consumes-render-lod-summary-not-physics-state',
+    stateAuthorityStatus: 'state-manager-admission-required-before-authoritative-remote-replay',
+    outputFamilies: [
+      'schroeder-portable-summary',
+      'schroeder-render-lod-summary',
+      'schroeder-retained-buffer-descriptors'
+    ],
+    retainedRefs: [
+      {
+        family: 'schroeder-level-assignment',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+        retained: true
+      },
+      {
+        family: 'schroeder-active-node-list',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+        retained: true
+      }
+    ],
+    renderLod: {
+      schema: ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+      status: 'schroeder-render-lod-summary-planned',
+      mode: 'active-node-leaf-and-aggregate-proxy-lod',
+      activeLeafProxyCount: 8,
+      aggregateProxyCount: 2,
+      lawQueueProxyCount: 1,
+      nativeGridSpacingM: 0.25,
+      geometryPolicy: 'aggregate-nodes-for-coherent-bulk-active-nodes-for-leaves',
+      opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
+      fullParticleReadbackRequired: false
+    }
+  };
+  const schroederAdmission = host.admitSchroederPortableSummary({
+    portableSummary: schroederPortableSummary,
+    cacheKey: 'ulg:test:schroeder-portable-summary-integration',
+    stateKey: 'ulg:test:schroeder-portable-summary-state',
+    sourceTaskId: 'ulg:test:schroeder-same-level-mechanics',
+    taskId: 'ulg:test:schroeder-portable-summary-admission'
+  });
+  assert.equal(schroederAdmission.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA);
+  assert.equal(schroederAdmission.status, 'schroeder-portable-summary-admission-published');
+  assert.equal(schroederAdmission.accepted, true);
+  assert.equal(schroederAdmission.committed, true);
+  assert.equal(schroederAdmission.rawGpuBufferTransferDetected, false);
+  assert.equal(schroederAdmission.activeLeafProxyCount, 8);
+  assert.equal(schroederAdmission.aggregateProxyCount, 2);
+  const schroederWarmDeltas = host.stateManager.getWarmDeltas(ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
+  assert.equal(
+    schroederWarmDeltas[schroederAdmission.commitDeltaTaskId].payload.status,
+    'schroeder-portable-summary-admitted'
+  );
+  assert.equal(
+    host.stateManager.getHotBuffer(schroederAdmission.hotBufferKey).copyMode,
+    'descriptor-only-no-raw-gpubuffer-transfer'
+  );
 
   const candidate = {
     schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',

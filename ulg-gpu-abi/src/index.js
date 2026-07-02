@@ -107,6 +107,7 @@ export const ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA = 'peercompute.ulg.schroe
 export const ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-conservation-summary-execution.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-portable-summary.v0';
 export const ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.schroeder-portable-summary-execution.v0';
+export const ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA = 'peercompute.ulg.schroeder-render-lod-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary.v0';
 export const ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-summary-execution.v0';
 export const ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0';

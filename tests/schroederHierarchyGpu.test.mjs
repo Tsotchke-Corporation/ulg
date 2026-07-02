@@ -53,6 +53,7 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
@@ -494,6 +495,10 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
   assert.equal(
     ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
     'peercompute.ulg.schroeder-portable-summary-execution.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+    'peercompute.ulg.schroeder-render-lod-summary.v0'
   );
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
@@ -1708,7 +1713,7 @@ test('Schroeder portable summary plan exposes render LOD descriptors without GPU
   assert.equal(plan.lawNeighborCandidateCount, 9);
   assert.equal(plan.retainedRefCount, 7);
   assert.equal(plan.retainedBufferRefCount, 7);
-  assert.equal(plan.renderLod.schema, 'peercompute.ulg.schroeder-render-lod-summary.v0');
+  assert.equal(plan.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
   assert.equal(plan.renderLod.status, 'schroeder-render-lod-summary-planned');
   assert.equal(plan.renderLod.activeLeafProxyCount, 3);
   assert.equal(plan.renderLod.aggregateProxyCount, 2);
@@ -3182,7 +3187,7 @@ test('Schroeder same-level mechanics can emit portable render LOD summary', asyn
   assert.equal(result.portableSummary.lawNeighborCandidateCount, 0);
   assert.equal(result.portableSummary.renderLodStatus, 'schroeder-render-lod-summary-planned');
   assert.equal(result.portableSummary.renderLodMode, 'active-node-leaf-and-aggregate-proxy-lod');
-  assert.equal(result.portableSummary.renderLod.schema, 'peercompute.ulg.schroeder-render-lod-summary.v0');
+  assert.equal(result.portableSummary.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
   assert.equal(result.portableSummary.renderLod.activeLeafProxyCount, 3);
   assert.equal(result.portableSummary.renderLod.aggregateProxyCount, 0);
   assert.equal(result.portableSummary.renderLod.lawQueueProxyCount, 0);

@@ -8,8 +8,86 @@ import {
   resolvePeerComputeRenderOwnershipPolicy
 } from '../src/runtime/peercomputeRenderOwnershipPolicy.js';
 import {
+  ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE,
+  admitSchroederPortableSummary,
   summarizePeerComputeResidentAuthorityHost
 } from '../src/runtime/peercomputeBrowserResidentHost.js';
+import {
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+
+function schroederPortableSummaryFixture(overrides = {}) {
+  return {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+    status: 'schroeder-portable-summary-plan-ready',
+    peerComputeUseCase: 'test-schroeder-render-lod',
+    portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
+    transferMode: 'peercompute-portable-summary-descriptors',
+    retainedRefCount: 2,
+    retainedBufferRefCount: 2,
+    activeNodeCount: 12,
+    aggregateNodeCount: 3,
+    lawQueueCount: 5,
+    fullParticleReadbackRequired: false,
+    portableMaterializationStatus: 'compact-summary-descriptor-ready-no-gpubuffer-transfer',
+    presentationAuthority: 'presentation-consumes-render-lod-summary-not-physics-state',
+    stateAuthorityStatus: 'state-manager-admission-required-before-authoritative-remote-replay',
+    outputFamilies: [
+      'schroeder-portable-summary',
+      'schroeder-render-lod-summary',
+      'schroeder-retained-buffer-descriptors'
+    ],
+    retainedRefs: [
+      {
+        family: 'schroeder-level-assignment',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+        retained: true
+      },
+      {
+        family: 'schroeder-active-node-list',
+        transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+        retained: true
+      }
+    ],
+    renderLod: {
+      schema: ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+      status: 'schroeder-render-lod-summary-planned',
+      mode: 'active-node-leaf-and-aggregate-proxy-lod',
+      selectedLevel: 1,
+      nativeGridSpacingM: 0.5,
+      activeLeafProxyCount: 12,
+      aggregateProxyCount: 3,
+      lawQueueProxyCount: 5,
+      phaseVolumeDiagnosticRowsAvailable: false,
+      opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
+      geometryPolicy: 'aggregate-nodes-for-coherent-bulk-active-nodes-for-leaves',
+      fullParticleReadbackRequired: false
+    },
+    ...overrides
+  };
+}
+
+function createMemoryStateManager() {
+  const hotBuffers = new Map();
+  const warmDeltas = {};
+  return {
+    setHotBuffer(key, value) {
+      hotBuffers.set(key, value);
+    },
+    getHotBuffer(key) {
+      return hotBuffers.get(key);
+    },
+    commitDelta(delta) {
+      warmDeltas[delta.scope] ||= {};
+      warmDeltas[delta.scope][delta.taskId] = delta;
+    },
+    getWarmDeltas(scope) {
+      return warmDeltas[scope] || {};
+    }
+  };
+}
 
 test('render ownership policy defaults to main-thread presentation', () => {
   const policy = resolvePeerComputeRenderOwnershipPolicy();
@@ -337,13 +415,116 @@ test('render ownership policy makes retained compact snapshot export opt-in', ()
   assert.equal(requestedPolicy.portableSnapshotExportRequested, true);
 });
 
+test('render ownership policy consumes Schroeder render LOD summaries as descriptor-only presentation input', () => {
+  const portableSummary = schroederPortableSummaryFixture();
+  const policy = resolvePeerComputeRenderOwnershipPolicy({
+    requestedMode: 'presentation-worker-retained-output-presentation-only',
+    workerOwnedResidentProducerReady: true,
+    schroederPortableSummary: portableSummary
+  });
+
+  assert.equal(policy.schroederPortableSummaryPresent, true);
+  assert.equal(policy.schroederPortableSummarySchema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
+  assert.equal(policy.schroederPortableSummaryStatus, 'schroeder-portable-summary-plan-ready');
+  assert.equal(policy.schroederPortableSummaryTransferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(policy.schroederPortableSummaryDescriptorOnlyTransfer, true);
+  assert.equal(policy.schroederPortableSummaryRawGpuBufferTransferDetected, false);
+  assert.equal(policy.schroederPortableSummaryRawGpuBufferTransferAllowed, false);
+  assert.equal(policy.schroederRenderLodStatus, 'schroeder-render-lod-summary-presentation-ready');
+  assert.equal(policy.schroederRenderLodPresentationReady, true);
+  assert.equal(policy.schroederRenderLodPresentationSourceMode, 'schroeder-portable-summary-render-lod');
+  assert.equal(policy.schroederRenderLodActiveLeafProxyCount, 12);
+  assert.equal(policy.schroederRenderLodAggregateProxyCount, 3);
+  assert.equal(policy.schroederRenderLodLawQueueProxyCount, 5);
+  assert.equal(policy.schroederRenderLodFullParticleReadbackRequired, false);
+  assert.equal(policy.schroederRenderLodFullParticleReadbackAvoided, true);
+  assert.equal(policy.requiresFreshPhysicsReadback, false);
+
+  const blocked = resolvePeerComputeRenderOwnershipPolicy({
+    schroederPortableSummary: schroederPortableSummaryFixture({
+      retainedRefs: [
+        {
+          family: 'schroeder-active-node-list',
+          transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+          retained: true,
+          buffer: { label: 'raw-gpubuffer-must-not-transfer' }
+        }
+      ]
+    })
+  });
+  assert.equal(blocked.schroederRenderLodPresentationReady, false);
+  assert.equal(
+    blocked.schroederRenderLodBlocker,
+    'schroeder-portable-summary-raw-gpubuffer-transfer-detected'
+  );
+});
+
+test('Schroeder portable summary admission commits descriptor-only render LOD state', () => {
+  const stateManager = createMemoryStateManager();
+  const portableSummary = schroederPortableSummaryFixture();
+  const admission = admitSchroederPortableSummary({
+    stateManager,
+    portableSummary,
+    cacheKey: 'ulg:test:schroeder-portable-summary',
+    stateKey: 'ulg:test:schroeder-state',
+    sourceTaskId: 'ulg:test:same-level-mechanics',
+    taskId: 'ulg:test:schroeder-portable-admission'
+  });
+
+  assert.equal(admission.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCHEMA);
+  assert.equal(admission.status, 'schroeder-portable-summary-admission-published');
+  assert.equal(admission.accepted, true);
+  assert.equal(admission.committed, true);
+  assert.equal(admission.hotBufferStored, true);
+  assert.equal(admission.portableState, true);
+  assert.equal(admission.authoritativeStateMutation, false);
+  assert.equal(admission.rawGpuBufferTransferAllowed, false);
+  assert.equal(admission.rawGpuBufferTransferDetected, false);
+  assert.equal(admission.crossPeerReplayReady, true);
+  assert.equal(admission.crossPeerReplayStatus, 'schroeder-portable-summary-descriptor-admitted-for-replay');
+  assert.equal(admission.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+  assert.equal(admission.activeLeafProxyCount, 12);
+  assert.equal(admission.aggregateProxyCount, 3);
+  assert.equal(admission.lawQueueProxyCount, 5);
+  assert.equal(admission.commitDeltaScope, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
+
+  const hotRecord = stateManager.getHotBuffer(admission.hotBufferKey);
+  assert.equal(hotRecord.status, 'schroeder-portable-summary-hot-buffer-source-stored');
+  assert.equal(hotRecord.copyMode, 'descriptor-only-no-raw-gpubuffer-transfer');
+  assert.equal(hotRecord.renderLod.schema, ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA);
+  const warmDelta = stateManager.getWarmDeltas(ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE)[
+    admission.commitDeltaTaskId
+  ];
+  assert.equal(warmDelta.payload.status, 'schroeder-portable-summary-admitted');
+  assert.equal(warmDelta.payload.hotBufferKey, admission.hotBufferKey);
+  assert.equal(warmDelta.payload.renderLod.activeLeafProxyCount, 12);
+
+  const rejected = admitSchroederPortableSummary({
+    stateManager,
+    portableSummary: schroederPortableSummaryFixture({
+      retainedRefs: [
+        {
+          family: 'schroeder-active-node-list',
+          transferMode: 'descriptor-only-no-raw-gpubuffer-transfer',
+          buffer: { label: 'raw-gpubuffer-must-not-transfer' }
+        }
+      ]
+    })
+  });
+  assert.equal(rejected.status, 'schroeder-portable-summary-admission-rejected');
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.committed, false);
+  assert.deepEqual(rejected.issues, ['portable-summary-raw-gpubuffer-transfer-detected']);
+});
+
 test('resident authority host summary exposes render ownership policy fields', () => {
   const renderOwnershipPolicy = resolvePeerComputeRenderOwnershipPolicy({
     peercomputePolicy: {
       requestedMode: 'presentation-worker-retained-output-presentation-only',
       retainedCompactSnapshotExportRequested: true
     },
-    workerOwnedResidentProducerReady: true
+    workerOwnedResidentProducerReady: true,
+    schroederPortableSummary: schroederPortableSummaryFixture()
   });
   const summary = summarizePeerComputeResidentAuthorityHost({
     status: 'ready',
@@ -383,4 +564,16 @@ test('resident authority host summary exposes render ownership policy fields', (
   assert.equal(summary.renderOwnershipResidentInterfaceRefreshMode, 'pipelined');
   assert.equal(summary.renderOwnershipResidentComputeManagerMode, 'direct');
   assert.equal(summary.renderOwnershipResidentComputeManagerModeExplicit, false);
+  assert.equal(summary.renderOwnershipSchroederPortableSummaryPresent, true);
+  assert.equal(summary.renderOwnershipSchroederPortableSummaryStatus, 'schroeder-portable-summary-plan-ready');
+  assert.equal(summary.renderOwnershipSchroederPortableSummaryTransferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(summary.renderOwnershipSchroederPortableSummaryDescriptorOnlyTransfer, true);
+  assert.equal(summary.renderOwnershipSchroederPortableSummaryRawGpuBufferTransferDetected, false);
+  assert.equal(summary.renderOwnershipSchroederRenderLodStatus, 'schroeder-render-lod-summary-presentation-ready');
+  assert.equal(summary.renderOwnershipSchroederRenderLodPresentationReady, true);
+  assert.equal(summary.renderOwnershipSchroederRenderLodPresentationSourceMode, 'schroeder-portable-summary-render-lod');
+  assert.equal(summary.renderOwnershipSchroederRenderLodActiveLeafProxyCount, 12);
+  assert.equal(summary.renderOwnershipSchroederRenderLodAggregateProxyCount, 3);
+  assert.equal(summary.renderOwnershipSchroederRenderLodFullParticleReadbackAvoided, true);
+  assert.equal(summary.residentSchroederPortableSummaryAdmissionReady, false);
 });

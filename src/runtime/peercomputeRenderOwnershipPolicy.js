@@ -1,3 +1,8 @@
+import {
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+  ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA
+} from '../../ulg-gpu-abi/src/index.js';
+
 export const ULG_PEERCOMPUTE_RENDER_OWNERSHIP_POLICY_SCHEMA =
   'peercompute.ulg.render-ownership-policy.v0';
 
@@ -131,6 +136,110 @@ function policyObject(value) {
   return value && typeof value === 'object' ? value : {};
 }
 
+function rawGpuBufferTransferDetected(retainedRefs = []) {
+  if (!Array.isArray(retainedRefs)) return false;
+  return retainedRefs.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    return Object.hasOwn(entry, 'buffer')
+      || Object.hasOwn(entry, 'gpuBuffer')
+      || (
+        entry.transferMode
+        && entry.transferMode !== 'descriptor-only-no-raw-gpubuffer-transfer'
+      );
+  });
+}
+
+function resolveSchroederRenderLodContract({
+  policy = {},
+  schroederPortableSummary = null,
+  schroederRenderLodSummary = null
+} = {}) {
+  const portable = policy.schroederPortableSummary
+    || policy.portableSummary
+    || schroederPortableSummary
+    || null;
+  const renderLod = schroederRenderLodSummary
+    || policy.schroederRenderLodSummary
+    || policy.renderLod
+    || portable?.renderLod
+    || null;
+  const retainedRefs = Array.isArray(portable?.retainedRefs) ? portable.retainedRefs : [];
+  const portablePresent = Boolean(portable);
+  const renderLodPresent = Boolean(renderLod);
+  const portableSchemaAccepted = !portablePresent || portable.schema === ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA;
+  const renderLodSchemaAccepted = !renderLodPresent || renderLod.schema === ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA;
+  const transferMode = portable?.transferMode || null;
+  const portableSummaryMode = portable?.portableSummaryMode || null;
+  const descriptorOnlyTransfer = !portablePresent
+    || transferMode === 'peercompute-portable-summary-descriptors'
+    || portableSummaryMode === 'portable-descriptors-not-raw-gpubuffers';
+  const rawGpuBufferTransfer = rawGpuBufferTransferDetected(retainedRefs);
+  const fullParticleReadbackRequired =
+    portable?.fullParticleReadbackRequired === true
+    || renderLod?.fullParticleReadbackRequired === true;
+  const presentationReady = Boolean(
+    renderLodPresent
+    && portableSchemaAccepted
+    && renderLodSchemaAccepted
+    && descriptorOnlyTransfer
+    && !rawGpuBufferTransfer
+    && !fullParticleReadbackRequired
+  );
+  let blocker = null;
+  if (renderLodPresent && !presentationReady) {
+    blocker = !portableSchemaAccepted
+      ? 'schroeder-portable-summary-schema-mismatch'
+      : (!renderLodSchemaAccepted
+        ? 'schroeder-render-lod-summary-schema-mismatch'
+        : (!descriptorOnlyTransfer
+          ? 'schroeder-portable-summary-not-descriptor-only'
+          : (rawGpuBufferTransfer
+            ? 'schroeder-portable-summary-raw-gpubuffer-transfer-detected'
+            : (fullParticleReadbackRequired
+              ? 'schroeder-render-lod-summary-requires-full-particle-readback'
+              : 'schroeder-render-lod-summary-not-ready'))));
+  }
+  const status = !renderLodPresent
+    ? 'disabled-schroeder-render-lod-summary'
+    : (presentationReady
+      ? 'schroeder-render-lod-summary-presentation-ready'
+      : 'blocked-schroeder-render-lod-summary');
+  return {
+    status,
+    blocker,
+    portablePresent,
+    portableSchema: portable?.schema || null,
+    portableStatus: portable?.status || null,
+    portableSummaryMode,
+    transferMode,
+    descriptorOnlyTransfer,
+    retainedRefCount: normalizeNonNegativeInteger(portable?.retainedRefCount, retainedRefs.length),
+    retainedBufferRefCount: normalizeNonNegativeInteger(portable?.retainedBufferRefCount, 0),
+    rawGpuBufferTransfer,
+    rawGpuBufferTransferAllowed: false,
+    renderLodPresent,
+    renderLodSchema: renderLod?.schema || null,
+    renderLodStatus: renderLod?.status || null,
+    renderLodMode: renderLod?.mode || null,
+    presentationReady,
+    presentationSourceMode: presentationReady ? 'schroeder-portable-summary-render-lod' : null,
+    activeLeafProxyCount: normalizeNonNegativeInteger(renderLod?.activeLeafProxyCount, 0),
+    aggregateProxyCount: normalizeNonNegativeInteger(renderLod?.aggregateProxyCount, 0),
+    lawQueueProxyCount: normalizeNonNegativeInteger(renderLod?.lawQueueProxyCount, 0),
+    nativeGridSpacingM: normalizePositiveNumber(renderLod?.nativeGridSpacingM, null),
+    geometryPolicy: renderLod?.geometryPolicy || null,
+    opticalPolicy: renderLod?.opticalPolicy || null,
+    presentationAuthority: portable?.presentationAuthority || (
+      presentationReady ? 'presentation-consumes-render-lod-summary-not-physics-state' : null
+    ),
+    stateAuthorityStatus: portable?.stateAuthorityStatus || (
+      renderLodPresent ? 'state-manager-admission-required-before-authoritative-remote-replay' : null
+    ),
+    fullParticleReadbackRequired,
+    fullParticleReadbackAvoided: presentationReady && !fullParticleReadbackRequired
+  };
+}
+
 function firstPolicyString(policy, keys = []) {
   for (const key of keys) {
     const value = normalizeString(policy?.[key], null);
@@ -184,6 +293,8 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   workerOwnedResidentProducerReady = false,
   workerOwnedResidentProducerSourceTransferRequiredOverride = null,
   presentationWorkerResidentStagesRequested = null,
+  schroederPortableSummary = null,
+  schroederRenderLodSummary = null,
   useCase = null,
   source = 'local-demo',
   workerCapability = null
@@ -484,6 +595,11 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     rawResidentComputeManagerMode,
     defaultResidentComputeManagerMode
   );
+  const schroederRenderLod = resolveSchroederRenderLodContract({
+    policy,
+    schroederPortableSummary,
+    schroederRenderLodSummary
+  });
   const inputTransport = workerOwnedResidentProducerSelected && targetImplementationReady
     ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_TRANSPORTS.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
     : (crossWorkerGpuBufferHandoffRequested
@@ -552,6 +668,34 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     retainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
     presentationWorkerRetainedCompactSnapshotExportRequested: compactSnapshotExportRequested,
     portableSnapshotExportRequested: compactSnapshotExportRequested,
+    schroederPortableSummaryPresent: schroederRenderLod.portablePresent,
+    schroederPortableSummarySchema: schroederRenderLod.portableSchema,
+    schroederPortableSummaryStatus: schroederRenderLod.portableStatus,
+    schroederPortableSummaryMode: schroederRenderLod.portableSummaryMode,
+    schroederPortableSummaryTransferMode: schroederRenderLod.transferMode,
+    schroederPortableSummaryDescriptorOnlyTransfer: schroederRenderLod.descriptorOnlyTransfer,
+    schroederPortableSummaryRetainedRefCount: schroederRenderLod.retainedRefCount,
+    schroederPortableSummaryRetainedBufferRefCount: schroederRenderLod.retainedBufferRefCount,
+    schroederPortableSummaryRawGpuBufferTransferDetected: schroederRenderLod.rawGpuBufferTransfer,
+    schroederPortableSummaryRawGpuBufferTransferAllowed: schroederRenderLod.rawGpuBufferTransferAllowed,
+    schroederRenderLodSummaryPresent: schroederRenderLod.renderLodPresent,
+    schroederRenderLodSummarySchema: schroederRenderLod.renderLodSchema,
+    schroederRenderLodSummaryStatus: schroederRenderLod.renderLodStatus,
+    schroederRenderLodStatus: schroederRenderLod.status,
+    schroederRenderLodBlocker: schroederRenderLod.blocker,
+    schroederRenderLodPresentationReady: schroederRenderLod.presentationReady,
+    schroederRenderLodPresentationSourceMode: schroederRenderLod.presentationSourceMode,
+    schroederRenderLodMode: schroederRenderLod.renderLodMode,
+    schroederRenderLodActiveLeafProxyCount: schroederRenderLod.activeLeafProxyCount,
+    schroederRenderLodAggregateProxyCount: schroederRenderLod.aggregateProxyCount,
+    schroederRenderLodLawQueueProxyCount: schroederRenderLod.lawQueueProxyCount,
+    schroederRenderLodNativeGridSpacingM: schroederRenderLod.nativeGridSpacingM,
+    schroederRenderLodGeometryPolicy: schroederRenderLod.geometryPolicy,
+    schroederRenderLodOpticalPolicy: schroederRenderLod.opticalPolicy,
+    schroederRenderLodPresentationAuthority: schroederRenderLod.presentationAuthority,
+    schroederRenderLodStateAuthorityStatus: schroederRenderLod.stateAuthorityStatus,
+    schroederRenderLodFullParticleReadbackRequired: schroederRenderLod.fullParticleReadbackRequired,
+    schroederRenderLodFullParticleReadbackAvoided: schroederRenderLod.fullParticleReadbackAvoided,
     workerOwnedResidentProducerRequested: workerOwnedResidentProducerSelected,
     workerOwnedResidentProducerExplicitlyRequested: workerOwnedResidentProducerRequested,
     workerOwnedResidentProducerReady: targetImplementationReady,

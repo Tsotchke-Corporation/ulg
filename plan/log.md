@@ -35393,3 +35393,35 @@ Next:
 
 - Start compact PeerCompute replay/admission of SS summaries as descriptors,
   seeds, or snapshots rather than raw browser `GPUBuffer` handles.
+
+## 2026-07-01 AKDT - SS Portable Summary Replay Descriptors
+
+Status:
+
+- Added `peercompute.ulg.schroeder-portable-summary-replay-descriptor.v0` and
+  `peercompute.ulg.schroeder-portable-summary-replay-seed.v0`.
+- SS portable-summary admission now stores a replay descriptor in the admission
+  return value, StateManager hot record, and warm delta. The replay seed carries
+  compact portable-summary, render LOD, retained-ref descriptor, and output
+  family metadata only.
+- Added `createSchroederPortableSummaryReplayDescriptor` on the resident
+  authority host so a downstream PeerCompute consumer can reconstruct the replay
+  descriptor from an admitted hot-buffer key without raw browser `GPUBuffer`
+  handles or full particle readback.
+- Host summary telemetry now reports whether the SS replay descriptor helper is
+  available.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeRenderOwnershipPolicy.test.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/peercomputeRenderOwnershipPolicy.test.mjs` with
+  `16/16` passing.
+- PASS: `node --test --test-name-pattern "ULG resident authority host admits worker-retained mechanics output descriptors" tests/peercomputeComputeManagerIntegration.test.mjs`.
+
+Next:
+
+- Keep the bucket index as the small-scene/default first GPU index and use
+  compact diagnostics to escalate only when configured or justified.

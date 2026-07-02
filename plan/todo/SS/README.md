@@ -198,11 +198,13 @@ Landed checkpoints:
     to CPU descriptor proxy geometry. Diagnostic CPU now requires explicit
     `diagnostic-cpu` preference, explicit admission, and an under-budget proxy
     count, and flattened telemetry marks it metadata-only and non-hot-path.
+53. `f26f895` adds descriptor-only SS portable-summary replay descriptors and
+    seeds to the StateManager admission path. Admissions, hot records, and warm
+    deltas now publish replay-ready compact SS summaries/render LOD without raw
+    `GPUBuffer` handles, and the resident authority host exposes a replay
+    descriptor helper.
 
 Next implementation queue:
 
-1. Publish/replay compact SS summaries across PeerCompute/StateManager
-   boundaries as descriptors, seeds, or snapshots rather than raw browser
-   `GPUBuffer` handles.
-2. Keep the bucket index as the small-scene/default first GPU index and use
+1. Keep the bucket index as the small-scene/default first GPU index and use
    compact diagnostics to escalate only when configured or justified.

@@ -47,6 +47,8 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
@@ -113,6 +115,8 @@ export {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
@@ -2611,6 +2615,215 @@ export function createSchroederConservationSummaryPlan({
     conservativeTransferStatus: 'summary-only-no-state-mutation',
     residualCounterStatus: 'planned-gpu-resident-workgroup-partials',
     conservedQuantities: ['mass', 'represented-volume'],
+    gpuFirst: true,
+    cpuReferenceRequired: false,
+    fullParticleReadbackRequired: false
+  };
+}
+
+function schroederPortableRetainedRef({
+  family,
+  artifact = null,
+  schema = artifact?.schema ?? null,
+  status = artifact?.status ?? null,
+  rowCount = 0,
+  strideFloats = 0,
+  byteLength = 0,
+  retained = false,
+  role = null
+} = {}) {
+  return {
+    family,
+    role,
+    schema,
+    status,
+    rowCount: Math.max(0, Math.round(finiteNumber(rowCount, 0))),
+    strideFloats: Math.max(0, Math.round(finiteNumber(strideFloats, 0))),
+    byteLength: Math.max(0, Math.round(finiteNumber(byteLength, 0))),
+    retained: Boolean(retained),
+    transferMode: 'descriptor-only-no-raw-gpubuffer-transfer'
+  };
+}
+
+export function createSchroederPortableSummaryPlan({
+  levelAssignment = null,
+  activeNodeList,
+  activeNodeIndex = null,
+  activeNodeSortedIndex = null,
+  lawQueue = null,
+  lawNeighborCandidates = null,
+  hierarchyAggregateNode = null,
+  conservationSummary = null,
+  phaseVolumeDiagnosticSummary = null,
+  selectedLevel = levelAssignment?.selectedLevel ?? 0,
+  baseGridSpacingM = DEFAULT_BASE_GRID_SPACING_M,
+  renderLodMode = 'active-node-leaf-and-aggregate-proxy-lod',
+  peerComputeUseCase = 'portable-schroeder-summary'
+} = {}) {
+  const particleCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList?.particleCount ?? activeNodeList?.activeCandidateCount,
+    0
+  )));
+  assertActiveNodeListInput(activeNodeList, particleCount);
+  if (levelAssignment) assertLevelAssignmentInput(levelAssignment);
+  if (activeNodeIndex) assertLawNeighborActiveNodeIndexInput(activeNodeIndex);
+  if (activeNodeSortedIndex) assertLawNeighborActiveNodeSortedIndexInput(activeNodeSortedIndex);
+  if (lawQueue) assertLawQueueInput(lawQueue);
+  if (hierarchyAggregateNode) assertHierarchyAggregateNodeInput(hierarchyAggregateNode);
+
+  const activeNodeCount = Math.max(0, Math.round(finiteNumber(
+    activeNodeList.activeCandidateCount ?? activeNodeList.particleCount,
+    particleCount
+  )));
+  const aggregateNodeCount = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregateNode?.aggregateNodeCount ?? hierarchyAggregateNode?.aggregateRowCount,
+    0
+  )));
+  const lawQueueCount = Math.max(0, Math.round(finiteNumber(lawQueue?.activeNodeCount, 0)));
+  const lawNeighborCandidateCount = Math.max(0, Math.round(finiteNumber(
+    lawNeighborCandidates?.neighborCandidateCount,
+    0
+  )));
+  const phaseDiagnosticRowsAvailable = phaseVolumeDiagnosticSummary?.summaryRows instanceof Float32Array
+    || Array.isArray(phaseVolumeDiagnosticSummary?.summaryRows);
+  const retainedRefs = [
+    schroederPortableRetainedRef({
+      family: 'schroeder-level-assignment',
+      role: 'native-scale-classification',
+      artifact: levelAssignment,
+      rowCount: levelAssignment?.particleCount,
+      strideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+      byteLength: levelAssignment?.assignmentBufferByteLength ?? levelAssignment?.assignmentByteLength,
+      retained: Boolean(levelAssignment?.assignmentBuffer)
+    }),
+    schroederPortableRetainedRef({
+      family: 'schroeder-active-node-list',
+      role: 'render-lod-leaf-source',
+      artifact: activeNodeList,
+      rowCount: activeNodeCount,
+      strideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+      byteLength: activeNodeList.activeNodeBufferByteLength ?? activeNodeList.activeNodeByteLength,
+      retained: Boolean(activeNodeList.activeNodeBuffer)
+    }),
+    activeNodeIndex ? schroederPortableRetainedRef({
+      family: 'schroeder-active-node-index',
+      role: 'small-scene-neighbor-accelerator',
+      artifact: activeNodeIndex,
+      rowCount: activeNodeIndex.bucketSlotCount,
+      strideFloats: 1,
+      byteLength: activeNodeIndex.bucketSlotByteLength,
+      retained: Boolean(activeNodeIndex.bucketSlotBuffer)
+    }) : null,
+    activeNodeSortedIndex ? schroederPortableRetainedRef({
+      family: 'schroeder-active-node-sorted-index',
+      role: 'sorted-radix-neighbor-accelerator',
+      artifact: activeNodeSortedIndex,
+      rowCount: activeNodeSortedIndex.activeNodeCount,
+      strideFloats: 1,
+      byteLength: activeNodeSortedIndex.sortedActiveIndexByteLength,
+      retained: Boolean(activeNodeSortedIndex.sortedActiveIndexBuffer)
+    }) : null,
+    lawQueue ? schroederPortableRetainedRef({
+      family: 'schroeder-law-queue',
+      role: 'near-field-law-work',
+      artifact: lawQueue,
+      rowCount: lawQueueCount,
+      strideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+      byteLength: lawQueue.lawQueueBufferByteLength ?? lawQueue.lawQueueByteLength,
+      retained: Boolean(lawQueue.lawQueueBuffer)
+    }) : null,
+    lawNeighborCandidates ? schroederPortableRetainedRef({
+      family: 'schroeder-law-neighbor-candidate',
+      role: 'near-field-law-candidates',
+      artifact: lawNeighborCandidates,
+      rowCount: lawNeighborCandidateCount,
+      strideFloats: SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS,
+      byteLength: lawNeighborCandidates.neighborCandidateBufferByteLength
+        ?? lawNeighborCandidates.neighborCandidateByteLength,
+      retained: Boolean(lawNeighborCandidates.neighborCandidateBuffer)
+    }) : null,
+    hierarchyAggregateNode ? schroederPortableRetainedRef({
+      family: 'schroeder-hierarchy-aggregate-node',
+      role: 'coherent-aggregate-render-proxy-source',
+      artifact: hierarchyAggregateNode,
+      rowCount: aggregateNodeCount,
+      strideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+      byteLength: hierarchyAggregateNode.aggregateNodeBufferByteLength
+        ?? hierarchyAggregateNode.aggregateNodeByteLength,
+      retained: Boolean(hierarchyAggregateNode.aggregateNodeBuffer)
+    }) : null,
+    conservationSummary ? schroederPortableRetainedRef({
+      family: 'schroeder-conservation-summary',
+      role: 'cross-level-residual-summary',
+      artifact: conservationSummary,
+      rowCount: conservationSummary.summaryRowCount,
+      strideFloats: SCHROEDER_CONSERVATION_SUMMARY_FLOATS,
+      byteLength: conservationSummary.summaryBufferByteLength ?? conservationSummary.summaryByteLength,
+      retained: Boolean(conservationSummary.summaryBuffer)
+    }) : null,
+    phaseVolumeDiagnosticSummary ? schroederPortableRetainedRef({
+      family: 'schroeder-phase-volume-diagnostic-summary',
+      role: 'phase-volume-render-lod-hint',
+      artifact: phaseVolumeDiagnosticSummary,
+      rowCount: phaseVolumeDiagnosticSummary.summaryRowCount,
+      strideFloats: SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS,
+      byteLength: phaseVolumeDiagnosticSummary.summaryBufferByteLength
+        ?? phaseVolumeDiagnosticSummary.summaryByteLength,
+      retained: Boolean(phaseVolumeDiagnosticSummary.summaryBuffer)
+    }) : null
+  ].filter(Boolean);
+  const retainedBufferRefCount = retainedRefs.filter((entry) => entry.retained).length;
+  const nativeGridSpacingM = schroederGridSpacingForLevel({
+    selectedLevel,
+    baseGridSpacingM
+  });
+  const renderLod = {
+    schema: 'peercompute.ulg.schroeder-render-lod-summary.v0',
+    status: 'schroeder-render-lod-summary-planned',
+    mode: renderLodMode,
+    selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
+    nativeGridSpacingM,
+    activeLeafProxyCount: activeNodeCount,
+    aggregateProxyCount: aggregateNodeCount,
+    lawQueueProxyCount: lawQueueCount,
+    phaseVolumeDiagnosticRowsAvailable: phaseDiagnosticRowsAvailable,
+    opticalPolicy: 'consume-closure-derived-optics-and-pbr-through-render-pipeline',
+    geometryPolicy: aggregateNodeCount > 0
+      ? 'aggregate-nodes-for-coherent-bulk-active-nodes-for-leaves'
+      : 'active-nodes-as-leaf-lod-proxies',
+    fullParticleReadbackRequired: false
+  };
+  return {
+    schema: ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+    status: 'schroeder-portable-summary-plan-ready',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    kernelScope: 'schroeder-portable-render-lod-summary',
+    peerComputeUseCase,
+    summaryMode: 'descriptor-only-retained-buffer-summary',
+    portableSummaryMode: 'portable-descriptors-not-raw-gpubuffers',
+    selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
+    nativeGridSpacingM,
+    particleCount,
+    activeNodeCount,
+    aggregateNodeCount,
+    lawQueueCount,
+    lawNeighborCandidateCount,
+    retainedRefs,
+    retainedRefCount: retainedRefs.length,
+    retainedBufferRefCount,
+    renderLod,
+    renderLodStatus: renderLod.status,
+    renderLodMode: renderLod.mode,
+    transferMode: 'peercompute-portable-summary-descriptors',
+    portableMaterializationStatus: 'compact-summary-descriptor-ready-no-gpubuffer-transfer',
+    presentationAuthority: 'presentation-consumes-render-lod-summary-not-physics-state',
+    stateAuthorityStatus: 'state-manager-admission-required-before-authoritative-remote-replay',
+    outputFamilies: [
+      'schroeder-portable-summary',
+      'schroeder-render-lod-summary',
+      'schroeder-retained-buffer-descriptors'
+    ],
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -5549,6 +5762,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeMigration = null,
   phaseVolumeLevelUpdate = null,
   phaseVolumeDiagnosticSummary = null,
+  portableSummary = null,
   stateDeltaMergeAdmission = null,
   phaseVolumeMigrationAdmission = null,
   selectedLevel = 0,
@@ -5586,6 +5800,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enablePhaseVolumeMigration = enableHierarchyAggregateNodeReduction,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
+  enablePortableSummary = false,
+  portableSummaryPeerComputeUseCase = 'same-level-schroeder-portable-summary',
   parentLevelDelta = 1,
   couplingHaloCells = supportInflateCells,
   minCouplingRadiusM = 0,
@@ -5613,6 +5829,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeMigrationRunner = runSchroederPhaseVolumeMigrationWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
+  portableSummaryRunner = createSchroederPortableSummaryPlan,
   phaseVolumeDiagnosticReadbackMode = SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   mergeEpoch = 0,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
@@ -5716,6 +5933,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && typeof phaseVolumeDiagnosticSummaryRunner !== 'function'
   ) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a phaseVolumeDiagnosticSummaryRunner function');
+  }
+  if (enablePortableSummary && typeof portableSummaryRunner !== 'function') {
+    throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a portableSummaryRunner function');
   }
   const plan = createSchroederSameLevelMechanicsPlan({
     sphParticleState,
@@ -5925,6 +6145,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       retainSummaryBuffer: true,
       readbackMode: phaseVolumeDiagnosticReadbackMode
     });
+  const resolvedPortableSummary = !enablePortableSummary
+    ? null
+    : portableSummary || await portableSummaryRunner({
+      levelAssignment: resolvedLevelAssignment,
+      activeNodeList: resolvedActiveNodeList,
+      activeNodeIndex: resolvedActiveNodeIndex,
+      activeNodeSortedIndex: resolvedActiveNodeSortedIndex,
+      lawQueue: resolvedLawQueue,
+      lawNeighborCandidates: resolvedLawNeighborCandidates,
+      hierarchyAggregateNode: resolvedHierarchyAggregateNode,
+      conservationSummary: resolvedConservationSummary,
+      phaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
+      selectedLevel: plan.selectedLevel,
+      baseGridSpacingM: plan.baseGridSpacingM,
+      peerComputeUseCase: portableSummaryPeerComputeUseCase
+    });
   const residentStep = await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
@@ -5955,6 +6191,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederPhaseVolumeMigration: resolvedPhaseVolumeMigration,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
     schroederPhaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
+    schroederPortableSummary: resolvedPortableSummary,
     fuseNoFullResidentMechanics: true,
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
@@ -6233,6 +6470,39 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? Array.from(resolvedPhaseVolumeDiagnosticSummary.summaryRows)
         : []
     } : null,
+    portableSummary: resolvedPortableSummary ? {
+      schema: resolvedPortableSummary.schema,
+      status: resolvedPortableSummary.status,
+      portableSummaryMode: resolvedPortableSummary.portableSummaryMode,
+      transferMode: resolvedPortableSummary.transferMode,
+      peerComputeUseCase: resolvedPortableSummary.peerComputeUseCase,
+      retainedRefCount: resolvedPortableSummary.retainedRefCount,
+      retainedBufferRefCount: resolvedPortableSummary.retainedBufferRefCount,
+      activeNodeCount: resolvedPortableSummary.activeNodeCount,
+      aggregateNodeCount: resolvedPortableSummary.aggregateNodeCount,
+      lawQueueCount: resolvedPortableSummary.lawQueueCount,
+      lawNeighborCandidateCount: resolvedPortableSummary.lawNeighborCandidateCount,
+      renderLodStatus: resolvedPortableSummary.renderLodStatus,
+      renderLodMode: resolvedPortableSummary.renderLodMode,
+      renderLod: resolvedPortableSummary.renderLod ? {
+        schema: resolvedPortableSummary.renderLod.schema,
+        status: resolvedPortableSummary.renderLod.status,
+        mode: resolvedPortableSummary.renderLod.mode,
+        selectedLevel: resolvedPortableSummary.renderLod.selectedLevel,
+        nativeGridSpacingM: resolvedPortableSummary.renderLod.nativeGridSpacingM,
+        activeLeafProxyCount: resolvedPortableSummary.renderLod.activeLeafProxyCount,
+        aggregateProxyCount: resolvedPortableSummary.renderLod.aggregateProxyCount,
+        lawQueueProxyCount: resolvedPortableSummary.renderLod.lawQueueProxyCount,
+        phaseVolumeDiagnosticRowsAvailable: resolvedPortableSummary.renderLod.phaseVolumeDiagnosticRowsAvailable,
+        opticalPolicy: resolvedPortableSummary.renderLod.opticalPolicy,
+        geometryPolicy: resolvedPortableSummary.renderLod.geometryPolicy,
+        fullParticleReadbackRequired: resolvedPortableSummary.renderLod.fullParticleReadbackRequired === true
+      } : null,
+      portableMaterializationStatus: resolvedPortableSummary.portableMaterializationStatus,
+      presentationAuthority: resolvedPortableSummary.presentationAuthority,
+      stateAuthorityStatus: resolvedPortableSummary.stateAuthorityStatus,
+      fullParticleReadbackRequired: resolvedPortableSummary.fullParticleReadbackRequired === true
+    } : null,
     residentStep,
     residentStepStatus: residentStep?.status ?? null,
     residentStepSchema: residentStep?.schema ?? null,
@@ -6311,6 +6581,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ? 'disabled-phase-volume-diagnostic-summary'
         : (resolvedPhaseVolumeMigration ? 'disabled-phase-volume-level-update-admission-not-provided' : 'disabled-same-level-only-mechanics')
     ),
+    portableSummaryStatus: resolvedPortableSummary?.status ?? 'disabled-schroeder-portable-summary',
+    renderLodStatus: resolvedPortableSummary?.renderLodStatus ?? 'disabled-schroeder-render-lod-summary',
+    portableSummaryTransferMode: resolvedPortableSummary?.transferMode ?? null,
     conservativeTransferStatus: resolvedPhaseVolumeLevelUpdate?.conservativeTransferStatus
       ?? resolvedPhaseVolumeMigration?.conservativeTransferStatus
       ?? resolvedHierarchyAggregateNode?.conservativeTransferStatus

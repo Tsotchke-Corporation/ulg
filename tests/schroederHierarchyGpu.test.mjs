@@ -51,6 +51,8 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCHEMA,
   ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_SAME_LEVEL_MECHANICS_SCHEMA,
   ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCHEMA,
@@ -127,6 +129,7 @@ import {
   createSchroederPhaseVolumeLevelUpdatePlan,
   createSchroederPhaseVolumeMigrationParamsArray,
   createSchroederPhaseVolumeMigrationPlan,
+  createSchroederPortableSummaryPlan,
   createSchroederSameLevelMechanicsPlan,
   decodeSchroederLawNeighborTraversalDiagnostics,
   estimateSchroederLevelDeltaForVolumeRatio,
@@ -484,6 +487,14 @@ test('Schroeder ABI exposes a compact level-assignment row', () => {
     SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS
   );
   assert.equal(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS % 4, 0);
+  assert.equal(
+    ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
+    'peercompute.ulg.schroeder-portable-summary.v0'
+  );
+  assert.equal(
+    ULG_SCHROEDER_PORTABLE_SUMMARY_EXECUTION_SCHEMA,
+    'peercompute.ulg.schroeder-portable-summary-execution.v0'
+  );
   assert.equal(ULG_SCHROEDER_CONSERVATION_SUMMARY_SCHEMA, 'peercompute.ulg.schroeder-conservation-summary.v0');
   assert.equal(
     ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -1609,6 +1620,108 @@ test('Schroeder phase-volume diagnostic summary plan reads compact admitted leve
   assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS);
   assert.equal(view.getFloat32(16, true), 64);
   assert.equal(view.getFloat32(20, true), 7);
+});
+
+test('Schroeder portable summary plan exposes render LOD descriptors without GPUBuffer transfer', () => {
+  const levelAssignmentByteLength = 3 * SCHROEDER_LEVEL_ASSIGNMENT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const activeNodeByteLength = 3 * SCHROEDER_ACTIVE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const lawQueueByteLength = 3 * SCHROEDER_LAW_QUEUE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const neighborByteLength = 9 * SCHROEDER_LAW_NEIGHBOR_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const aggregateNodeByteLength = 2 * SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const summaryByteLength = SCHROEDER_CONSERVATION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const phaseDiagnosticByteLength =
+    SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const plan = createSchroederPortableSummaryPlan({
+    levelAssignment: {
+      schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+      status: 'schroeder-level-assignment-submitted',
+      particleCount: 3,
+      assignmentStrideFloats: SCHROEDER_LEVEL_ASSIGNMENT_FLOATS,
+      assignmentBuffer: { label: 'retained-level-assignment' },
+      assignmentBufferByteLength: levelAssignmentByteLength
+    },
+    activeNodeList: {
+      schema: ULG_SCHROEDER_ACTIVE_NODE_LIST_EXECUTION_SCHEMA,
+      status: 'schroeder-active-node-list-submitted',
+      particleCount: 3,
+      activeCandidateCount: 3,
+      activeNodeStrideFloats: SCHROEDER_ACTIVE_NODE_FLOATS,
+      activeNodeBuffer: { label: 'retained-active-node-list' },
+      activeNodeBufferByteLength: activeNodeByteLength
+    },
+    lawQueue: {
+      schema: ULG_SCHROEDER_LAW_QUEUE_EXECUTION_SCHEMA,
+      status: 'schroeder-law-queue-submitted',
+      activeNodeCount: 3,
+      lawQueueStrideFloats: SCHROEDER_LAW_QUEUE_FLOATS,
+      lawQueueBuffer: { label: 'retained-law-queue' },
+      lawQueueBufferByteLength: lawQueueByteLength
+    },
+    lawNeighborCandidates: {
+      schema: ULG_SCHROEDER_LAW_NEIGHBOR_CANDIDATE_EXECUTION_SCHEMA,
+      status: 'schroeder-law-neighbor-candidates-submitted',
+      neighborCandidateCount: 9,
+      neighborCandidateBuffer: { label: 'retained-law-neighbor-candidates' },
+      neighborCandidateBufferByteLength: neighborByteLength
+    },
+    hierarchyAggregateNode: {
+      schema: ULG_SCHROEDER_HIERARCHY_AGGREGATE_NODE_EXECUTION_SCHEMA,
+      status: 'schroeder-hierarchy-aggregate-node-submitted',
+      aggregateNodeCount: 2,
+      aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+      aggregateNodeBuffer: { label: 'retained-hierarchy-aggregate-node' },
+      aggregateNodeBufferByteLength: aggregateNodeByteLength
+    },
+    conservationSummary: {
+      schema: ULG_SCHROEDER_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
+      status: 'schroeder-conservation-summary-submitted',
+      summaryRowCount: 1,
+      summaryBuffer: { label: 'retained-conservation-summary' },
+      summaryBufferByteLength: summaryByteLength
+    },
+    phaseVolumeDiagnosticSummary: {
+      schema: ULG_SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_EXECUTION_SCHEMA,
+      status: 'schroeder-phase-volume-diagnostic-summary-submitted',
+      summaryRowCount: 1,
+      summaryRows: new Float32Array(SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_FLOATS),
+      summaryBuffer: { label: 'retained-phase-volume-diagnostic-summary' },
+      summaryBufferByteLength: phaseDiagnosticByteLength
+    },
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    peerComputeUseCase: 'test-render-lod'
+  });
+
+  assert.equal(plan.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
+  assert.equal(plan.status, 'schroeder-portable-summary-plan-ready');
+  assert.equal(plan.transferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(plan.portableSummaryMode, 'portable-descriptors-not-raw-gpubuffers');
+  assert.equal(plan.portableMaterializationStatus, 'compact-summary-descriptor-ready-no-gpubuffer-transfer');
+  assert.equal(plan.presentationAuthority, 'presentation-consumes-render-lod-summary-not-physics-state');
+  assert.equal(plan.stateAuthorityStatus, 'state-manager-admission-required-before-authoritative-remote-replay');
+  assert.equal(plan.peerComputeUseCase, 'test-render-lod');
+  assert.equal(plan.selectedLevel, 2);
+  assert.equal(plan.nativeGridSpacingM, 1);
+  assert.equal(plan.activeNodeCount, 3);
+  assert.equal(plan.aggregateNodeCount, 2);
+  assert.equal(plan.lawQueueCount, 3);
+  assert.equal(plan.lawNeighborCandidateCount, 9);
+  assert.equal(plan.retainedRefCount, 7);
+  assert.equal(plan.retainedBufferRefCount, 7);
+  assert.equal(plan.renderLod.schema, 'peercompute.ulg.schroeder-render-lod-summary.v0');
+  assert.equal(plan.renderLod.status, 'schroeder-render-lod-summary-planned');
+  assert.equal(plan.renderLod.activeLeafProxyCount, 3);
+  assert.equal(plan.renderLod.aggregateProxyCount, 2);
+  assert.equal(plan.renderLod.lawQueueProxyCount, 3);
+  assert.equal(plan.renderLod.phaseVolumeDiagnosticRowsAvailable, true);
+  assert.equal(plan.renderLod.fullParticleReadbackRequired, false);
+  assert.equal(plan.fullParticleReadbackRequired, false);
+  assert.equal(
+    plan.retainedRefs.every((entry) => entry.transferMode === 'descriptor-only-no-raw-gpubuffer-transfer'),
+    true
+  );
+  assert.equal(plan.retainedRefs.some((entry) => Object.hasOwn(entry, 'buffer')), false);
+  assert.equal(plan.retainedRefs.some((entry) => Object.hasOwn(entry, 'gpuBuffer')), false);
 });
 
 test('Schroeder same-level mechanics plan selects a native hierarchy grid spacing', () => {
@@ -3027,6 +3140,75 @@ test('Schroeder same-level mechanics runs SS prepasses before dense resident bac
     device.dispatches,
     [[1, 1, 1], [1, 1, 1], [1, 1, 1], [3, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]
   );
+});
+
+test('Schroeder same-level mechanics can emit portable render LOD summary', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const calls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 1,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePortableSummary: true,
+    portableSummaryPeerComputeUseCase: 'test-same-level-render-lod',
+    residentStepRunner: async (options) => {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+        status: 'resident-step-stubbed',
+        hasPortableSummary: Boolean(options.schroederPortableSummary),
+        portableSummarySchema: options.schroederPortableSummary?.schema,
+        portableSummaryStatus: options.schroederPortableSummary?.status,
+        portableSummaryTransferMode: options.schroederPortableSummary?.transferMode,
+        renderLodStatus: options.schroederPortableSummary?.renderLodStatus,
+        retainedRefCount: options.schroederPortableSummary?.retainedRefCount
+      };
+    }
+  });
+
+  assert.equal(result.portableSummary.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
+  assert.equal(result.portableSummary.status, 'schroeder-portable-summary-plan-ready');
+  assert.equal(result.portableSummary.peerComputeUseCase, 'test-same-level-render-lod');
+  assert.equal(result.portableSummary.transferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(result.portableSummary.retainedRefCount, 2);
+  assert.equal(result.portableSummary.retainedBufferRefCount, 2);
+  assert.equal(result.portableSummary.activeNodeCount, 3);
+  assert.equal(result.portableSummary.aggregateNodeCount, 0);
+  assert.equal(result.portableSummary.lawQueueCount, 0);
+  assert.equal(result.portableSummary.lawNeighborCandidateCount, 0);
+  assert.equal(result.portableSummary.renderLodStatus, 'schroeder-render-lod-summary-planned');
+  assert.equal(result.portableSummary.renderLodMode, 'active-node-leaf-and-aggregate-proxy-lod');
+  assert.equal(result.portableSummary.renderLod.schema, 'peercompute.ulg.schroeder-render-lod-summary.v0');
+  assert.equal(result.portableSummary.renderLod.activeLeafProxyCount, 3);
+  assert.equal(result.portableSummary.renderLod.aggregateProxyCount, 0);
+  assert.equal(result.portableSummary.renderLod.lawQueueProxyCount, 0);
+  assert.equal(result.portableSummary.renderLod.fullParticleReadbackRequired, false);
+  assert.equal(result.portableSummary.fullParticleReadbackRequired, false);
+  assert.equal(result.portableSummaryStatus, 'schroeder-portable-summary-plan-ready');
+  assert.equal(result.renderLodStatus, 'schroeder-render-lod-summary-planned');
+  assert.equal(result.portableSummaryTransferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(result.residentStep.hasPortableSummary, true);
+  assert.equal(result.residentStep.portableSummarySchema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
+  assert.equal(result.residentStep.portableSummaryStatus, 'schroeder-portable-summary-plan-ready');
+  assert.equal(result.residentStep.portableSummaryTransferMode, 'peercompute-portable-summary-descriptors');
+  assert.equal(result.residentStep.renderLodStatus, 'schroeder-render-lod-summary-planned');
+  assert.equal(result.residentStep.retainedRefCount, 2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].schroederPortableSummary.schema, ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA);
+  assert.equal(calls[0].schroederPortableSummary.renderLod.activeLeafProxyCount, 3);
+  assert.equal(calls[0].schroederPortableSummary.renderLod.aggregateProxyCount, 0);
+  assert.equal(
+    calls[0].schroederPortableSummary.retainedRefs.every(
+      (entry) => entry.transferMode === 'descriptor-only-no-raw-gpubuffer-transfer'
+    ),
+    true
+  );
+  assert.equal(calls[0].schroederPortableSummary.retainedRefs.some((entry) => Object.hasOwn(entry, 'buffer')), false);
+  assert.equal(calls[0].schroederPortableSummary.retainedRefs.some((entry) => Object.hasOwn(entry, 'gpuBuffer')), false);
 });
 
 test('Schroeder same-level mechanics can build an opt-in active-node index before resident backend', async () => {

@@ -11436,11 +11436,50 @@ test('Schroeder cross-level grid coupling conserves mass and momentum numericall
       coarseGridBuffer: constantRestriction.coarseGridBuffer
     });
 
+    // Repeat the conservation check under the real MLS-MPM grid convention:
+    // z-fastest flat indexing with gridShift 1 (createMlsMpmGridSpec).
+    const mpmPlan = coupling.createSchroederCrossLevelGridCouplingPlan({
+      fineGridDims: [9, 7, 6],
+      fineGridSpacingM: 0.25,
+      gridOriginM: [0, 0, 0],
+      indexOrder: 'z-fastest',
+      gridShift: 1
+    });
+    const mpmFineRows = new Float32Array(mpmPlan.fineNodeCount * mpmPlan.gridStrideFloats);
+    let mpmExpectedMass = 0;
+    const mpmExpectedMomentum = [0, 0, 0];
+    for (let index = 0; index < mpmPlan.fineNodeCount; index += 1) {
+      const offset = index * mpmPlan.gridStrideFloats;
+      const mass = random() < 0.3 ? 0 : 0.05 + random() * 2;
+      mpmFineRows[offset] = mass;
+      mpmFineRows[offset + 1] = mass * (random() * 4 - 2);
+      mpmFineRows[offset + 2] = mass * (random() * 4 - 2);
+      mpmFineRows[offset + 3] = mass * (random() * 4 - 2);
+      mpmExpectedMass += mpmFineRows[offset];
+      mpmExpectedMomentum[0] += mpmFineRows[offset + 1];
+      mpmExpectedMomentum[1] += mpmFineRows[offset + 2];
+      mpmExpectedMomentum[2] += mpmFineRows[offset + 3];
+    }
+    const mpmFineBuffer = makeGridBuffer('proof-mpm-fine-grid', mpmFineRows);
+    const mpmRestriction = await coupling.runSchroederCrossLevelGridRestrictionWebGpu({
+      device,
+      plan: mpmPlan,
+      fineGridBuffer: mpmFineBuffer
+    });
+    const mpmSummary = await coupling.runSchroederCrossLevelGridConservationSummaryWebGpu({
+      device,
+      plan: mpmPlan,
+      fineGridBuffer: mpmFineBuffer,
+      coarseGridBuffer: mpmRestriction.coarseGridBuffer
+    });
+
     restriction.destroyCoarseGridBuffer?.();
     constantRestriction.destroyCoarseGridBuffer?.();
+    mpmRestriction.destroyCoarseGridBuffer?.();
     fineBuffer.destroy();
     constantFineBuffer.destroy();
     zeroedFineBuffer.destroy();
+    mpmFineBuffer.destroy();
     device.destroy?.();
 
     return {
@@ -11455,7 +11494,12 @@ test('Schroeder cross-level grid coupling conserves mass and momentum numericall
       maxVelocityError,
       massiveNodeCount,
       fineNodeCount: plan.fineNodeCount,
-      coarseNodeCount: plan.coarseNodeCount
+      coarseNodeCount: plan.coarseNodeCount,
+      mpmExpectedMass,
+      mpmExpectedMomentum,
+      mpmConservation: mpmSummary.conservation,
+      mpmPlanFlags: mpmPlan.flags,
+      mpmCoarseGridDims: mpmPlan.coarseGridDims
     };
   });
 
@@ -11490,5 +11534,345 @@ test('Schroeder cross-level grid coupling conserves mass and momentum numericall
   for (let axis = 0; axis < 3; axis += 1) {
     expect(Math.abs(prolonged.momentumResidualKgMPerS[axis]))
       .toBeLessThan(1e-4 * Math.max(1, Math.abs(prolonged.fineMomentumKgMPerS[axis])));
+  }
+
+  // The same gates hold under the real MLS-MPM grid convention
+  // (z-fastest indexing, gridShift 1).
+  expect(result.mpmPlanFlags).toBe(2);
+  // ceil((n - shift) / 2) + shift per axis: [9,7,6] with shift 1 -> [5,4,4].
+  expect(result.mpmCoarseGridDims).toEqual([5, 4, 4]);
+  const mpmConservation = result.mpmConservation;
+  expect(mpmConservation).not.toBeNull();
+  const mpmMassScale = Math.max(1, result.mpmExpectedMass);
+  expect(Math.abs(mpmConservation.fineMassKg - result.mpmExpectedMass))
+    .toBeLessThan(1e-4 * mpmMassScale);
+  expect(Math.abs(mpmConservation.massResidualKg)).toBeLessThan(1e-4 * mpmMassScale);
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(mpmConservation.momentumResidualKgMPerS[axis]))
+      .toBeLessThan(1e-4 * Math.max(1, Math.abs(result.mpmExpectedMomentum[axis])));
+  }
+  expect(mpmConservation.coarseActiveNodeCount).toBeGreaterThan(0);
+});
+
+test('Schroeder two-level co-simulation couples real P2G grids and preserves a constant velocity field', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const gridKernel = await import('/src/runtime/sph/sphGridGpuKernel.js');
+    const gridUpdateKernel = await import('/src/runtime/sph/sphGridUpdateGpuKernel.js');
+    const g2pKernel = await import('/src/runtime/sph/sphG2pGpuKernel.js');
+    const coupling = await import('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
+    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await import('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const packParticles = ({ positions, velocity, massKg, smoothingLengthM, dt }) => {
+      const count = positions.length;
+      const state = new Float32Array(count * 8);
+      const thermo = new Float32Array(count * 12);
+      const mechanics = new Float32Array(count * MECHANICS_FLOATS);
+      for (let index = 0; index < count; index += 1) {
+        const s = index * 8;
+        state[s] = positions[index][0];
+        state[s + 1] = positions[index][1];
+        state[s + 2] = positions[index][2];
+        state[s + 3] = massKg;
+        state[s + 4] = velocity[0];
+        state[s + 5] = velocity[1];
+        state[s + 6] = velocity[2];
+        state[s + 7] = 1;
+        thermo[index * 12 + 3] = massKg / (smoothingLengthM ** 3);
+        const m = index * MECHANICS_FLOATS;
+        mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+        mechanics[m + 18] = 1;
+        mechanics[m + 19] = massKg / (massKg / (smoothingLengthM ** 3));
+        mechanics[m + 20] = 1;
+        mechanics[m + 21] = 1;
+        mechanics[m + 27] = 1;
+      }
+      return {
+        sphParticleState: {
+          schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+          particleCount: count,
+          smoothingLengthM,
+          step: 0,
+          time: 0,
+          state,
+          thermo
+        },
+        mlsMpmParticleState: {
+          schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+          particleCount: count,
+          step: 0,
+          time: 0,
+          mechanicsDtS: dt,
+          mechanics
+        }
+      };
+    };
+
+    const boxDimsM = [6, 6, 6];
+    const fineDx = 0.5;
+    const coarseDx = 1.0;
+    const dt = 1e-4;
+    const velocity = [0.3, -0.2, 0.1];
+    const gravity = [0, 0, 0];
+
+    // Interior particle blocks: quadratic stencils must not reach nodes
+    // inside the wall-barrier band (one grid spacing per level), which
+    // zeroes tangential velocity at the walls even in single-level runs.
+    // Coarse particles at 2.6..3.4 with dx=1 keep every stencil node at
+    // least one coarse spacing from all six walls.
+    const finePositions = [];
+    for (let x = 0; x < 3; x += 1) {
+      for (let y = 0; y < 3; y += 1) {
+        finePositions.push([2.6 + x * 0.4, 2.6 + y * 0.4, 2.8]);
+      }
+    }
+    const coarsePositions = [];
+    for (let x = 0; x < 2; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        coarsePositions.push([2.6 + x * 0.8, 2.6 + y * 0.8, 3.2]);
+      }
+    }
+    const fineMassKg = 0.5;
+    const coarseMassKg = 4.0;
+    const fine = packParticles({
+      positions: finePositions,
+      velocity,
+      massKg: fineMassKg,
+      smoothingLengthM: fineDx,
+      dt
+    });
+    const coarse = packParticles({
+      positions: coarsePositions,
+      velocity,
+      massKg: coarseMassKg,
+      smoothingLengthM: coarseDx,
+      dt
+    });
+
+    // Same-level P2G on each level's own grid (real production kernel).
+    const fineProjection = await gridKernel.runMlsMpmP2gGridProjectionWebGpu({
+      device,
+      sphParticleState: fine.sphParticleState,
+      mlsMpmParticleState: fine.mlsMpmParticleState,
+      gridSpacingM: fineDx,
+      boxDimsM,
+      dt,
+      retainGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    });
+    const coarseProjection = await gridKernel.runMlsMpmP2gGridProjectionWebGpu({
+      device,
+      sphParticleState: coarse.sphParticleState,
+      mlsMpmParticleState: coarse.mlsMpmParticleState,
+      gridSpacingM: coarseDx,
+      boxDimsM,
+      dt,
+      retainGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    });
+    const fineSpec = gridKernel.createMlsMpmGridSpec({ boxDimsM, gridSpacingM: fineDx });
+    const coarseSpec = gridKernel.createMlsMpmGridSpec({ boxDimsM, gridSpacingM: coarseDx });
+
+    // Adjacent-level restriction: accumulate fine momentum into the coarse
+    // P2G grid so the coarse level sees combined conserved totals.
+    const couplingPlan = coupling.createSchroederCrossLevelGridCouplingPlan({
+      fineGridDims: fineSpec.gridDims,
+      coarseGridDims: coarseSpec.gridDims,
+      fineGridSpacingM: fineDx,
+      indexOrder: 'z-fastest',
+      gridShift: fineSpec.shift,
+      accumulate: true
+    });
+    await coupling.runSchroederCrossLevelGridRestrictionWebGpu({
+      device,
+      plan: couplingPlan,
+      fineGridBuffer: fineProjection.gridBuffer,
+      coarseGridBuffer: coarseProjection.gridBuffer
+    });
+    const combinedSummary = await coupling.runSchroederCrossLevelGridConservationSummaryWebGpu({
+      device,
+      plan: couplingPlan,
+      fineGridBuffer: fineProjection.gridBuffer,
+      coarseGridBuffer: coarseProjection.gridBuffer
+    });
+
+    // Snapshot the combined pre-update coarse momentum grid: the delta-form
+    // prolongation needs parent velocity before and after the grid update.
+    const coarseGridByteLength = coarseSpec.gridNodeCount * 8 * 4;
+    const coarsePreGridBuffer = device.createBuffer({
+      label: 'proof-coarse-pre-update-grid',
+      size: coarseGridByteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    {
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(
+        coarseProjection.gridBuffer,
+        0,
+        coarsePreGridBuffer,
+        0,
+        coarseGridByteLength
+      );
+      device.queue.submit([encoder.finish()]);
+    }
+
+    // Grid updates at both levels (zero gravity, zero stress).
+    const fineGridUpdate = await gridUpdateKernel.runMlsMpmGridUpdateWebGpu({
+      device,
+      p2gGridProjection: fineProjection,
+      p2gGridBuffer: fineProjection.gridBuffer,
+      dt,
+      gravityMPerS2: gravity,
+      boxDimsM,
+      retainUpdatedGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    });
+    const coarseGridUpdate = await gridUpdateKernel.runMlsMpmGridUpdateWebGpu({
+      device,
+      p2gGridProjection: coarseProjection,
+      p2gGridBuffer: coarseProjection.gridBuffer,
+      dt,
+      gravityMPerS2: gravity,
+      boxDimsM,
+      retainUpdatedGridBuffer: true,
+      readbackMode: 'no-full-readback'
+    });
+
+    // Delta-form prolongation: fine nodes receive their parent's velocity
+    // change across the coarse update instead of a raw velocity copy, so a
+    // force-free field transfers exactly zero correction.
+    const deltaProlongation = await coupling.runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
+      device,
+      fineGridDims: fineSpec.gridDims,
+      coarseGridDims: coarseSpec.gridDims,
+      fineGridSpacingM: fineDx,
+      indexOrder: 'z-fastest',
+      gridShift: fineSpec.shift,
+      boxDimsM,
+      coarsePreGridBuffer,
+      coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
+      fineGridBuffer: fineGridUpdate.updatedGridBuffer
+    });
+
+    // G2P at both levels. Full readback is allowed here: this is a small
+    // brute-force diagnostic scene, not the hot path.
+    const fineG2p = await g2pKernel.runMlsMpmG2pWebGpu({
+      device,
+      sphParticleState: fine.sphParticleState,
+      mlsMpmParticleState: fine.mlsMpmParticleState,
+      gridUpdate: fineGridUpdate,
+      updatedGridBuffer: fineGridUpdate.updatedGridBuffer,
+      dt,
+      boxDimsM
+    });
+    const coarseG2p = await g2pKernel.runMlsMpmG2pWebGpu({
+      device,
+      sphParticleState: coarse.sphParticleState,
+      mlsMpmParticleState: coarse.mlsMpmParticleState,
+      gridUpdate: coarseGridUpdate,
+      updatedGridBuffer: coarseGridUpdate.updatedGridBuffer,
+      dt,
+      boxDimsM
+    });
+
+    const particleStats = (state, count, sourcePositions) => {
+      let maxVelocityError = 0;
+      let maxPositionError = 0;
+      let mass = 0;
+      const momentum = [0, 0, 0];
+      for (let index = 0; index < count; index += 1) {
+        const offset = index * 8;
+        const particleMass = state[offset + 3];
+        mass += particleMass;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const v = state[offset + 4 + axis];
+          momentum[axis] += particleMass * v;
+          maxVelocityError = Math.max(maxVelocityError, Math.abs(v - velocity[axis]));
+          const expectedPosition = sourcePositions[index][axis] + velocity[axis] * dt;
+          maxPositionError = Math.max(
+            maxPositionError,
+            Math.abs(state[offset + axis] - expectedPosition)
+          );
+        }
+      }
+      return { mass, momentum, maxVelocityError, maxPositionError };
+    };
+    const fineStats = particleStats(fineG2p.state, finePositions.length, finePositions);
+    const coarseStats = particleStats(coarseG2p.state, coarsePositions.length, coarsePositions);
+
+    fineProjection.destroyGridBuffer?.();
+    coarseProjection.destroyGridBuffer?.();
+    coarsePreGridBuffer.destroy();
+    fineGridUpdate.destroyUpdatedGridBuffer?.();
+    coarseGridUpdate.destroyUpdatedGridBuffer?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      fineParticleCount: finePositions.length,
+      coarseParticleCount: coarsePositions.length,
+      expectedFineMass: finePositions.length * fineMassKg,
+      expectedCoarseMass: coarsePositions.length * coarseMassKg,
+      expectedVelocity: velocity,
+      combinedConservation: combinedSummary.conservation,
+      deltaProlongationStatus: deltaProlongation.status,
+      deltaProlongationMode: deltaProlongation.prolongationMode,
+      fineStats,
+      coarseStats
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  const totalMass = result.expectedFineMass + result.expectedCoarseMass;
+
+  // Gate 1: after restriction, the combined coarse grid holds the total mass
+  // and momentum of BOTH particle sets (fine restricted + coarse projected),
+  // read from the compact GPU conservation summary row.
+  const combined = result.combinedConservation;
+  expect(combined).not.toBeNull();
+  expect(Math.abs(combined.fineMassKg - result.expectedFineMass))
+    .toBeLessThan(1e-4 * Math.max(1, result.expectedFineMass));
+  expect(Math.abs(combined.coarseMassKg - totalMass)).toBeLessThan(1e-4 * totalMass);
+  for (let axis = 0; axis < 3; axis += 1) {
+    const expectedCombinedMomentum = totalMass * result.expectedVelocity[axis];
+    expect(Math.abs(combined.coarseMomentumKgMPerS[axis] - expectedCombinedMomentum))
+      .toBeLessThan(1e-4 * Math.max(1, Math.abs(expectedCombinedMomentum)));
+  }
+
+  // Gate 2: the constant velocity field survives the full two-level cycle
+  // (P2G -> restrict -> grid update -> delta-prolong -> G2P) at both levels.
+  // Tolerance floor: the production P2G kernel accumulates with fixed-point
+  // atomics, which quantizes to ~1e-4 relative on this scene even in a pure
+  // single-level cycle. The gate asserts coupling adds no error class beyond
+  // that existing floor.
+  expect(result.deltaProlongationStatus)
+    .toBe('schroeder-cross-level-grid-velocity-delta-prolongation-submitted');
+  expect(result.deltaProlongationMode).toBe('coarse-velocity-delta-correction');
+  expect(result.fineStats.maxVelocityError).toBeLessThan(5e-4);
+  expect(result.coarseStats.maxVelocityError).toBeLessThan(5e-4);
+  expect(result.fineStats.maxPositionError).toBeLessThan(1e-4);
+  expect(result.coarseStats.maxPositionError).toBeLessThan(1e-4);
+
+  // Gate 3: particle-level mass and momentum are conserved end to end.
+  expect(Math.abs(result.fineStats.mass - result.expectedFineMass))
+    .toBeLessThan(1e-4 * Math.max(1, result.expectedFineMass));
+  expect(Math.abs(result.coarseStats.mass - result.expectedCoarseMass))
+    .toBeLessThan(1e-4 * Math.max(1, result.expectedCoarseMass));
+  for (let axis = 0; axis < 3; axis += 1) {
+    const expectedFineMomentum = result.expectedFineMass * result.expectedVelocity[axis];
+    const expectedCoarseMomentum = result.expectedCoarseMass * result.expectedVelocity[axis];
+    // Same 5e-4 fixed-point floor as gate 2: per-particle velocity noise
+    // sums into the momentum totals.
+    expect(Math.abs(result.fineStats.momentum[axis] - expectedFineMomentum))
+      .toBeLessThan(5e-4 * Math.max(1, Math.abs(expectedFineMomentum)));
+    expect(Math.abs(result.coarseStats.momentum[axis] - expectedCoarseMomentum))
+      .toBeLessThan(5e-4 * Math.max(1, Math.abs(expectedCoarseMomentum)));
   }
 });

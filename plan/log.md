@@ -36215,3 +36215,70 @@ Next (Phase 1 slices 2-3):
   summary asserted numerically in a mounted proof.
 - One admitted split/merge that changes live particle count via an explicit
   `admittedParticleCountDelta` from a compact split/merge diagnostic readback.
+
+## 2026-07-02 AKDT - SS Two-Level Co-Simulation Proof (Phase 1 Slice 2)
+
+Second physics-first slice: two SS levels co-simulate one step through the
+real production kernels, with numeric conservation gates.
+
+Operator upgrades in `schroederCrossLevelCouplingGpu.js` / ABI WGSL:
+
+- The coupling params/kernels now support the real MLS-MPM grid convention:
+  z-fastest flat indexing and `gridShift` (shared shift-aware parent/child
+  axis mapping in one WGSL block), explicit `coarseGridDims` override,
+  accumulate-mode restriction (adds fine totals into a coarse grid that
+  already carries its own P2G mass), and a velocity-grids prolongation mode.
+- New `runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu`: delta-form
+  (AMR velocity-correction) prolongation, `fine_v += post_v(parent) -
+  pre_v(parent)` across the coarse grid update. A force-free field transfers
+  exactly zero, unlike a raw velocity copy, which measurably injected
+  quantized tiny-mass parent velocities into fine nodes (~1.5e-3 particle
+  velocity error).
+- Boundary ownership: wall-barrier response bands are one grid spacing wide
+  per level, so the coarse band covers fine nodes the fine level already
+  treated correctly. The delta kernel masks the correction inside the coarse
+  boundary band (sealed-box dims in params; zero dims disable the mask).
+
+New Playwright proof `Schroeder two-level co-simulation couples real P2G
+grids and preserves a constant velocity field`, composing the production
+`runMlsMpmP2gGridProjectionWebGpu`, restriction(accumulate), grid updates at
+both spacings, delta prolongation, and `runMlsMpmG2pWebGpu` at both levels:
+
+- Gate 1 (compact GPU summary row): combined coarse grid holds the total
+  mass/momentum of both particle sets after restriction, residuals < 1e-4
+  relative.
+- Gate 2: constant velocity field survives the full two-level cycle at both
+  levels, max per-particle error < 5e-4 (documented fixed-point atomic P2G
+  quantization floor, measured ~8e-5..1.5e-4 on single-level baselines).
+- Gate 3: particle-level mass and momentum conserved end-to-end at the same
+  5e-4 floor.
+- Full particle readback in the proof is explicit small-scene brute-force
+  diagnostics per the SS GPU-first rules; the operator path itself stays
+  no-full-readback.
+
+Findings recorded for future slices:
+
+- Production P2G fixed-point atomics put a ~1e-4 relative quantization floor
+  on grid velocities; tiny-mass stencil-edge nodes are much worse (4/13-style
+  ratios), which any velocity-copy cross-level transfer amplifies. Delta-form
+  transfers avoid the class.
+- Wall-barrier response zeroes tangential velocity on gap-0 nodes; coarse
+  levels widen that band, so cross-level corrections must not override the
+  finer level's own boundary treatment (hence the band mask), and coarse
+  particles closer than ~2.5 spacings to a wall lean on barrier-affected
+  nodes even in single-level runs.
+
+Validation:
+
+- PASS: `node --test tests/schroederCrossLevelCouplingGpu.test.mjs` `11/11`.
+- PASS: targeted Playwright two-level co-simulation proof `1/1` (6.3s).
+- PASS: targeted Playwright grid-coupling conservation proof `1/1` (both
+  x-fastest and z-fastest/shift conventions).
+- PASS: `npm test` `958/961`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next (Phase 1 slice 3):
+
+- One admitted split/merge that changes live particle count by an explicit
+  `admittedParticleCountDelta` derived from a compact split/merge diagnostic
+  readback, with mass conserved.

@@ -97,7 +97,7 @@ test('Schroeder cross-level grid coupling params array encodes dims, stride, and
     flags: 3
   });
   const params = createSchroederCrossLevelGridCouplingParamsArray(plan);
-  assert.equal(params.byteLength, 48);
+  assert.equal(params.byteLength, 64);
   const view = new DataView(params);
   assert.equal(view.getUint32(0, true), 6);
   assert.equal(view.getUint32(4, true), 4);
@@ -110,6 +110,92 @@ test('Schroeder cross-level grid coupling params array encodes dims, stride, and
   assert.ok(Math.abs(view.getFloat32(32, true) - 0.1) < 1e-7);
   assert.ok(Math.abs(view.getFloat32(36, true) - 0.5) < 1e-7);
   assert.equal(view.getFloat32(44, true), -1);
+  assert.equal(view.getInt32(48, true), 0);
+});
+
+test('coupling plan encodes MLS-MPM z-fastest index order, shift, and accumulate flags', () => {
+  const plan = createSchroederCrossLevelGridCouplingPlan({
+    fineGridDims: [9, 9, 9],
+    fineGridSpacingM: 0.25,
+    indexOrder: 'z-fastest',
+    gridShift: 1,
+    accumulate: true
+  });
+  assert.equal(plan.indexOrder, 'z-fastest');
+  assert.equal(plan.gridShift, 1);
+  assert.equal(plan.accumulate, true);
+  // accumulate=1 | z-fastest=2
+  assert.equal(plan.flags, 3);
+  // ceil((9 - 1) / 2) + 1 = 5 per axis.
+  assert.deepEqual(plan.coarseGridDims, [5, 5, 5]);
+  const view = new DataView(createSchroederCrossLevelGridCouplingParamsArray(plan));
+  assert.equal(view.getUint32(28, true), 3);
+  assert.equal(view.getInt32(48, true), 1);
+});
+
+test('restriction oracle conserves mass and momentum under z-fastest indexing with shift', () => {
+  const plan = createSchroederCrossLevelGridCouplingPlan({
+    fineGridDims: [9, 7, 6],
+    fineGridSpacingM: 0.25,
+    indexOrder: 'z-fastest',
+    gridShift: 1
+  });
+  const fineRows = randomFineGridRows(plan, 5150);
+  const coarseRows = restrictGridRowsCpuOracle(plan, fineRows);
+  const fine = summarizeGridConservationCpuOracle(plan, fineRows);
+  const coarse = summarizeGridConservationCpuOracle(plan, coarseRows);
+  assert.ok(Math.abs(fine.massKg - coarse.massKg) < 1e-12 * Math.max(1, fine.massKg));
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(
+      Math.abs(fine.momentumKgMPerS[axis] - coarse.momentumKgMPerS[axis])
+        < 1e-12 * Math.max(1, Math.abs(fine.momentumKgMPerS[axis]))
+    );
+  }
+  // Constant-field recovery must also hold with shifted parent mapping.
+  const velocity = [0.5, -1.25, 0.75];
+  const constantRows = new Float64Array(plan.fineNodeCount * plan.gridStrideFloats);
+  for (let index = 0; index < plan.fineNodeCount; index += 1) {
+    const offset = index * plan.gridStrideFloats;
+    const mass = index % 3 === 0 ? 0 : 0.25;
+    constantRows[offset] = mass;
+    constantRows[offset + 1] = mass * velocity[0];
+    constantRows[offset + 2] = mass * velocity[1];
+    constantRows[offset + 3] = mass * velocity[2];
+  }
+  const constantCoarse = restrictGridRowsCpuOracle(plan, constantRows);
+  const prolonged = prolongGridRowsCpuOracle(plan, constantCoarse, constantRows);
+  for (let index = 0; index < plan.fineNodeCount; index += 1) {
+    const offset = index * plan.gridStrideFloats;
+    const mass = prolonged[offset];
+    if (!(mass > 0)) continue;
+    for (let axis = 0; axis < 3; axis += 1) {
+      assert.ok(Math.abs(prolonged[offset + 1 + axis] / mass - velocity[axis]) < 1e-12);
+    }
+  }
+});
+
+test('accumulate-mode restriction adds fine totals into existing coarse totals', () => {
+  const basePlan = createSchroederCrossLevelGridCouplingPlan({
+    fineGridDims: [6, 6, 6],
+    fineGridSpacingM: 0.5
+  });
+  const fineRows = randomFineGridRows(basePlan, 31337);
+  const seededCoarse = restrictGridRowsCpuOracle(basePlan, fineRows);
+  const accumulatePlan = createSchroederCrossLevelGridCouplingPlan({
+    fineGridDims: [6, 6, 6],
+    fineGridSpacingM: 0.5,
+    accumulate: true
+  });
+  const doubled = restrictGridRowsCpuOracle(accumulatePlan, fineRows, seededCoarse);
+  const single = summarizeGridConservationCpuOracle(basePlan, seededCoarse);
+  const combined = summarizeGridConservationCpuOracle(accumulatePlan, doubled);
+  assert.ok(Math.abs(combined.massKg - 2 * single.massKg) < 1e-12 * Math.max(1, single.massKg));
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(
+      Math.abs(combined.momentumKgMPerS[axis] - 2 * single.momentumKgMPerS[axis])
+        < 1e-12 * Math.max(1, Math.abs(single.momentumKgMPerS[axis]))
+    );
+  }
 });
 
 test('restriction oracle conserves total mass and momentum exactly', () => {

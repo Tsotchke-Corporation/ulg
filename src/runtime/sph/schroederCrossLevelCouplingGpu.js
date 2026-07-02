@@ -11,7 +11,8 @@ import {
 import {
   schroederCrossLevelGridConservationSummaryWgsl,
   schroederCrossLevelGridProlongationWgsl,
-  schroederCrossLevelGridRestrictionWgsl
+  schroederCrossLevelGridRestrictionWgsl,
+  schroederCrossLevelGridVelocityDeltaProlongationWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
   computeBufferBinding,
@@ -32,6 +33,17 @@ export const MLS_MPM_GPU_GRID_NODE_FLOATS = MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.len
 export const SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_FLOATS =
   SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_ROW_LAYOUT.length;
 export const SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE = 64;
+export const SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE = 1;
+export const SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST = 2;
+// Grid slots 1-3 hold velocity (post-grid-update layout) instead of
+// momentum; prolongation copies parent velocity onto massive fine nodes.
+export const SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS = 4;
+export const SCHROEDER_GRID_COUPLING_PARAMS_BYTES = 64;
+// Index order of the flat grid-node arrays. The standalone operator tests use
+// 'x-fastest'; real MLS-MPM P2G grids from createMlsMpmGridSpec use
+// 'z-fastest' with gridShift 1 (see gridNodeCoords in sphGridGpuKernel.js).
+export const SCHROEDER_GRID_INDEX_ORDER_X_FASTEST = 'x-fastest';
+export const SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST = 'z-fastest';
 export const SCHROEDER_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE =
   'compact-grid-conservation-summary-readback';
@@ -92,10 +104,27 @@ export function createSchroederCrossLevelGridCouplingPlan({
   gridOriginM = [0, 0, 0],
   gridStrideFloats = MLS_MPM_GPU_GRID_NODE_FLOATS,
   couplingEpoch = 0,
+  indexOrder = SCHROEDER_GRID_INDEX_ORDER_X_FASTEST,
+  gridShift = 0,
+  accumulate = false,
+  velocityGrids = false,
+  coarseGridDims = null,
+  boxDimsM = null,
   flags = 0
 } = {}) {
   const fineDims = gridDims3(fineGridDims);
-  const coarseDims = fineDims.map((n) => Math.max(1, Math.ceil(n / 2)));
+  const shift = Math.max(0, Math.round(finiteNumber(gridShift, 0)));
+  // With a shift, coarse cell c covers fine logical cells 2(c-shift)..2(c-shift)+1
+  // (plus the shared shift border), so the coarse grid needs
+  // ceil((n - shift) / 2) + shift indices to cover every fine node.
+  const coarseDims = coarseGridDims
+    ? gridDims3(coarseGridDims)
+    : fineDims.map((n) => Math.max(1, Math.ceil((n - shift) / 2) + shift));
+  const zFastest = indexOrder === SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST;
+  const resolvedFlags = (Math.max(0, Math.round(finiteNumber(flags, 0)))
+    | (accumulate ? SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE : 0)
+    | (zFastest ? SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST : 0)
+    | (velocityGrids ? SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS : 0)) >>> 0;
   const strideFloats = positiveInteger(gridStrideFloats, MLS_MPM_GPU_GRID_NODE_FLOATS);
   const fineNodeCount = fineDims[0] * fineDims[1] * fineDims[2];
   const coarseNodeCount = coarseDims[0] * coarseDims[1] * coarseDims[2];
@@ -128,7 +157,20 @@ export function createSchroederCrossLevelGridCouplingPlan({
       * Float32Array.BYTES_PER_ELEMENT,
     conservedQuantities: ['mass', 'momentum'],
     couplingEpoch: Math.max(0, Math.round(finiteNumber(couplingEpoch, 0))),
-    flags: Math.max(0, Math.round(finiteNumber(flags, 0))),
+    indexOrder: zFastest
+      ? SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST
+      : SCHROEDER_GRID_INDEX_ORDER_X_FASTEST,
+    gridShift: shift,
+    accumulate: (resolvedFlags & SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE) !== 0,
+    velocityGrids: (resolvedFlags & SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS) !== 0,
+    // Sealed-box dims enable the delta-prolongation boundary-band mask; zero
+    // dims disable it (open/chartless grids).
+    boxDimsM: [
+      Math.max(0, finiteNumber(boxDimsM?.[0], 0)),
+      Math.max(0, finiteNumber(boxDimsM?.[1], 0)),
+      Math.max(0, finiteNumber(boxDimsM?.[2], 0))
+    ],
+    flags: resolvedFlags,
     gpuFirst: true,
     cpuReferenceRequired: false,
     fullParticleReadbackRequired: false
@@ -136,7 +178,7 @@ export function createSchroederCrossLevelGridCouplingPlan({
 }
 
 export function createSchroederCrossLevelGridCouplingParamsArray(plan) {
-  const buffer = new ArrayBuffer(48);
+  const buffer = new ArrayBuffer(SCHROEDER_GRID_COUPLING_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, plan.fineGridDims[0], true);
   view.setUint32(4, plan.fineGridDims[1], true);
@@ -150,6 +192,10 @@ export function createSchroederCrossLevelGridCouplingParamsArray(plan) {
   view.setFloat32(36, plan.gridOriginM[0], true);
   view.setFloat32(40, plan.gridOriginM[1], true);
   view.setFloat32(44, plan.gridOriginM[2], true);
+  view.setInt32(48, plan.gridShift ?? 0, true);
+  view.setFloat32(52, plan.boxDimsM?.[0] ?? 0, true);
+  view.setFloat32(56, plan.boxDimsM?.[1] ?? 0, true);
+  view.setFloat32(60, plan.boxDimsM?.[2] ?? 0, true);
   return buffer;
 }
 
@@ -199,7 +245,7 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
     };
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-grid-restriction-params',
-    size: 48,
+    size: SCHROEDER_GRID_COUPLING_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   let returnedRetainedCoarseBuffer = false;
@@ -293,7 +339,7 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-grid-prolongation-params',
-    size: 48,
+    size: SCHROEDER_GRID_COUPLING_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   let returnedRetainedFineBuffer = false;
@@ -367,6 +413,115 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
  * readback and is a single 16-float row, matching the compact-counter
  * allowance in the SS GPU-first rules.
  */
+/**
+ * Delta-form prolongation (AMR velocity correction): every massive fine node
+ * receives the change in its parent's velocity across the coarse grid update
+ * (`fine_v += post_v(parent) - pre_v(parent)`). Because a force-free field
+ * has zero delta, this transfer contributes no error of its own, unlike a
+ * direct velocity copy which injects quantized tiny-mass parent velocities
+ * into fine nodes. Pre grid is momentum-layout, post grid velocity-layout,
+ * fine grid velocity-layout; the fine buffer mutates in place.
+ */
+export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
+  device,
+  plan = null,
+  coarsePreGridBuffer = null,
+  coarsePreGridRows = null,
+  coarsePostGridBuffer = null,
+  coarsePostGridRows = null,
+  fineGridBuffer = null,
+  fineGridRows = null,
+  retainFineGridBuffer = true,
+  ...planOptions
+} = {}) {
+  assertWebGpuDevice(device, 'runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu');
+  const resolvedPlan = plan || createSchroederCrossLevelGridCouplingPlan(planOptions);
+  const coarsePre = resolveGridInput(device, 'ulg-schroeder-grid-delta-prolongation-coarse-pre-in', {
+    buffer: coarsePreGridBuffer,
+    rows: coarsePreGridRows
+  });
+  const coarsePost = resolveGridInput(device, 'ulg-schroeder-grid-delta-prolongation-coarse-post-in', {
+    buffer: coarsePostGridBuffer,
+    rows: coarsePostGridRows
+  });
+  const fine = resolveGridInput(device, 'ulg-schroeder-grid-delta-prolongation-fine-inout', {
+    buffer: fineGridBuffer,
+    rows: fineGridRows
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-schroeder-grid-delta-prolongation-params',
+    size: SCHROEDER_GRID_COUPLING_PARAMS_BYTES,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  let returnedRetainedFineBuffer = false;
+  try {
+    device.queue.writeBuffer(paramsBuffer, 0, createSchroederCrossLevelGridCouplingParamsArray(resolvedPlan));
+    const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation.v0',
+      label: 'ulg-schroeder-cross-level-grid-velocity-delta-prolongation',
+      code: schroederCrossLevelGridVelocityDeltaProlongationWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform')
+      ]
+    });
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: coarsePre.gridBuffer } },
+        { binding: 1, resource: { buffer: coarsePost.gridBuffer } },
+        { binding: 2, resource: { buffer: fine.gridBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(resolvedPlan.fineNodeCount / SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+
+    const result = {
+      ...resolvedPlan,
+      schema: ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_EXECUTION_SCHEMA,
+      couplingPlanSchema: ULG_SCHROEDER_CROSS_LEVEL_GRID_PROLONGATION_SCHEMA,
+      status: 'schroeder-cross-level-grid-velocity-delta-prolongation-submitted',
+      prolongationMode: 'coarse-velocity-delta-correction',
+      backend: 'webgpu',
+      pipelineCacheStatus: cacheStatus,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      fullReadbackPerformed: false,
+      fullParticleReadbackPerformed: false,
+      normalHotLoopReadbackFree: true,
+      retainedFineGridBuffer: Boolean(retainFineGridBuffer || fine.borrowed),
+      conservativeTransferStatus:
+        'grid-velocity-delta-prolongation-submitted-parent-update-correction',
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (retainFineGridBuffer || fine.borrowed) {
+      result.fineGridBuffer = fine.gridBuffer;
+      if (!fine.borrowed) {
+        result.destroyFineGridBuffer = () => fine.gridBuffer.destroy?.();
+      }
+      returnedRetainedFineBuffer = true;
+    }
+    return result;
+  } finally {
+    const cleanup = () => {
+      if (!coarsePre.borrowed) coarsePre.gridBuffer.destroy?.();
+      if (!coarsePost.borrowed) coarsePost.gridBuffer.destroy?.();
+      if (!fine.borrowed && !returnedRetainedFineBuffer) fine.gridBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+    };
+    deferSubmittedWorkCleanup(device, cleanup);
+  }
+}
+
 export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
   device,
   plan = null,
@@ -395,7 +550,7 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-grid-conservation-summary-params',
-    size: 48,
+    size: SCHROEDER_GRID_COUPLING_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const readBuffer = compactReadback
@@ -509,30 +664,52 @@ export function decodeSchroederCrossLevelGridConservationSummaryRow(row) {
 // velocity fields. They are numerical oracles for tests and explicitly not
 // a runtime execution path: the SS hot path stays GPU-resident.
 
-export function restrictGridRowsCpuOracle(plan, fineRows) {
+function gridAxisIndexForPlan(plan, x, y, z, dims) {
+  if (plan.indexOrder === SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST) {
+    return x * dims[1] * dims[2] + y * dims[2] + z;
+  }
+  return x + dims[0] * (y + dims[1] * z);
+}
+
+function fineChildAxisForPlan(plan, coarseAxis, child) {
+  const shift = plan.gridShift ?? 0;
+  return 2 * (coarseAxis - shift) + shift + child;
+}
+
+function coarseParentAxisForPlan(plan, fineAxis, coarseN) {
+  const shift = plan.gridShift ?? 0;
+  const logical = fineAxis - shift;
+  const parent = logical >= 0 ? Math.floor(logical / 2) : -Math.floor((-logical + 1) / 2);
+  return Math.min(Math.max(parent + shift, 0), coarseN - 1);
+}
+
+export function restrictGridRowsCpuOracle(plan, fineRows, coarseRowsInOut = null) {
   const stride = plan.gridStrideFloats;
   const [nx, ny, nz] = plan.fineGridDims;
   const [cnx, cny, cnz] = plan.coarseGridDims;
-  const coarseRows = new Float64Array(plan.coarseNodeCount * stride);
+  const accumulate = plan.accumulate === true && coarseRowsInOut;
+  const coarseRows = coarseRowsInOut
+    ? Float64Array.from(coarseRowsInOut)
+    : new Float64Array(plan.coarseNodeCount * stride);
   for (let cz = 0; cz < cnz; cz += 1) {
     for (let cy = 0; cy < cny; cy += 1) {
       for (let cx = 0; cx < cnx; cx += 1) {
-        const coarseIndex = cx + cnx * (cy + cny * cz);
+        const coarseIndex = gridAxisIndexForPlan(plan, cx, cy, cz, plan.coarseGridDims);
         const offset = coarseIndex * stride;
         let mass = 0;
         let px = 0;
         let py = 0;
         let pz = 0;
         for (let dz = 0; dz < 2; dz += 1) {
-          const fz = cz * 2 + dz;
-          if (fz >= nz) continue;
+          const fz = fineChildAxisForPlan(plan, cz, dz);
+          if (fz < 0 || fz >= nz) continue;
           for (let dy = 0; dy < 2; dy += 1) {
-            const fy = cy * 2 + dy;
-            if (fy >= ny) continue;
+            const fy = fineChildAxisForPlan(plan, cy, dy);
+            if (fy < 0 || fy >= ny) continue;
             for (let dx = 0; dx < 2; dx += 1) {
-              const fx = cx * 2 + dx;
-              if (fx >= nx) continue;
-              const fineOffset = (fx + nx * (fy + ny * fz)) * stride;
+              const fx = fineChildAxisForPlan(plan, cx, dx);
+              if (fx < 0 || fx >= nx) continue;
+              const fineOffset = gridAxisIndexForPlan(plan, fx, fy, fz, plan.fineGridDims) * stride;
               mass += Math.max(0, fineRows[fineOffset]);
               px += fineRows[fineOffset + 1];
               py += fineRows[fineOffset + 2];
@@ -540,14 +717,24 @@ export function restrictGridRowsCpuOracle(plan, fineRows) {
             }
           }
         }
-        coarseRows[offset] = mass;
-        coarseRows[offset + 1] = px;
-        coarseRows[offset + 2] = py;
-        coarseRows[offset + 3] = pz;
-        coarseRows[offset + 4] = plan.gridOriginM[0] + cx * plan.coarseGridSpacingM;
-        coarseRows[offset + 5] = plan.gridOriginM[1] + cy * plan.coarseGridSpacingM;
-        coarseRows[offset + 6] = plan.gridOriginM[2] + cz * plan.coarseGridSpacingM;
-        coarseRows[offset + 7] = mass > 0 ? 1 : 0;
+        if (accumulate) {
+          const total = coarseRows[offset] + mass;
+          coarseRows[offset] = total;
+          coarseRows[offset + 1] += px;
+          coarseRows[offset + 2] += py;
+          coarseRows[offset + 3] += pz;
+          if (total > 0) coarseRows[offset + 7] = 1;
+        } else {
+          const shift = plan.gridShift ?? 0;
+          coarseRows[offset] = mass;
+          coarseRows[offset + 1] = px;
+          coarseRows[offset + 2] = py;
+          coarseRows[offset + 3] = pz;
+          coarseRows[offset + 4] = plan.gridOriginM[0] + (cx - shift) * plan.coarseGridSpacingM;
+          coarseRows[offset + 5] = plan.gridOriginM[1] + (cy - shift) * plan.coarseGridSpacingM;
+          coarseRows[offset + 6] = plan.gridOriginM[2] + (cz - shift) * plan.coarseGridSpacingM;
+          coarseRows[offset + 7] = mass > 0 ? 1 : 0;
+        }
       }
     }
   }
@@ -562,17 +749,25 @@ export function prolongGridRowsCpuOracle(plan, coarseRows, fineRows) {
   for (let fz = 0; fz < nz; fz += 1) {
     for (let fy = 0; fy < ny; fy += 1) {
       for (let fx = 0; fx < nx; fx += 1) {
-        const cx = Math.min(Math.floor(fx / 2), cnx - 1);
-        const cy = Math.min(Math.floor(fy / 2), cny - 1);
-        const cz = Math.min(Math.floor(fz / 2), cnz - 1);
-        const coarseOffset = (cx + cnx * (cy + cny * cz)) * stride;
+        const cx = coarseParentAxisForPlan(plan, fx, cnx);
+        const cy = coarseParentAxisForPlan(plan, fy, cny);
+        const cz = coarseParentAxisForPlan(plan, fz, cnz);
+        const coarseOffset = gridAxisIndexForPlan(plan, cx, cy, cz, plan.coarseGridDims) * stride;
         const coarseMass = coarseRows[coarseOffset];
         if (!(coarseMass > 0)) continue;
-        const fineOffset = (fx + nx * (fy + ny * fz)) * stride;
+        const fineOffset = gridAxisIndexForPlan(plan, fx, fy, fz, plan.fineGridDims) * stride;
         const fineMass = Math.max(0, out[fineOffset]);
-        out[fineOffset + 1] = (fineMass * coarseRows[coarseOffset + 1]) / coarseMass;
-        out[fineOffset + 2] = (fineMass * coarseRows[coarseOffset + 2]) / coarseMass;
-        out[fineOffset + 3] = (fineMass * coarseRows[coarseOffset + 3]) / coarseMass;
+        if (plan.velocityGrids === true) {
+          if (fineMass > 0) {
+            out[fineOffset + 1] = coarseRows[coarseOffset + 1];
+            out[fineOffset + 2] = coarseRows[coarseOffset + 2];
+            out[fineOffset + 3] = coarseRows[coarseOffset + 3];
+          }
+        } else {
+          out[fineOffset + 1] = (fineMass * coarseRows[coarseOffset + 1]) / coarseMass;
+          out[fineOffset + 2] = (fineMass * coarseRows[coarseOffset + 2]) / coarseMass;
+          out[fineOffset + 3] = (fineMass * coarseRows[coarseOffset + 3]) / coarseMass;
+        }
       }
     }
   }

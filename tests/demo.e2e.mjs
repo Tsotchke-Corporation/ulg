@@ -13037,11 +13037,15 @@ test('SPH phase continuation scene keeps simulating on the merged particle set a
   const sampleState = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const execution = overlay?.__mlsMpmResidentSteps || null;
+    const diagnostics = execution?.finalStep?.diagnostics || null;
     return {
       count: execution?.finalStep?.nextParticleCount ?? null,
       source: execution?.finalStep?.schroederParticleStorageMaterialization?.sourceParticleCount ?? null,
       simTime: execution?.nextSphParticleState?.time ?? null,
-      status: execution?.status ?? null
+      status: execution?.status ?? null,
+      compactGpuSummaryAvailable: diagnostics?.compactGpuSummaryAvailable === true,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      centerOfMassM: diagnostics?.nextCenterOfMassM ?? null
     };
   });
   await page.waitForFunction(() => {
@@ -13065,6 +13069,62 @@ test('SPH phase continuation scene keeps simulating on the merged particle set a
   expect(first.count).toBeLessThan(35);
   expect(second.count).toBe(first.count);
   expect(second.simTime).toBeGreaterThan(first.simTime);
+  // KNOWN GAP (see fixme test below): the numeric motion proof on the
+  // merged set currently reads zero mass from the compact summary after
+  // storage adoption; assert only that the summary is present here.
+  expect(second.compactGpuSummaryAvailable).toBe(true);
+});
+
+// KNOWN GAP - executable acceptance gate for the next slice. After live
+// coarsening adopts the merged storage, the compact GPU summary reports
+// zero mass, zero center of mass, and zero displacement: either the
+// merged-set continuation does not actually simulate (coarsened level-1
+// particles are copy-through'd by the single-level selectedLevel=0 filter,
+// the gap the "merges/splits under two-level authority" slice closes), or
+// the summary binds buffers superseded by adoption. Un-fixme when the
+// merged-set continuation proves motion numerically.
+test.fixme('SPH phase merged-set continuation proves motion numerically after live coarsening', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  const sample = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const diagnostics = execution?.finalStep?.diagnostics || null;
+    return {
+      count: execution?.finalStep?.nextParticleCount ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      nextMassKg: diagnostics?.nextMassKg ?? null,
+      centerOfMassM: diagnostics?.nextCenterOfMassM ?? null
+    };
+  });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    const count = Number(execution?.finalStep?.nextParticleCount);
+    return Number.isFinite(time) && time > 0.05 && Number.isFinite(count) && count > 0 && count < 35;
+  }, null, { timeout: 120_000 });
+  const first = await sample();
+  await page.waitForTimeout(10_000);
+  const second = await sample();
+  // The merged set must carry mass and evolve: a healthy continuation has
+  // positive summary mass, nonzero per-step displacement, and a moving
+  // center of mass.
+  expect(second.nextMassKg).toBeGreaterThan(0);
+  expect(second.maxDisplacementM).toBeGreaterThan(0);
+  const centerOfMassMoved = Array.isArray(first.centerOfMassM)
+    && Array.isArray(second.centerOfMassM)
+    && Math.hypot(
+      second.centerOfMassM[0] - first.centerOfMassM[0],
+      second.centerOfMassM[1] - first.centerOfMassM[1],
+      second.centerOfMassM[2] - first.centerOfMassM[2]
+    ) > 1e-6;
+  expect(centerOfMassMoved).toBe(true);
 });
 
 test('Schroeder two-level coupled step runs both levels in one shared particle set with conservation', async ({ page }) => {

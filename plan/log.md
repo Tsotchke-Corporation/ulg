@@ -37036,3 +37036,23 @@ Numeric validation (browser, real GPU):
 Follow-ups queued in the plan: re-verify live merge/split gates on the now-
 moving mounted sim, add a mounted motion gate to the e2e battery, active-
 node GRID gating for sparse efficiency if profiling justifies it.
+
+## 2026-07-03 - Merged-set continuation after live coarsening fails the
+   motion gate (known gap, executable fixme acceptance test)
+
+Re-verifying the live-coarsening flagship on the now-moving sim: the count
+and conservation gates still pass, but extending the continuation proof
+with the numeric motion gate exposed that the POST-ADOPTION merged-set
+continuation reads zero mass, zero center of mass, and zero displacement
+from the compact GPU summary while sim time advances. Two candidate causes
+(not yet isolated): (a) coarsened level-1 particles are copy-through'd by
+the single-level selectedLevel=0 assignment filter, so the merged set has
+no mechanics - the exact gap the "merges/splits under two-level authority"
+slice is queued to close; (b) the compact summary binds buffers superseded
+by storage adoption (measurement bug). Zero MASS in the summary leans (b)
+or both: even a frozen set should report its mass.
+
+Recorded as `test.fixme('SPH phase merged-set continuation proves motion
+numerically after live coarsening')` - the executable acceptance gate for
+the next slice. The original continuation proof keeps its count/sim-time
+gates plus a summary-presence assertion.

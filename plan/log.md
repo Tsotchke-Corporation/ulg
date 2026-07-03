@@ -37220,3 +37220,16 @@ the mechanics schedule mode in some config, or a policy gate downgraded by
 the count-changing adoption). Note the anti-freeze e2e gates would catch
 this as frozen displacement if pointed at this scene config - consider
 promoting the boiling config into the gate matrix once fixed.
+
+Additional clue: in the healthy ironh=1.01 scene the FIRST schedule ran
+mixed modes (step 0 full-parity-readback, steps 1-3 no-full-readback), so
+finalStep.readbackMode = no-full and the continuation gate passed. In the
+stalled ironh=1.5 scene ALL FOUR steps of every schedule run
+full-parity-readback, so finalStep.readbackMode = full-parity and
+residentGpuContinuationReady rejects it forever. Find what flips the
+per-step mode to no-full after step 0 in the healthy scene and why the
+hotter scene never flips (scene default readback mode is 'no-full-readback'
+per SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT; scheduling likely passes
+full-parity for the initial pack and something in the hot scene keeps
+re-triggering the initial-pack path - e.g. a reset/invalidation per
+schedule from the count-changing adoption).

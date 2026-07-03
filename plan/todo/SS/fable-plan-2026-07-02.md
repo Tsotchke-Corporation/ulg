@@ -4,9 +4,29 @@ Date: 2026-07-02
 Branch: `SS`
 Status: Phase 0 landed in `a1e5378`. Phase 1 landed in `320917c` (coupling
 operator), `91da8cf` (two-level co-simulation), and `9048d4d` (admitted split
-count mutation). Remaining follow-ups: orchestration wiring for the count
-summary, free-slot compaction for merges, then the deferred distribution
-work.
+count mutation). The follow-up arc landed in `52362e6` (compaction),
+`6fb7462` (orchestration wiring), `d6956d9` (live leader-elected merges +
+the allocator-admission capacity fix), `b4f4cb2` (momentum-conserving
+merges), `75d266f` (mass-correct splits), `3066994` (thermal averaging +
+entity counts), `7c1e1ec` (continuation stability after live coarsening),
+and `4575083` (performance: SS overhead noise-level at 1k-8k particles).
+
+The flagship acceptance gate now runs live and stable: steam scenes coarsen
+their own particle count through admitted leader-elected merges with mass,
+momentum, represented volume, thermal energy (uniform-c), and entity counts
+conserved, and the continuation keeps simulating on the merged set.
+
+Next up (unstarted):
+
+1. Live split policy: refine-pressure conditions near interfaces/walls in
+   scenes (the chain is proven; enabling it in scenes is a policy slice).
+2. Time integration across levels (subcycling) - the big one; the two-level
+   co-simulation currently shares one dt.
+3. Native-renderer + replay-mode diagnostic scenes emit repeated AbortError
+   refresh failures after count-changing adoption (continuous path is
+   unaffected) - triage.
+4. The deferred distribution work (portable rematerializer, worker-owned
+   adopted storage).
 Author: Claude (Fable), taking over from the codex handoff
 (`fable-handoff-2026-07-02.md`).
 

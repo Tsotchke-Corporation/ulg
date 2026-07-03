@@ -10406,8 +10406,10 @@ export function createSphPhaseScene(container, {
       && Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0)) > 0
       // Stale CPU arrays under GPU-resident continuation would freeze the
       // worker canvas at the packed t=0 positions (content-hash cache is
-      // reused forever); prefer fresh render rows in that case.
-      && sphParticleState?.cpuStateStale !== true
+      // reused forever); prefer fresh render rows whenever this refresh
+      // actually decoded them. Pinned-no-full diagnostic refreshes carry no
+      // fresh rows, so the cached producer frame remains the honest output.
+      && (sphParticleState?.cpuStateStale !== true || !(positionsM?.length > 0))
     );
     const drawFn = useResidentProducer
       ? workerOffscreenPresentationBridge.drawResidentRenderProducer.bind(workerOffscreenPresentationBridge)
@@ -25546,6 +25548,12 @@ export function createSphPhaseScene(container, {
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.effectiveMode
         === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
         && !explicitMainThreadSurfaceDrawBridgeRequested;
+      // Callers that explicitly pin no-full rows (diagnostic refreshes)
+      // cannot receive fresh rows anyway; for them the stale producer frame
+      // is the accepted presentation and the fallback must not force a
+      // full readback into a pinned-no-full refresh.
+      const callerPinnedNoFullRenderRows =
+        renderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE;
       const useWorkerOwnedResidentParticleStateProducer = Boolean(
         useWorkerOwnedResidentRenderProducer
         && nextSphParticleState?.state instanceof Float32Array
@@ -25556,7 +25564,7 @@ export function createSphPhaseScene(container, {
         // cache would render the initial positions forever while sim time
         // advances. Fall through to the compact render-row transfer, which
         // reads back fresh GPU rows at the visual cadence.
-        && nextSphParticleState?.cpuStateStale !== true
+        && (nextSphParticleState?.cpuStateStale !== true || callerPinnedNoFullRenderRows)
       );
       const renderRowReadbackPlan = resolveResidentRenderRowBridgeReadbackPlan({
         requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeFromCaller,

@@ -37066,3 +37066,39 @@ simulation itself also freezes on the merged set is still open - fix the
 summary's post-adoption bindings first (bind the adopted state/mechanics
 buffers as "next" and the pre-step adopted uploads as "source"), then
 re-read the motion gate to judge the mechanics.
+
+## 2026-07-03 - Merged-set continuation freeze resolved: empty step.state
+   poisoned the CPU chain; buffer sizing hardened; render bridge copies
+
+The zero-mass merged-set summary had three stacked causes, found by
+instrumented probes (uncapturederror hooks, per-step provenance with CPU
+array lengths):
+
+1. **Empty step.state adopted into the continuation.** The first scheduled
+   SS step runs `full-parity-readback` (initial visual refresh). On that
+   branch `cloneSphParticleStateForNext` fell through to `step.state`,
+   which the SS orchestrator path leaves as an empty Float32Array, and
+   adopted it without a length guard - permanently replacing the packed
+   35-row CPU state with a 0-length array. Both clone functions now refuse
+   empty arrays and fall back to the source arrays.
+2. **GPU output buffers sized from CPU arrays.** The fused mechanics,
+   standalone G2P, thermal, mechanics-refresh, and reaction kernels sized
+   their output buffers from `state/thermo/mechanics.byteLength`; with the
+   poisoned 0-length arrays they allocated 4-byte outputs and every
+   downstream bind failed validation ("[Buffer ...] bound with size 4 ...
+   is too small", 250+ invalid command buffers per run). All five now size
+   from `particleCount * stride` as the floor.
+3. **The offscreen render bridge transferred the live physics arrays.**
+   `drawResidentParticleStateProducer` put `state.buffer`/`thermo.buffer`
+   in its postMessage transfer list on every producer cache miss,
+   detaching the scene's authoritative CPU arrays. It now transfers
+   copies.
+
+Validation: merged-set summary reports positive conserved mass (944.87 kg
+over 27 rows, source == next), nonzero per-step displacement (settled-pool
+equilibrium; a frozen sim reports exactly 0), zero WebGPU validation
+errors. The fixme acceptance gate is promoted to a real test with
+equilibrium-safe assertions (mass > 0, maxDisplacementM > 0, sim time
+advancing; center of mass finite but allowed to be static once settled).
+Unit suite 980/977/0. Scene provenance now records per-step CPU array
+lengths alongside upload provenance.

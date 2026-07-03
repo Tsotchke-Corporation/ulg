@@ -459,10 +459,15 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     mlsMpmParticleUpload
   });
   const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
+  // Never size GPU outputs from the CPU arrays alone: under GPU-resident
+  // continuation the CPU copies can be stale or detached (byteLength 0).
   const outMechanicsBuffer = createOutputStorageBuffer(
     device,
     'ulg-mls-mpm-mechanics-refresh-output-mechanics',
-    mlsMpmParticleState.mechanics.byteLength,
+    Math.max(
+      mlsMpmParticleState.mechanics.byteLength,
+      mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+    ),
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({

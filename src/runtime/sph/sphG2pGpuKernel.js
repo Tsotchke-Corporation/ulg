@@ -646,8 +646,20 @@ export async function runMlsMpmG2pWebGpu({
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
   const dtSeconds = finiteNumber(dt, 0);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
-  const stateByteLength = sphParticleState.state.byteLength;
-  const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  // Never size GPU output buffers from the CPU arrays alone: under
+  // GPU-resident continuation the CPU copies can be stale or detached
+  // (byteLength 0), which would allocate 4-byte outputs and fail every
+  // downstream binding. particleCount * stride is authoritative.
+  const stateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+      ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const mechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+      ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded' ? mlsMpmParticleUpload.mechanicsBuffer : null;

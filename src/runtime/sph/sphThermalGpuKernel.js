@@ -1510,16 +1510,26 @@ export function createSphThermalStepWebGpuEncoderStage({
     sphParticleUpload
   });
   const outputBufferInitializationMode = 'shader-writes-all-particle-rows';
+  // Never size GPU outputs from the CPU arrays alone: under GPU-resident
+  // continuation the CPU copies can be stale or detached (byteLength 0).
+  const outStateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outThermoByteLength = Math.max(
+    sphParticleState.thermo.byteLength,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
   const outStateBuffer = createOutputStorageBuffer(
     device,
     'ulg-sph-thermal-output-state',
-    sphParticleState.state.byteLength,
+    outStateByteLength,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const outThermoBuffer = createOutputStorageBuffer(
     device,
     'ulg-sph-thermal-output-thermo',
-    sphParticleState.thermo.byteLength,
+    outThermoByteLength,
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const paramsBuffer = device.createBuffer({
@@ -1616,8 +1626,8 @@ export function createSphThermalStepWebGpuEncoderStage({
     boxDimsM: dims,
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
-    stateBufferByteLength: sphParticleState.state.byteLength,
-    thermoBufferByteLength: sphParticleState.thermo.byteLength,
+    stateBufferByteLength: outStateByteLength,
+    thermoBufferByteLength: outThermoByteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
     destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     outputBufferInitializationMode,
@@ -1637,8 +1647,8 @@ export function createSphThermalStepWebGpuEncoderStage({
     result,
     stateBuffer: outStateBuffer,
     thermoBuffer: outThermoBuffer,
-    stateBufferByteLength: sphParticleState.state.byteLength,
-    thermoBufferByteLength: sphParticleState.thermo.byteLength,
+    stateBufferByteLength: outStateByteLength,
+    thermoBufferByteLength: outThermoByteLength,
     encode(encoder) {
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);

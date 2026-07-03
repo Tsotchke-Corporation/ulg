@@ -2436,9 +2436,20 @@ export async function runSphReactionStepWebGpu({
     new Float32Array(packedParticleRecords.length),
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(sphParticleState.state.length), GPU_BUFFER_USAGE.COPY_SRC);
-  const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(sphParticleState.thermo.length), GPU_BUFFER_USAGE.COPY_SRC);
-  const outMechanicsBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(mlsMpmParticleState.mechanics.length), GPU_BUFFER_USAGE.COPY_SRC);
+  // Never size GPU outputs from the CPU arrays alone: under GPU-resident
+  // continuation the CPU copies can be stale or detached (length 0).
+  const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(Math.max(
+    sphParticleState.state.length,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
+  )), GPU_BUFFER_USAGE.COPY_SRC);
+  const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(Math.max(
+    sphParticleState.thermo.length,
+    sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
+  )), GPU_BUFFER_USAGE.COPY_SRC);
+  const outMechanicsBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(Math.max(
+    mlsMpmParticleState.mechanics.length,
+    mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+  )), GPU_BUFFER_USAGE.COPY_SRC);
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-reaction-params',
     size: 48,

@@ -3276,8 +3276,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const p2gAccumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
   const p2gAccumulatorByteLength = p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
   const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const stateByteLength = sphParticleState.state.byteLength;
-  const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  // Never size GPU output buffers from the CPU arrays alone: under
+  // GPU-resident continuation the CPU copies can be stale or detached
+  // (byteLength 0), which would allocate 4-byte outputs and fail every
+  // downstream binding. particleCount * stride is authoritative.
+  const stateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+      ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const mechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+      ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
   const activeGridDispatch = resolveFusedActiveGridDispatch({
     requested: fuseActiveGrid,
     sphParticleState,
@@ -3809,8 +3821,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   const p2gAccumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
   const p2gAccumulatorByteLength = p2gAccumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
   const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const stateByteLength = sphParticleState.state.byteLength;
-  const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  // Never size GPU output buffers from the CPU arrays alone: under
+  // GPU-resident continuation the CPU copies can be stale or detached
+  // (byteLength 0), which would allocate 4-byte outputs and fail every
+  // downstream binding. particleCount * stride is authoritative.
+  const stateByteLength = Math.max(
+    sphParticleState.state.byteLength,
+    sphParticleState.particleCount * (sphParticleState.stateStrideBytes
+      ?? SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const mechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount * (mlsMpmParticleState.mechanicsStrideBytes
+      ?? MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
   const useThermalSidecarFusion = Boolean(
     sidecarFusionPlan?.sequenceRunnableWithSidecars === true
     && sidecarFusionPlan?.sidecarBlockers?.length === 1
@@ -16768,7 +16792,14 @@ export function cloneSphParticleStateForNext(source, step) {
           ? reactionResult.state
           : (thermalResult?.state?.length
               ? thermalResult.state
-              : (schroederFarForceResult?.state?.length ? schroederFarForceResult.state : step.state))),
+              : (schroederFarForceResult?.state?.length
+                  ? schroederFarForceResult.state
+                  // Never adopt an empty step.state: steps that skip the CPU
+                  // readback (e.g. the SS orchestrator path) carry an empty
+                  // array, and adopting it permanently poisons the CPU chain
+                  // (every consumer sizing or falling back to CPU rows then
+                  // sees zero-length state).
+                  : (step.state?.length ? step.state : source.state)))),
     cpuStateStale: noFullReadback,
     thermo: noFullReadback ? source.thermo : (reactionResult?.thermo?.length ? reactionResult.thermo : (thermalResult?.thermo?.length ? thermalResult.thermo : source.thermo)),
     residentPositionBoundsM: continuationBounds.boundsM,
@@ -16796,7 +16827,12 @@ export function cloneMlsMpmParticleStateForNext(source, step) {
     particleCount: schroederParticleStorageParticleCount ?? source.particleCount,
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    mechanics: noFullReadback ? source.mechanics : (reactionResult?.mechanics?.length ? reactionResult.mechanics : step.mechanics),
+    // Never adopt an empty step.mechanics (see cloneSphParticleStateForNext).
+    mechanics: noFullReadback
+      ? source.mechanics
+      : (reactionResult?.mechanics?.length
+          ? reactionResult.mechanics
+          : (step.mechanics?.length ? step.mechanics : source.mechanics)),
     cpuStateStale: noFullReadback
   };
 }

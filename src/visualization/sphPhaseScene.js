@@ -20560,7 +20560,9 @@ export function createSphPhaseScene(container, {
               sphUploadStateBufferBound: Boolean(currentSphParticleUpload?.stateBuffer),
               mlsUploadStatus: currentMlsMpmParticleUpload?.status ?? null,
               mlsUploadMechanicsBufferBound: Boolean(currentMlsMpmParticleUpload?.mechanicsBuffer),
-              sourceStateStep: currentSphParticleState?.step ?? null
+              sourceStateStep: currentSphParticleState?.step ?? null,
+              sourceStateParticleCount: currentSphParticleState?.particleCount ?? null,
+              sourceStateCpuLen: currentSphParticleState?.state?.length ?? null
             });
             const residentStepOptions = {
               ...baseOptions,
@@ -20722,6 +20724,17 @@ export function createSphPhaseScene(container, {
             }
             finalStep = step;
             finalSchroederResult = schroederResult;
+            {
+              const provenanceEntry = uploadProvenance[uploadProvenance.length - 1];
+              if (provenanceEntry) {
+                provenanceEntry.stepReadbackMode = step.readbackMode ?? null;
+                provenanceEntry.stepStateLen = step.state?.length ?? null;
+                provenanceEntry.stepThermalStateLen =
+                  (step.thermalStep?.result || step.thermalStep)?.state?.length ?? null;
+                provenanceEntry.stepReactionStateLen =
+                  (step.reactionStep?.result || step.reactionStep)?.state?.length ?? null;
+              }
+            }
             currentSphParticleState = cloneSphParticleStateForNext(currentSphParticleState, step);
             currentMlsMpmParticleState = cloneMlsMpmParticleStateForNext(currentMlsMpmParticleState, step);
             currentSphParticleUpload = step.nextParticleUploads?.sphParticleUpload ?? null;

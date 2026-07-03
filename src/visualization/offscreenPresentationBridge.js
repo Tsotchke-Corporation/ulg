@@ -1162,10 +1162,23 @@ export function createUlgWorkerOffscreenPresentationBridge({
       };
       const transferList = [viewProjection.buffer];
       if (!sourceCacheReusable) {
-        message.sourceState = state;
-        message.sourceThermo = thermo;
-        message.materialColorRows = expected.colorRows;
-        transferList.unshift(state.buffer, thermo.buffer, expected.colorRows.buffer);
+        // Transfer COPIES: state/thermo are the scene's authoritative packed
+        // particle arrays. Transferring their live buffers detaches them on
+        // the main thread (byteLength 0), and every runner that sizes GPU
+        // output buffers from state.byteLength then allocates 4-byte buffers
+        // and fails validation - this froze the post-adoption merged-set
+        // continuation. colorRows may also be cached by the caller.
+        const sourceStateCopy = state.slice();
+        const sourceThermoCopy = thermo.slice();
+        const materialColorRowsCopy = expected.colorRows.slice();
+        message.sourceState = sourceStateCopy;
+        message.sourceThermo = sourceThermoCopy;
+        message.materialColorRows = materialColorRowsCopy;
+        transferList.unshift(
+          sourceStateCopy.buffer,
+          sourceThermoCopy.buffer,
+          materialColorRowsCopy.buffer
+        );
         this.residentParticleStateProducerCacheKey = normalizedSourceCacheKey;
         this.residentParticleStateProducerParticleCount = expected.particleCount;
         this.residentParticleStateProducerStateStrideFloats = expected.stateStrideFloats;

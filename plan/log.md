@@ -37206,3 +37206,17 @@ set, free-list/budget exhaustion, or a scheduling gate rejecting the
 continuation), then continue the live split policy work: verify refine rows
 flow through proposal -> allocation slot action 4 (divide-mass) ->
 materialization in a live scene once one actually boils.
+
+Stall diagnosis pinpointed: the scene re-simulates t=0 -> 0.002 every
+schedule. The published execution's readbackMode is 'full-parity-readback'
+(provenance: stepReadbackMode full-parity on all 4 steps, sourceStateStep
+max 3, continuedFromResidentState false while continuationAvailable true).
+residentGpuContinuationReady requires readbackMode 'no-full-readback', so
+each schedule restarts from the CPU pack at t=0 - an unbounded replay
+treadmill. Question for the fix: WHY does this scene's every schedule run
+full-parity readback while the ironh=1.01 variant switches to no-full
+continuation (suspects: render-mode requiresFreshPhysicsReadback forcing
+the mechanics schedule mode in some config, or a policy gate downgraded by
+the count-changing adoption). Note the anti-freeze e2e gates would catch
+this as frozen displacement if pointed at this scene config - consider
+promoting the boiling config into the gate matrix once fixed.

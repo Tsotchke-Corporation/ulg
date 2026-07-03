@@ -1,5 +1,5 @@
 import {
-  SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
@@ -41,7 +41,7 @@ const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const G2P_SCOPE = 'mls-mpm-g2p-velocity-affine-deformation-reconstruction';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
-const SCHROEDER_ACTIVE_NODE_FLOATS = SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
+const SCHROEDER_LEVEL_ASSIGNMENT_FLOATS = SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
 const EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
   taitCondensed: 1
@@ -608,7 +608,7 @@ function createParamsArray({
   view.setFloat32(56, finiteNumber(internalPressureScale, 1), true);
   view.setFloat32(60, clamp(finiteNumber(liquidWallDampingAlpha, 0), 0, 1), true);
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
-  view.setUint32(68, SCHROEDER_ACTIVE_NODE_FLOATS, true);
+  view.setUint32(68, SCHROEDER_LEVEL_ASSIGNMENT_FLOATS, true);
   view.setUint32(72, schroederLevelFilterEnabled ? 1 : 0, true);
   return buffer;
 }
@@ -626,6 +626,7 @@ export async function runMlsMpmG2pWebGpu({
   internalPressureScale = 1,
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
+  schroederLevelAssignment = null,
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
   retainOutputParticleBuffers = false,
@@ -633,6 +634,14 @@ export async function runMlsMpmG2pWebGpu({
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (schroederActiveNodeList) {
+    // The compacted active-node list is tile/node-aligned, not
+    // particle-parallel; using it as a per-particle G2P filter silently
+    // froze the simulation. Callers must pass the level assignment.
+    throw new TypeError(
+      'runMlsMpmG2pWebGpu no longer accepts schroederActiveNodeList; pass schroederLevelAssignment (particle-parallel rows) instead'
+    );
   }
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
   const dtSeconds = finiteNumber(dt, 0);
@@ -656,19 +665,23 @@ export async function runMlsMpmG2pWebGpu({
   const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const paramsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-params', size: G2P_PARAMS_BYTES, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const borrowedActiveNodeBuffer = schroederActiveNodeList?.activeNodeBuffer || null;
-  const activeNodeRows = schroederActiveNodeList?.activeNodes instanceof Float32Array
-    ? schroederActiveNodeList.activeNodes
+  const borrowedAssignmentBuffer = schroederLevelAssignment?.assignmentBuffer
+    || schroederLevelAssignment?.buffer
+    || null;
+  const assignmentRows = schroederLevelAssignment?.assignments instanceof Float32Array
+    ? schroederLevelAssignment.assignments
     : null;
-  const schroederActiveNodeFilterEnabled = Boolean(borrowedActiveNodeBuffer || activeNodeRows);
-  const schroederLevelFilterEnabled = schroederActiveNodeFilterEnabled
-    && Number.isFinite(Number(schroederSelectedLevel));
-  const schroederActiveNodeBuffer = borrowedActiveNodeBuffer || writeStorageBuffer(
+  const schroederActiveNodeFilterEnabled = Boolean(
+    (borrowedAssignmentBuffer || assignmentRows)
+    && Number.isFinite(Number(schroederSelectedLevel))
+  );
+  const schroederLevelFilterEnabled = schroederActiveNodeFilterEnabled;
+  const schroederActiveNodeBuffer = borrowedAssignmentBuffer || writeStorageBuffer(
     device,
     schroederActiveNodeFilterEnabled
-      ? 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
-      : 'ulg-mls-mpm-g2p-schroeder-active-nodes-dummy',
-    activeNodeRows || new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
+      ? 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
+      : 'ulg-mls-mpm-g2p-schroeder-level-assignments-dummy',
+    assignmentRows || new Float32Array(SCHROEDER_LEVEL_ASSIGNMENT_FLOATS)
   );
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
@@ -695,7 +708,7 @@ export async function runMlsMpmG2pWebGpu({
         : -1
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v3',
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v4',
       label: 'ulg-mls-mpm-g2p-reconstruct',
       code: mlsMpmG2pReconstructWgsl,
       entryPoint: 'main',
@@ -779,7 +792,7 @@ export async function runMlsMpmG2pWebGpu({
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
       }
-      if (!borrowedActiveNodeBuffer) schroederActiveNodeBuffer.destroy?.();
+      if (!borrowedAssignmentBuffer) schroederActiveNodeBuffer.destroy?.();
       paramsBuffer.destroy?.();
       stateReadBuffer?.destroy?.();
       mechanicsReadBuffer?.destroy?.();

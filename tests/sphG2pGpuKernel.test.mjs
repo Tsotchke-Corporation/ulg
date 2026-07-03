@@ -196,7 +196,7 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
-  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_active_nodes/);
+  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments/);
   assert.match(mlsMpmG2pReconstructWgsl, /fn g2p_particle_enabled/);
   assert.match(mlsMpmG2pReconstructWgsl, /fn g2p_copy_input_particle/);
   assert.match(mlsMpmG2pReconstructWgsl, /g2p_cubic_root_positive/);
@@ -595,48 +595,62 @@ test('MLS-MPM G2P parity report is explicit and non-scientific', () => {
   assert.equal(parity.fullPhysicsValidation, false);
 });
 
-test('WebGPU MLS-MPM G2P binds a retained Schroeder active-node list for level filtering', async () => {
+test('WebGPU MLS-MPM G2P binds a retained Schroeder level-assignment buffer for level filtering', async () => {
   const device = fakeG2pDevice();
-  const retainedActiveNodeBuffer = { label: 'retained-schroeder-active-nodes', size: 4096 };
+  const retainedAssignmentBuffer = { label: 'retained-schroeder-level-assignments', size: 4096 };
   const result = await runMlsMpmG2pWebGpu({
     ...fixture(),
     device,
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
-    schroederActiveNodeList: { activeNodeBuffer: retainedActiveNodeBuffer },
+    schroederLevelAssignment: { assignmentBuffer: retainedAssignmentBuffer },
     schroederSelectedLevel: 2
   });
   assert.equal(result.backend, 'webgpu');
-  // No dummy active-node buffer is created when a retained list is borrowed.
+  // No dummy assignment buffer is created when a retained buffer is borrowed.
   assert.equal(
-    device.createdBuffers.some((buffer) => String(buffer.label).includes('active-nodes-dummy')),
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('level-assignments-dummy')),
     false
   );
   const bindGroup = device.dispatches[0].bindGroup;
-  const activeNodeEntry = bindGroup.entries.find((entry) => entry.binding === 7);
-  assert.equal(activeNodeEntry.resource.buffer, retainedActiveNodeBuffer);
+  const assignmentEntry = bindGroup.entries.find((entry) => entry.binding === 7);
+  assert.equal(assignmentEntry.resource.buffer, retainedAssignmentBuffer);
 });
 
-test('WebGPU MLS-MPM G2P uploads explicit active-node rows for level filtering', async () => {
+test('WebGPU MLS-MPM G2P uploads explicit level-assignment rows for level filtering', async () => {
   const device = fakeG2pDevice();
-  const rows = new Float32Array(18 * 2);
+  const rows = new Float32Array(16 * 2);
   rows[0] = 1;
-  rows[10] = 0;
-  rows[11] = 1;
+  rows[16] = 0;
   await runMlsMpmG2pWebGpu({
     ...fixture(),
     device,
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
-    schroederActiveNodeList: { activeNodes: rows },
+    schroederLevelAssignment: { assignments: rows },
     schroederSelectedLevel: 1
   });
   const uploaded = device.createdBuffers.find(
-    (buffer) => buffer.label === 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
+    (buffer) => buffer.label === 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
   );
   assert.ok(uploaded);
   const write = device.writes.find(
-    (entry) => entry.label === 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
+    (entry) => entry.label === 'ulg-mls-mpm-g2p-schroeder-level-assignments-in'
   );
   assert.equal(write.byteLength, rows.byteLength);
+});
+
+test('WebGPU MLS-MPM G2P rejects the compacted active-node list as a particle filter', async () => {
+  const device = fakeG2pDevice();
+  await assert.rejects(
+    runMlsMpmG2pWebGpu({
+      ...fixture(),
+      device,
+      boxDimsM: [3, 3, 3],
+      readbackMode: 'no-full-readback',
+      schroederActiveNodeList: { activeNodes: new Float32Array(16) },
+      schroederSelectedLevel: 1
+    }),
+    /no longer accepts schroederActiveNodeList/
+  );
 });

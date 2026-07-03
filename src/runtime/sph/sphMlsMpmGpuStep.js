@@ -2922,11 +2922,13 @@ function createFusedG2pParamsArray({
   internalPressureScale,
   liquidWallDampingAlpha = 0,
   liquidWallDampingDistanceM = 0,
-  schroederLevelFilter = null,
-  schroederActiveNodeFilter = null
+  schroederLevelFilter = null
 }) {
+  // G2P particle filtering reads particle-parallel LEVEL ASSIGNMENT rows.
+  // The compacted active-node list must never gate particles here: its rows
+  // are tile/node-aligned, and treating them as particle-aligned silently
+  // dropped nearly every particle from mechanics (frozen simulation).
   const levelFilterEnabled = schroederLevelFilter?.enabled === true;
-  const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
@@ -2935,7 +2937,7 @@ function createFusedG2pParamsArray({
   view.setUint32(12, gridSpec.gridDims[1], true);
   view.setUint32(16, gridSpec.gridDims[2], true);
   view.setUint32(20, gridSpec.shift, true);
-  view.setUint32(24, activeNodeFilterEnabled ? 1 : 0, true);
+  view.setUint32(24, levelFilterEnabled ? 1 : 0, true);
   view.setInt32(28, levelFilterEnabled ? Math.round(finiteNumber(schroederLevelFilter.selectedLevel, 0)) : -1, true);
   view.setFloat32(32, gridSpec.gridSpacingM, true);
   view.setFloat32(36, gridSpec.invGridSpacingM, true);
@@ -2947,8 +2949,8 @@ function createFusedG2pParamsArray({
   view.setFloat32(60, Math.min(Math.max(finiteNumber(liquidWallDampingAlpha, 0), 0), 1), true);
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
   view.setUint32(68, Math.max(1, Math.round(finiteNumber(
-    schroederActiveNodeFilter?.activeNodeStrideFloats,
-    SCHROEDER_ACTIVE_NODE_FLOATS
+    schroederLevelFilter?.assignmentStrideFloats,
+    SCHROEDER_LEVEL_ASSIGNMENT_FLOATS
   ))), true);
   view.setUint32(72, levelFilterEnabled ? 1 : 0, true);
   return buffer;
@@ -3401,8 +3403,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       internalPressureScale,
       liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
       liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM,
-      schroederLevelFilter,
-      schroederActiveNodeFilter
+      schroederLevelFilter
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -3549,7 +3550,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 4, resource: { buffer: outStateBuffer } },
         { binding: 5, resource: { buffer: outMechanicsBuffer } },
         { binding: 6, resource: { buffer: g2pParamsBuffer } },
-        { binding: 7, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } }
+        // G2P filters by particle-parallel level-assignment rows (never the
+        // compacted active-node list, whose rows are not particle-aligned).
+        { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -3968,8 +3971,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       internalPressureScale,
       liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
       liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM,
-      schroederLevelFilter,
-      schroederActiveNodeFilter
+      schroederLevelFilter
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -4211,7 +4213,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 4, resource: { buffer: outStateBuffer } },
           { binding: 5, resource: { buffer: outMechanicsBuffer } },
           { binding: 6, resource: { buffer: g2pParamsBuffer } },
-          { binding: 7, resource: { buffer: schroederActiveNodeBuffer } }
+          // G2P filters by particle-parallel level-assignment rows (never
+          // the compacted active-node list).
+          { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
       });
       const g2pPass = encoder.beginComputePass();

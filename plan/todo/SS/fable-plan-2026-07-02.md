@@ -35,6 +35,31 @@ particle-storage materialization), and the mounted URL-scheduled demo runs
 its actual simulation on subcycled two-level mechanics with sim time
 advancing and live conservation telemetry.
 
+Motion-gate milestone (2026-07-03): restoring the compact GPU summary
+(final-only) on the demo's no-full-readback hot path exposed that every
+mounted `ss=1` scene had NEVER actually simulated - sim time advanced while
+particle state froze at the initial upload. Root cause: the fused mechanics'
+Schroeder "active-node particle filter" (codex-era `17c9de8`) indexed the
+COMPACTED active-node list as if its rows were particle-aligned; the
+producer writes particle-parallel candidate rows, but compaction re-packs
+them tile-aligned, so the filter silently dropped nearly every particle
+from P2G and copy-through'd G2P. Fixed by making particle filtering read
+particle-parallel LEVEL-ASSIGNMENT rows everywhere (P2G kept its assignment
+filter; G2P's filter binding was repurposed from active-node rows to
+assignment rows; `runMlsMpmG2pWebGpu` now rejects `schroederActiveNodeList`
+outright). Mounted `ss=1`, two-level observation, and two-level
+authoritative (substeps 1 and 2) scenes now free-fall analytically
+(maxSpeedMPerS = g*t to 4 digits, center of mass dropping, nonzero
+maxDisplacementM). The same arc fixed the demo's render options (explicit
+surfaceDraw / offscreenPresentation=0 / render-mode menu now override the
+auto worker-owned presentation policy), premultiplied-alpha worker-canvas
+clears, and gave the two-level authoritative step its own compact summary
+as resident diagnostics.
+
+Standing measurement rule learned the hard way: headless probes MUST launch
+Chromium with `--use-angle=vulkan` or WebGPU canvas presentation silently
+never composites (compute works; screenshots show nothing).
+
 Next up:
 
 1. **Two-level authority follow-ups**: sidecar operator splitting on the
@@ -51,6 +76,14 @@ Next up:
    simplest honest start) or per level (later). Gate the switch on the same
    numeric conservation battery plus a continuation proof (sim time
    advancing across scheduled refreshes with two-level authority on).
+1b. **Re-verify the SS live merge/split flagship gates on the now-moving
+   mounted sim** (they were proven while the mounted state was frozen; the
+   chain-level numeric gates were real, but live-scene coarsening now runs
+   on genuinely evolving state for the first time), and add a mounted
+   motion gate (maxDisplacementM > 0 across scheduled refreshes) to the e2e
+   battery so a frozen-state regression can never pass again.
+1c. Sparse-grid efficiency follow-up: active-node GRID gating (not particle
+   gating) for the fused path, if profiling justifies it.
 2. Live split policy: refine-pressure conditions near interfaces/walls in
    scenes (the chain is proven; enabling it in scenes is a policy slice).
 3. Native-renderer + replay-mode diagnostic scenes emit repeated AbortError

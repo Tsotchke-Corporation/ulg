@@ -1057,7 +1057,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       dt: dtFine,
       boxDimsM,
       internalPressureScale,
-      schroederActiveNodeList: fineActiveNodeList,
+      schroederLevelAssignment: levelAssignment,
       schroederSelectedLevel: resolvedFineLevel,
       retainOutputParticleBuffers: true,
       readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
@@ -1095,7 +1095,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     dt: dtSeconds,
     boxDimsM,
     internalPressureScale,
-    schroederActiveNodeList: coarseActiveNodeList,
+    schroederLevelAssignment: levelAssignment,
     schroederSelectedLevel: coarseLevel,
     retainOutputParticleBuffers: true,
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE

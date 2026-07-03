@@ -5028,21 +5028,12 @@ fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
   return true;
 }
 
+// Particle filtering is by level ASSIGNMENT rows only: assignment rows are
+// particle-parallel. The compacted active-node list is tile/node-aligned
+// (its rows do not correspond to particle indices) and must never be used
+// as a per-particle filter - doing so silently drops nearly every particle
+// from P2G and freezes the simulation.
 fn p2g_particle_enabled(particle_index: u32) -> bool {
-  if (params.schroeder_active_node_filter_enabled != 0u) {
-    let active_stride = max(params.schroeder_active_node_stride_floats, 1u);
-    let active_offset = particle_index * active_stride;
-    let active_level = i32(round(schroeder_active_nodes[active_offset]));
-    let source_particle_index = u32(max(round(schroeder_active_nodes[active_offset + 10u]), 0.0));
-    let status = schroeder_active_nodes[active_offset + 11u];
-    if (!(status > 0.0) || status >= 32.0 || source_particle_index != particle_index) {
-      return false;
-    }
-    if (params.schroeder_filter_enabled != 0u && active_level != params.schroeder_selected_level) {
-      return false;
-    }
-    return true;
-  }
   if (params.schroeder_filter_enabled == 0u) {
     return true;
   }
@@ -6448,7 +6439,7 @@ struct G2pParams {
 @group(0) @binding(4) var<storage, read_write> out_sph_state: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: G2pParams;
-@group(0) @binding(7) var<storage, read> schroeder_active_nodes: array<f32>;
+@group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
 
 fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {
   let a = 1.5 - fx;
@@ -6519,22 +6510,19 @@ fn g2p_in_range(i: i32, j: i32, k: i32) -> bool {
     && kk < i32(params.grid_nz);
 }
 
+// Level-filtered G2P with copy-through: only particles assigned to the
+// selected level reconstruct from this grid; other particles copy their
+// input state through unchanged so a coarser/finer pass (or the caller)
+// keeps authority over them. Assignment rows are particle-parallel; the
+// compacted active-node list is NOT and must never gate particles here.
 fn g2p_particle_enabled(particle_index: u32) -> bool {
   if (params.schroeder_active_node_filter_enabled == 0u) {
     return true;
   }
-  let active_stride = max(params.schroeder_active_node_stride_floats, 1u);
-  let active_offset = particle_index * active_stride;
-  let active_level = i32(round(schroeder_active_nodes[active_offset]));
-  let source_particle_index = u32(max(round(schroeder_active_nodes[active_offset + 10u]), 0.0));
-  let status = schroeder_active_nodes[active_offset + 11u];
-  if (!(status > 0.0) || status >= 32.0 || source_particle_index != particle_index) {
-    return false;
-  }
-  if (params.schroeder_level_filter_enabled != 0u && active_level != params.schroeder_selected_level) {
-    return false;
-  }
-  return true;
+  let stride = max(params.schroeder_active_node_stride_floats, 1u);
+  let assignment_offset = particle_index * stride;
+  let level = i32(round(schroeder_level_assignments[assignment_offset]));
+  return level == params.schroeder_selected_level;
 }
 
 fn g2p_copy_input_particle(state_base: u32, mechanics_base: u32) {

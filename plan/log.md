@@ -36953,3 +36953,86 @@ particle-storage materialization stay on the resident path, fail-closed
 with an explicit error when combined). Follow-ups: sidecar operator
 splitting on the two-level path, then merges/splits under two-level
 authority.
+
+## 2026-07-03 - Render options authoritative + numeric motion proof (ea2dcb9)
+
+User-reported: the demo "is still using an overlay renderer" (verboten) and
+"the rendering options aren't working correctly." Investigation first fixed
+the measurement environment: headless Chromium never composites WebGPU
+canvas presentation without `--use-angle=vulkan` (an opaque red clear on a
+WebGPU canvas produced zero visible pixels; WebGL rendered fine). With that
+flag, the worker-owned presented canvas was shown to be the working default
+particle renderer all along.
+
+Real defects fixed:
+
+- Explicit render selections (`surfaceDraw=`, the render-mode menu,
+  `offscreenPresentation=0`) were silently ignored: the auto render-ownership
+  policy kept worker-owned presentation regardless. Explicit main-thread
+  bridge modes now bypass the worker producer, the retained-output display
+  preservation, and clear the worker canvas; `offscreenPresentation=0`
+  resolves the auto policy to the main-thread renderer; the render-mode menu
+  marks selections explicit; `surfaceDraw` only persists to the URL when
+  explicitly chosen.
+- Worker canvas clears wrote non-premultiplied colors at alpha 0 (invalid
+  premultiplied color = washed-out veil); clear values now premultiply.
+- The demo scheduler disabled the compact GPU summary on the
+  no-full-readback hot path, so no path had `maxDisplacementM` (the numeric
+  motion proof) and readback-free presentation paths showed a spurious
+  "compact motion proof is unavailable" banner. Summary now runs final-only
+  (fixed-size readback, allowed on the hot path); the two-level
+  authoritative step runs the same summary and carries it as resident-step
+  diagnostics; the Schroeder scene sequence records per-step consumed-input
+  provenance.
+
+## 2026-07-03 - Mounted SS scenes never simulated: fused active-node
+   particle filter indexed the compacted list as particle-aligned
+
+The restored motion gate immediately showed every mounted `ss=1` scene
+frozen: sim time advanced, center of mass constant, maxSpeedMPerS exactly
+g*dt (every step re-ran from the initial upload's rest state),
+maxDisplacementM exactly 0. Isolation: direct resident step = correct
+(-g*dt after one step); orchestrator-wrapped = frozen; bisect showed EITHER
+dropping `schroederActiveNodeList` OR the fuse flags restored physics.
+
+Root cause (codex-era `17c9de8` "Consume Schroeder active nodes in fused
+mechanics"): `p2g_particle_enabled`/`g2p_particle_enabled` read the active-
+node list row at `particle_index` and required
+`row.sourceParticleIndex == particle_index`. The producer writes
+particle-parallel candidate rows, but the list is then COMPACTED to
+tile-aligned rows, so the check fails for nearly all particles: P2G
+projected almost nothing and G2P copy-through'd everything. The handful of
+accidental row alignments moved ~half the mass by one g*dt - visible in the
+cross-level conservation summary and never caught because no mounted gate
+measured displacement.
+
+Fix (physics-first: particle filters read particle-parallel rows only):
+
+- `mlsMpmP2gGridProjectionWgsl`: active-node branch removed from
+  `p2g_particle_enabled`; the existing level-assignment filter is the only
+  particle filter (binding 8 stays declared/bound but ungated).
+- `mlsMpmG2pReconstructWgsl`: binding 7 repurposed from active-node rows to
+  particle-parallel level-assignment rows; the filter is now level ==
+  selected with copy-through otherwise.
+- `runMlsMpmG2pWebGpu` accepts `schroederLevelAssignment` and throws on
+  `schroederActiveNodeList` (fail-closed against stale callers).
+- Fused mechanics params/bind groups feed the assignment buffer to G2P;
+  `createFusedG2pParamsArray` drops the active-node filter inputs.
+- The two-level coupling module passes `schroederLevelAssignment` to its
+  fine/coarse G2P passes.
+
+Numeric validation (browser, real GPU):
+
+- Minimal chained orchestrator repro: one step from rest now yields
+  vy = -g*dt exactly in every option combination that previously froze.
+- Mounted `ss=1`: center of mass falls (1.75 -> 1.69 over 0.156s),
+  maxSpeedMPerS = 1.5298 vs g*t = 1.5299 (free fall, 4 digits).
+- Mounted two-level observation, authoritative substeps=1 and =2: all
+  free-fall analytically (maxSpeed = g*simT to 4 digits, nonzero
+  maxDisplacementM), conservation telemetry live.
+- Unit suite: 980 tests, 977 pass, 0 fail (filter tests rewritten to the
+  assignment interface plus a rejection test for the compacted list).
+
+Follow-ups queued in the plan: re-verify live merge/split gates on the now-
+moving mounted sim, add a mounted motion gate to the e2e battery, active-
+node GRID gating for sparse efficiency if profiling justifies it.

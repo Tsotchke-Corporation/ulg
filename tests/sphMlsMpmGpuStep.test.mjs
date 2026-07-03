@@ -2586,7 +2586,9 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
   const g2pParams = new DataView(g2pParamWrite.data);
   assert.equal(g2pParams.getUint32(24, true), 1);
   assert.equal(g2pParams.getInt32(28, true), 2);
-  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  // G2P particle filtering reads particle-parallel level-assignment rows;
+  // the compacted active-node list must never gate particles.
+  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(g2pParams.getUint32(72, true), 1);
   const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
     return group.entries.some((entry) => entry.binding === 8);
@@ -2600,7 +2602,7 @@ test('MLS-MPM resident fused mechanics filters P2G/G2P by retained Schroeder act
   }));
   const g2pSchroederBindGroups = device.bindGroups.filter((group) => {
     return group.entries.length === 8
-      && group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederActiveNodeBuffer
+      && group.entries.find((entry) => entry.binding === 7)?.resource?.buffer === schroederAssignmentBuffer
       && !group.entries.some((entry) => entry.binding === 8);
   });
   assert.equal(g2pSchroederBindGroups.length, 1);
@@ -7619,7 +7621,8 @@ test('MLS-MPM resident fused mechanics sequence filters by retained Schroeder ac
   const g2pParams = new DataView(g2pParamWrite.data);
   assert.equal(g2pParams.getUint32(24, true), 1);
   assert.equal(g2pParams.getInt32(28, true), 2);
-  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length);
+  // G2P particle filtering reads particle-parallel level-assignment rows.
+  assert.equal(g2pParams.getUint32(68, true), SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length);
   assert.equal(g2pParams.getUint32(72, true), 1);
   const p2gSchroederBindGroups = device.bindGroups.filter((group) => {
     return group.entries.some((entry) => entry.binding === 8);

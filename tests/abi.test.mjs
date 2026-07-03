@@ -1112,7 +1112,7 @@ test('MLS-MPM GPU G2P reconstruction ABI exposes execution schemas and WGSL bind
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
-  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_active_nodes: array<f32>/);
+  assert.match(mlsMpmG2pReconstructWgsl, /@group\(0\) @binding\(7\) var<storage, read> schroeder_level_assignments: array<f32>/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });
 

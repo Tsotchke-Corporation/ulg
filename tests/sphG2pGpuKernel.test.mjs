@@ -594,3 +594,49 @@ test('MLS-MPM G2P parity report is explicit and non-scientific', () => {
   assert.equal(parity.phaseChangeValidation, false);
   assert.equal(parity.fullPhysicsValidation, false);
 });
+
+test('WebGPU MLS-MPM G2P binds a retained Schroeder active-node list for level filtering', async () => {
+  const device = fakeG2pDevice();
+  const retainedActiveNodeBuffer = { label: 'retained-schroeder-active-nodes', size: 4096 };
+  const result = await runMlsMpmG2pWebGpu({
+    ...fixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    schroederActiveNodeList: { activeNodeBuffer: retainedActiveNodeBuffer },
+    schroederSelectedLevel: 2
+  });
+  assert.equal(result.backend, 'webgpu');
+  // No dummy active-node buffer is created when a retained list is borrowed.
+  assert.equal(
+    device.createdBuffers.some((buffer) => String(buffer.label).includes('active-nodes-dummy')),
+    false
+  );
+  const bindGroup = device.dispatches[0].bindGroup;
+  const activeNodeEntry = bindGroup.entries.find((entry) => entry.binding === 7);
+  assert.equal(activeNodeEntry.resource.buffer, retainedActiveNodeBuffer);
+});
+
+test('WebGPU MLS-MPM G2P uploads explicit active-node rows for level filtering', async () => {
+  const device = fakeG2pDevice();
+  const rows = new Float32Array(18 * 2);
+  rows[0] = 1;
+  rows[10] = 0;
+  rows[11] = 1;
+  await runMlsMpmG2pWebGpu({
+    ...fixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    schroederActiveNodeList: { activeNodes: rows },
+    schroederSelectedLevel: 1
+  });
+  const uploaded = device.createdBuffers.find(
+    (buffer) => buffer.label === 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
+  );
+  assert.ok(uploaded);
+  const write = device.writes.find(
+    (entry) => entry.label === 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
+  );
+  assert.equal(write.byteLength, rows.byteLength);
+});

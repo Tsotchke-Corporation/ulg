@@ -793,3 +793,295 @@ export function summarizeGridConservationCpuOracle(plan, rows) {
   }
   return { massKg: mass, momentumKgMPerS: [px, py, pz], activeNodeCount: active };
 }
+
+// --- Two-level coupled mechanics step -----------------------------------
+
+export const ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_SCHEMA =
+  'peercompute.ulg.schroeder-two-level-mechanics-step.v0';
+export const ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0';
+
+/**
+ * One coupled two-level MLS-MPM step over a single particle set partitioned
+ * by Schroeder level assignment (composite-grid form, shared dt; subcycling
+ * is a planned extension):
+ *
+ *   P2G(fine level, dx)          P2G(coarse level, 2dx)
+ *            \\                       |
+ *      restrict(accumulate) --> combined coarse grid
+ *            |                        |
+ *      grid update (fine)      grid update (coarse)
+ *            |                        |
+ *      delta-prolongation  <-- coarse velocity change
+ *            |                        |
+ *      G2P (fine particles)    G2P (coarse particles)
+ *
+ * Both G2P passes are level-filtered with copy-through, chained so the
+ * second pass preserves the first pass's outputs. All intermediate buffers
+ * stay GPU-resident; the optional conservation summary row is the only
+ * readback on the default path.
+ */
+export async function runSchroederTwoLevelMechanicsStepWebGpu({
+  device,
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
+  levelAssignment,
+  fineActiveNodeList,
+  coarseActiveNodeList,
+  fineLevel = 0,
+  baseGridSpacingM = sphParticleState?.smoothingLengthM,
+  boxDimsM = [4, 4, 4],
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  gravityMPerS2 = [0, -9.80665, 0],
+  internalPressureScale = 1,
+  gridSpecFactory,
+  p2gRunner,
+  gridUpdateRunner,
+  g2pRunner,
+  retainOutputParticleBuffers = true,
+  conservationSummaryReadback = true
+} = {}) {
+  assertWebGpuDevice(device, 'runSchroederTwoLevelMechanicsStepWebGpu');
+  if (typeof gridSpecFactory !== 'function'
+    || typeof p2gRunner !== 'function'
+    || typeof gridUpdateRunner !== 'function'
+    || typeof g2pRunner !== 'function') {
+    throw new TypeError(
+      'runSchroederTwoLevelMechanicsStepWebGpu requires gridSpecFactory, p2gRunner, gridUpdateRunner, and g2pRunner functions'
+    );
+  }
+  if (!levelAssignment) {
+    throw new TypeError('runSchroederTwoLevelMechanicsStepWebGpu requires a Schroeder level assignment');
+  }
+  const resolvedFineLevel = Math.round(finiteNumber(fineLevel, 0));
+  const coarseLevel = resolvedFineLevel + 1;
+  const baseDx = Math.max(1e-9, finiteNumber(baseGridSpacingM, 0));
+  const fineDx = baseDx * (2 ** resolvedFineLevel);
+  const coarseDx = fineDx * 2;
+  const dtSeconds = finiteNumber(dt, 0);
+
+  const fineProjection = await p2gRunner({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederLevelAssignment: levelAssignment,
+    schroederSelectedLevel: resolvedFineLevel,
+    gridSpacingM: fineDx,
+    boxDimsM,
+    dt: dtSeconds,
+    internalPressureScale,
+    retainGridBuffer: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const coarseProjection = await p2gRunner({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    schroederLevelAssignment: levelAssignment,
+    schroederSelectedLevel: coarseLevel,
+    gridSpacingM: coarseDx,
+    boxDimsM,
+    dt: dtSeconds,
+    internalPressureScale,
+    retainGridBuffer: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const fineSpec = gridSpecFactory({ boxDimsM, gridSpacingM: fineDx });
+  const coarseSpec = gridSpecFactory({ boxDimsM, gridSpacingM: coarseDx });
+  const couplingPlan = createSchroederCrossLevelGridCouplingPlan({
+    fineGridDims: fineSpec.gridDims,
+    coarseGridDims: coarseSpec.gridDims,
+    fineGridSpacingM: fineDx,
+    indexOrder: SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST,
+    gridShift: fineSpec.shift,
+    accumulate: true
+  });
+
+  // Snapshot the combined pre-update coarse momentum grid for the
+  // delta-form prolongation.
+  const coarseGridByteLength = coarseSpec.gridNodeCount
+    * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const coarsePreGridBuffer = device.createBuffer({
+    label: 'ulg-schroeder-two-level-coarse-pre-update',
+    size: Math.max(16, coarseGridByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+  });
+
+  await runSchroederCrossLevelGridRestrictionWebGpu({
+    device,
+    plan: couplingPlan,
+    fineGridBuffer: fineProjection.gridBuffer,
+    coarseGridBuffer: coarseProjection.gridBuffer
+  });
+  {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(
+      coarseProjection.gridBuffer,
+      0,
+      coarsePreGridBuffer,
+      0,
+      Math.max(16, coarseGridByteLength)
+    );
+    device.queue.submit([encoder.finish()]);
+  }
+
+  const fineGridUpdate = await gridUpdateRunner({
+    device,
+    p2gGridProjection: fineProjection,
+    p2gGridBuffer: fineProjection.gridBuffer,
+    dt: dtSeconds,
+    gravityMPerS2,
+    boxDimsM,
+    retainUpdatedGridBuffer: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const coarseGridUpdate = await gridUpdateRunner({
+    device,
+    p2gGridProjection: coarseProjection,
+    p2gGridBuffer: coarseProjection.gridBuffer,
+    dt: dtSeconds,
+    gravityMPerS2,
+    boxDimsM,
+    retainUpdatedGridBuffer: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+
+  await runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
+    device,
+    fineGridDims: fineSpec.gridDims,
+    coarseGridDims: coarseSpec.gridDims,
+    fineGridSpacingM: fineDx,
+    indexOrder: SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST,
+    gridShift: fineSpec.shift,
+    boxDimsM,
+    coarsePreGridBuffer,
+    coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
+    fineGridBuffer: fineGridUpdate.updatedGridBuffer
+  });
+
+  // Chained level-filtered G2P: pass 2 consumes pass 1's outputs so
+  // copy-through preserves the other level's results.
+  const fineG2p = await g2pRunner({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    gridUpdate: fineGridUpdate,
+    updatedGridBuffer: fineGridUpdate.updatedGridBuffer,
+    dt: dtSeconds,
+    boxDimsM,
+    internalPressureScale,
+    schroederActiveNodeList: fineActiveNodeList,
+    schroederSelectedLevel: resolvedFineLevel,
+    retainOutputParticleBuffers: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+  const passOneUploads = {
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: fineG2p.stateBuffer,
+      thermoBuffer: sphParticleUpload?.status === 'webgpu-uploaded'
+        ? sphParticleUpload.thermoBuffer
+        : null,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: fineG2p.mechanicsBuffer,
+      slot: 0
+    }
+  };
+  if (!passOneUploads.sphParticleUpload.thermoBuffer) {
+    passOneUploads.sphParticleUpload.thermoBuffer = writeStorageBuffer(
+      device,
+      'ulg-schroeder-two-level-thermo-in',
+      sphParticleState.thermo
+    );
+    passOneUploads.ownsThermoBuffer = true;
+  }
+  const coarseG2p = await g2pRunner({
+    device,
+    sphParticleState,
+    mlsMpmParticleState,
+    sphParticleUpload: passOneUploads.sphParticleUpload,
+    mlsMpmParticleUpload: passOneUploads.mlsMpmParticleUpload,
+    gridUpdate: coarseGridUpdate,
+    updatedGridBuffer: coarseGridUpdate.updatedGridBuffer,
+    dt: dtSeconds,
+    boxDimsM,
+    internalPressureScale,
+    schroederActiveNodeList: coarseActiveNodeList,
+    schroederSelectedLevel: coarseLevel,
+    retainOutputParticleBuffers: true,
+    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+  });
+
+  const conservation = conservationSummaryReadback
+    ? await runSchroederCrossLevelGridConservationSummaryWebGpu({
+      device,
+      plan: couplingPlan,
+      fineGridBuffer: fineProjection.gridBuffer,
+      coarseGridBuffer: coarseProjection.gridBuffer
+    })
+    : null;
+
+  // Intermediates are released behind the queue; the caller owns the final
+  // G2P outputs (and destroys pass-1 outputs once consumed).
+  const cleanup = () => {
+    fineProjection.destroyGridBuffer?.();
+    coarseProjection.destroyGridBuffer?.();
+    coarsePreGridBuffer.destroy?.();
+    fineGridUpdate.destroyUpdatedGridBuffer?.();
+    coarseGridUpdate.destroyUpdatedGridBuffer?.();
+    fineG2p.stateBuffer?.destroy?.();
+    fineG2p.mechanicsBuffer?.destroy?.();
+    if (passOneUploads.ownsThermoBuffer) {
+      passOneUploads.sphParticleUpload.thermoBuffer?.destroy?.();
+    }
+  };
+  deferSubmittedWorkCleanup(device, cleanup);
+
+  const result = {
+    schema: ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_EXECUTION_SCHEMA,
+    twoLevelMechanicsStepSchema: ULG_SCHROEDER_TWO_LEVEL_MECHANICS_STEP_SCHEMA,
+    status: 'schroeder-two-level-mechanics-step-submitted',
+    algorithm: 'schroeder-algorithm',
+    dataStructure: 'schroeder-tree',
+    couplingMode: 'composite-grid-shared-dt-delta-prolongation',
+    backend: 'webgpu',
+    fineLevel: resolvedFineLevel,
+    coarseLevel,
+    fineGridSpacingM: fineDx,
+    coarseGridSpacingM: coarseDx,
+    fineGridDims: fineSpec.gridDims,
+    coarseGridDims: coarseSpec.gridDims,
+    dt: dtSeconds,
+    particleCount: sphParticleState.particleCount,
+    readbackMode: conservationSummaryReadback
+      ? SCHROEDER_COMPACT_GRID_CONSERVATION_READBACK_MODE
+      : SCHROEDER_NO_FULL_READBACK_MODE,
+    fullParticleReadbackPerformed: false,
+    normalHotLoopReadbackFree: !conservationSummaryReadback,
+    conservation: conservation?.conservation ?? null,
+    conservativeTransferStatus:
+      'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (retainOutputParticleBuffers) {
+    result.stateBuffer = coarseG2p.stateBuffer;
+    result.mechanicsBuffer = coarseG2p.mechanicsBuffer;
+    result.destroyOutputParticleBuffers = () => {
+      coarseG2p.stateBuffer?.destroy?.();
+      coarseG2p.mechanicsBuffer?.destroy?.();
+    };
+  }
+  return result;
+}

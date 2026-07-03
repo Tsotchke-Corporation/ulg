@@ -584,7 +584,10 @@ function createParamsArray({
   boxDimsM,
   internalPressureScale,
   liquidWallDampingAlpha = 0,
-  liquidWallDampingDistanceM = 0
+  liquidWallDampingDistanceM = 0,
+  schroederActiveNodeFilterEnabled = false,
+  schroederLevelFilterEnabled = false,
+  schroederSelectedLevel = -1
 }) {
   const buffer = new ArrayBuffer(G2P_PARAMS_BYTES);
   const view = new DataView(buffer);
@@ -594,8 +597,8 @@ function createParamsArray({
   view.setUint32(12, gridUpdate.gridDims[1], true);
   view.setUint32(16, gridUpdate.gridDims[2], true);
   view.setUint32(20, gridUpdate.gridShift, true);
-  view.setUint32(24, 0, true);
-  view.setInt32(28, -1, true);
+  view.setUint32(24, schroederActiveNodeFilterEnabled ? 1 : 0, true);
+  view.setInt32(28, Math.round(finiteNumber(schroederSelectedLevel, -1)), true);
   view.setFloat32(32, gridUpdate.gridSpacingM, true);
   view.setFloat32(36, 1 / gridUpdate.gridSpacingM, true);
   view.setFloat32(40, dt, true);
@@ -606,7 +609,7 @@ function createParamsArray({
   view.setFloat32(60, clamp(finiteNumber(liquidWallDampingAlpha, 0), 0, 1), true);
   view.setFloat32(64, Math.max(finiteNumber(liquidWallDampingDistanceM, 0), 0), true);
   view.setUint32(68, SCHROEDER_ACTIVE_NODE_FLOATS, true);
-  view.setUint32(72, 0, true);
+  view.setUint32(72, schroederLevelFilterEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -623,6 +626,8 @@ export async function runMlsMpmG2pWebGpu({
   internalPressureScale = 1,
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
+  schroederActiveNodeList = null,
+  schroederSelectedLevel = null,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -651,10 +656,19 @@ export async function runMlsMpmG2pWebGpu({
   const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const paramsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-params', size: G2P_PARAMS_BYTES, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const schroederActiveNodeBuffer = writeStorageBuffer(
+  const borrowedActiveNodeBuffer = schroederActiveNodeList?.activeNodeBuffer || null;
+  const activeNodeRows = schroederActiveNodeList?.activeNodes instanceof Float32Array
+    ? schroederActiveNodeList.activeNodes
+    : null;
+  const schroederActiveNodeFilterEnabled = Boolean(borrowedActiveNodeBuffer || activeNodeRows);
+  const schroederLevelFilterEnabled = schroederActiveNodeFilterEnabled
+    && Number.isFinite(Number(schroederSelectedLevel));
+  const schroederActiveNodeBuffer = borrowedActiveNodeBuffer || writeStorageBuffer(
     device,
-    'ulg-mls-mpm-g2p-schroeder-active-nodes-dummy',
-    new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
+    schroederActiveNodeFilterEnabled
+      ? 'ulg-mls-mpm-g2p-schroeder-active-nodes-in'
+      : 'ulg-mls-mpm-g2p-schroeder-active-nodes-dummy',
+    activeNodeRows || new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
   );
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const stateReadBuffer = noFullReadback
@@ -673,7 +687,12 @@ export async function runMlsMpmG2pWebGpu({
       boxDimsM: dims,
       internalPressureScale,
       liquidWallDampingAlpha,
-      liquidWallDampingDistanceM
+      liquidWallDampingDistanceM,
+      schroederActiveNodeFilterEnabled,
+      schroederLevelFilterEnabled,
+      schroederSelectedLevel: schroederLevelFilterEnabled
+        ? Math.round(Number(schroederSelectedLevel))
+        : -1
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v3',
@@ -760,7 +779,7 @@ export async function runMlsMpmG2pWebGpu({
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
       }
-      schroederActiveNodeBuffer.destroy?.();
+      if (!borrowedActiveNodeBuffer) schroederActiveNodeBuffer.destroy?.();
       paramsBuffer.destroy?.();
       stateReadBuffer?.destroy?.();
       mechanicsReadBuffer?.destroy?.();

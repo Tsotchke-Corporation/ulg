@@ -13066,3 +13066,226 @@ test('SPH phase continuation scene keeps simulating on the merged particle set a
   expect(second.count).toBe(first.count);
   expect(second.simTime).toBeGreaterThan(first.simTime);
 });
+
+test('Schroeder two-level coupled step runs both levels in one shared particle set with conservation', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const importWithRetry = async (path) => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await import(path);
+        } catch (error) {
+          if (attempt === 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+      return null;
+    };
+    const gridKernel = await importWithRetry('/src/runtime/sph/sphGridGpuKernel.js');
+    const gridUpdateKernel = await importWithRetry('/src/runtime/sph/sphGridUpdateGpuKernel.js');
+    const g2pKernel = await importWithRetry('/src/runtime/sph/sphG2pGpuKernel.js');
+    const coupling = await importWithRetry('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
+    const buffersModule = await importWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await importWithRetry('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const ASSIGNMENT_FLOATS = abi.SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
+    const ACTIVE_NODE_FLOATS = abi.SCHROEDER_ACTIVE_NODE_ROW_LAYOUT.length;
+
+    const boxDimsM = [6, 6, 6];
+    const baseDx = 0.5;
+    const dt = 1e-4;
+    const velocity = [0.3, -0.2, 0.1];
+
+    // One shared particle set: 9 fine-level (0) particles and 4 coarse-level
+    // (1) particles, all interior and at the same constant velocity.
+    const positions = [];
+    const levels = [];
+    for (let x = 0; x < 3; x += 1) {
+      for (let y = 0; y < 3; y += 1) {
+        positions.push([2.6 + x * 0.4, 2.6 + y * 0.4, 2.8]);
+        levels.push(0);
+      }
+    }
+    for (let x = 0; x < 2; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        positions.push([2.6 + x * 0.8, 2.6 + y * 0.8, 3.4]);
+        levels.push(1);
+      }
+    }
+    const particleCount = positions.length;
+    const fineMassKg = 0.5;
+    const coarseMassKg = 4.0;
+    const state = new Float32Array(particleCount * 8);
+    const thermo = new Float32Array(particleCount * 12);
+    const mechanics = new Float32Array(particleCount * MECHANICS_FLOATS);
+    let totalMass = 0;
+    for (let index = 0; index < particleCount; index += 1) {
+      const s = index * 8;
+      const mass = levels[index] === 0 ? fineMassKg : coarseMassKg;
+      totalMass += mass;
+      state[s] = positions[index][0];
+      state[s + 1] = positions[index][1];
+      state[s + 2] = positions[index][2];
+      state[s + 3] = mass;
+      state[s + 4] = velocity[0];
+      state[s + 5] = velocity[1];
+      state[s + 6] = velocity[2];
+      state[s + 7] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = mass / 1000;
+      mechanics[m + 20] = 1;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      smoothingLengthM: baseDx,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: dt,
+      mechanics
+    };
+
+    // Admitted level-assignment rows (P2G filter) and per-level active-node
+    // rows (G2P filter): level at column 0, source index at 10, status at 11.
+    const assignments = new Float32Array(particleCount * ASSIGNMENT_FLOATS);
+    const fineActiveNodes = new Float32Array(particleCount * ACTIVE_NODE_FLOATS);
+    const coarseActiveNodes = new Float32Array(particleCount * ACTIVE_NODE_FLOATS);
+    for (let index = 0; index < particleCount; index += 1) {
+      assignments[index * ASSIGNMENT_FLOATS] = levels[index];
+      for (const rows of [fineActiveNodes, coarseActiveNodes]) {
+        const offset = index * ACTIVE_NODE_FLOATS;
+        rows[offset] = levels[index];
+        rows[offset + 10] = index;
+        rows[offset + 11] = 1;
+      }
+    }
+    const levelAssignment = {
+      assignments,
+      assignmentStrideFloats: ASSIGNMENT_FLOATS
+    };
+    const fineActiveNodeList = { activeNodes: fineActiveNodes };
+    const coarseActiveNodeList = { activeNodes: coarseActiveNodes };
+
+    const step = await coupling.runSchroederTwoLevelMechanicsStepWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      levelAssignment,
+      fineActiveNodeList,
+      coarseActiveNodeList,
+      fineLevel: 0,
+      baseGridSpacingM: baseDx,
+      boxDimsM,
+      dt,
+      gravityMPerS2: [0, 0, 0],
+      gridSpecFactory: gridKernel.createMlsMpmGridSpec,
+      p2gRunner: gridKernel.runMlsMpmP2gGridProjectionWebGpu,
+      gridUpdateRunner: gridUpdateKernel.runMlsMpmGridUpdateWebGpu,
+      g2pRunner: g2pKernel.runMlsMpmG2pWebGpu
+    });
+
+    // Diagnostic full readback of the output particle state (small scene).
+    const stateFloats = particleCount * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(step.stateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const outState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    let maxVelocityError = 0;
+    let maxPositionError = 0;
+    let outMass = 0;
+    const outMomentum = [0, 0, 0];
+    for (let index = 0; index < particleCount; index += 1) {
+      const offset = index * 8;
+      const mass = outState[offset + 3];
+      outMass += mass;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const v = outState[offset + 4 + axis];
+        outMomentum[axis] += mass * v;
+        maxVelocityError = Math.max(maxVelocityError, Math.abs(v - velocity[axis]));
+        const expectedPosition = positions[index][axis] + velocity[axis] * dt;
+        maxPositionError = Math.max(
+          maxPositionError,
+          Math.abs(outState[offset + axis] - expectedPosition)
+        );
+      }
+    }
+
+    step.destroyOutputParticleBuffers?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      stepStatus: step.status,
+      couplingModeReported: step.couplingMode,
+      fineLevel: step.fineLevel,
+      coarseLevel: step.coarseLevel,
+      conservation: step.conservation,
+      totalMass,
+      expectedMomentum: velocity.map((v) => totalMass * v),
+      outMass,
+      outMomentum,
+      maxVelocityError,
+      maxPositionError,
+      particleCount
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.stepStatus).toBe('schroeder-two-level-mechanics-step-submitted');
+  expect(result.couplingModeReported).toBe('composite-grid-shared-dt-delta-prolongation');
+  expect(result.fineLevel).toBe(0);
+  expect(result.coarseLevel).toBe(1);
+
+  // Gate 1 (compact GPU summary): after restriction, the combined coarse
+  // grid carries the total mass and momentum of both levels.
+  const conservation = result.conservation;
+  expect(conservation).not.toBeNull();
+  expect(Math.abs(conservation.coarseMassKg - result.totalMass))
+    .toBeLessThan(1e-4 * Math.max(1, result.totalMass));
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(conservation.coarseMomentumKgMPerS[axis] - result.expectedMomentum[axis]))
+      .toBeLessThan(1e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+  }
+
+  // Gate 2: the constant velocity field survives the coupled two-level step
+  // for every particle at both levels (fixed-point P2G floor tolerance),
+  // and positions advance by exactly one dt of the constant velocity.
+  expect(result.maxVelocityError).toBeLessThan(5e-4);
+  expect(result.maxPositionError).toBeLessThan(1e-4);
+
+  // Gate 3: particle-level totals conserved through the shared-set step
+  // (also proves the chained copy-through G2P touched every particle
+  // exactly once).
+  expect(Math.abs(result.outMass - result.totalMass)).toBeLessThan(1e-4 * result.totalMass);
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(result.outMomentum[axis] - result.expectedMomentum[axis]))
+      .toBeLessThan(5e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+  }
+});

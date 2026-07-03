@@ -36705,3 +36705,47 @@ Conclusion: the SS hierarchy machinery is noise-level at current demo scales
 on this device, closing the near-term performance risk flagged in the
 feasibility assessment. Re-measure when multi-level co-simulation and
 subcycling join the per-frame path, and at much larger particle counts.
+
+## 2026-07-03 AKDT - SS Two-Level Coupled Step Over One Shared Particle Set (Slice 12)
+
+First slice of the multi-level milestone: the two-level coupled cycle is now
+one production function over a single particle set partitioned by Schroeder
+level assignment, instead of a proof-only composition over two separate
+particle sets.
+
+- `runMlsMpmG2pWebGpu` (standalone) now accepts a retained
+  `schroederActiveNodeList` (buffer or rows) plus `schroederSelectedLevel`
+  and encodes the existing WGSL active-node/level filter params (the fused
+  path had this; the standalone runner always bound a dummy). Copy-through
+  semantics make level-filtered G2P passes chainable: pass 2 consumes pass
+  1's retained outputs so every particle is written exactly once.
+- New `runSchroederTwoLevelMechanicsStepWebGpu` in
+  `schroederCrossLevelCouplingGpu.js`: level-filtered P2G at fine dx and
+  coarse 2dx over the shared set, restriction(accumulate) into the coarse
+  grid, per-level grid updates, delta-form prolongation with the
+  boundary-band mask, then chained level-filtered G2P at both levels.
+  Composite-grid form with shared dt; subcycling is the planned extension.
+  Production kernels are injected (gridSpecFactory/p2g/gridUpdate/g2p
+  runners) to keep the module dependency-clean; intermediates are released
+  behind the queue and the compact conservation row is the only readback.
+
+New proof `Schroeder two-level coupled step runs both levels in one shared
+particle set with conservation`: 13 particles (9 fine-level at 0.5 kg, 4
+coarse-level at 4 kg) under admitted assignment/active-node rows, gating on
+the combined coarse grid carrying the full two-level mass/momentum (compact
+GPU row), constant velocity surviving the coupled step for every particle at
+both levels with positions advanced exactly one dt, and particle-level
+totals conserved (which also proves the chained copy-through touched each
+particle exactly once).
+
+Validation:
+
+- PASS: `node --test tests/sphG2pGpuKernel.test.mjs` `19/19` (two new
+  filter-binding tests).
+- PASS: both two-level proofs (kernel composition and shared-set production
+  step) `2/2`.
+- PASS: `npm test` `972/975`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next: subcycling (fine level substeps per coarse step with time-interpolated
+delta prolongation), then scene-loop scheduling of the two-level step.

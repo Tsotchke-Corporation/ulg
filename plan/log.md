@@ -36844,3 +36844,27 @@ Validation:
 Next: authority switch for two-level mechanics (resident envelope
 integration with adoption/publication parity), live split policy, renderer
 AbortError triage, deferred distribution work.
+
+## 2026-07-03 AKDT - SS Two-Level Continuation Envelope (Slice 15)
+
+First sub-slice of the authority switch: the two-level coupled step now
+emits a resident-compatible continuation envelope when its outputs are
+retained - `nextSphParticleState` / `nextMlsMpmParticleState` descriptors
+(gpu-resident-unread-ready, step/time advanced, cpuStateStale) and
+`nextParticleUploads` with webgpu-uploaded retained state/thermo/mechanics
+buffers and explicit ownership flags. Internally-created thermo buffers
+transfer ownership to the caller through the envelope instead of being
+destroyed behind the queue.
+
+Proof: the shared-set two-level proof gains a chained case - step B consumes
+step A's retained uploads directly (no CPU repack), and every particle
+advances exactly two dt of the constant field across the two coupled steps,
+with step/time counters propagating (step 2, t = 2e-4).
+
+Validation: chained proof passes inside the existing shared-set test
+(5.9s); `npm test` `974/977`, `3` skipped; `git diff --check` clean.
+
+Remaining for the authority switch: orchestrator authoritative mode
+returning this envelope in the resident-step result shape, sidecar
+sequencing decision (post-step operator splitting first), and a scheduled
+continuation proof with two-level authority on.

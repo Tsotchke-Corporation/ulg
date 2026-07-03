@@ -13275,6 +13275,73 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
     const subcycled = await runStep(2);
     const sharedGravity = await runStep(1, gravity);
     const subcycledGravity = await runStep(2, gravity);
+
+    // Continuation-envelope chain: step B consumes step A's retained
+    // nextParticleUploads directly (no CPU repack), so positions must
+    // advance two full dt through two coupled steps.
+    const stepOptions = {
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      levelAssignment,
+      fineActiveNodeList,
+      coarseActiveNodeList,
+      fineLevel: 0,
+      baseGridSpacingM: baseDx,
+      boxDimsM,
+      dt,
+      gravityMPerS2: [0, 0, 0],
+      fineSubstepCount: 2,
+      gridSpecFactory: gridKernel.createMlsMpmGridSpec,
+      p2gRunner: gridKernel.runMlsMpmP2gGridProjectionWebGpu,
+      gridUpdateRunner: gridUpdateKernel.runMlsMpmGridUpdateWebGpu,
+      g2pRunner: g2pKernel.runMlsMpmG2pWebGpu
+    };
+    const stepA = await coupling.runSchroederTwoLevelMechanicsStepWebGpu(stepOptions);
+    const stepB = await coupling.runSchroederTwoLevelMechanicsStepWebGpu({
+      ...stepOptions,
+      sphParticleState: stepA.nextSphParticleState,
+      mlsMpmParticleState: stepA.nextMlsMpmParticleState,
+      sphParticleUpload: stepA.nextParticleUploads.sphParticleUpload,
+      mlsMpmParticleUpload: stepA.nextParticleUploads.mlsMpmParticleUpload
+    });
+    const stateFloatsChained = particleCount * 8;
+    const chainReadBuffer = device.createBuffer({
+      size: stateFloatsChained * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const chainEncoder = device.createCommandEncoder();
+    chainEncoder.copyBufferToBuffer(stepB.stateBuffer, 0, chainReadBuffer, 0, stateFloatsChained * 4);
+    device.queue.submit([chainEncoder.finish()]);
+    await chainReadBuffer.mapAsync(GPUMapMode.READ);
+    const chainedState = new Float32Array(chainReadBuffer.getMappedRange()).slice(0, stateFloatsChained);
+    chainReadBuffer.unmap();
+    chainReadBuffer.destroy();
+    let chainedMaxVelocityError = 0;
+    let chainedMaxPositionError = 0;
+    for (let index = 0; index < particleCount; index += 1) {
+      const offset = index * 8;
+      for (let axis = 0; axis < 3; axis += 1) {
+        chainedMaxVelocityError = Math.max(
+          chainedMaxVelocityError,
+          Math.abs(chainedState[offset + 4 + axis] - velocity[axis])
+        );
+        const expectedPosition = positions[index][axis] + velocity[axis] * 2 * dt;
+        chainedMaxPositionError = Math.max(
+          chainedMaxPositionError,
+          Math.abs(chainedState[offset + axis] - expectedPosition)
+        );
+      }
+    }
+    const chained = {
+      stepBTime: stepB.nextSphParticleState.time,
+      stepBStep: stepB.nextSphParticleState.step,
+      uploadsStatus: stepA.nextParticleUploads.sphParticleUpload.status,
+      chainedMaxVelocityError,
+      chainedMaxPositionError
+    };
+    stepA.destroyOutputParticleBuffers?.();
+    stepB.destroyOutputParticleBuffers?.();
     device.destroy?.();
 
     return {
@@ -13283,6 +13350,7 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
       subcycled,
       sharedGravity,
       subcycledGravity,
+      chained,
       totalMass,
       expectedMomentum: velocity.map((v) => totalMass * v),
       particleCount
@@ -13296,6 +13364,14 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
   expect(result.subcycled.fineSubstepCount).toBe(2);
   expect(result.shared.fineLevel).toBe(0);
   expect(result.shared.coarseLevel).toBe(1);
+
+  // Continuation envelope: two chained coupled steps advance exactly two
+  // dt with the second step consuming retained GPU uploads directly.
+  expect(result.chained.uploadsStatus).toBe('webgpu-uploaded');
+  expect(result.chained.stepBStep).toBe(2);
+  expect(Math.abs(result.chained.stepBTime - 2e-4)).toBeLessThan(1e-9);
+  expect(result.chained.chainedMaxVelocityError).toBeLessThan(1e-3);
+  expect(result.chained.chainedMaxPositionError).toBeLessThan(2e-4);
 
   // Gravity runs: uniform gravity must not be double counted through the
   // coarse correction at either substep count.

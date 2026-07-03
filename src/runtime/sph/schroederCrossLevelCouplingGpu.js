@@ -1107,6 +1107,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
 
   // Intermediates are released behind the queue; the caller owns the final
   // G2P outputs (and destroys pass-1 outputs once consumed).
+  const transferThermoOwnership = retainOutputParticleBuffers && ownsThermoBuffer;
   const cleanup = () => {
     fineProjection.destroyGridBuffer?.();
     coarseProjection.destroyGridBuffer?.();
@@ -1116,7 +1117,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     for (const destroyIntermediate of intermediateBuffers) destroyIntermediate();
     fineG2p.stateBuffer?.destroy?.();
     fineG2p.mechanicsBuffer?.destroy?.();
-    if (ownsThermoBuffer) thermoBuffer?.destroy?.();
+    if (ownsThermoBuffer && !transferThermoOwnership) thermoBuffer?.destroy?.();
   };
   deferSubmittedWorkCleanup(device, cleanup);
 
@@ -1157,6 +1158,50 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     result.destroyOutputParticleBuffers = () => {
       coarseG2p.stateBuffer?.destroy?.();
       coarseG2p.mechanicsBuffer?.destroy?.();
+      if (transferThermoOwnership) thermoBuffer?.destroy?.();
+    };
+    // Resident-compatible continuation envelope: the next scheduled step
+    // (or a chained two-level step) can consume these retained buffers as
+    // webgpu-uploaded particle inputs without any CPU readback.
+    const nextStep = (finiteNumber(sphParticleState.step, 0)) + 1;
+    const nextTime = finiteNumber(sphParticleState.time, 0) + dtSeconds;
+    result.nextSphParticleState = {
+      ...sphParticleState,
+      status: 'gpu-resident-unread-ready',
+      step: nextStep,
+      time: nextTime,
+      cpuStateStale: true
+    };
+    result.nextMlsMpmParticleState = {
+      ...mlsMpmParticleState,
+      status: 'gpu-resident-unread-ready',
+      step: nextStep,
+      time: nextTime,
+      cpuStateStale: true
+    };
+    result.nextParticleUploads = {
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        sourceStage: 'schroeder-two-level-mechanics-step',
+        particleCount: sphParticleState.particleCount,
+        stateBuffer: coarseG2p.stateBuffer,
+        thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: transferThermoOwnership,
+        slot: 0,
+        step: nextStep,
+        time: nextTime
+      },
+      mlsMpmParticleUpload: {
+        status: 'webgpu-uploaded',
+        sourceStage: 'schroeder-two-level-mechanics-step',
+        particleCount: mlsMpmParticleState.particleCount,
+        mechanicsBuffer: coarseG2p.mechanicsBuffer,
+        ownsMechanicsBuffer: true,
+        slot: 0,
+        step: nextStep,
+        time: nextTime
+      }
     };
   }
   return result;

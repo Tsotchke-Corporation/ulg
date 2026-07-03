@@ -36910,3 +36910,46 @@ Remaining for live two-level authority: scene/demoMount plumbing
 (URL/config -> refresh options -> runSchroederSceneResidentSteps
 baseOptions) and a mounted scheduled proof; the envelope-compatibility risk
 is now retired.
+
+## 2026-07-03 AKDT - SS Two-Level Authority Live In The Mounted Demo (Slice 17)
+
+The multi-level milestone is complete: the mounted, URL-scheduled demo can
+now run its actual simulation on subcycled two-level Schroeder mechanics.
+
+Scene/mount plumbing:
+
+- `refreshMlsMpmResidentSteps` accepts and forwards
+  `schroederEnableTwoLevelMechanics`,
+  `schroederTwoLevelMechanicsAuthority`, and
+  `schroederTwoLevelFineSubstepCount` into the same-level orchestrator call
+  inside the scene sequence loop; the resident scheduling signature carries
+  `ssTwoLevel/ssTwoLevelAuthority/ssTwoLevelSubsteps` tokens at both call
+  sites so config changes reschedule.
+- demoMount URL/config params `schroederTwoLevel` (`ssTwoLevel`),
+  `schroederTwoLevelAuthority`, and `schroederTwoLevelSubsteps` parse into
+  the initial Schroeder config, forward into resident scheduling, and
+  persist into the hash URL.
+
+Proof `SPH phase mounted scene advances under authoritative two-level SS
+mechanics`: a URL-configured mounted scene
+(`ss=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&
+schroederTwoLevelSubsteps=2`) executes synthesized authoritative two-level
+steps through the real scheduler, with sim time strictly advancing across
+schedules, live combined-mass conservation telemetry positive, and no
+WebGPU validation errors. The scene sequence loop consumed the synthesized
+envelope (uploads, ping-pong, clone-for-next) without modification.
+
+Validation:
+
+- PASS: mounted authoritative proof `1/1` (25.3s).
+- PASS: regression battery (mounted storage policy, live steam coarsening,
+  merged-set continuation, chained authoritative orchestrator, observation
+  stage) `5/5` (one batch-order page-load flake passed standalone).
+- PASS: `npm test` `976/979`, `3` skipped.
+- PASS: `git diff --check`.
+
+Two-level authority remains opt-in and mechanics-only (sidecars and
+particle-storage materialization stay on the resident path, fail-closed
+with an explicit error when combined). Follow-ups: sidecar operator
+splitting on the two-level path, then merges/splits under two-level
+authority.

@@ -239,6 +239,10 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'schroederLawNeighborCandidates',
   'schroederParticleStorageMaterialization',
   'ssParticleStorageMaterialization',
+  'schroederTwoLevel',
+  'ssTwoLevel',
+  'schroederTwoLevelAuthority',
+  'schroederTwoLevelSubsteps',
   'schroederParticleStorageRowBudget',
   'schroederParticleStorageRequiredCapacity',
   'schroederParticleStorageCapacityMargin',
@@ -2163,6 +2167,26 @@ export async function mountSphPhaseDemoOverlay({
     ),
     true
   );
+  const initialSchroederTwoLevelMechanicsEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederTwoLevel', 'ssTwoLevel'],
+      ['enableTwoLevelMechanics', 'schroederEnableTwoLevelMechanics', 'twoLevelMechanics']
+    ),
+    false
+  );
+  const initialSchroederTwoLevelMechanicsAuthority = (() => {
+    const raw = String(initialUrlOrSchroederPolicyValue(
+      ['schroederTwoLevelAuthority'],
+      ['twoLevelMechanicsAuthority', 'schroederTwoLevelMechanicsAuthority']
+    ) || 'observation').trim().toLowerCase();
+    return raw === 'authoritative' ? 'authoritative' : 'observation';
+  })();
+  const initialSchroederTwoLevelFineSubstepCount = positiveIntegerUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederTwoLevelSubsteps'],
+      ['twoLevelFineSubstepCount', 'schroederTwoLevelFineSubstepCount']
+    )
+  ) || 1;
   const initialSchroederParticleStorageMaterializationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederParticleStorageMaterialization', 'ssParticleStorageMaterialization'],
@@ -2254,6 +2278,9 @@ export async function mountSphPhaseDemoOverlay({
     enableCrossLevelCoupling: initialSchroederCrossLevelCouplingEnabled,
     enableLawQueue: initialSchroederLawQueueEnabled,
     enableLawNeighborCandidates: initialSchroederLawNeighborCandidatesEnabled,
+    enableTwoLevelMechanics: initialSchroederTwoLevelMechanicsEnabled,
+    twoLevelMechanicsAuthority: initialSchroederTwoLevelMechanicsAuthority,
+    twoLevelFineSubstepCount: initialSchroederTwoLevelFineSubstepCount,
     enableParticleStorageMaterialization: initialSchroederParticleStorageMaterializationEnabled,
     particleStorageAdmissionRowBudget: initialSchroederParticleStorageAdmissionRowBudget,
     particleStorageRequiredCapacity: initialSchroederParticleStorageRequiredCapacity,
@@ -2302,6 +2329,9 @@ export async function mountSphPhaseDemoOverlay({
       schroederEnableCrossLevelCoupling: config.enableCrossLevelCoupling,
       schroederEnableLawQueue: config.enableLawQueue,
       schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates,
+      schroederEnableTwoLevelMechanics: config.enableTwoLevelMechanics,
+      schroederTwoLevelMechanicsAuthority: config.twoLevelMechanicsAuthority,
+      schroederTwoLevelFineSubstepCount: config.twoLevelFineSubstepCount,
       schroederEnableParticleStorageMaterialization: config.enableParticleStorageMaterialization,
       schroederParticleStorageAdmissionRowBudget: config.particleStorageAdmissionRowBudget,
       schroederParticleStorageRequiredCapacity: config.particleStorageRequiredCapacity,
@@ -2670,6 +2700,15 @@ export async function mountSphPhaseDemoOverlay({
       if (!initialSchroederLawNeighborCandidatesEnabled) q.set('schroederLawNeighborCandidates', '0');
       if (initialSchroederParticleStorageMaterializationEnabled) {
         q.set('schroederParticleStorageMaterialization', '1');
+      }
+      if (initialSchroederTwoLevelMechanicsEnabled) {
+        q.set('schroederTwoLevel', '1');
+        if (initialSchroederTwoLevelMechanicsAuthority !== 'observation') {
+          q.set('schroederTwoLevelAuthority', initialSchroederTwoLevelMechanicsAuthority);
+        }
+        if (initialSchroederTwoLevelFineSubstepCount > 1) {
+          q.set('schroederTwoLevelSubsteps', String(initialSchroederTwoLevelFineSubstepCount));
+        }
       }
       if (initialSchroederParticleStorageAdmissionRowBudget != null) {
         q.set('schroederParticleStorageRowBudget', String(initialSchroederParticleStorageAdmissionRowBudget));

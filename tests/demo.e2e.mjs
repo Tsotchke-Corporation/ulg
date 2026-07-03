@@ -13803,3 +13803,65 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
   expect(result.maxPositionError).toBeLessThan(2e-4);
   expect(Math.abs(result.outMass - result.totalMass)).toBeLessThan(1e-4 * result.totalMass);
 });
+
+test('SPH phase mounted scene advances under authoritative two-level SS mechanics', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  const sampleState = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const twoLevel = execution?.finalSchroederResult?.twoLevelMechanics
+      || execution?.schroederSameLevelMechanics?.twoLevelMechanics
+      || null;
+    return {
+      status: execution?.status ?? null,
+      finalStepStatus: execution?.finalStep?.status ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      twoLevelAuthority: twoLevel?.authority
+        ?? execution?.finalStep?.twoLevelMechanicsAuthority
+        ?? null,
+      twoLevelConservationMass:
+        twoLevel?.conservation?.coarseMassKg
+        ?? execution?.finalStep?.twoLevelConservation?.coarseMassKg
+        ?? null
+    };
+  });
+
+  // Wait until the scheduled scene is executing authoritative two-level
+  // steps with sim time past the first schedule.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    return execution?.finalStep?.status === 'schroeder-two-level-authoritative-step-executed'
+      && Number.isFinite(time) && time > 0.002;
+  }, null, { timeout: 120_000 });
+
+  const first = await sampleState();
+  await page.waitForTimeout(10_000);
+  const second = await sampleState();
+
+  // The mounted scheduler is running the synthesized authoritative steps
+  // and sim time strictly advances across schedules on the two-level path.
+  expect(first.finalStepStatus).toBe('schroeder-two-level-authoritative-step-executed');
+  expect([
+    'authoritative',
+    'two-level-authoritative-resident-mechanics-replaced'
+  ]).toContain(first.twoLevelAuthority);
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+  // Live conservation telemetry is present with a positive combined mass.
+  expect(first.twoLevelConservationMass).toBeGreaterThan(0);
+  expect(consoleIssues).toEqual([]);
+});

@@ -12927,6 +12927,9 @@ export function createSphPhaseScene(container, {
     schroederMaxLevel = null,
     schroederTileCellCount = null,
     schroederEnablePortableSummary = false,
+    schroederEnableTwoLevelMechanics = false,
+    schroederTwoLevelMechanicsAuthority = 'observation',
+    schroederTwoLevelFineSubstepCount = 1,
     schroederEnableActiveNodeIndex = false,
     schroederEnableActiveNodeSortedIndex = false,
     schroederLawNeighborTraversalPolicyMode = null,
@@ -12964,6 +12967,9 @@ export function createSphPhaseScene(container, {
       `ssMax=${schroederMaxLevel ?? 'default'}`,
       `ssTile=${schroederTileCellCount ?? 'default'}`,
       `ssPortable=${Boolean(schroederEnablePortableSummary) ? 1 : 0}`,
+      `ssTwoLevel=${Boolean(schroederEnableTwoLevelMechanics) ? 1 : 0}`,
+      `ssTwoLevelAuthority=${schroederTwoLevelMechanicsAuthority || 'observation'}`,
+      `ssTwoLevelSubsteps=${Math.max(1, Math.round(Number(schroederTwoLevelFineSubstepCount) || 1))}`,
       `ssIndex=${Boolean(schroederEnableActiveNodeIndex) ? 1 : 0}`,
       `ssSorted=${Boolean(schroederEnableActiveNodeSortedIndex) ? 1 : 0}`,
       `ssTraversal=${schroederLawNeighborTraversalPolicyMode || 'default'}`,
@@ -19253,6 +19259,9 @@ export function createSphPhaseScene(container, {
     schroederMaxLevel = null,
     schroederTileCellCount = null,
     schroederEnablePortableSummary = true,
+    schroederEnableTwoLevelMechanics = false,
+    schroederTwoLevelMechanicsAuthority = 'observation',
+    schroederTwoLevelFineSubstepCount = 1,
     schroederPortableSummaryPeerComputeUseCase = 'scene-native-schroeder-render-lod',
     schroederEnableActiveNodeIndex = false,
     schroederEnableActiveNodeSortedIndex = false,
@@ -19344,6 +19353,15 @@ export function createSphPhaseScene(container, {
       ? Math.max(1, Math.round(Number(schroederTileCellCount)))
       : null;
     const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
+    const requestedSchroederEnableTwoLevelMechanics = Boolean(schroederEnableTwoLevelMechanics);
+    const requestedSchroederTwoLevelMechanicsAuthority =
+      String(schroederTwoLevelMechanicsAuthority || 'observation').trim().toLowerCase() === 'authoritative'
+        ? 'authoritative'
+        : 'observation';
+    const requestedSchroederTwoLevelFineSubstepCount = Math.max(
+      1,
+      Math.round(Number(schroederTwoLevelFineSubstepCount) || 1)
+    );
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
     const schroederAdmissionResidentAuthorityHost =
@@ -20057,6 +20075,9 @@ export function createSphPhaseScene(container, {
       schroederMaxLevel: requestedSchroederMaxLevel,
       schroederTileCellCount: requestedSchroederTileCellCount,
       schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
+      schroederEnableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+      schroederTwoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
+      schroederTwoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
       schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
       schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
       schroederLawNeighborTraversalPolicyMode,
@@ -20529,6 +20550,9 @@ export function createSphPhaseScene(container, {
               mlsMpmParticleUpload: currentMlsMpmParticleUpload,
               selectedLevel: requestedSchroederSelectedLevel,
               baseGridSpacingM: requestedSchroederBaseGridSpacingM,
+              enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+              twoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
+              twoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
               ...(requestedSchroederMinLevel !== null ? { minLevel: requestedSchroederMinLevel } : {}),
               ...(requestedSchroederMaxLevel !== null ? { maxLevel: requestedSchroederMaxLevel } : {}),
               ...(requestedSchroederTileCellCount !== null ? { tileCellCount: requestedSchroederTileCellCount } : {}),
@@ -20980,6 +21004,9 @@ export function createSphPhaseScene(container, {
             schroederMaxLevel: requestedSchroederMaxLevel,
             schroederTileCellCount: requestedSchroederTileCellCount,
             schroederEnablePortableSummary: requestedSchroederEnablePortableSummary,
+      schroederEnableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+      schroederTwoLevelMechanicsAuthority: requestedSchroederTwoLevelMechanicsAuthority,
+      schroederTwoLevelFineSubstepCount: requestedSchroederTwoLevelFineSubstepCount,
             schroederEnableActiveNodeIndex: requestedSchroederEnableActiveNodeIndex,
             schroederEnableActiveNodeSortedIndex: requestedSchroederEnableActiveNodeSortedIndex,
             schroederLawNeighborTraversalPolicyMode,

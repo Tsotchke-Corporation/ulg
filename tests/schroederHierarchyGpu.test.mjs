@@ -8687,3 +8687,94 @@ test('Schroeder same-level mechanics leaves two-level mode off by default', asyn
   assert.equal(twoLevelCalls.length, 0);
   assert.equal(result.twoLevelMechanics, null);
 });
+
+test('Schroeder same-level mechanics can make the two-level step authoritative', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const envelopeUploads = {
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: { label: 'two-level-state-out' },
+      thermoBuffer: { label: 'two-level-thermo' },
+      particleCount: 3,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: { label: 'two-level-mechanics-out' },
+      particleCount: 3,
+      slot: 0
+    }
+  };
+  const twoLevelMechanicsRunner = async (options) => ({
+    schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+    status: 'schroeder-two-level-mechanics-step-submitted',
+    couplingMode: 'composite-grid-subcycled-delta-prolongation',
+    fineLevel: options.fineLevel,
+    coarseLevel: options.fineLevel + 1,
+    fineSubstepCount: options.fineSubstepCount,
+    fineSubstepDt: options.dt / options.fineSubstepCount,
+    fineGridSpacingM: 0.25,
+    coarseGridSpacingM: 0.5,
+    conservation: { massResidualKg: 0 },
+    conservativeTransferStatus: 'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
+    retainOutputParticleBuffersRequested: options.retainOutputParticleBuffers === true,
+    nextSphParticleState: { step: 1, time: 5e-4 },
+    nextMlsMpmParticleState: { step: 1, time: 5e-4 },
+    nextParticleUploads: envelopeUploads
+  });
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner,
+    residentStepRunner: async (options) => {
+      residentCalls.push(options);
+      return { status: 'resident-step-stubbed' };
+    }
+  });
+
+  // The resident runner is replaced entirely; the synthesized step exposes
+  // the scene-consumed envelope fields from the two-level outputs.
+  assert.equal(residentCalls.length, 0);
+  const step = result.residentStep;
+  assert.equal(step.status, 'schroeder-two-level-authoritative-step-executed');
+  assert.equal(step.backend, 'webgpu');
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.twoLevelMechanicsAuthority, 'authoritative');
+  assert.equal(step.sidecars, 'none-two-level-mechanics-only');
+  assert.equal(step.nextParticleUploads, envelopeUploads);
+  assert.equal(step.particlePingPong.nextStep, 1);
+  assert.equal(step.particlePingPong.nextTime, 5e-4);
+  assert.equal(step.particlePingPong.nextSlot, 1);
+  assert.equal(
+    result.twoLevelMechanics.authority,
+    'two-level-authoritative-resident-mechanics-replaced'
+  );
+});
+
+test('Schroeder two-level authoritative mode fail-closes with particle-storage materialization', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  await assert.rejects(
+    runSchroederSameLevelMechanicsWebGpu({
+      device,
+      ...buffers,
+      selectedLevel: 0,
+      baseGridSpacingM: 0.25,
+      enableTwoLevelMechanics: true,
+      twoLevelMechanicsAuthority: 'authoritative',
+      enableParticleStorageMaterialization: true,
+      particleStorageMaterializationAdmission: { committed: true },
+      residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+    }),
+    /does not yet support particle-storage materialization/
+  );
+});

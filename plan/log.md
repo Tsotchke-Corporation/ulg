@@ -36868,3 +36868,45 @@ Remaining for the authority switch: orchestrator authoritative mode
 returning this envelope in the resident-step result shape, sidecar
 sequencing decision (post-step operator splitting first), and a scheduled
 continuation proof with two-level authority on.
+
+## 2026-07-03 AKDT - SS Two-Level Authoritative Mode (Slice 16)
+
+The authority switch, orchestrator level: two-level mechanics can now
+replace the resident mechanics as the state authority.
+
+- `twoLevelMechanicsAuthority: 'observation' | 'authoritative'` on
+  `runSchroederSameLevelMechanicsWebGpu`. Authoritative mode retains the
+  coupled-step continuation envelope and synthesizes a
+  resident-step-shaped result
+  (`schroeder-two-level-authoritative-step-executed`) carrying exactly the
+  fields the scene sequence loop consumes: status/backend/readbackMode,
+  `nextParticleUploads` with webgpu-uploaded retained buffers,
+  `particlePingPong` slots/step/time for clone-for-next, dt, stage
+  status/backends, plus the two-level conservation row. The resident step
+  runner is not invoked.
+- Mechanics-only by design: authoritative mode fail-closes with an explicit
+  TypeError when particle-storage materialization is enabled (sidecars and
+  storage adoption stay on the resident path until their own slices).
+  Observation mode remains the default.
+
+Proofs:
+
+- Unit (`128/128`): authoritative mode skips the resident runner and
+  synthesizes the envelope (ping-pong counters, uploads pass-through,
+  authority telemetry); the storage-materialization guard rejects; existing
+  observation/default tests unchanged.
+- Browser: `Schroeder orchestrator advances chained authoritative two-level
+  steps with conservation` - two scheduled orchestrator invocations under
+  two-level authority, the second consuming the first's synthesized
+  envelope exactly like the scene loop does. Gates: resident mechanics
+  never invoked, step/time counters reach 2 and 2e-4, conservation
+  telemetry from both steps, constant velocity at both levels, positions
+  advanced exactly two dt, mass conserved.
+
+Validation: authoritative chain proof `1/1` (6.0s); sibling proofs `3/3`;
+`npm test` `976/979`, `3` skipped; `git diff --check` clean.
+
+Remaining for live two-level authority: scene/demoMount plumbing
+(URL/config -> refresh options -> runSchroederSceneResidentSteps
+baseOptions) and a mounted scheduled proof; the envelope-compatibility risk
+is now retired.

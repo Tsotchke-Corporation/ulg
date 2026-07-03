@@ -13590,3 +13590,216 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
       .toBeLessThan(1e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
   }
 });
+
+test('Schroeder orchestrator advances chained authoritative two-level steps with conservation', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const importWithRetry = async (path) => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await import(path);
+        } catch (error) {
+          if (attempt === 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+      return null;
+    };
+    const hierarchy = await importWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const buffersModule = await importWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await importWithRetry('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const ASSIGNMENT_FLOATS = abi.SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
+    const boxDimsM = [6, 6, 6];
+    const baseDx = 0.5;
+    const dt = 1e-4;
+    const velocity = [0.3, -0.2, 0.1];
+    const positions = [];
+    const levels = [];
+    for (let x = 0; x < 3; x += 1) {
+      for (let y = 0; y < 3; y += 1) {
+        positions.push([2.6 + x * 0.4, 2.6 + y * 0.4, 2.8]);
+        levels.push(0);
+      }
+    }
+    for (let x = 0; x < 2; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        positions.push([2.6 + x * 0.8, 2.6 + y * 0.8, 3.4]);
+        levels.push(1);
+      }
+    }
+    const particleCount = positions.length;
+    const state = new Float32Array(particleCount * 8);
+    const thermo = new Float32Array(particleCount * 12);
+    const mechanics = new Float32Array(particleCount * MECHANICS_FLOATS);
+    let totalMass = 0;
+    for (let index = 0; index < particleCount; index += 1) {
+      const s = index * 8;
+      const mass = levels[index] === 0 ? 0.5 : 4.0;
+      totalMass += mass;
+      state[s] = positions[index][0];
+      state[s + 1] = positions[index][1];
+      state[s + 2] = positions[index][2];
+      state[s + 3] = mass;
+      state[s + 4] = velocity[0];
+      state[s + 5] = velocity[1];
+      state[s + 6] = velocity[2];
+      state[s + 7] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = mass / 1000;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const baseSph = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      smoothingLengthM: baseDx,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const baseMls = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: dt,
+      mechanics
+    };
+    const assignments = new Float32Array(particleCount * ASSIGNMENT_FLOATS);
+    for (let index = 0; index < particleCount; index += 1) {
+      assignments[index * ASSIGNMENT_FLOATS] = levels[index];
+    }
+    const levelAssignment = {
+      schema: abi.ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
+      status: 'schroeder-level-assignment-submitted',
+      particleCount,
+      assignmentStrideFloats: ASSIGNMENT_FLOATS,
+      assignments
+    };
+
+    const residentCalls = [];
+    const runScheduled = (sphState, mlsState, sphUpload, mlsUpload) =>
+      hierarchy.runSchroederSameLevelMechanicsWebGpu({
+        device,
+        sphParticleState: sphState,
+        mlsMpmParticleState: mlsState,
+        sphParticleUpload: sphUpload,
+        mlsMpmParticleUpload: mlsUpload,
+        levelAssignment,
+        selectedLevel: 0,
+        baseGridSpacingM: baseDx,
+        boxDimsM,
+        dt,
+        gravityMPerS2: [0, 0, 0],
+        enableTwoLevelMechanics: true,
+        twoLevelMechanicsAuthority: 'authoritative',
+        twoLevelFineSubstepCount: 2,
+        residentStepRunner: async (options) => {
+          residentCalls.push(options);
+          return { status: 'resident-step-stubbed' };
+        }
+      });
+
+    // Two chained scheduled invocations, exactly like the scene loop: the
+    // second consumes the first's synthesized step envelope.
+    const first = await runScheduled(baseSph, baseMls, null, null);
+    const firstStep = first.residentStep;
+    const second = await runScheduled(
+      { ...baseSph, ...firstStep.nextSphParticleState },
+      { ...baseMls, ...firstStep.nextMlsMpmParticleState },
+      firstStep.nextParticleUploads.sphParticleUpload,
+      firstStep.nextParticleUploads.mlsMpmParticleUpload
+    );
+    const secondStep = second.residentStep;
+
+    const stateFloats = particleCount * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(
+      secondStep.nextParticleUploads.sphParticleUpload.stateBuffer,
+      0,
+      readBuffer,
+      0,
+      stateFloats * 4
+    );
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const outState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    let maxVelocityError = 0;
+    let maxPositionError = 0;
+    let outMass = 0;
+    for (let index = 0; index < particleCount; index += 1) {
+      const offset = index * 8;
+      outMass += outState[offset + 3];
+      for (let axis = 0; axis < 3; axis += 1) {
+        maxVelocityError = Math.max(
+          maxVelocityError,
+          Math.abs(outState[offset + 4 + axis] - velocity[axis])
+        );
+        const expectedPosition = positions[index][axis] + velocity[axis] * 2 * dt;
+        maxPositionError = Math.max(
+          maxPositionError,
+          Math.abs(outState[offset + axis] - expectedPosition)
+        );
+      }
+    }
+
+    const summary = {
+      status: 'ok',
+      residentCallCount: residentCalls.length,
+      firstStatus: firstStep.status,
+      firstAuthority: first.twoLevelMechanics.authority,
+      firstConservation: first.twoLevelMechanics.conservation,
+      secondStatus: secondStep.status,
+      secondConservation: second.twoLevelMechanics.conservation,
+      secondNextTime: secondStep.particlePingPong.nextTime,
+      secondNextStep: secondStep.particlePingPong.nextStep,
+      totalMass,
+      expectedMomentum: velocity.map((v) => totalMass * v),
+      outMass,
+      maxVelocityError,
+      maxPositionError
+    };
+    device.destroy?.();
+    return summary;
+  });
+
+  expect(result.status).toBe('ok');
+  // The resident mechanics never ran: the two-level step held authority for
+  // both scheduled invocations.
+  expect(result.residentCallCount).toBe(0);
+  expect(result.firstStatus).toBe('schroeder-two-level-authoritative-step-executed');
+  expect(result.secondStatus).toBe('schroeder-two-level-authoritative-step-executed');
+  expect(result.firstAuthority).toBe('two-level-authoritative-resident-mechanics-replaced');
+  expect(result.secondNextStep).toBe(2);
+  expect(Math.abs(result.secondNextTime - 2e-4)).toBeLessThan(1e-9);
+
+  // Conservation telemetry from both scheduled steps, and the physics gates
+  // across the chain: constant velocity at both levels, positions advanced
+  // exactly two dt, mass conserved.
+  for (const conservation of [result.firstConservation, result.secondConservation]) {
+    expect(conservation).not.toBeNull();
+    expect(Math.abs(conservation.coarseMassKg - result.totalMass))
+      .toBeLessThan(1e-4 * Math.max(1, result.totalMass));
+  }
+  expect(result.maxVelocityError).toBeLessThan(1e-3);
+  expect(result.maxPositionError).toBeLessThan(2e-4);
+  expect(Math.abs(result.outMass - result.totalMass)).toBeLessThan(1e-4 * result.totalMass);
+});

@@ -12785,6 +12785,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   coarseActiveNodeList = null,
   enableTwoLevelMechanics = false,
   twoLevelFineSubstepCount = 1,
+  twoLevelMechanicsAuthority = 'observation',
   activeNodeIndex = null,
   activeNodeSortedIndex = null,
   lawQueue = null,
@@ -13346,10 +13347,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
-  // Two-level mechanics (observation mode): produce the adjacent-level
-  // active-node list and run the coupled two-level step beside the resident
-  // authority path so its conservation is telemetered live before any
-  // authority switch.
+  // Two-level mechanics: observation mode runs the coupled step beside the
+  // resident authority path with telemetry only; authoritative mode replaces
+  // the resident mechanics entirely (mechanics-only: sidecars and
+  // particle-storage materialization are not yet available on this path).
+  const twoLevelAuthoritative = enableTwoLevelMechanics
+    && twoLevelMechanicsAuthority === 'authoritative';
+  if (twoLevelAuthoritative && enableParticleStorageMaterialization) {
+    throw new TypeError(
+      'Schroeder two-level authoritative mechanics does not yet support particle-storage materialization; use observation mode or the single-level resident path'
+    );
+  }
   const resolvedCoarseActiveNodeList = !enableTwoLevelMechanics
     ? null
     : coarseActiveNodeList || await runSchroederActiveNodeListWebGpu({
@@ -13384,9 +13392,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       p2gRunner: runMlsMpmP2gGridProjectionWebGpu,
       gridUpdateRunner: runMlsMpmGridUpdateWebGpu,
       g2pRunner: runMlsMpmG2pWebGpu,
-      // Observation mode: the resident step remains the state authority, so
-      // the two-level outputs are released and only telemetry is kept.
-      retainOutputParticleBuffers: false,
+      // Observation mode releases outputs and keeps telemetry only;
+      // authoritative mode retains the continuation envelope.
+      retainOutputParticleBuffers: twoLevelAuthoritative,
       conservationSummaryReadback: true
     });
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
@@ -13907,7 +13915,37 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     activeNodeList: resolvedActiveNodeList,
     hierarchyAggregateNode: resolvedHierarchyAggregateNode
   });
-  const residentStep = await residentStepRunner({
+  // Authoritative two-level mode replaces the resident mechanics with a
+  // synthesized resident-step-shaped envelope built from the coupled-step
+  // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
+  // clone-for-next) continues unchanged.
+  const residentStep = twoLevelAuthoritative
+    ? {
+      schema: 'peercompute.ulg.schroeder-two-level-authoritative-step.v0',
+      status: 'schroeder-two-level-authoritative-step-executed',
+      backend: 'webgpu',
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      normalHotLoopReadbackFree: true,
+      fullParticleReadbackPerformed: false,
+      dt,
+      stageStatus: { twoLevelMechanics: resolvedTwoLevelMechanics?.status ?? null },
+      stageBackends: { twoLevelMechanics: 'webgpu' },
+      twoLevelMechanicsAuthority: 'authoritative',
+      sidecars: 'none-two-level-mechanics-only',
+      particlePingPong: {
+        sourceSlot: sphParticleUpload?.slot ?? 0,
+        nextSlot: (sphParticleUpload?.slot ?? 0) === 0 ? 1 : 0,
+        nextStep: resolvedTwoLevelMechanics?.nextSphParticleState?.step
+          ?? ((sphParticleState?.step ?? 0) + 1),
+        nextTime: resolvedTwoLevelMechanics?.nextSphParticleState?.time
+          ?? ((sphParticleState?.time ?? 0) + finiteNumber(dt, 0))
+      },
+      nextSphParticleState: resolvedTwoLevelMechanics?.nextSphParticleState ?? null,
+      nextMlsMpmParticleState: resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
+      nextParticleUploads: resolvedTwoLevelMechanics?.nextParticleUploads ?? null,
+      twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null
+    }
+    : await residentStepRunner({
     ...residentStepOptions,
     sphParticleState,
     mlsMpmParticleState,
@@ -14598,7 +14636,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       schema: resolvedTwoLevelMechanics.schema,
       status: resolvedTwoLevelMechanics.status,
       couplingMode: resolvedTwoLevelMechanics.couplingMode,
-      authority: 'observation-only-resident-step-remains-authoritative',
+      authority: twoLevelAuthoritative
+        ? 'two-level-authoritative-resident-mechanics-replaced'
+        : 'observation-only-resident-step-remains-authoritative',
       fineLevel: resolvedTwoLevelMechanics.fineLevel,
       coarseLevel: resolvedTwoLevelMechanics.coarseLevel,
       fineSubstepCount: resolvedTwoLevelMechanics.fineSubstepCount,

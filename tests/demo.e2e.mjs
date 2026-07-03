@@ -13022,3 +13022,47 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
       .toBeLessThan(1e-5 * Math.max(1, Math.abs(result.sourceMomentum[axis])));
   }
 });
+
+test('SPH phase continuation scene keeps simulating on the merged particle set after live coarsening', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  // Wait for the first coarsening cycle to land in continuation mode: the
+  // execution consumes fewer particles than the initial pack and sim time
+  // advances past the first schedule.
+  const sampleState = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    return {
+      count: execution?.finalStep?.nextParticleCount ?? null,
+      source: execution?.finalStep?.schroederParticleStorageMaterialization?.sourceParticleCount ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      status: execution?.status ?? null
+    };
+  });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    const count = Number(execution?.finalStep?.nextParticleCount);
+    return Number.isFinite(time) && time > 0.005 && Number.isFinite(count) && count > 0;
+  }, null, { timeout: 120_000 });
+
+  const first = await sampleState();
+  await page.waitForTimeout(12_000);
+  const second = await sampleState();
+
+  // The live merge shrank the particle set below the initial pack (35 in
+  // this scene) and the continuation keeps simulating on the merged set:
+  // sim time strictly advances between samples while the count stays
+  // stable (no runaway merging, no oscillation, no replay from t=0).
+  expect(first.status).toBe('resident-steps-executed');
+  expect(first.count).toBeGreaterThan(0);
+  expect(first.count).toBeLessThan(35);
+  expect(second.count).toBe(first.count);
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+});

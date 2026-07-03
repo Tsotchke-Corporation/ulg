@@ -36650,3 +36650,38 @@ Validation:
 Split/merge conservation is now complete across mass, momentum,
 represented volume, thermal energy (uniform-c), and entity counts, in both
 directions, live in scenes for merges and chain-proven for splits.
+
+## 2026-07-02 AKDT - SS Continuation Stability After Live Coarsening (Slice 10)
+
+Investigated whether live coarsening survives past its first cycle. Findings:
+
+- The URL-scheduled diagnostic steam scene (no continuation flags) appears to
+  "freeze" after the first merge cycle: its scheduling signature never
+  changes, so the memoized execution is returned forever. That is replay-mode
+  behavior by design, not a defect of the merge path. (With the native
+  renderer attached that scene also logs repeated `resident-steps-error`
+  AbortErrors from a mapAsync on a destroyed handle; renderer/replay
+  interplay predates this work and is recorded as a follow-up.)
+- The continuous-simulation configuration (residentAuto with fused sequences,
+  workers, and resident continuation) is healthy end to end: the scene merges
+  35 -> 27 in the first refresh, adopts the compacted storage, and keeps
+  simulating on the merged particle set - sim time advances steadily
+  (observed step 36 -> 200 over ~90s) with the count stable at 27, no
+  runaway merging, and no oscillation. Coarsen eligibility converges once
+  coherent bulk has merged.
+
+New proof `SPH phase continuation scene keeps simulating on the merged
+particle set after live coarsening`: waits for the first coarsening cycle in
+continuation mode, then samples twice 12s apart and gates on count < initial
+pack, count stable between samples, and sim time strictly advancing (no
+replay from t=0).
+
+Validation:
+
+- PASS: continuation coarsening stability proof `1/1` (31.2s).
+- PASS: `npm test` `970/973`, `3` skipped.
+- PASS: `git diff --check`.
+
+Follow-up recorded: native-renderer + replay-mode diagnostic scenes emit
+repeated AbortError refresh failures after count-changing adoption; the
+continuous path is unaffected.

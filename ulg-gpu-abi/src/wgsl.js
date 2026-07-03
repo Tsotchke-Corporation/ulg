@@ -13129,6 +13129,10 @@ struct SchroederCrossLevelGridCouplingParams {
   box_x_m: f32,
   box_y_m: f32,
   box_z_m: f32,
+  delta_scale: f32,
+  shared_accel_dt_x: f32,
+  shared_accel_dt_y: f32,
+  shared_accel_dt_z: f32,
 };
 
 const SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE: u32 = 64u;
@@ -13485,7 +13489,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     coarse_post_grid[coarse_offset + 2u],
     coarse_post_grid[coarse_offset + 3u]
   );
-  let delta = post_velocity - pre_velocity;
+  // delta_scale supports subcycled fine substeps: each substep applies its
+  // time-interpolated share of the coarse correction (scale 1/substeps),
+  // summing to the full delta across the coarse step. Zero means 1.
+  // shared_accel_dt removes velocity change the fine level integrates
+  // itself (gravity and other uniform shared accelerations times the
+  // coarse dt), so the transferred delta carries only coarse-grid-specific
+  // information and shared forces are not double counted.
+  let scale = select(params.delta_scale, 1.0, params.delta_scale == 0.0);
+  let shared_accel_dt = vec3<f32>(
+    params.shared_accel_dt_x,
+    params.shared_accel_dt_y,
+    params.shared_accel_dt_z
+  );
+  let delta = (post_velocity - pre_velocity - shared_accel_dt) * scale;
   fine_grid[fine_offset + 1u] = fine_grid[fine_offset + 1u] + delta.x;
   fine_grid[fine_offset + 2u] = fine_grid[fine_offset + 2u] + delta.y;
   fine_grid[fine_offset + 3u] = fine_grid[fine_offset + 3u] + delta.z;

@@ -38,7 +38,7 @@ export const SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST = 2;
 // Grid slots 1-3 hold velocity (post-grid-update layout) instead of
 // momentum; prolongation copies parent velocity onto massive fine nodes.
 export const SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS = 4;
-export const SCHROEDER_GRID_COUPLING_PARAMS_BYTES = 64;
+export const SCHROEDER_GRID_COUPLING_PARAMS_BYTES = 80;
 // Index order of the flat grid-node arrays. The standalone operator tests use
 // 'x-fastest'; real MLS-MPM P2G grids from createMlsMpmGridSpec use
 // 'z-fastest' with gridShift 1 (see gridNodeCoords in sphGridGpuKernel.js).
@@ -110,6 +110,8 @@ export function createSchroederCrossLevelGridCouplingPlan({
   velocityGrids = false,
   coarseGridDims = null,
   boxDimsM = null,
+  deltaScale = 0,
+  sharedAccelerationDtMPerS = null,
   flags = 0
 } = {}) {
   const fineDims = gridDims3(fineGridDims);
@@ -163,6 +165,15 @@ export function createSchroederCrossLevelGridCouplingPlan({
     gridShift: shift,
     accumulate: (resolvedFlags & SCHROEDER_GRID_COUPLING_FLAG_ACCUMULATE) !== 0,
     velocityGrids: (resolvedFlags & SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS) !== 0,
+    deltaScale: Math.max(0, finiteNumber(deltaScale, 0)),
+    // Velocity change per coarse dt that the fine level integrates itself
+    // (gravity etc.); the delta prolongation subtracts it to avoid double
+    // counting shared forces.
+    sharedAccelerationDtMPerS: [
+      finiteNumber(sharedAccelerationDtMPerS?.[0], 0),
+      finiteNumber(sharedAccelerationDtMPerS?.[1], 0),
+      finiteNumber(sharedAccelerationDtMPerS?.[2], 0)
+    ],
     // Sealed-box dims enable the delta-prolongation boundary-band mask; zero
     // dims disable it (open/chartless grids).
     boxDimsM: [
@@ -196,6 +207,12 @@ export function createSchroederCrossLevelGridCouplingParamsArray(plan) {
   view.setFloat32(52, plan.boxDimsM?.[0] ?? 0, true);
   view.setFloat32(56, plan.boxDimsM?.[1] ?? 0, true);
   view.setFloat32(60, plan.boxDimsM?.[2] ?? 0, true);
+  // Subcycled fine substeps apply their share of the coarse correction;
+  // zero encodes the default full delta.
+  view.setFloat32(64, finiteNumber(plan.deltaScale, 0), true);
+  view.setFloat32(68, finiteNumber(plan.sharedAccelerationDtMPerS?.[0], 0), true);
+  view.setFloat32(72, finiteNumber(plan.sharedAccelerationDtMPerS?.[1], 0), true);
+  view.setFloat32(76, finiteNumber(plan.sharedAccelerationDtMPerS?.[2], 0), true);
   return buffer;
 }
 
@@ -836,6 +853,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = [0, -9.80665, 0],
   internalPressureScale = 1,
+  fineSubstepCount = 1,
   gridSpecFactory,
   p2gRunner,
   gridUpdateRunner,
@@ -861,6 +879,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   const fineDx = baseDx * (2 ** resolvedFineLevel);
   const coarseDx = fineDx * 2;
   const dtSeconds = finiteNumber(dt, 0);
+  // Subcycling: the coarse level advances one full dt while the fine level
+  // takes fineSubstepCount substeps of dt / fineSubstepCount, each applying
+  // its time-interpolated share of the coarse velocity correction.
+  const substeps = Math.max(1, Math.round(finiteNumber(fineSubstepCount, 1)));
+  const dtFine = dtSeconds / substeps;
 
   const fineProjection = await p2gRunner({
     device,
@@ -872,7 +895,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     schroederSelectedLevel: resolvedFineLevel,
     gridSpacingM: fineDx,
     boxDimsM,
-    dt: dtSeconds,
+    dt: dtFine,
     internalPressureScale,
     retainGridBuffer: true,
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
@@ -931,16 +954,6 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     device.queue.submit([encoder.finish()]);
   }
 
-  const fineGridUpdate = await gridUpdateRunner({
-    device,
-    p2gGridProjection: fineProjection,
-    p2gGridBuffer: fineProjection.gridBuffer,
-    dt: dtSeconds,
-    gravityMPerS2,
-    boxDimsM,
-    retainUpdatedGridBuffer: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
-  });
   const coarseGridUpdate = await gridUpdateRunner({
     device,
     p2gGridProjection: coarseProjection,
@@ -952,66 +965,126 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
   });
 
-  await runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
-    device,
-    fineGridDims: fineSpec.gridDims,
-    coarseGridDims: coarseSpec.gridDims,
-    fineGridSpacingM: fineDx,
-    indexOrder: SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST,
-    gridShift: fineSpec.shift,
-    boxDimsM,
-    coarsePreGridBuffer,
-    coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
-    fineGridBuffer: fineGridUpdate.updatedGridBuffer
-  });
-
-  // Chained level-filtered G2P: pass 2 consumes pass 1's outputs so
-  // copy-through preserves the other level's results.
-  const fineG2p = await g2pRunner({
-    device,
-    sphParticleState,
-    mlsMpmParticleState,
-    sphParticleUpload,
-    mlsMpmParticleUpload,
-    gridUpdate: fineGridUpdate,
-    updatedGridBuffer: fineGridUpdate.updatedGridBuffer,
-    dt: dtSeconds,
-    boxDimsM,
-    internalPressureScale,
-    schroederActiveNodeList: fineActiveNodeList,
-    schroederSelectedLevel: resolvedFineLevel,
-    retainOutputParticleBuffers: true,
-    readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
-  });
-  const passOneUploads = {
-    sphParticleUpload: {
-      status: 'webgpu-uploaded',
-      stateBuffer: fineG2p.stateBuffer,
-      thermoBuffer: sphParticleUpload?.status === 'webgpu-uploaded'
-        ? sphParticleUpload.thermoBuffer
-        : null,
-      slot: 0
-    },
-    mlsMpmParticleUpload: {
-      status: 'webgpu-uploaded',
-      mechanicsBuffer: fineG2p.mechanicsBuffer,
-      slot: 0
-    }
-  };
-  if (!passOneUploads.sphParticleUpload.thermoBuffer) {
-    passOneUploads.sphParticleUpload.thermoBuffer = writeStorageBuffer(
+  // Shared thermo buffer for chained passes.
+  let ownsThermoBuffer = false;
+  let thermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.thermoBuffer
+    : null;
+  if (!thermoBuffer) {
+    thermoBuffer = writeStorageBuffer(
       device,
       'ulg-schroeder-two-level-thermo-in',
       sphParticleState.thermo
     );
-    passOneUploads.ownsThermoBuffer = true;
+    ownsThermoBuffer = true;
   }
+
+  // Fine substep loop: each substep projects the current fine particle
+  // state, updates the fine grid with dt/substeps, applies 1/substeps of
+  // the coarse correction, and reconstructs the fine particles. Later
+  // substeps consume the previous substep's retained outputs so
+  // copy-through preserves coarse particles throughout.
+  const intermediateBuffers = [];
+  const fineGridUpdates = [];
+  let currentSphUpload = sphParticleUpload;
+  let currentMlsUpload = mlsMpmParticleUpload;
+  let lastFineG2p = null;
+  for (let substep = 0; substep < substeps; substep += 1) {
+    const substepProjection = substep === 0
+      ? fineProjection
+      : await p2gRunner({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload: currentSphUpload,
+        mlsMpmParticleUpload: currentMlsUpload,
+        schroederLevelAssignment: levelAssignment,
+        schroederSelectedLevel: resolvedFineLevel,
+        gridSpacingM: fineDx,
+        boxDimsM,
+        dt: dtFine,
+        internalPressureScale,
+        retainGridBuffer: true,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+      });
+    if (substep > 0) {
+      intermediateBuffers.push(() => substepProjection.destroyGridBuffer?.());
+    }
+    const substepGridUpdate = await gridUpdateRunner({
+      device,
+      p2gGridProjection: substepProjection,
+      p2gGridBuffer: substepProjection.gridBuffer,
+      dt: dtFine,
+      gravityMPerS2,
+      boxDimsM,
+      retainUpdatedGridBuffer: true,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    });
+    fineGridUpdates.push(substepGridUpdate);
+    await runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu({
+      device,
+      fineGridDims: fineSpec.gridDims,
+      coarseGridDims: coarseSpec.gridDims,
+      fineGridSpacingM: fineDx,
+      indexOrder: SCHROEDER_GRID_INDEX_ORDER_Z_FASTEST,
+      gridShift: fineSpec.shift,
+      boxDimsM,
+      deltaScale: 1 / substeps,
+      // The fine grid updates integrate gravity themselves; exclude it from
+      // the transferred coarse correction.
+      sharedAccelerationDtMPerS: [
+        finiteNumber(gravityMPerS2?.[0], 0) * dtSeconds,
+        finiteNumber(gravityMPerS2?.[1], 0) * dtSeconds,
+        finiteNumber(gravityMPerS2?.[2], 0) * dtSeconds
+      ],
+      coarsePreGridBuffer,
+      coarsePostGridBuffer: coarseGridUpdate.updatedGridBuffer,
+      fineGridBuffer: substepGridUpdate.updatedGridBuffer
+    });
+    const substepG2p = await g2pRunner({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload: currentSphUpload,
+      mlsMpmParticleUpload: currentMlsUpload,
+      gridUpdate: substepGridUpdate,
+      updatedGridBuffer: substepGridUpdate.updatedGridBuffer,
+      dt: dtFine,
+      boxDimsM,
+      internalPressureScale,
+      schroederActiveNodeList: fineActiveNodeList,
+      schroederSelectedLevel: resolvedFineLevel,
+      retainOutputParticleBuffers: true,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
+    });
+    if (lastFineG2p) {
+      const previous = lastFineG2p;
+      intermediateBuffers.push(() => {
+        previous.stateBuffer?.destroy?.();
+        previous.mechanicsBuffer?.destroy?.();
+      });
+    }
+    lastFineG2p = substepG2p;
+    currentSphUpload = {
+      status: 'webgpu-uploaded',
+      stateBuffer: substepG2p.stateBuffer,
+      thermoBuffer,
+      slot: 0
+    };
+    currentMlsUpload = {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: substepG2p.mechanicsBuffer,
+      slot: 0
+    };
+  }
+  const fineGridUpdate = fineGridUpdates[fineGridUpdates.length - 1];
+  const fineG2p = lastFineG2p;
   const coarseG2p = await g2pRunner({
     device,
     sphParticleState,
     mlsMpmParticleState,
-    sphParticleUpload: passOneUploads.sphParticleUpload,
-    mlsMpmParticleUpload: passOneUploads.mlsMpmParticleUpload,
+    sphParticleUpload: currentSphUpload,
+    mlsMpmParticleUpload: currentMlsUpload,
     gridUpdate: coarseGridUpdate,
     updatedGridBuffer: coarseGridUpdate.updatedGridBuffer,
     dt: dtSeconds,
@@ -1038,13 +1111,12 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     fineProjection.destroyGridBuffer?.();
     coarseProjection.destroyGridBuffer?.();
     coarsePreGridBuffer.destroy?.();
-    fineGridUpdate.destroyUpdatedGridBuffer?.();
+    for (const update of fineGridUpdates) update.destroyUpdatedGridBuffer?.();
     coarseGridUpdate.destroyUpdatedGridBuffer?.();
+    for (const destroyIntermediate of intermediateBuffers) destroyIntermediate();
     fineG2p.stateBuffer?.destroy?.();
     fineG2p.mechanicsBuffer?.destroy?.();
-    if (passOneUploads.ownsThermoBuffer) {
-      passOneUploads.sphParticleUpload.thermoBuffer?.destroy?.();
-    }
+    if (ownsThermoBuffer) thermoBuffer?.destroy?.();
   };
   deferSubmittedWorkCleanup(device, cleanup);
 
@@ -1054,7 +1126,11 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     status: 'schroeder-two-level-mechanics-step-submitted',
     algorithm: 'schroeder-algorithm',
     dataStructure: 'schroeder-tree',
-    couplingMode: 'composite-grid-shared-dt-delta-prolongation',
+    couplingMode: substeps > 1
+      ? 'composite-grid-subcycled-delta-prolongation'
+      : 'composite-grid-shared-dt-delta-prolongation',
+    fineSubstepCount: substeps,
+    fineSubstepDt: dtFine,
     backend: 'webgpu',
     fineLevel: resolvedFineLevel,
     coarseLevel,

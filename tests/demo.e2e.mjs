@@ -13185,107 +13185,166 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
     const fineActiveNodeList = { activeNodes: fineActiveNodes };
     const coarseActiveNodeList = { activeNodes: coarseActiveNodes };
 
-    const step = await coupling.runSchroederTwoLevelMechanicsStepWebGpu({
-      device,
-      sphParticleState,
-      mlsMpmParticleState,
-      levelAssignment,
-      fineActiveNodeList,
-      coarseActiveNodeList,
-      fineLevel: 0,
-      baseGridSpacingM: baseDx,
-      boxDimsM,
-      dt,
-      gravityMPerS2: [0, 0, 0],
-      gridSpecFactory: gridKernel.createMlsMpmGridSpec,
-      p2gRunner: gridKernel.runMlsMpmP2gGridProjectionWebGpu,
-      gridUpdateRunner: gridUpdateKernel.runMlsMpmGridUpdateWebGpu,
-      g2pRunner: g2pKernel.runMlsMpmG2pWebGpu
-    });
+    const runStep = async (fineSubstepCount, gravityMPerS2 = [0, 0, 0]) => {
+      const step = await coupling.runSchroederTwoLevelMechanicsStepWebGpu({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        levelAssignment,
+        fineActiveNodeList,
+        coarseActiveNodeList,
+        fineLevel: 0,
+        baseGridSpacingM: baseDx,
+        boxDimsM,
+        dt,
+        gravityMPerS2,
+        fineSubstepCount,
+        gridSpecFactory: gridKernel.createMlsMpmGridSpec,
+        p2gRunner: gridKernel.runMlsMpmP2gGridProjectionWebGpu,
+        gridUpdateRunner: gridUpdateKernel.runMlsMpmGridUpdateWebGpu,
+        g2pRunner: g2pKernel.runMlsMpmG2pWebGpu
+      });
 
-    // Diagnostic full readback of the output particle state (small scene).
-    const stateFloats = particleCount * 8;
-    const readBuffer = device.createBuffer({
-      size: stateFloats * 4,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(step.stateBuffer, 0, readBuffer, 0, stateFloats * 4);
-    device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPUMapMode.READ);
-    const outState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
-    readBuffer.unmap();
-    readBuffer.destroy();
+      // Diagnostic full readback of the output particle state (small scene).
+      const stateFloats = particleCount * 8;
+      const readBuffer = device.createBuffer({
+        size: stateFloats * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(step.stateBuffer, 0, readBuffer, 0, stateFloats * 4);
+      device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const outState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+      readBuffer.unmap();
+      readBuffer.destroy();
 
-    let maxVelocityError = 0;
-    let maxPositionError = 0;
-    let outMass = 0;
-    const outMomentum = [0, 0, 0];
-    for (let index = 0; index < particleCount; index += 1) {
-      const offset = index * 8;
-      const mass = outState[offset + 3];
-      outMass += mass;
-      for (let axis = 0; axis < 3; axis += 1) {
-        const v = outState[offset + 4 + axis];
-        outMomentum[axis] += mass * v;
-        maxVelocityError = Math.max(maxVelocityError, Math.abs(v - velocity[axis]));
-        const expectedPosition = positions[index][axis] + velocity[axis] * dt;
-        maxPositionError = Math.max(
-          maxPositionError,
-          Math.abs(outState[offset + axis] - expectedPosition)
-        );
+      let maxVelocityError = 0;
+      let maxPositionError = 0;
+      let outMass = 0;
+      const outMomentum = [0, 0, 0];
+      // With uniform gravity every particle must land on v0 + g*dt after
+      // one coupled step regardless of level or substep count; any coarse
+      // correction double counting shows up as extra g*dt on fine levels.
+      const expectedVelocity = velocity.map(
+        (component, axis) => component + gravityMPerS2[axis] * dt
+      );
+      for (let index = 0; index < particleCount; index += 1) {
+        const offset = index * 8;
+        const mass = outState[offset + 3];
+        outMass += mass;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const v = outState[offset + 4 + axis];
+          outMomentum[axis] += mass * v;
+          maxVelocityError = Math.max(maxVelocityError, Math.abs(v - expectedVelocity[axis]));
+        }
       }
-    }
+      // Position gate only in the force-free runs (gravity position updates
+      // depend on substep integration order).
+      if (!gravityMPerS2.some((component) => component !== 0)) {
+        for (let index = 0; index < particleCount; index += 1) {
+          const offset = index * 8;
+          for (let axis = 0; axis < 3; axis += 1) {
+            const expectedPosition = positions[index][axis] + velocity[axis] * dt;
+            maxPositionError = Math.max(
+              maxPositionError,
+              Math.abs(outState[offset + axis] - expectedPosition)
+            );
+          }
+        }
+      }
+      const summary = {
+        stepStatus: step.status,
+        couplingModeReported: step.couplingMode,
+        fineSubstepCount: step.fineSubstepCount,
+        fineLevel: step.fineLevel,
+        coarseLevel: step.coarseLevel,
+        conservation: step.conservation,
+        outMass,
+        outMomentum,
+        expectedVelocity,
+        maxVelocityError,
+        maxPositionError
+      };
+      step.destroyOutputParticleBuffers?.();
+      return summary;
+    };
 
-    step.destroyOutputParticleBuffers?.();
+    const gravity = [0, -9.80665, 0];
+    const shared = await runStep(1);
+    const subcycled = await runStep(2);
+    const sharedGravity = await runStep(1, gravity);
+    const subcycledGravity = await runStep(2, gravity);
     device.destroy?.();
 
     return {
       status: 'ok',
-      stepStatus: step.status,
-      couplingModeReported: step.couplingMode,
-      fineLevel: step.fineLevel,
-      coarseLevel: step.coarseLevel,
-      conservation: step.conservation,
+      shared,
+      subcycled,
+      sharedGravity,
+      subcycledGravity,
       totalMass,
       expectedMomentum: velocity.map((v) => totalMass * v),
-      outMass,
-      outMomentum,
-      maxVelocityError,
-      maxPositionError,
       particleCount
     };
   });
 
   expect(result.status).toBe('ok');
-  expect(result.stepStatus).toBe('schroeder-two-level-mechanics-step-submitted');
-  expect(result.couplingModeReported).toBe('composite-grid-shared-dt-delta-prolongation');
-  expect(result.fineLevel).toBe(0);
-  expect(result.coarseLevel).toBe(1);
+  expect(result.shared.stepStatus).toBe('schroeder-two-level-mechanics-step-submitted');
+  expect(result.shared.couplingModeReported).toBe('composite-grid-shared-dt-delta-prolongation');
+  expect(result.subcycled.couplingModeReported).toBe('composite-grid-subcycled-delta-prolongation');
+  expect(result.subcycled.fineSubstepCount).toBe(2);
+  expect(result.shared.fineLevel).toBe(0);
+  expect(result.shared.coarseLevel).toBe(1);
 
-  // Gate 1 (compact GPU summary): after restriction, the combined coarse
-  // grid carries the total mass and momentum of both levels.
-  const conservation = result.conservation;
-  expect(conservation).not.toBeNull();
-  expect(Math.abs(conservation.coarseMassKg - result.totalMass))
-    .toBeLessThan(1e-4 * Math.max(1, result.totalMass));
-  for (let axis = 0; axis < 3; axis += 1) {
-    expect(Math.abs(conservation.coarseMomentumKgMPerS[axis] - result.expectedMomentum[axis]))
-      .toBeLessThan(1e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+  // Gravity runs: uniform gravity must not be double counted through the
+  // coarse correction at either substep count.
+  for (const [label, run] of [
+    ['shared-gravity', result.sharedGravity],
+    ['subcycled-gravity', result.subcycledGravity]
+  ]) {
+    expect(run.maxVelocityError, label).toBeLessThan(5e-4);
+    const expectedMomentumWithGravity = run.expectedVelocity.map(
+      (component) => result.totalMass * component
+    );
+    for (let axis = 0; axis < 3; axis += 1) {
+      expect(Math.abs(run.outMomentum[axis] - expectedMomentumWithGravity[axis]), label)
+        .toBeLessThan(5e-3 * Math.max(1, Math.abs(expectedMomentumWithGravity[axis])));
+    }
   }
 
-  // Gate 2: the constant velocity field survives the coupled two-level step
-  // for every particle at both levels (fixed-point P2G floor tolerance),
-  // and positions advance by exactly one dt of the constant velocity.
-  expect(result.maxVelocityError).toBeLessThan(5e-4);
-  expect(result.maxPositionError).toBeLessThan(1e-4);
+  for (const [label, run] of [['shared', result.shared], ['subcycled', result.subcycled]]) {
+    // Gate 1 (compact GPU summary): after restriction, the combined coarse
+    // grid carries the total mass and momentum of both levels.
+    const conservation = run.conservation;
+    expect(conservation, label).not.toBeNull();
+    expect(Math.abs(conservation.coarseMassKg - result.totalMass), label)
+      .toBeLessThan(1e-4 * Math.max(1, result.totalMass));
+    for (let axis = 0; axis < 3; axis += 1) {
+      expect(
+        Math.abs(conservation.coarseMomentumKgMPerS[axis] - result.expectedMomentum[axis]),
+        label
+      ).toBeLessThan(1e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+    }
 
-  // Gate 3: particle-level totals conserved through the shared-set step
-  // (also proves the chained copy-through G2P touched every particle
-  // exactly once).
-  expect(Math.abs(result.outMass - result.totalMass)).toBeLessThan(1e-4 * result.totalMass);
-  for (let axis = 0; axis < 3; axis += 1) {
-    expect(Math.abs(result.outMomentum[axis] - result.expectedMomentum[axis]))
-      .toBeLessThan(5e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+    // Gate 2: the constant velocity field survives the coupled two-level
+    // step for every particle at both levels (fixed-point P2G floor
+    // tolerance), and positions advance by exactly one full dt of the
+    // constant velocity - for the subcycled run that means two fine
+    // substeps summing to one coarse dt.
+    expect(run.maxVelocityError, label).toBeLessThan(5e-4);
+    expect(run.maxPositionError, label).toBeLessThan(1e-4);
+
+    // Gate 3: particle-level totals conserved through the shared-set step
+    // (also proves the chained copy-through G2P touched every particle
+    // exactly once per pass).
+    expect(Math.abs(run.outMass - result.totalMass), label)
+      .toBeLessThan(1e-4 * result.totalMass);
+    for (let axis = 0; axis < 3; axis += 1) {
+      expect(
+        Math.abs(run.outMomentum[axis] - result.expectedMomentum[axis]),
+        label
+      ).toBeLessThan(5e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+    }
   }
 });

@@ -36749,3 +36749,51 @@ Validation:
 
 Next: subcycling (fine level substeps per coarse step with time-interpolated
 delta prolongation), then scene-loop scheduling of the two-level step.
+
+## 2026-07-03 AKDT - SS Subcycled Fine Substeps With Shared-Force Exclusion (Slice 13)
+
+Time integration across levels: the two-level coupled step now supports
+subcycling, with the classic double-counting hazard identified and closed
+before it could ship.
+
+Scheme (`fineSubstepCount` on `runSchroederTwoLevelMechanicsStepWebGpu`):
+
+- The coarse level advances one full dt; the fine level takes N substeps of
+  dt/N. Each substep re-projects the current fine particle state (real P2G,
+  not dt-splitting), updates the fine grid with dt/N, applies its
+  time-interpolated share (1/N) of the coarse velocity correction, and
+  reconstructs the fine particles; later substeps consume the previous
+  substep's retained outputs. The coarse G2P runs last off the chained
+  outputs. All intermediates release behind the queue.
+- `delta_scale` joins the shared coupling params (80 bytes) so each substep
+  applies its share of the coarse delta, summing to the full correction
+  across the coarse step.
+
+Double-counting hazard closed: with any force applied at both levels
+(gravity), the coarse correction includes g*dt that the fine grid updates
+already integrate themselves - transferring it verbatim would give fine
+particles 2*g*dt per coarse step. The delta prolongation now subtracts a
+`shared_accel_dt` vector (gravity times coarse dt, supplied by the two-level
+step) so the transferred delta carries only coarse-grid-specific
+information. The constant-velocity gates alone could never see this (the
+delta is zero in force-free fields); the new gravity gates would have
+caught it immediately.
+
+Proof upgrade: the shared-set two-level proof now runs four cases -
+shared-dt, subcycled (2 fine substeps), and both again under uniform
+gravity - gating every particle at both levels on exactly v0 + g*dt after
+one coupled step, positions advancing one full dt in the force-free runs
+(two substeps summing correctly), combined-grid conservation, and
+shared-set totals.
+
+Validation:
+
+- PASS: shared-set two-level proof with all four cases `1/1` (5.7s).
+- PASS: `node --test tests/schroederCrossLevelCouplingGpu.test.mjs` `11/11`.
+- PASS: sibling proofs (kernel-composition two-level, live steam
+  coarsening) `2/2`.
+- PASS: `npm test` `972/975`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next: scene-loop scheduling of the two-level step (the last piece of the
+multi-level milestone), then live split policy.

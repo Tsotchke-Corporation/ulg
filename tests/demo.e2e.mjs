@@ -14047,3 +14047,53 @@ test('SPH phase mounted scene coarsens live under authoritative two-level SS mec
   expect(second.maxDisplacementM).toBeGreaterThan(0);
   expect(second.simTime).toBeGreaterThan(first.simTime);
 });
+
+test('SPH phase thermal sidecar evolves temperature under authoritative two-level SS mechanics', async ({ page }) => {
+  test.setTimeout(180_000);
+  // Sequential operator splitting: the thermal step runs after the coupled
+  // two-level mechanics and its outputs own the continuation. Numeric gate:
+  // the 650K drop must cool toward the 300K bath across schedules (max
+  // temperature strictly decreasing) - a mechanics-only authority path
+  // leaves temperatures bit-frozen.
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  const sample = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const diagnostics = finalStep?.diagnostics || null;
+    return {
+      status: finalStep?.status ?? null,
+      sidecars: finalStep?.sidecars ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      maxTemperatureK: diagnostics?.maxTemperatureK ?? null,
+      uploadSourceStage: finalStep?.nextParticleUploads?.sphParticleUpload?.sourceStage ?? null
+    };
+  });
+
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    return finalStep?.status === 'schroeder-two-level-authoritative-step-executed'
+      && finalStep?.diagnostics?.compactGpuSummaryAvailable === true
+      && Number.isFinite(time) && time > 0.05;
+  }, null, { timeout: 120_000 });
+
+  const first = await sample();
+  await page.waitForTimeout(10_000);
+  const second = await sample();
+
+  expect(first.sidecars).toBe('thermal-post-two-level-sequential');
+  expect(first.uploadSourceStage).toBe('schroeder-two-level-thermal-sidecar');
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+  // The hot drop conducts heat into the bath: its peak temperature falls
+  // measurably between samples (frozen thermodynamics would be bit-equal).
+  expect(first.maxTemperatureK).toBeGreaterThan(400);
+  expect(second.maxTemperatureK).toBeLessThan(first.maxTemperatureK - 0.5);
+});

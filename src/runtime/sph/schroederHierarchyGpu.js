@@ -153,6 +153,7 @@ import {
   createSchroederParticleStorageAdoption,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from './sphMlsMpmGpuStep.js';
+import { runSphThermalStepWebGpu } from './sphThermalGpuKernel.js';
 import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
 import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
 import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
@@ -13922,6 +13923,38 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     activeNodeList: resolvedActiveNodeList,
     hierarchyAggregateNode: resolvedHierarchyAggregateNode
   });
+  // Sequential operator splitting: the thermal sidecar runs after the
+  // coupled two-level mechanics on the combined next state, exactly like the
+  // resident step runs it after G2P. Without it, heated scenes cannot
+  // evolve temperature (and cannot trigger phase-driven coarsening) under
+  // two-level authority. Reaction/pressure sidecars remain queued.
+  const twoLevelThermalMaterialTable = residentStepOptions?.thermalMaterialTable ?? null;
+  const twoLevelThermalRunner = residentStepOptions?.thermalStepRunner ?? runSphThermalStepWebGpu;
+  const twoLevelCoupledUploads = resolvedTwoLevelMechanics?.nextParticleUploads ?? null;
+  let twoLevelThermalStep = null;
+  if (
+    twoLevelAuthoritative
+    && twoLevelThermalMaterialTable
+    && resolvedTwoLevelMechanics?.stateBuffer
+    && twoLevelCoupledUploads?.sphParticleUpload?.thermoBuffer
+  ) {
+    twoLevelThermalStep = await twoLevelThermalRunner({
+      device,
+      sphParticleState,
+      thermalMaterialTable: twoLevelThermalMaterialTable,
+      sphParticleUpload: twoLevelCoupledUploads.sphParticleUpload,
+      sourceStateBuffer: resolvedTwoLevelMechanics.stateBuffer,
+      sourceThermoBuffer: twoLevelCoupledUploads.sphParticleUpload.thermoBuffer,
+      boxDimsM,
+      dtS: dt,
+      retainOutputParticleBuffers: true,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      ...(residentStepOptions?.thermalStepOptions || {})
+    });
+  }
+  const twoLevelThermalOutputsRetained = Boolean(
+    twoLevelThermalStep?.stateBuffer && twoLevelThermalStep?.thermoBuffer
+  );
   // Under two-level authority, admitted merges/splits adopt exactly like the
   // single-level path: the storage chain materialized/compacted the merged
   // set from the step's input configuration, and the adopted buffers take
@@ -13937,9 +13970,30 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   if (twoLevelAdopted && resolvedTwoLevelMechanics?.destroyOutputParticleBuffers) {
     // The coupled step's retained outputs are superseded by the adopted
     // storage; release them once the already-submitted GPU work (including
-    // the compact summary that read them) completes.
+    // the compact summary and thermal sidecar that read them) completes.
     const supersededTwoLevel = resolvedTwoLevelMechanics;
     deferSubmittedWorkCleanup(device, () => supersededTwoLevel.destroyOutputParticleBuffers());
+  }
+  if (twoLevelThermalOutputsRetained && twoLevelAdopted) {
+    // Topology step: the adopted merged storage supersedes the thermal
+    // sidecar outputs too (same precedence as the single-level path).
+    const supersededThermal = twoLevelThermalStep;
+    deferSubmittedWorkCleanup(device, () => {
+      supersededThermal.stateBuffer?.destroy?.();
+      supersededThermal.thermoBuffer?.destroy?.();
+    });
+  } else if (twoLevelThermalOutputsRetained && !twoLevelAdopted) {
+    // The thermal outputs replace the coupled step's state/thermo in the
+    // continuation; release the superseded coupled state buffer (mechanics
+    // stays live in the uploads) and the coupled thermo copy if owned.
+    const supersededState = resolvedTwoLevelMechanics?.stateBuffer ?? null;
+    const supersededThermo = twoLevelCoupledUploads?.sphParticleUpload?.ownsThermoBuffer
+      ? twoLevelCoupledUploads.sphParticleUpload.thermoBuffer
+      : null;
+    deferSubmittedWorkCleanup(device, () => {
+      supersededState?.destroy?.();
+      supersededThermo?.destroy?.();
+    });
   }
   const twoLevelNextSlot = (sphParticleUpload?.slot ?? 0) === 0 ? 1 : 0;
   const twoLevelAdoptedUploads = twoLevelAdopted
@@ -13972,6 +14026,23 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       }
     }
     : null;
+  // Thermal sidecar outputs replace the coupled state/thermo in the
+  // continuation when no merged storage was adopted this step.
+  const twoLevelThermalUploads = !twoLevelAdopted
+    && twoLevelThermalOutputsRetained
+    && twoLevelCoupledUploads
+    ? {
+      sphParticleUpload: {
+        ...twoLevelCoupledUploads.sphParticleUpload,
+        stateBuffer: twoLevelThermalStep.stateBuffer,
+        thermoBuffer: twoLevelThermalStep.thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        sourceStage: 'schroeder-two-level-thermal-sidecar'
+      },
+      mlsMpmParticleUpload: twoLevelCoupledUploads.mlsMpmParticleUpload
+    }
+    : null;
   // Authoritative two-level mode replaces the resident mechanics with a
   // synthesized resident-step-shaped envelope built from the coupled-step
   // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
@@ -13988,7 +14059,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       stageStatus: { twoLevelMechanics: resolvedTwoLevelMechanics?.status ?? null },
       stageBackends: { twoLevelMechanics: 'webgpu' },
       twoLevelMechanicsAuthority: 'authoritative',
-      sidecars: 'none-two-level-mechanics-only',
+      sidecars: twoLevelThermalStep
+        ? 'thermal-post-two-level-sequential'
+        : 'none-two-level-mechanics-only',
+      thermalStep: twoLevelThermalStep,
       // Provenance of the consumed particle inputs: chained scheduling must
       // show the previous two-level step here, not a fresh CPU upload.
       sourceSphUploadStatus: sphParticleUpload?.status ?? null,
@@ -14016,6 +14090,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         }
         : resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
       nextParticleUploads: twoLevelAdoptedUploads
+        ?? twoLevelThermalUploads
         ?? resolvedTwoLevelMechanics?.nextParticleUploads
         ?? null,
       schroederParticleStorageAdoption: twoLevelParticleStorageAdoption,

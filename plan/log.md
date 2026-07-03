@@ -37134,3 +37134,26 @@ delta). Unit suite 980/977/0.
 Still queued from plan item 1: sidecar operator splitting on the two-level
 path (thermal/reaction/pressure post-step run) - the authoritative path
 remains mechanics-only for sidecars.
+
+## 2026-07-03 - Thermal sidecar on the two-level authoritative path
+   (plan item 1, part 2: sequential operator splitting)
+
+The authoritative two-level path now runs the thermal step after the
+coupled mechanics on the combined next state (sequential operator
+splitting), consuming the coupled state/thermo buffers and owning the
+continuation uploads (sourceStage schroeder-two-level-thermal-sidecar).
+Precedence matches the single-level resident path: adopted merged storage
+> thermal sidecar outputs > raw coupled outputs, with superseded buffers
+released behind submitted-work cleanup. The envelope reports
+sidecars: 'thermal-post-two-level-sequential' and carries the thermal step.
+
+Numeric gates: in the heated mounted scene under two-level authority the
+650K drop cools toward the 300K bath across chained schedules (maxT
+635.6 -> 608.5K over ~0.14s sim time; previously bit-frozen), mean bath
+temperature stays ~300K, motion gate holds, zero WebGPU validation
+errors. New e2e proof "thermal sidecar evolves temperature under
+authoritative two-level SS mechanics" gates the cooling numerically; a
+unit test proves the sidecar consumes the coupled outputs and the
+continuation chains the thermal buffers. Unit suite 981/978/0.
+
+Reaction/pressure sidecars remain queued (same insertion point).

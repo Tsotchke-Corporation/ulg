@@ -8849,3 +8849,79 @@ test('Schroeder two-level authoritative mode adopts admitted merged storage over
   assert.equal(step.nextSphParticleState.particleCount, 2);
   assert.equal(step.nextMlsMpmParticleState.particleCount, 2);
 });
+
+test('Schroeder two-level authoritative mode runs the thermal sidecar sequentially on the coupled outputs', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const coupledStateBuffer = { label: 'two-level-state-out', destroy() {} };
+  const coupledThermoBuffer = { label: 'two-level-thermo', destroy() {} };
+  const envelopeUploads = {
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: coupledStateBuffer,
+      thermoBuffer: coupledThermoBuffer,
+      ownsStateBuffer: true,
+      ownsThermoBuffer: false,
+      particleCount: 3,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: { label: 'two-level-mechanics-out' },
+      particleCount: 3,
+      slot: 0
+    }
+  };
+  const thermalCalls = [];
+  const thermalStateBuffer = { label: 'thermal-state-out', destroy() {} };
+  const thermalThermoBuffer = { label: 'thermal-thermo-out', destroy() {} };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner: async (options) => ({
+      schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+      status: 'schroeder-two-level-mechanics-step-submitted',
+      fineLevel: options.fineLevel,
+      coarseLevel: options.fineLevel + 1,
+      conservation: { massResidualKg: 0 },
+      stateBuffer: coupledStateBuffer,
+      mechanicsBuffer: envelopeUploads.mlsMpmParticleUpload.mechanicsBuffer,
+      nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+      nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+      nextParticleUploads: envelopeUploads
+    }),
+    residentStepOptions: {
+      thermalMaterialTable: { schema: 'thermal-table-stub', materialCount: 1 },
+      thermalStepRunner: async (options) => {
+        thermalCalls.push(options);
+        return {
+          status: 'thermal-step-executed',
+          stateBuffer: thermalStateBuffer,
+          thermoBuffer: thermalThermoBuffer
+        };
+      }
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+
+  const step = result.residentStep;
+  assert.equal(step.sidecars, 'thermal-post-two-level-sequential');
+  assert.equal(thermalCalls.length, 1);
+  // The sidecar consumes the coupled outputs (sequential operator split).
+  assert.equal(thermalCalls[0].sourceStateBuffer, coupledStateBuffer);
+  assert.equal(thermalCalls[0].sourceThermoBuffer, coupledThermoBuffer);
+  assert.equal(thermalCalls[0].readbackMode, 'no-full-readback');
+  // The continuation chains the thermal outputs, not the raw coupled state.
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, thermalStateBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, thermalThermoBuffer);
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.sourceStage,
+    'schroeder-two-level-thermal-sidecar'
+  );
+});

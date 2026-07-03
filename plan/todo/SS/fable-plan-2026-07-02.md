@@ -27,6 +27,7 @@ Next up (unstarted):
    unaffected) - triage.
 4. The deferred distribution work (portable rematerializer, worker-owned
    adopted storage).
+
 Author: Claude (Fable), taking over from the codex handoff
 (`fable-handoff-2026-07-02.md`).
 

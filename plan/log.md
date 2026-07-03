@@ -37271,3 +37271,30 @@ handoff) instead of the stale CPU cache. Also noted: iceh/ironh URL params
 are HEIGHTS (geometry), not heater controls - the 'boiling' probe scene
 was misconfigured; a real boiling-realism scene needs wall/floor
 temperature controls.
+
+## 2026-07-03 - Display now tracks the authoritative sim (stale-render fix)
+
+The visual pass exposed that continuation scenes rendered their INITIAL
+particle positions forever: (a) the worker-owned particle-state producer
+rendered a content-hash cache of the CPU arrays, which never change under
+no-full continuation; (b) with that disabled, the presentation worker's
+retained-stage lane (running ~1.5 fps vs the authoritative 120+ fps chain)
+overwrote fresh row transfers with its lagging output.
+
+Fixes: the producer path is skipped when cpuStateStale (falls through to
+the compact render-row transfer, fresh GPU readback at visual cadence);
+and the presentation worker now arbitrates by sim step - every draw
+message and the retained-stage render request carry an explicit sphStep,
+and the worker refuses to present anything older than the newest step
+already on screen (publishing worker-offscreen-presentation-superseded-
+stale-step), resetting on init/clear.
+
+Visual gates: the water drop now visibly falls and produces a physically
+plausible crown splash with radial ejecta at sim t 0.68 (previously the
+drop hovered at t=0 forever); Al+O2 shows energetic combustion with
+dispersing gas and a molten cluster; ice persists (423.5 kg solid, ~260K)
+with negligible melt over 2s (correct); zero console/GPU errors across
+the matrix. Realism watch-items: ice appears submerged rather than
+floating (buoyancy at coarse resolution), and a real boiling-realism
+scene still needs wall/floor temperature controls (iceh/ironh are
+geometry heights, not heaters).

@@ -42,6 +42,26 @@ let cssHeight = 0;
 let pixelRatio = 1;
 let frameCount = 0;
 let readyFrameCount = 0;
+// Display arbitration: never present a state older than the newest one
+// already on screen. The presentation-worker retained-stage lane can lag
+// the authoritative main-thread chain; without this gate its late draws
+// overwrite fresh render-row transfers and the canvas appears frozen at an
+// old sim time. Reset on init/resize/clear (scene resets flow through
+// those messages).
+let lastPresentedSphStep = null;
+function presentationStepAccepts(sphStep) {
+  const step = Number(sphStep);
+  if (!Number.isFinite(step)) return true;
+  if (!Number.isFinite(Number(lastPresentedSphStep))) return true;
+  return step >= Number(lastPresentedSphStep);
+}
+function notePresentedSphStep(sphStep) {
+  const step = Number(sphStep);
+  if (Number.isFinite(step)) lastPresentedSphStep = step;
+}
+function resetPresentedSphStep() {
+  lastPresentedSphStep = null;
+}
 let disposed = false;
 let renderRowsPipeline = null;
 let renderRowsBindGroupLayout = null;
@@ -1200,6 +1220,16 @@ function normalizeMatrix(value) {
 }
 
 function drawRenderRows(data) {
+  if (!presentationStepAccepts(data.sphStep)) {
+    return publishRenderRowsStatus({
+      status: 'worker-offscreen-presentation-superseded-stale-step',
+      reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
+      sphStep: Number(data.sphStep),
+      lastPresentedSphStep: Number(lastPresentedSphStep),
+      particleCount: data.particleCount ?? 0,
+      inputTransferBytes: 0
+    });
+  }
   if (!device || !context || !format) {
     publishRenderRowsStatus({
       status: 'worker-offscreen-render-rows-blocked-webgpu-unavailable',
@@ -1271,6 +1301,7 @@ function drawRenderRows(data) {
   pass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
+  notePresentedSphStep(data.sphStep);
   readyFrameCount = frameCount;
   publishRenderRowsStatus({
     status: 'worker-offscreen-render-rows-rendered',
@@ -1294,6 +1325,16 @@ function drawRenderRows(data) {
 }
 
 function drawResidentRenderProducer(data) {
+  if (!presentationStepAccepts(data.sphStep)) {
+    return publishRenderRowsStatus({
+      status: 'worker-offscreen-presentation-superseded-stale-step',
+      reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
+      sphStep: Number(data.sphStep),
+      lastPresentedSphStep: Number(lastPresentedSphStep),
+      particleCount: data.particleCount ?? 0,
+      inputTransferBytes: 0
+    });
+  }
   if (!device || !context || !format) {
     publishRenderRowsStatus({
       status: 'worker-offscreen-resident-render-producer-blocked-webgpu-unavailable',
@@ -1431,6 +1472,7 @@ function drawResidentRenderProducer(data) {
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
+  notePresentedSphStep(data.sphStep);
   readyFrameCount = frameCount;
   publishRenderRowsStatus({
     schema: RESIDENT_RENDER_PRODUCER_SCHEMA,
@@ -1468,6 +1510,16 @@ function drawResidentRenderProducer(data) {
 }
 
 function drawResidentParticleStateProducer(data) {
+  if (!presentationStepAccepts(data.sphStep)) {
+    return publishRenderRowsStatus({
+      status: 'worker-offscreen-presentation-superseded-stale-step',
+      reason: `draw carries sphStep ${data.sphStep} older than presented ${lastPresentedSphStep}`,
+      sphStep: Number(data.sphStep),
+      lastPresentedSphStep: Number(lastPresentedSphStep),
+      particleCount: data.particleCount ?? 0,
+      inputTransferBytes: 0
+    });
+  }
   if (!device || !context || !format) {
     publishRenderRowsStatus({
       schema: RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
@@ -1686,6 +1738,7 @@ function drawResidentParticleStateProducer(data) {
   renderPass.end();
   device.queue.submit([encoder.finish()]);
   frameCount += 1;
+  notePresentedSphStep(data.sphStep);
   readyFrameCount = frameCount;
   const sourceStateTransferBytes = (sourceCacheHit || workerRetainedStageOutputSource)
     ? 0
@@ -1820,6 +1873,7 @@ self.onmessage = (event) => {
   const data = event?.data || {};
   Promise.resolve().then(async () => {
     if (data.type === 'init-offscreen-presentation') {
+      resetPresentedSphStep();
       await initPresentation(data);
       return;
     }
@@ -1835,6 +1889,7 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'clear') {
+      resetPresentedSphStep();
       backgroundColor = data.backgroundColor || backgroundColor;
       clearAlpha = Number.isFinite(Number(data.clearAlpha)) ? Number(data.clearAlpha) : clearAlpha;
       clearPresentation({ reason: data.reason || 'clear' });

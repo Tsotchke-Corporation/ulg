@@ -797,6 +797,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       });
     },
     drawRenderRows({
+      sphStep = null,
       positionsM = null,
       colorsRgb = null,
       particleRadiiM = null,
@@ -844,6 +845,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const inputTransferBytes = payload.byteLength + viewProjection.byteLength;
       this.worker.postMessage?.({
         type: 'draw-render-rows',
+        sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
         inputTransport: ULG_WORKER_OFFSCREEN_RENDER_ROWS_INPUT_TRANSPORT,
         particleRows: payload.particleRows,
@@ -874,6 +876,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       });
     },
     drawResidentRenderProducer({
+      sphStep = null,
       positionsM = null,
       colorsRgb = null,
       particleRadiiM = null,
@@ -963,6 +966,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       );
       const message = {
         type: 'draw-resident-render-producer',
+        sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_RENDER_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
         inputTransport: ULG_WORKER_OFFSCREEN_WORKER_LOCAL_PRODUCER_TRANSPORT,
@@ -1018,6 +1022,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       });
     },
     drawResidentParticleStateProducer({
+      sphStep = null,
       sphParticleState = null,
       materialColorRows = null,
       sourceCacheKey = null,
@@ -1119,6 +1124,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       const inputTransferBytes = viewProjection.byteLength + sourceTransferBytes;
       const message = {
         type: 'draw-resident-particle-state-producer',
+        sphStep: Number.isFinite(Number(sphStep)) ? Number(sphStep) : null,
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
         renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
         inputTransport: ULG_WORKER_OFFSCREEN_WORKER_LOCAL_PRODUCER_TRANSPORT,

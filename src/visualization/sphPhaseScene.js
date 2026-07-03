@@ -10404,6 +10404,10 @@ export function createSphPhaseScene(container, {
       && sphParticleState?.state instanceof Float32Array
       && sphParticleState?.thermo instanceof Float32Array
       && Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0)) > 0
+      // Stale CPU arrays under GPU-resident continuation would freeze the
+      // worker canvas at the packed t=0 positions (content-hash cache is
+      // reused forever); prefer fresh render rows in that case.
+      && sphParticleState?.cpuStateStale !== true
     );
     const drawFn = useResidentProducer
       ? workerOffscreenPresentationBridge.drawResidentRenderProducer.bind(workerOffscreenPresentationBridge)
@@ -10424,6 +10428,10 @@ export function createSphPhaseScene(container, {
     );
     const commonDrawOptions = {
       viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
+      // Display arbitration: fresh row/producer draws carry the sim step so
+      // the worker can reject presenting anything older than what is
+      // already on screen.
+      sphStep: Number.isFinite(Number(sphParticleState?.step)) ? Number(sphParticleState.step) : null,
       radiusScalePx: Math.max(48, Math.min(240, backingMinPx * 0.14)),
       fallbackPointSizePx: Math.max(3, Math.min(8, backingMinPx * 0.008)),
       minPointSizePx: 2,
@@ -25543,6 +25551,12 @@ export function createSphPhaseScene(container, {
         && nextSphParticleState?.state instanceof Float32Array
         && nextSphParticleState?.thermo instanceof Float32Array
         && Math.max(0, Math.floor(Number(nextSphParticleState?.particleCount) || 0)) > 0
+        // Under GPU-resident continuation the CPU arrays are stale (they
+        // stay at the packed t=0 state), so the producer's content-hash
+        // cache would render the initial positions forever while sim time
+        // advances. Fall through to the compact render-row transfer, which
+        // reads back fresh GPU rows at the visual cadence.
+        && nextSphParticleState?.cpuStateStale !== true
       );
       const renderRowReadbackPlan = resolveResidentRenderRowBridgeReadbackPlan({
         requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeFromCaller,
@@ -29244,6 +29258,10 @@ export function createSphPhaseScene(container, {
       reason,
       laneId,
       stateKey,
+      // Display arbitration: the presentation worker only presents this
+      // retained output if it is not older than the newest already
+      // presented state (the retained lane can lag the authoritative chain).
+      sphStep: Number.isFinite(Number(sphParticleState?.step)) ? Number(sphParticleState.step) : null,
       particleCount,
       stateStrideFloats,
       thermoStrideFloats,

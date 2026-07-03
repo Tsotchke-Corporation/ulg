@@ -27,10 +27,20 @@ exactly v0 + g*dt at both substep counts), and runs inside the production
 orchestrator as an opt-in observation stage with live compact conservation
 telemetry while the resident step keeps state authority.
 
+Authority switch landed (2026-07-03, slices 15-17, `ed3ac39`, `fb86e51`,
+`232282f`): the two-level step emits a resident-compatible continuation
+envelope, the orchestrator can make it the state authority (synthesized
+resident-step-shaped result; mechanics-only, fail-closed against
+particle-storage materialization), and the mounted URL-scheduled demo runs
+its actual simulation on subcycled two-level mechanics with sim time
+advancing and live conservation telemetry.
+
 Next up:
 
-1. **Two-level authority switch** - make the two-level step the state
-   authority instead of observation-only. Design notes: the resident step
+1. **Two-level authority follow-ups**: sidecar operator splitting on the
+   two-level path (thermal/reaction/pressure post-step), then merges/splits
+   under two-level authority (lift the fail-closed storage guard) so
+   coarsening and hierarchy mechanics run together. Design notes: the resident step
    envelope must be reproduced around the two-level outputs
    (nextParticleUploads with retained state/thermo/mechanics buffers and
    webgpu-uploaded status, particle ping-pong slots/step/time, commit-delta

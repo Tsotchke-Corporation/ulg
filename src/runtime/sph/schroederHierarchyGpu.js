@@ -1645,7 +1645,8 @@ export function createSchroederPhaseVolumeTargetAggregateParamsArray({
   phaseVolumeExpandThreshold = DEFAULT_PHASE_VOLUME_EXPAND_THRESHOLD,
   gasPhaseId = DEFAULT_GAS_PHASE_ID,
   aggregateEpoch = 0,
-  stateFamilyId = 1
+  stateFamilyId = 1,
+  stateVec4Stride = 0
 } = {}) {
   const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
@@ -1661,7 +1662,9 @@ export function createSchroederPhaseVolumeTargetAggregateParamsArray({
   view.setUint32(12, Math.max(0, Math.round(finiteNumber(flags, 0))), true);
   view.setInt32(16, Math.round(finiteNumber(minLevel, DEFAULT_MIN_LEVEL)), true);
   view.setInt32(20, Math.round(finiteNumber(maxLevel, DEFAULT_MAX_LEVEL)), true);
-  view.setUint32(24, 0, true);
+  // pad0 carries the sph-state vec4 stride for contribution momentum; zero
+  // keeps the legacy zero-momentum contributions.
+  view.setUint32(24, Math.max(0, Math.round(finiteNumber(stateVec4Stride, 0))), true);
   view.setUint32(28, 0, true);
   view.setFloat32(32, finitePositive(baseGridSpacingM, DEFAULT_BASE_GRID_SPACING_M), true);
   view.setFloat32(36, finitePositive(targetSupportCells, DEFAULT_TARGET_SUPPORT_CELLS), true);
@@ -1804,9 +1807,11 @@ export function createSchroederPhaseVolumeSplitMergeProposalParamsArray({
   proposalEpoch = 0,
   stateFamilyId = 1,
   coarsenModeId = 1,
-  refineModeId = 2
+  refineModeId = 2,
+  aggregateNodeCount = 0,
+  aggregateNodeStrideFloats = SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
 } = {}) {
-  const buffer = new ArrayBuffer(32);
+  const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(migrationRowCount, 0))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(
@@ -1822,6 +1827,11 @@ export function createSchroederPhaseVolumeSplitMergeProposalParamsArray({
   view.setFloat32(20, finiteNumber(stateFamilyId, 1), true);
   view.setFloat32(24, finiteNumber(coarsenModeId, 1), true);
   view.setFloat32(28, finiteNumber(refineModeId, 2), true);
+  view.setUint32(32, Math.max(0, Math.round(finiteNumber(aggregateNodeCount, 0))), true);
+  view.setUint32(36, Math.max(1, Math.round(finiteNumber(
+    aggregateNodeStrideFloats,
+    SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+  ))), true);
   return buffer;
 }
 
@@ -5602,12 +5612,17 @@ export function createSchroederPhaseVolumeMigrationPlan({
 
 export function createSchroederPhaseVolumeSplitMergeProposalPlan({
   phaseVolumeMigration,
+  hierarchyAggregateNode = null,
   proposalEpoch = phaseVolumeMigration?.migrationEpoch ?? 0,
   stateFamilyId = 1,
   coarsenModeId = 1,
   refineModeId = 2
 } = {}) {
   assertPhaseVolumeMigrationInput(phaseVolumeMigration);
+  const aggregateNodeCount = Math.max(0, Math.round(finiteNumber(
+    hierarchyAggregateNode?.aggregateNodeCount ?? hierarchyAggregateNode?.aggregateRowCount,
+    0
+  )));
   const migrationRowCount = Math.max(0, Math.round(finiteNumber(phaseVolumeMigration.particleCount, 0)));
   const proposalByteLength = Math.max(
     4,
@@ -5623,6 +5638,13 @@ export function createSchroederPhaseVolumeSplitMergeProposalPlan({
     sourcePhaseVolumeMigrationStatus: phaseVolumeMigration.status ?? null,
     migrationRowCount,
     migrationStrideFloats: SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS,
+    aggregateNodeCount,
+    aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
+    // Nonzero aggregate node count enables mass-weighted cell momentum on
+    // merged children; zero keeps the legacy leader-velocity behavior.
+    mergedChildMomentumSource: aggregateNodeCount > 0
+      ? 'hierarchy-aggregate-node-cell-momentum'
+      : 'merge-leader-velocity-no-aggregate-node-rows',
     proposalRowLayout: [...SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT],
     proposalStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS,
     proposalStrideBytes: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -9387,6 +9409,8 @@ export async function runSchroederHierarchyAggregateWebGpu({
 export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   device,
   levelAssignment,
+  sphParticleState = null,
+  sphParticleUpload = null,
   baseGridSpacingM = levelAssignment?.baseGridSpacingM ?? DEFAULT_BASE_GRID_SPACING_M,
   minLevel = levelAssignment?.minLevel ?? DEFAULT_MIN_LEVEL,
   maxLevel = levelAssignment?.maxLevel ?? DEFAULT_MAX_LEVEL,
@@ -9424,12 +9448,26 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   }
   const assignmentBuffer = borrowedAssignmentBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-target-aggregate-assignment-in', assignmentRows);
+  const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.stateBuffer
+    : null;
+  const stateRows = sphParticleState?.state instanceof Float32Array ? sphParticleState.state : null;
+  const stateProvided = Boolean(borrowedStateBuffer || stateRows);
+  const stateBuffer = borrowedStateBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-phase-volume-target-aggregate-state-in',
+      stateRows || new Float32Array(SPH_GPU_PARTICLE_STATE_FLOATS)
+    );
   const aggregateBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-target-aggregate-out',
     size: plan.aggregateByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
-  const paramsArray = createSchroederPhaseVolumeTargetAggregateParamsArray(plan);
+  const paramsArray = createSchroederPhaseVolumeTargetAggregateParamsArray({
+    ...plan,
+    stateVec4Stride: stateProvided ? SPH_GPU_PARTICLE_STATE_FLOATS / 4 : 0
+  });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-target-aggregate-params',
     size: paramsArray.byteLength,
@@ -9449,10 +9487,11 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      computeBufferBinding(3, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v0',
+      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v1',
       label: 'ulg-schroeder-phase-volume-target-aggregate',
       code: schroederPhaseVolumeTargetAggregateWgsl,
       entryPoint: 'main',
@@ -9463,7 +9502,8 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       entries: [
         { binding: 0, resource: { buffer: assignmentBuffer } },
         { binding: 1, resource: { buffer: aggregateBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        { binding: 3, resource: { buffer: stateBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -9524,6 +9564,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   } finally {
     const cleanup = () => {
       if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
+      if (!borrowedStateBuffer) stateBuffer.destroy?.();
       if (!retainAggregateBuffer || !returnedRetainedAggregateBuffer) aggregateBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
@@ -11457,6 +11498,7 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
 export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   device,
   phaseVolumeMigration,
+  hierarchyAggregateNode = null,
   proposalEpoch = phaseVolumeMigration?.migrationEpoch ?? 0,
   stateFamilyId = 1,
   coarsenModeId = 1,
@@ -11471,6 +11513,7 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   }
   const plan = createSchroederPhaseVolumeSplitMergeProposalPlan({
     phaseVolumeMigration,
+    hierarchyAggregateNode,
     proposalEpoch,
     stateFamilyId,
     coarsenModeId,
@@ -11478,6 +11521,13 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   });
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedMigrationBuffer = phaseVolumeMigration?.migrationBuffer || null;
+  const borrowedAggregateNodeBuffer = plan.aggregateNodeCount > 0
+    ? (hierarchyAggregateNode?.aggregateNodeBuffer || null)
+    : null;
+  const aggregateNodeRows = plan.aggregateNodeCount > 0
+    && hierarchyAggregateNode?.aggregateNodeRows instanceof Float32Array
+    ? hierarchyAggregateNode.aggregateNodeRows
+    : null;
   const migrationRows = phaseVolumeMigration?.migrationRows instanceof Float32Array
     ? phaseVolumeMigration.migrationRows
     : null;
@@ -11487,6 +11537,14 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
 
   const migrationBuffer = borrowedMigrationBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-phase-volume-split-merge-proposal-in', migrationRows);
+  const aggregateNodeBuffer = borrowedAggregateNodeBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-phase-volume-split-merge-proposal-aggregate-nodes-in',
+      aggregateNodeRows instanceof Float32Array && aggregateNodeRows.length >= SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS
+        ? aggregateNodeRows
+        : new Float32Array(SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS)
+    );
   const proposalBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-split-merge-proposal-out',
     size: plan.proposalByteLength,
@@ -11494,7 +11552,7 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-split-merge-proposal-params',
-    size: 32,
+    size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const readBuffer = noFullReadback
@@ -11511,10 +11569,11 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
     const bindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
-      computeBufferBinding(2, 'uniform')
+      computeBufferBinding(2, 'uniform'),
+      computeBufferBinding(3, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-split-merge-proposal.v0',
+      cacheKey: 'ulg-schroeder-phase-volume-split-merge-proposal.v1',
       label: 'ulg-schroeder-phase-volume-split-merge-proposal',
       code: schroederPhaseVolumeSplitMergeProposalWgsl,
       entryPoint: 'main',
@@ -11525,7 +11584,8 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
       entries: [
         { binding: 0, resource: { buffer: migrationBuffer } },
         { binding: 1, resource: { buffer: proposalBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        { binding: 3, resource: { buffer: aggregateNodeBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -11586,6 +11646,7 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
   } finally {
     const cleanup = () => {
       if (!borrowedMigrationBuffer) migrationBuffer.destroy?.();
+      if (!borrowedAggregateNodeBuffer) aggregateNodeBuffer.destroy?.();
       if (!retainProposalBuffer || !returnedRetainedProposalBuffer) proposalBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
@@ -13402,6 +13463,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     : phaseVolumeTargetAggregate || await phaseVolumeTargetAggregateRunner({
       device,
       levelAssignment: resolvedLevelAssignment,
+      // Particle state feeds per-contribution momentum so merged children
+      // carry the mass-weighted cell velocity.
+      sphParticleState,
+      sphParticleUpload,
       baseGridSpacingM: plan.baseGridSpacingM,
       minLevel: plan.minLevel,
       maxLevel: plan.maxLevel,
@@ -13583,6 +13648,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       ? null
       : await phaseVolumeSplitMergeProposalRunner({
         device,
+        hierarchyAggregateNode: resolvedPhaseVolumeAggregateNodeForMigration,
         phaseVolumeMigration: resolvedPhaseVolumeMigration,
         proposalEpoch: mergeEpoch,
         stateFamilyId: 1,

@@ -2682,12 +2682,19 @@ test('Schroeder phase-volume split/merge proposal plan is proposal-only before a
 
   const params = createSchroederPhaseVolumeSplitMergeProposalParamsArray(plan);
   const view = new DataView(params);
-  assert.equal(params.byteLength, 32);
+  // 48 bytes: the tail carries the optional aggregate-node binding metadata
+  // used for merged-child cell momentum.
+  assert.equal(params.byteLength, 48);
   assert.equal(view.getUint32(0, true), 130);
   assert.equal(view.getUint32(4, true), SCHROEDER_PHASE_VOLUME_MIGRATION_FLOATS);
   assert.equal(view.getUint32(8, true), SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_FLOATS);
   assert.equal(view.getFloat32(16, true), 9);
   assert.equal(view.getFloat32(20, true), 3);
+  assert.equal(view.getUint32(32, true), 0);
+  assert.equal(
+    plan.mergedChildMomentumSource,
+    'merge-leader-velocity-no-aggregate-node-rows'
+  );
 });
 
 test('Schroeder phase-volume split/merge admission gates apply rows', () => {

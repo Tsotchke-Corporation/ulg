@@ -12361,6 +12361,14 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     const MIGRATION_FLOATS = abi.SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
     const sourceParticleCount = 4;
     const massKg = 2.0;
+    // Distinct member velocities so the merged child's velocity must be the
+    // mass-weighted cell average, not the leader's.
+    const velocities = [
+      [0.4, 0, 0],
+      [-0.2, 0.6, 0],
+      [0.1, -0.3, 0.5],
+      [0.25, -0.5, 0.75]
+    ];
     const state = new Float32Array(sourceParticleCount * 8);
     const thermo = new Float32Array(sourceParticleCount * 12);
     const mechanics = new Float32Array(sourceParticleCount * MECHANICS_FLOATS);
@@ -12370,9 +12378,9 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
       state[s + 1] = 1.5;
       state[s + 2] = 2;
       state[s + 3] = massKg;
-      state[s + 4] = 0.25;
-      state[s + 5] = -0.5;
-      state[s + 6] = 0.75;
+      state[s + 4] = velocities[index][0];
+      state[s + 5] = velocities[index][1];
+      state[s + 6] = velocities[index][2];
       state[s + 7] = 1;
       thermo[index * 12 + 2] = 1;
       thermo[index * 12 + 3] = 1000;
@@ -12414,13 +12422,35 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
       migrationRows[offset + 6] = massKg / 1000;
       migrationRows[offset + 7] = massKg / 1000;
       if (index < 3) {
-        migrationRows[offset + 12] = 5;
+        migrationRows[offset + 12] = 0;
         migrationRows[offset + 13] = 3;
         migrationRows[offset + 15] = massKg * 3;
         migrationRows[offset + 16] = (massKg * 3) / 1000;
         migrationRows[offset + 22] = 1;
       }
     }
+    // The hierarchy aggregate node for the merge cell: status active, cell
+    // mass 6 kg, cell momentum = sum(m_i * v_i) over members 0-2.
+    const cellMomentum = [0, 1, 2].reduce(
+      (sum, index) => [
+        sum[0] + massKg * velocities[index][0],
+        sum[1] + massKg * velocities[index][1],
+        sum[2] + massKg * velocities[index][2]
+      ],
+      [0, 0, 0]
+    );
+    const AGG_NODE_FLOATS = abi.SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT.length;
+    const aggregateNodeRows = new Float32Array(AGG_NODE_FLOATS);
+    aggregateNodeRows[3] = 1;
+    aggregateNodeRows[8] = massKg * 3;
+    aggregateNodeRows[9] = (massKg * 3) / 1000;
+    aggregateNodeRows[10] = cellMomentum[0];
+    aggregateNodeRows[11] = cellMomentum[1];
+    aggregateNodeRows[12] = cellMomentum[2];
+    const hierarchyAggregateNode = {
+      aggregateNodeCount: 1,
+      aggregateNodeRows
+    };
     const phaseVolumeMigration = {
       schema: abi.ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
       status: 'schroeder-phase-volume-migration-submitted',
@@ -12491,7 +12521,8 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     // The real production chain, no fixture rows past the migration decision.
     const proposal = await hierarchy.runSchroederPhaseVolumeSplitMergeProposalWebGpu({
       device,
-      phaseVolumeMigration
+      phaseVolumeMigration,
+      hierarchyAggregateNode
     });
     const apply = await hierarchy.runSchroederPhaseVolumeSplitMergeApplyWebGpu({
       device,
@@ -12554,11 +12585,24 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
 
     const liveCount = compaction.liveParticleCount;
     let compactedMass = 0;
+    const compactedMomentum = [0, 0, 0];
     const liveSlots = [];
     for (let index = 0; index < liveCount; index += 1) {
       const offset = index * 8;
-      compactedMass += compactedState[offset + 3];
-      liveSlots.push({ mass: compactedState[offset + 3], x: compactedState[offset] });
+      const slotMass = compactedState[offset + 3];
+      compactedMass += slotMass;
+      for (let axis = 0; axis < 3; axis += 1) {
+        compactedMomentum[axis] += slotMass * compactedState[offset + 4 + axis];
+      }
+      liveSlots.push({
+        mass: slotMass,
+        x: compactedState[offset],
+        v: [
+          compactedState[offset + 4],
+          compactedState[offset + 5],
+          compactedState[offset + 6]
+        ]
+      });
     }
 
     materialization.destroyParticleBuffers?.();
@@ -12580,6 +12624,9 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
       adoptionAuthoritativeParticleCount: adoption?.authoritativeParticleCount ?? null,
       sourceMassTotal: sourceParticleCount * massKg,
       compactedMass,
+      compactedMomentum,
+      cellMomentum,
+      survivorVelocity: velocities[3],
       liveSlots
     };
   });
@@ -12610,6 +12657,16 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
   expect(Math.abs(result.liveSlots[1].mass - 6)).toBeLessThan(1e-6);
   expect(Math.abs(result.liveSlots[1].x - 1.0)).toBeLessThan(1e-6);
   expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+
+  // Momentum conservation of the merge: the child carries the mass-weighted
+  // cell velocity (cell momentum / cell mass), not the leader's velocity,
+  // and total momentum over the live range equals the initial total.
+  for (let axis = 0; axis < 3; axis += 1) {
+    const expectedChildVelocity = result.cellMomentum[axis] / 6;
+    expect(Math.abs(result.liveSlots[1].v[axis] - expectedChildVelocity)).toBeLessThan(1e-6);
+    const expectedTotalMomentum = result.cellMomentum[axis] + 2 * result.survivorVelocity[axis];
+    expect(Math.abs(result.compactedMomentum[axis] - expectedTotalMomentum)).toBeLessThan(1e-5);
+  }
 });
 
 test('SPH phase URL steam scene coarsens the live particle count through admitted merges', async ({ page }) => {

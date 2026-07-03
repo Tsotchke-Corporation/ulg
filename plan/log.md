@@ -36518,3 +36518,53 @@ Validation:
   diagnostics) `8/8`.
 - PASS: `npm test` `970/973`, `3` skipped.
 - PASS: `git diff --check`.
+
+## 2026-07-02 AKDT - SS Momentum-Conserving Merges (Slice 7)
+
+Merged children now carry the mass-weighted cell velocity instead of the
+merge leader's, closing the momentum follow-up from slice 6.
+
+Momentum flow (all retained GPU, no new readbacks):
+
+- The phase-volume target-aggregate producer now binds the SPH particle
+  state (new binding 3, stride carried in the params pad; zero disables it
+  for legacy callers) and writes per-contribution momentum
+  `mass * velocity` into contribution columns 10-12, which the existing
+  aggregate-node reducer already sums into cell momentum.
+- The split/merge proposal kernel now binds the hierarchy aggregate node
+  rows (new binding 3, dummy when absent) and forwards the matched cell's
+  momentum into proposal columns 18-20 for coarsen-eligible rows. The apply,
+  allocation, and slot-assignment stages already piped those columns through
+  to assignment columns 24-26.
+- Materialization computes the merged child's velocity as
+  `cell momentum / child mass` when the assignment row carries a nonzero
+  momentum; zero-momentum rows keep the leader velocity (legacy fixtures and
+  the measure-zero symmetric-cell case, residual bounded by leader speed).
+- Same-level orchestration passes the particle state into the target
+  aggregate producer and the target aggregate node into the proposal
+  runner; plans report `mergedChildMomentumSource` telemetry.
+
+Proof upgrade: the real-chain merge proof now gives the three cell members
+distinct velocities and hand-built aggregate node rows, and gates
+numerically on the child velocity equaling cell momentum / cell mass
+(1e-6) and on total live-range momentum equaling the initial total (1e-5),
+alongside the existing count and mass gates.
+
+Validation:
+
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` `124/124`
+  (proposal params grew to 48 bytes; expectation updated with the
+  aggregate-node metadata fields).
+- PASS: targeted battery (steam diagnostics, mounted storage policy, split,
+  merge, real-chain momentum-conserving merge, live steam coarsening)
+  `6/6`.
+- PASS: `npm test` `970/973`, `3` skipped.
+- PASS: `git diff --check`.
+
+Remaining split/merge follow-ups:
+
+- Internal energy of merged children (aggregate internal energy column
+  exists but the target-aggregate producer writes zero; thermo of the child
+  currently copies the leader).
+- Mass-correct splits (refine rows still use legacy allocation semantics);
+  live splits remain gated off in scenes.

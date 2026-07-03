@@ -9595,10 +9595,25 @@ struct SchroederPhaseVolumeTargetAggregateParams {
 @group(0) @binding(0) var<storage, read> level_assignments: array<f32>;
 @group(0) @binding(1) var<storage, read_write> aggregate_rows: array<f32>;
 @group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeTargetAggregateParams;
+@group(0) @binding(3) var<storage, read> sph_state: array<vec4<f32>>;
 
 const SCHROEDER_PVTA_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PVTA_AGGREGATE_STRIDE: u32 = 32u;
+const SCHROEDER_PVTA_STATE_VEC4_STRIDE: u32 = 2u;
 const SCHROEDER_PVTA_PI: f32 = 3.141592653589793;
+
+// Per-particle momentum for the contribution row so the reduced aggregate
+// node carries true cell momentum for momentum-conserving merges. pad0
+// carries the sph-state vec4 stride; zero disables the state binding
+// (legacy callers keep zero-momentum contributions).
+fn ss_pvta_particle_momentum(particle_index: u32, mass_kg: f32) -> vec3<f32> {
+  if (params.pad0 == 0u) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let state_stride = max(params.pad0, SCHROEDER_PVTA_STATE_VEC4_STRIDE);
+  let velocity = sph_state[particle_index * state_stride + 1u].xyz;
+  return mass_kg * velocity;
+}
 
 fn ss_pvta_positive(value: f32) -> bool {
   return value == value && value > 0.0;
@@ -9699,9 +9714,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   aggregate_rows[aggregate_offset + 7u] = params.state_family_id;
   aggregate_rows[aggregate_offset + 8u] = mass_kg;
   aggregate_rows[aggregate_offset + 9u] = represented_volume;
-  aggregate_rows[aggregate_offset + 10u] = 0.0;
-  aggregate_rows[aggregate_offset + 11u] = 0.0;
-  aggregate_rows[aggregate_offset + 12u] = 0.0;
+  let particle_momentum = ss_pvta_particle_momentum(particle_index, mass_kg);
+  aggregate_rows[aggregate_offset + 10u] = particle_momentum.x;
+  aggregate_rows[aggregate_offset + 11u] = particle_momentum.y;
+  aggregate_rows[aggregate_offset + 12u] = particle_momentum.z;
   aggregate_rows[aggregate_offset + 13u] = 0.0;
   aggregate_rows[aggregate_offset + 14u] = f32(particle_index);
   aggregate_rows[aggregate_offset + 15u] = 1.0;
@@ -11895,14 +11911,44 @@ struct SchroederPhaseVolumeSplitMergeProposalParams {
   state_family_id: f32,
   coarsen_mode_id: f32,
   refine_mode_id: f32,
+  aggregate_node_count: u32,
+  aggregate_node_stride: u32,
+  pad0: u32,
+  pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> migration_rows: array<f32>;
 @group(0) @binding(1) var<storage, read_write> proposal_rows: array<f32>;
 @group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeSplitMergeProposalParams;
+@group(0) @binding(3) var<storage, read> aggregate_node_rows: array<f32>;
 
 const SCHROEDER_PVSMP_MIGRATION_STRIDE: u32 = 32u;
 const SCHROEDER_PVSMP_PROPOSAL_STRIDE: u32 = 32u;
+const SCHROEDER_PVSMP_AGGREGATE_NODE_STRIDE: u32 = 32u;
+
+// Cell momentum for the merged child: the hierarchy aggregate node rows
+// already reduce member momentum (columns 10-12); forward it so the
+// materialized child can carry the mass-weighted cell velocity instead of
+// the merge leader's. Returns zero when no aggregate node rows are bound.
+fn ss_pvsmp_cell_momentum(aggregate_node_index: f32) -> vec3<f32> {
+  if (params.aggregate_node_count == 0u || aggregate_node_index < 0.0) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let node_index = u32(aggregate_node_index);
+  if (node_index >= params.aggregate_node_count) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let node_stride = max(params.aggregate_node_stride, SCHROEDER_PVSMP_AGGREGATE_NODE_STRIDE);
+  let node_offset = node_index * node_stride;
+  if (aggregate_node_rows[node_offset + 3u] <= 0.0) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  return vec3<f32>(
+    aggregate_node_rows[node_offset + 10u],
+    aggregate_node_rows[node_offset + 11u],
+    aggregate_node_rows[node_offset + 12u]
+  );
+}
 
 fn ss_pvsmp_active_migration(migration_offset: u32) -> bool {
   let status = migration_rows[migration_offset + 3u];
@@ -11986,9 +12032,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   proposal_rows[proposal_offset + 15u] = migration_rows[migration_offset + 16u];
   proposal_rows[proposal_offset + 16u] = migration_rows[migration_offset + 17u];
   proposal_rows[proposal_offset + 17u] = migration_rows[migration_offset + 18u];
-  proposal_rows[proposal_offset + 18u] = 0.0;
-  proposal_rows[proposal_offset + 19u] = 0.0;
-  proposal_rows[proposal_offset + 20u] = 0.0;
+  let cell_momentum = select(
+    vec3<f32>(0.0, 0.0, 0.0),
+    ss_pvsmp_cell_momentum(migration_rows[migration_offset + 12u]),
+    coarsen_eligible > 0.0
+  );
+  proposal_rows[proposal_offset + 18u] = cell_momentum.x;
+  proposal_rows[proposal_offset + 19u] = cell_momentum.y;
+  proposal_rows[proposal_offset + 20u] = cell_momentum.z;
   proposal_rows[proposal_offset + 21u] = 0.0;
   proposal_rows[proposal_offset + 22u] = migration_rows[migration_offset + 4u];
   proposal_rows[proposal_offset + 23u] = migration_rows[migration_offset + 5u];
@@ -12506,13 +12557,30 @@ fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset:
 
   let state0 = source_sph_state[source_state_base];
   let state1 = source_sph_state[source_state_base + 1u];
+  let child_mass = ss_psm_target_mass(assignment_offset, state0.w);
   out_sph_state[target_state_base] = vec4<f32>(
     state0.x,
     state0.y,
     state0.z,
-    ss_psm_target_mass(assignment_offset, state0.w)
+    child_mass
   );
-  out_sph_state[target_state_base + 1u] = state1;
+  // Momentum-conserving merge: when the assignment row carries the cell
+  // momentum (columns 24-26), the child velocity is momentum / child mass
+  // instead of the merge leader's velocity. Cells with exactly zero total
+  // momentum keep the leader velocity; that residual is bounded by the
+  // leader speed and only occurs at measure-zero symmetric states.
+  let target_momentum = vec3<f32>(
+    assignment_rows[assignment_offset + 24u],
+    assignment_rows[assignment_offset + 25u],
+    assignment_rows[assignment_offset + 26u]
+  );
+  let momentum_provided = child_mass > 0.0
+    && (target_momentum.x != 0.0 || target_momentum.y != 0.0 || target_momentum.z != 0.0);
+  if (momentum_provided) {
+    out_sph_state[target_state_base + 1u] = vec4<f32>(target_momentum / child_mass, state1.w);
+  } else {
+    out_sph_state[target_state_base + 1u] = state1;
+  }
 
   let thermo0 = source_sph_thermo[source_thermo_base];
   let thermo1 = source_sph_thermo[source_thermo_base + 1u];

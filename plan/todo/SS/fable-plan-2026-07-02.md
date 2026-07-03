@@ -16,12 +16,33 @@ their own particle count through admitted leader-elected merges with mass,
 momentum, represented volume, thermal energy (uniform-c), and entity counts
 conserved, and the continuation keeps simulating on the merged set.
 
-Next up (unstarted):
+Multi-level milestone (2026-07-03, slices 12-14, landed in `5a05ae2`,
+`d60f043`, `c593cbd`): the two-level coupled step runs over one shared
+particle set partitioned by level assignment (level-filtered P2G and
+chainable copy-through-filtered G2P), supports subcycled fine substeps with
+time-interpolated coarse corrections, excludes shared forces from the
+transferred delta (the gravity double-counting hazard - constant-velocity
+gates alone cannot see it; the gravity gates now pin every particle to
+exactly v0 + g*dt at both substep counts), and runs inside the production
+orchestrator as an opt-in observation stage with live compact conservation
+telemetry while the resident step keeps state authority.
 
-1. Live split policy: refine-pressure conditions near interfaces/walls in
+Next up:
+
+1. **Two-level authority switch** - make the two-level step the state
+   authority instead of observation-only. Design notes: the resident step
+   envelope must be reproduced around the two-level outputs
+   (nextParticleUploads with retained state/thermo/mechanics buffers and
+   webgpu-uploaded status, particle ping-pong slots/step/time, commit-delta
+   payloads, storage-adoption compatibility so merges/splits keep working,
+   and the sidecar question: thermal/reaction/pressure stages currently run
+   inside the resident step at the single selected level - either run them
+   post-two-level on the combined state (sequential operator splitting,
+   simplest honest start) or per level (later). Gate the switch on the same
+   numeric conservation battery plus a continuation proof (sim time
+   advancing across scheduled refreshes with two-level authority on).
+2. Live split policy: refine-pressure conditions near interfaces/walls in
    scenes (the chain is proven; enabling it in scenes is a policy slice).
-2. Time integration across levels (subcycling) - the big one; the two-level
-   co-simulation currently shares one dt.
 3. Native-renderer + replay-mode diagnostic scenes emit repeated AbortError
    refresh failures after count-changing adoption (continuous path is
    unaffected) - triage.

@@ -36400,3 +36400,50 @@ Next:
 - Wire count summary + compaction into same-level SS orchestration so
   scene-scheduled splits/merges produce adopted count changes automatically.
 - Then the deferred distribution work per `fable-plan-2026-07-02.md`.
+
+## 2026-07-02 AKDT - SS Orchestration Wiring For Count Summary And Compaction (Slice 5)
+
+Scene-scheduled SS runs now produce adopted particle-count changes
+automatically: the same-level orchestrator runs the count summary and
+compaction stages itself instead of relying on proof-side invocation.
+
+`runSchroederSameLevelMechanicsWebGpu` changes:
+
+- After admitted materialization, the compact GPU count summary runs by
+  default (`enableParticleStorageCountSummary`, one 16-float readback) and
+  attaches `admittedParticleCountDelta` to the materialization descriptor.
+- When the summary reports freed source slots, compaction runs
+  (`enableParticleStorageCompaction`) and the compaction execution replaces
+  the materialization as the storage-adoption source forwarded to the
+  resident backend, so merges shrink the adopted count end to end.
+- Superseded locally-created materialization particle buffers are destroyed
+  after compaction (the compaction summary readback fences their last GPU
+  read); caller-injected materializations are never destroyed. The
+  supersession is marked on the result
+  (`particleBuffersSuperseded: 'schroeder-particle-storage-compaction'`).
+- Both stages accept injected runners and explicit artifacts like every
+  other SS prepass, and compact metadata blocks
+  (`particleStorageCountSummary`, `particleStorageCompaction`) join the
+  same-level result.
+
+Validation:
+
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` `124/124`,
+  including two new orchestration tests (count-summary delta attachment,
+  compaction forwarding as adoption source, injected-buffer preservation,
+  and the no-freed-slots skip path) and the updated dispatch-count
+  expectation on the existing forwarding test (22 -> 23 for the default-on
+  count summary).
+- PASS: mounted Playwright proofs `mounted Schroeder materialized storage`
+  and `mounted SS storage policy` with the new stages active in the real
+  scene path `2/2`.
+- PASS: targeted admitted-split and admitted-merge proofs `2/2`.
+- PASS: `npm test` `969/972`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next:
+
+- A mounted scene proof where policy-driven split/merge admissions produce a
+  nonzero adopted count delta in the running demo (the H2O steam scene
+  currently coarsens without split/merge slot movement).
+- Then the deferred distribution work per `fable-plan-2026-07-02.md`.

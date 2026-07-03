@@ -7912,11 +7912,19 @@ test('Schroeder same-level mechanics forwards admitted particle-storage material
     ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
   );
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
-  assert.equal(device.dispatches.length, 22);
+  // 22 SS prepass dispatches plus the default-on particle-storage count
+  // summary reduction over the admitted materialization rows.
+  assert.equal(device.dispatches.length, 23);
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('materialization-readback')),
     false
   );
+  assert.equal(
+    result.particleStorageCountSummary?.status,
+    'schroeder-particle-storage-count-summary-submitted'
+  );
+  // Zeroed fake-device readback reports no freed slots, so compaction skips.
+  assert.equal(result.particleStorageCompaction, null);
 });
 
 test('Schroeder same-level mechanics forwards admitted far-aggregate law consumers to resident backend', async () => {
@@ -8429,4 +8437,164 @@ test('Schroeder same-level mechanics can disable local law queue per use case', 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].schroederLawQueue, null);
   assert.deepEqual(device.dispatches, [[1, 1, 1], [1, 1, 1]]);
+});
+
+test('Schroeder same-level mechanics runs count summary and compaction over materialized storage', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const residentStepRunner = async (options) => {
+    residentCalls.push(options);
+    return {
+      schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+      status: 'resident-step-stubbed'
+    };
+  };
+  const injectedMaterialization = {
+    schema: 'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    particleStorageMaterializationAdmissionApproved: true,
+    materializationBuffer: { label: 'retained-materialization-rows' },
+    particleStateBuffer: { label: 'materialized-state' },
+    particleThermoBuffer: { label: 'materialized-thermo' },
+    particleMechanicsBuffer: { label: 'materialized-mechanics' },
+    assignmentRowCount: 3,
+    materializationStrideFloats: 32,
+    sourceParticleCount: 3,
+    outputParticleCapacity: 6,
+    retainedParticleBuffers: true,
+    destroyParticleBuffers() {
+      this.destroyedParticleBuffers = true;
+    }
+  };
+  const countSummaryCalls = [];
+  const countSummaryRunner = async (options) => {
+    countSummaryCalls.push(options);
+    return {
+      schema: 'peercompute.ulg.schroeder-particle-storage-count-summary-execution.v0',
+      status: 'schroeder-particle-storage-count-summary-submitted',
+      countPolicy: 'append-only-freed-slots-await-compaction',
+      admittedParticleCountDelta: 1,
+      authoritativeParticleCount: 4,
+      countSummary: {
+        admittedRowCount: 3,
+        appendedTargetSlotCount: 1,
+        freedSourceSlotCount: 2,
+        admittedParticleCountDelta: 1
+      }
+    };
+  };
+  const compactionCalls = [];
+  const compactionRunner = async (options) => {
+    compactionCalls.push(options);
+    return {
+      schema: 'peercompute.ulg.schroeder-particle-storage-compaction-execution.v0',
+      status: 'schroeder-particle-storage-compaction-submitted',
+      compactionMode: 'order-preserving-live-slot-stream-compaction',
+      particleStorageMaterializationAdmissionApproved: true,
+      retainedParticleBuffers: true,
+      liveParticleCount: 2,
+      admittedParticleCountDelta: -1,
+      sourceParticleCount: 3,
+      outputParticleCapacity: 6,
+      particleStateBuffer: { label: 'compacted-state' },
+      particleThermoBuffer: { label: 'compacted-thermo' },
+      particleMechanicsBuffer: { label: 'compacted-mechanics' },
+      compactionSummary: { liveParticleCount: 2, freedHoleCount: 4 }
+    };
+  };
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    particleStorageMaterialization: injectedMaterialization,
+    particleStorageCountSummaryRunner: countSummaryRunner,
+    particleStorageCompactionRunner: compactionRunner,
+    residentStepRunner
+  });
+
+  // Count summary consumed the retained materialization rows and attached
+  // the explicit delta to the materialization descriptor.
+  assert.equal(countSummaryCalls.length, 1);
+  assert.equal(countSummaryCalls[0].particleStorageMaterialization, injectedMaterialization);
+  assert.equal(injectedMaterialization.admittedParticleCountDelta, 1);
+
+  // Freed holes triggered compaction, and the resident backend received the
+  // compaction execution as the storage adoption source.
+  assert.equal(compactionCalls.length, 1);
+  assert.equal(residentCalls.length, 1);
+  assert.equal(
+    residentCalls[0].schroederParticleStorageMaterialization.schema,
+    'peercompute.ulg.schroeder-particle-storage-compaction-execution.v0'
+  );
+  assert.equal(
+    residentCalls[0].schroederParticleStorageMaterialization.admittedParticleCountDelta,
+    -1
+  );
+
+  // Caller-injected materialization buffers are never destroyed by the
+  // orchestrator.
+  assert.notEqual(injectedMaterialization.destroyedParticleBuffers, true);
+  assert.ok(injectedMaterialization.particleStateBuffer);
+
+  // Compact metadata is exposed on the same-level result.
+  assert.equal(result.particleStorageCountSummary.admittedParticleCountDelta, 1);
+  assert.equal(result.particleStorageCountSummary.countSummary.freedSourceSlotCount, 2);
+  assert.equal(result.particleStorageCompaction.liveParticleCount, 2);
+  assert.equal(result.particleStorageCompaction.admittedParticleCountDelta, -1);
+  assert.equal(result.particleStorageMaterialization.admittedParticleCountDelta, 1);
+});
+
+test('Schroeder same-level mechanics skips compaction when no slots were freed', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const residentStepRunner = async (options) => {
+    residentCalls.push(options);
+    return { status: 'resident-step-stubbed' };
+  };
+  const injectedMaterialization = {
+    schema: 'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    particleStorageMaterializationAdmissionApproved: true,
+    materializationBuffer: { label: 'retained-materialization-rows' },
+    particleStateBuffer: { label: 'materialized-state' },
+    particleThermoBuffer: { label: 'materialized-thermo' },
+    particleMechanicsBuffer: { label: 'materialized-mechanics' },
+    assignmentRowCount: 3,
+    materializationStrideFloats: 32,
+    sourceParticleCount: 3,
+    outputParticleCapacity: 6,
+    retainedParticleBuffers: true
+  };
+  const compactionCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    particleStorageMaterialization: injectedMaterialization,
+    particleStorageCountSummaryRunner: async () => ({
+      status: 'schroeder-particle-storage-count-summary-submitted',
+      countPolicy: 'append-only-freed-slots-await-compaction',
+      admittedParticleCountDelta: 0,
+      authoritativeParticleCount: 3,
+      countSummary: { admittedRowCount: 3, appendedTargetSlotCount: 0, freedSourceSlotCount: 0 }
+    }),
+    particleStorageCompactionRunner: async (options) => {
+      compactionCalls.push(options);
+      return {};
+    },
+    residentStepRunner
+  });
+
+  assert.equal(compactionCalls.length, 0);
+  assert.equal(result.particleStorageCompaction, null);
+  assert.equal(injectedMaterialization.admittedParticleCountDelta, 0);
+  assert.equal(
+    residentCalls[0].schroederParticleStorageMaterialization,
+    injectedMaterialization
+  );
 });

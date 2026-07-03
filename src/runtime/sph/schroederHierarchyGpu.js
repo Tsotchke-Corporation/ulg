@@ -150,6 +150,8 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
+import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
+import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
 
 export {
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
@@ -12788,6 +12790,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableParticleStorageAllocation = Boolean(particleStorageAllocatorAdmission),
   enableParticleStorageSlotAssignment = Boolean(particleStorageSlotAssignmentAdmission),
   enableParticleStorageMaterialization = Boolean(particleStorageMaterializationAdmission),
+  enableParticleStorageCountSummary = true,
+  enableParticleStorageCompaction = true,
+  particleStorageCountSummary = null,
+  particleStorageCompaction = null,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
   enablePortableSummary = false,
@@ -12889,6 +12895,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   particleStorageAllocationRunner = runSchroederParticleStorageAllocationWebGpu,
   particleStorageSlotAssignmentRunner = runSchroederParticleStorageSlotAssignmentWebGpu,
   particleStorageMaterializationRunner = runSchroederParticleStorageMaterializationWebGpu,
+  particleStorageCountSummaryRunner = runSchroederParticleStorageCountSummaryWebGpu,
+  particleStorageCompactionRunner = runSchroederParticleStorageCompactionWebGpu,
   phaseVolumeLevelUpdateRunner = runSchroederPhaseVolumeLevelUpdateWebGpu,
   phaseVolumeDiagnosticSummaryRunner = runSchroederPhaseVolumeDiagnosticSummaryWebGpu,
   portableSummaryRunner = createSchroederPortableSummaryPlan,
@@ -13658,6 +13666,53 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         readbackMode
       })
   );
+  // Compact GPU count summary over admitted materialization rows: the
+  // explicit admittedParticleCountDelta storage adoption consumes. The
+  // single 16-float row is the only readback.
+  const resolvedParticleStorageCountSummary = particleStorageCountSummary || (
+    !resolvedParticleStorageMaterialization
+    || resolvedParticleStorageMaterialization.particleStorageMaterializationAdmissionApproved !== true
+    || !resolvedParticleStorageMaterialization.materializationBuffer
+    || !enableParticleStorageCountSummary
+      ? null
+      : await particleStorageCountSummaryRunner({
+        device,
+        particleStorageMaterialization: resolvedParticleStorageMaterialization
+      })
+  );
+  if (resolvedParticleStorageCountSummary && resolvedParticleStorageMaterialization) {
+    resolvedParticleStorageMaterialization.admittedParticleCountDelta =
+      resolvedParticleStorageCountSummary.admittedParticleCountDelta;
+  }
+  // Freed source slots are zero-mass holes; compaction rebuilds a dense live
+  // range so merges become real count reductions. Only runs when holes
+  // exist and the materialized buffers are retained.
+  const resolvedParticleStorageCompaction = particleStorageCompaction || (
+    !resolvedParticleStorageCountSummary
+    || !enableParticleStorageCompaction
+    || !(resolvedParticleStorageCountSummary.countSummary?.freedSourceSlotCount > 0)
+    || !resolvedParticleStorageMaterialization?.particleStateBuffer
+      ? null
+      : await particleStorageCompactionRunner({
+        device,
+        particleStorageMaterialization: resolvedParticleStorageMaterialization
+      })
+  );
+  // Adoption consumes the compacted storage when compaction ran; the
+  // superseded materialization particle buffers are destroyed here (the
+  // compaction summary readback fences their last GPU read) unless the
+  // materialization was caller-injected.
+  if (resolvedParticleStorageCompaction && !particleStorageMaterialization) {
+    resolvedParticleStorageMaterialization.destroyParticleBuffers?.();
+    resolvedParticleStorageMaterialization.particleStateBuffer = null;
+    resolvedParticleStorageMaterialization.particleThermoBuffer = null;
+    resolvedParticleStorageMaterialization.particleMechanicsBuffer = null;
+    resolvedParticleStorageMaterialization.retainedParticleBuffers = false;
+    resolvedParticleStorageMaterialization.particleBuffersSuperseded =
+      'schroeder-particle-storage-compaction';
+  }
+  const resolvedParticleStorageAdoptionSource =
+    resolvedParticleStorageCompaction || resolvedParticleStorageMaterialization;
   const resolvedPhaseVolumeLevelUpdate = phaseVolumeLevelUpdate || (
     !resolvedPhaseVolumeMigration || !enablePhaseVolumeLevelUpdate
       ? null
@@ -13759,7 +13814,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederPhaseVolumeSplitMergeApply: resolvedPhaseVolumeSplitMergeApply,
     schroederParticleStorageAllocation: resolvedParticleStorageAllocation,
     schroederParticleStorageSlotAssignment: resolvedParticleStorageSlotAssignment,
-    schroederParticleStorageMaterialization: resolvedParticleStorageMaterialization,
+    schroederParticleStorageMaterialization: resolvedParticleStorageAdoptionSource,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
     schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,
@@ -14397,7 +14452,30 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       materializationBufferByteLength:
         resolvedParticleStorageMaterialization.materializationBufferByteLength
         ?? resolvedParticleStorageMaterialization.materializationByteLength
-        ?? 0
+        ?? 0,
+      admittedParticleCountDelta:
+        resolvedParticleStorageMaterialization.admittedParticleCountDelta ?? null,
+      particleBuffersSuperseded:
+        resolvedParticleStorageMaterialization.particleBuffersSuperseded ?? null
+    } : null,
+    particleStorageCountSummary: resolvedParticleStorageCountSummary ? {
+      schema: resolvedParticleStorageCountSummary.schema,
+      status: resolvedParticleStorageCountSummary.status,
+      countPolicy: resolvedParticleStorageCountSummary.countPolicy,
+      admittedParticleCountDelta: resolvedParticleStorageCountSummary.admittedParticleCountDelta,
+      authoritativeParticleCount: resolvedParticleStorageCountSummary.authoritativeParticleCount,
+      countSummary: resolvedParticleStorageCountSummary.countSummary
+    } : null,
+    particleStorageCompaction: resolvedParticleStorageCompaction ? {
+      schema: resolvedParticleStorageCompaction.schema,
+      status: resolvedParticleStorageCompaction.status,
+      compactionMode: resolvedParticleStorageCompaction.compactionMode,
+      liveParticleCount: resolvedParticleStorageCompaction.liveParticleCount,
+      admittedParticleCountDelta: resolvedParticleStorageCompaction.admittedParticleCountDelta,
+      sourceParticleCount: resolvedParticleStorageCompaction.sourceParticleCount,
+      outputParticleCapacity: resolvedParticleStorageCompaction.outputParticleCapacity,
+      retainedParticleBuffers: Boolean(resolvedParticleStorageCompaction.particleStateBuffer),
+      compactionSummary: resolvedParticleStorageCompaction.compactionSummary
     } : null,
     phaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate ? {
       schema: resolvedPhaseVolumeLevelUpdate.schema,

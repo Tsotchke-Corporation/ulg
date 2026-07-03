@@ -37306,3 +37306,33 @@ boiling scene now advances but needs a REAL heat source (find the wall/
 floor temperature controls; iceh/ironh are geometry); (3) ice buoyancy
 realism check at higher resolution; (4) pressure-interface sidecar on the
 two-level authoritative path.
+
+## 2026-07-03 - Live-merge steady state is a fixed-point treadmill under
+   sustained coarsening pressure (found via real boiling scene)
+
+Built the first honest boiling scene (wymin=700 floor; wall URL params are
+wxmin/wxmax/wymin/wymax/wzmin/wzmax). Result: the SS single-level scene
+advances sim time but adoption fires EVERY step with admittedParticleCount
+Delta -9 and sourceParticleCount 27 while the live count is already 18;
+center of mass, per-step displacement, and temperatures are bit-frozen.
+Mechanism: the storage chain runs before the resident step from the STEP
+INPUT, and its adopted output supersedes the step's mechanics/thermal
+outputs (topology precedence) - so when coarsening candidates never clear
+(sustained heat keeps every particle steam-expansion-eligible), the
+continuation becomes state = merge(input) forever: no motion, no heating.
+The ironh=1.01 scenes pass the anti-freeze gates only because their
+candidates clear after the first merges.
+
+Also suspicious: the chain claims sourceParticleCount 27 on an 18-particle
+continuation - the allocation/assignment side consumes a stale count under
+count-changed continuation.
+
+Fix directions for the next slice (in order): (1) idempotence/admission
+guard - do not re-admit a merge set identical to the previous step's
+(same aggregate leaders), and verify the chain consumes the CURRENT
+18-row assignment rather than a stale 27-row one; (2) consider whether
+repeated coarsening pressure should instead migrate the merged particles
+to their coarser level assignment (phase-volume level update overlay) so
+they stop being candidates; (3) the anti-freeze e2e gate should add the
+sustained-heat config once fixed (it currently only covers the
+candidate-clearing case).

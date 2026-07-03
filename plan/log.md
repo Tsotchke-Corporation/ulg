@@ -37195,3 +37195,14 @@ immediately). Next: decode the diagnostic summaryRows refine counts, then
 route refine-pressure counts into split proposals/admissions for mounted
 scenes (the divide-mass split chain is already proven end-to-end), gated
 on live count GROWTH with conserved mass in a boiling scene.
+
+Follow-up: the hotter boiling scene (ironh=1.5, baset=370, row budget 64)
+STALLS at simT=0.002 - after the first schedule (which merges 35 -> 18,
+matDelta -9) sim time never advances, even after 90s wall time. The milder
+ironh=1.01 coarsening scene advances normally. refineRequiredCount stays 0
+(water has not boiled by 0.002s). Investigate the stall first (suspects:
+repeated per-schedule re-materialization admission blocking on the shrunken
+set, free-list/budget exhaustion, or a scheduling gate rejecting the
+continuation), then continue the live split policy work: verify refine rows
+flow through proposal -> allocation slot action 4 (divide-mass) ->
+materialization in a live scene once one actually boils.

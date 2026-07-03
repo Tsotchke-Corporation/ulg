@@ -37180,3 +37180,18 @@ outputs; continuation carries reaction buffers). Unit suite 982/979/0.
 Remaining from plan item 1: the pressure-interface sidecar (heavier: gas
 cell field import/admission plumbing); queued next alongside live split
 policy near interfaces.
+
+## 2026-07-03 - Live split policy investigation (in progress)
+
+Probing a boiling scene (h2o over ironh=1.5, baset=370, materialization on,
+row budget 64): the phase-volume diagnostic summary is live with
+refinePressurePolicy 'compact-summary-count-and-reason-mask-no-particle-
+readback' and a refinePressureReasonBits mask (nulls in the compacted
+telemetry; the raw summaryRows carry the counts - row[0]=27 scanned).
+Notably the scene coarsened 35 -> 18 within 0.002s sim time at a 370K bath
+- coarsening policy may be too aggressive for warm-liquid scenes (worth a
+threshold review when enabling splits, or the merged pool will re-split
+immediately). Next: decode the diagnostic summaryRows refine counts, then
+route refine-pressure counts into split proposals/admissions for mounted
+scenes (the divide-mass split chain is already proven end-to-end), gated
+on live count GROWTH with conserved mass in a boiling scene.

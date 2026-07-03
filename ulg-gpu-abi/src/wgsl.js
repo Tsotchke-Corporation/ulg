@@ -12142,8 +12142,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     refine_delta,
     refine_required
   );
-  let target_mass_kg = select(represented_volume_m3, aggregate_mass_kg, coarsen_eligible);
-  let target_volume_m3 = select(represented_volume_m3, aggregate_volume_m3, coarsen_eligible);
+  // Coarsen children carry the aggregated cell mass; refine children get
+  // their mass divided from the source at materialization (zero here so the
+  // divide-mass split path is unambiguous).
+  let target_mass_kg = select(0.0, aggregate_mass_kg, coarsen_eligible && !refine_required);
+  let target_volume_m3 = select(represented_volume_m3, aggregate_volume_m3, coarsen_eligible && !refine_required);
 
   apply_rows[apply_offset + 0u] = proposal_rows[proposal_offset + 0u];
   apply_rows[apply_offset + 1u] = proposal_rows[proposal_offset + 1u];
@@ -12282,7 +12285,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_delta = apply_rows[apply_offset + 7u];
   var allocation_count = max(particle_delta, 0.0);
   var free_count = max(-particle_delta, 0.0);
-  if (ss_psal_coarsen_row(apply_offset)) {
+  var divide_mass_split = false;
+  let status_bits_self = u32(max(apply_rows[apply_offset + 3u], 0.0));
+  if ((status_bits_self & 4u) != 0u) {
+    // Mass-correct split: the source is replaced by (delta + 1) children,
+    // each receiving source mass / child count at materialization, and the
+    // source slot is freed. A zero-delta refine row keeps its particle.
+    if (particle_delta >= 1.0) {
+      allocation_count = particle_delta + 1.0;
+      free_count = 1.0;
+      divide_mass_split = true;
+    } else {
+      allocation_count = 0.0;
+      free_count = 0.0;
+    }
+  } else if (ss_psal_coarsen_row(apply_offset)) {
     // Merge group semantics: exactly one leader per aggregate cell writes
     // the aggregated child (target mass/volume already carry the cell
     // aggregates), and every member, leader included, frees its own source
@@ -12313,11 +12330,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     status = status + 16.0;
   }
 
-  let slot_action_id = select(
+  var slot_action_id = select(
     select(1.0, 3.0, allocation_required),
     2.0,
     free_required
   );
+  if (divide_mass_split) {
+    slot_action_id = 4.0;
+  }
 
   allocation_rows[allocation_offset + 0u] = apply_rows[apply_offset + 0u];
   allocation_rows[allocation_offset + 1u] = apply_rows[apply_offset + 1u];
@@ -12541,7 +12561,13 @@ fn ss_psm_source_represented_volume(source_index: u32, mechanics_stride: u32) ->
   return max(row4.z, 0.0) * max(row4.w, 0.0);
 }
 
-fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset: u32) -> f32 {
+fn ss_psm_copy_particle(
+  source_index: u32,
+  target_index: u32,
+  assignment_offset: u32,
+  child_ordinal: u32,
+  child_count: u32
+) -> f32 {
   if (source_index >= params.source_particle_count || target_index >= params.output_particle_capacity) {
     return 0.0;
   }
@@ -12557,11 +12583,29 @@ fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset:
 
   let state0 = source_sph_state[source_state_base];
   let state1 = source_sph_state[source_state_base + 1u];
-  let child_mass = ss_psm_target_mass(assignment_offset, state0.w);
+  // Slot action 4 is the mass-correct split: children divide the source
+  // mass and represented volume evenly and are jittered deterministically
+  // inside the child length scale so they do not stack.
+  let divide_mass_split = assignment_rows[assignment_offset + 8u] == 4.0
+    && child_count > 0u;
+  let divisor = f32(max(child_count, 1u));
+  var child_mass = ss_psm_target_mass(assignment_offset, state0.w);
+  var child_position = state0.xyz;
+  if (divide_mass_split) {
+    child_mass = max(state0.w, 0.0) / divisor;
+    let child_volume = max(assignment_rows[assignment_offset + 22u], 0.0) / divisor;
+    let child_scale = pow(max(child_volume, 1.0e-18), 0.3333333333333333);
+    let corner = vec3<f32>(
+      f32(child_ordinal & 1u) * 2.0 - 1.0,
+      f32((child_ordinal >> 1u) & 1u) * 2.0 - 1.0,
+      f32((child_ordinal >> 2u) & 1u) * 2.0 - 1.0
+    );
+    child_position = state0.xyz + 0.25 * child_scale * corner;
+  }
   out_sph_state[target_state_base] = vec4<f32>(
-    state0.x,
-    state0.y,
-    state0.z,
+    child_position.x,
+    child_position.y,
+    child_position.z,
     child_mass
   );
   // Momentum-conserving merge: when the assignment row carries the cell
@@ -12575,6 +12619,7 @@ fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset:
     assignment_rows[assignment_offset + 26u]
   );
   let momentum_provided = child_mass > 0.0
+    && !divide_mass_split
     && (target_momentum.x != 0.0 || target_momentum.y != 0.0 || target_momentum.z != 0.0);
   if (momentum_provided) {
     out_sph_state[target_state_base + 1u] = vec4<f32>(target_momentum / child_mass, state1.w);
@@ -12599,7 +12644,10 @@ fn ss_psm_copy_particle(source_index: u32, target_index: u32, assignment_offset:
   out_mls_mechanics[target_mechanics_base + 2u] = source_mls_mechanics[source_mechanics_base + 2u];
   out_mls_mechanics[target_mechanics_base + 3u] = source_mls_mechanics[source_mechanics_base + 3u];
   var row4 = source_mls_mechanics[source_mechanics_base + 4u];
-  let target_volume = assignment_rows[assignment_offset + 22u];
+  var target_volume = assignment_rows[assignment_offset + 22u];
+  if (divide_mass_split) {
+    target_volume = target_volume / divisor;
+  }
   if (target_volume > 0.0 && row4.w > 0.0) {
     row4 = vec4<f32>(row4.x, row4.y, max(target_volume / row4.w, 1.0e-9), row4.w);
   }
@@ -12685,7 +12733,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       written_target_count = written_target_count + ss_psm_copy_particle(
         source_index,
         target_start + slot,
-        assignment_offset
+        assignment_offset,
+        slot,
+        target_count
       );
     }
   }

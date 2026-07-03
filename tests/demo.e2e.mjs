@@ -12730,3 +12730,265 @@ test('SPH phase URL steam scene coarsens the live particle count through admitte
   expect(result.fullParticleReadbackPerformed).toBe(false);
   expect(consoleIssues).toEqual([]);
 });
+
+test('Schroeder refine-required row splits mass-correctly through the real proposal chain', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await import('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const MIGRATION_FLOATS = abi.SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
+    const sourceParticleCount = 2;
+    const massKg = 3.0;
+    const velocity = [0.3, -0.4, 0.2];
+    const state = new Float32Array(sourceParticleCount * 8);
+    const thermo = new Float32Array(sourceParticleCount * 12);
+    const mechanics = new Float32Array(sourceParticleCount * MECHANICS_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const s = index * 8;
+      state[s] = 1.5 + index;
+      state[s + 1] = 2;
+      state[s + 2] = 2.5;
+      state[s + 3] = massKg;
+      state[s + 4] = velocity[0];
+      state[s + 5] = velocity[1];
+      state[s + 6] = velocity[2];
+      state[s + 7] = 1;
+      thermo[index * 12 + 2] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = massKg / 1000;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      smoothingLengthM: 0.5,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: 1e-4,
+      mechanics
+    };
+
+    // Particle 0 is refine-required with a two-level delta (one net new
+    // child -> two children replacing the source); particle 1 keeps.
+    const migrationRows = new Float32Array(sourceParticleCount * MIGRATION_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const offset = index * MIGRATION_FLOATS;
+      migrationRows[offset + 0] = index;
+      migrationRows[offset + 3] = 1;
+      migrationRows[offset + 6] = massKg / 1000;
+      migrationRows[offset + 7] = massKg / 1000;
+      if (index === 0) {
+        migrationRows[offset + 9] = -2;
+        migrationRows[offset + 23] = 1;
+      }
+    }
+    const phaseVolumeMigration = {
+      schema: abi.ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+      status: 'schroeder-phase-volume-migration-submitted',
+      particleCount: sourceParticleCount,
+      migrationStrideFloats: MIGRATION_FLOATS,
+      migrationRows,
+      migrationEpoch: 1
+    };
+
+    const targetStateFamilies = [
+      'sph-particle-state',
+      'mls-mpm-particle-mechanics',
+      'sph-particle-thermo'
+    ];
+    const outputParticleCapacity = 6;
+    const admissionBase = (name, extra) => ({
+      status: `schroeder-${name}-admission-admitted`,
+      targetStateFamilies,
+      hotBufferKey: `ulg:test:ss-real-split-${name}-admission`,
+      sourceHotBufferKey: `ulg:test:ss-real-split-${name}-admission`,
+      committed: true,
+      ...extra
+    });
+    const proposal = await hierarchy.runSchroederPhaseVolumeSplitMergeProposalWebGpu({
+      device,
+      phaseVolumeMigration
+    });
+    const apply = await hierarchy.runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+      device,
+      phaseVolumeSplitMergeProposal: proposal,
+      phaseVolumeSplitMergeAdmission: admissionBase('phase-volume-split-merge', {
+        schema: abi.ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+        phaseVolumeSplitMergeApproved: true,
+        outputFamilies: ['schroeder-phase-volume-split-merge-apply'],
+        schroederPhaseVolumeSplitMergeProposalRowCount: sourceParticleCount
+      })
+    });
+    const allocation = await hierarchy.runSchroederParticleStorageAllocationWebGpu({
+      device,
+      phaseVolumeSplitMergeApply: apply,
+      particleStorageAllocatorAdmission: admissionBase('particle-storage-allocator', {
+        schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+        particleStorageAllocationApproved: true,
+        particleCapacityApproved: true,
+        outputFamilies: ['schroeder-particle-storage-allocation'],
+        schroederParticleStorageAllocationRowCount: sourceParticleCount,
+        currentParticleCapacity: outputParticleCapacity,
+        requiredParticleCapacity: outputParticleCapacity
+      }),
+      currentParticleCapacity: outputParticleCapacity,
+      requiredParticleCapacity: outputParticleCapacity
+    });
+    const particleStorageFreeList = hierarchy.createSchroederParticleStorageFreeListPlan({
+      baseSlotIndex: sourceParticleCount,
+      slotCapacity: outputParticleCapacity - sourceParticleCount,
+      availableSlotCount: outputParticleCapacity - sourceParticleCount,
+      maxSlotsPerRow: 2
+    });
+    const slotAssignment = await hierarchy.runSchroederParticleStorageSlotAssignmentWebGpu({
+      device,
+      particleStorageAllocation: allocation,
+      particleStorageFreeList,
+      particleStorageSlotAssignmentAdmission: admissionBase('particle-storage-slot-assignment', {
+        schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
+        particleStorageSlotAssignmentApproved: true,
+        freeListDescriptorApproved: true,
+        outputFamilies: ['schroeder-particle-storage-slot-assignment'],
+        schroederParticleStorageSlotAssignmentRowCount: sourceParticleCount
+      })
+    });
+    const materialization = await hierarchy.runSchroederParticleStorageMaterializationWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      particleStorageSlotAssignment: slotAssignment,
+      particleStorageMaterializationAdmission: admissionBase('particle-storage-materialization', {
+        schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+        particleStorageMaterializationApproved: true,
+        slotAssignmentDescriptorApproved: true,
+        outputFamilies: ['schroeder-particle-storage-materialization'],
+        schroederParticleStorageMaterializationRowCount: sourceParticleCount,
+        requiredParticleCapacity: outputParticleCapacity
+      }),
+      outputParticleCapacity
+    });
+    const countSummary = await countModule.runSchroederParticleStorageCountSummaryWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+    const compaction = await compactionModule.runSchroederParticleStorageCompactionWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+    const adoption = stepModule.createSchroederParticleStorageAdoption({
+      schroederParticleStorageMaterialization: compaction,
+      sphParticleState,
+      mlsMpmParticleState
+    });
+
+    const stateFloats = outputParticleCapacity * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(compaction.particleStateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const compactedState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    const liveCount = compaction.liveParticleCount;
+    let compactedMass = 0;
+    const compactedMomentum = [0, 0, 0];
+    const liveSlots = [];
+    for (let index = 0; index < liveCount; index += 1) {
+      const offset = index * 8;
+      const slotMass = compactedState[offset + 3];
+      compactedMass += slotMass;
+      for (let axis = 0; axis < 3; axis += 1) {
+        compactedMomentum[axis] += slotMass * compactedState[offset + 4 + axis];
+      }
+      liveSlots.push({
+        mass: slotMass,
+        p: [compactedState[offset], compactedState[offset + 1], compactedState[offset + 2]],
+        v: [compactedState[offset + 4], compactedState[offset + 5], compactedState[offset + 6]]
+      });
+    }
+
+    materialization.destroyParticleBuffers?.();
+    materialization.destroyMaterializationBuffer?.();
+    compaction.destroyParticleBuffers?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      countSummary: countSummary.countSummary,
+      liveParticleCount: liveCount,
+      admittedParticleCountDelta: compaction.admittedParticleCountDelta,
+      adoptionAuthoritativeParticleCount: adoption?.authoritativeParticleCount ?? null,
+      sourceMassTotal: sourceParticleCount * massKg,
+      sourceMomentum: [
+        sourceParticleCount * massKg * velocity[0],
+        sourceParticleCount * massKg * velocity[1],
+        sourceParticleCount * massKg * velocity[2]
+      ],
+      velocity,
+      compactedMass,
+      compactedMomentum,
+      liveSlots
+    };
+  });
+
+  expect(result.status).toBe('ok');
+
+  // The refine row wrote two children (appended) and freed the source:
+  // one net new particle, 2 -> 3 through the production chain.
+  expect(result.countSummary.appendedTargetSlotCount).toBe(2);
+  expect(result.countSummary.freedSourceSlotCount).toBe(1);
+  expect(result.liveParticleCount).toBe(3);
+  expect(result.admittedParticleCountDelta).toBe(1);
+  expect(result.adoptionAuthoritativeParticleCount).toBe(3);
+
+  // Mass-correct split: each child carries exactly half the source mass,
+  // children are jittered apart, and both keep the source velocity.
+  const children = result.liveSlots.filter((slot) => Math.abs(slot.mass - 1.5) < 1e-6);
+  expect(children.length).toBe(2);
+  const childSeparation = Math.hypot(
+    children[0].p[0] - children[1].p[0],
+    children[0].p[1] - children[1].p[1],
+    children[0].p[2] - children[1].p[2]
+  );
+  expect(childSeparation).toBeGreaterThan(1e-4);
+  for (const child of children) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      expect(Math.abs(child.v[axis] - result.velocity[axis])).toBeLessThan(1e-6);
+    }
+  }
+
+  // Totals conserved across the split.
+  expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(result.compactedMomentum[axis] - result.sourceMomentum[axis]))
+      .toBeLessThan(1e-5 * Math.max(1, Math.abs(result.sourceMomentum[axis])));
+  }
+});

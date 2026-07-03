@@ -36568,3 +36568,48 @@ Remaining split/merge follow-ups:
   currently copies the leader).
 - Mass-correct splits (refine rows still use legacy allocation semantics);
   live splits remain gated off in scenes.
+
+## 2026-07-02 AKDT - SS Mass-Correct Splits (Slice 8)
+
+Refine-required rows now split mass-correctly through the production chain,
+closing the second follow-up from slice 6 and completing conservative count
+mutation in both directions.
+
+Semantics (slot action id 4, divide-mass split):
+
+- Apply: refine rows stop stuffing represented volume into the target-mass
+  column (zero marks the divide-mass path); coarsen target mass/volume now
+  gate on `coarsen && !refine` so mixed rows follow refine precedence like
+  the mode id.
+- Allocation: refine rows with a positive count delta request
+  `delta + 1` child slots and free their source slot under slot action 4;
+  zero-delta refine rows keep their particle.
+- Materialization: action-4 children each receive `source mass / child
+  count` and `represented volume / child count`, are jittered
+  deterministically apart inside a quarter of the child length scale
+  (corner pattern over the child ordinal), and keep the source velocity, so
+  mass and momentum are conserved by construction. The merge momentum
+  override explicitly skips divide-mass rows.
+
+New proof `Schroeder refine-required row splits mass-correctly through the
+real proposal chain`: a two-level refine migration row runs the full
+production chain and gates numerically on 2 appended children, 1 freed
+source, live count 2 -> 3, delta exactly +1, each child at exactly half the
+source mass with a real spatial separation and the source velocity, and
+total mass/momentum conservation.
+
+Live scenes still gate refine paths off (steam coarsen rows require zero
+refine-pressure), so this lands as chain capability; enabling live splits
+near interfaces/walls is a policy decision for a later slice.
+
+Validation:
+
+- PASS: targeted battery (steam diagnostics, both fixture storage proofs,
+  real-chain merge, live steam coarsening, real-chain split) `6/6`.
+- PASS: `npm test` `970/973`, `3` skipped.
+- PASS: `git diff --check`.
+
+Remaining split/merge follow-up: internal energy of merged/split children
+(thermo currently copies the leader/source row; the aggregate
+internal-energy column exists but the target-aggregate producer writes
+zero).

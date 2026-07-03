@@ -37102,3 +37102,35 @@ equilibrium-safe assertions (mass > 0, maxDisplacementM > 0, sim time
 advancing; center of mass finite but allowed to be static once settled).
 Unit suite 980/977/0. Scene provenance now records per-step CPU array
 lengths alongside upload provenance.
+
+## 2026-07-03 - Merges/splits under two-level authority (plan item 1, part 1)
+
+Lifted the fail-closed guard between authoritative two-level mechanics and
+particle-storage materialization. The storage chain already merges/splits
+from the step's INPUT configuration, so composition follows the
+single-level path's topology-step precedence: the orchestrator now creates
+the storage adoption directly (createSchroederParticleStorageAdoption over
+the materialization/compaction source) and, when adopted, the synthesized
+authoritative envelope carries the adopted buffers as its continuation
+uploads (sourceStage schroeder-particle-storage-materialization), sets the
+authoritative (merged) particle count on next states, exposes
+schroederParticleStorageAdoption for the scene's clone-for-next, and
+releases the coupled step's superseded outputs behind submitted-work
+cleanup.
+
+Numeric gates (browser, real GPU): the mounted steam scene with
+ss=1 + materialization + schroederTwoLevel=1 + authority=authoritative +
+substeps=2 coarsens 35 -> 27 through admitted merges, chains the adopted
+storage across schedules, and the adopted particle mass (944.8664 kg from
+the compact summary) agrees with the two-level coupled grid mass
+(944.8662 kg from the cross-level conservation summary) to <1e-3 relative;
+per-step displacement nonzero (settled equilibrium), sim time advancing,
+zero WebGPU validation errors. New e2e proof "mounted scene coarsens live
+under authoritative two-level SS mechanics" gates all of the above; the
+fail-closed unit test became a positive composition test (adoption
+supersedes coupled outputs, merged count 3 -> 2 with injected admitted
+delta). Unit suite 980/977/0.
+
+Still queued from plan item 1: sidecar operator splitting on the two-level
+path (thermal/reaction/pressure post-step run) - the authoritative path
+remains mechanics-only for sidecars.

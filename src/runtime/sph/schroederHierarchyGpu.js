@@ -149,7 +149,10 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
-import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
+import {
+  createSchroederParticleStorageAdoption,
+  runMlsMpmResidentStepWithOptionalWebGpu
+} from './sphMlsMpmGpuStep.js';
 import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
 import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
 import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
@@ -13349,15 +13352,14 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   });
   // Two-level mechanics: observation mode runs the coupled step beside the
   // resident authority path with telemetry only; authoritative mode replaces
-  // the resident mechanics entirely (mechanics-only: sidecars and
-  // particle-storage materialization are not yet available on this path).
+  // the resident mechanics entirely (sidecars are not yet available on this
+  // path). Particle-storage materialization composes with authority: the
+  // storage chain merges/splits from the step's INPUT configuration and its
+  // adopted buffers supersede the coupled step's mechanics outputs for the
+  // continuation - the same topology-step precedence the single-level
+  // resident path applies through buildNextParticleUploads.
   const twoLevelAuthoritative = enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative';
-  if (twoLevelAuthoritative && enableParticleStorageMaterialization) {
-    throw new TypeError(
-      'Schroeder two-level authoritative mechanics does not yet support particle-storage materialization; use observation mode or the single-level resident path'
-    );
-  }
   const resolvedCoarseActiveNodeList = !enableTwoLevelMechanics
     ? null
     : coarseActiveNodeList || await runSchroederActiveNodeListWebGpu({
@@ -13920,6 +13922,56 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     activeNodeList: resolvedActiveNodeList,
     hierarchyAggregateNode: resolvedHierarchyAggregateNode
   });
+  // Under two-level authority, admitted merges/splits adopt exactly like the
+  // single-level path: the storage chain materialized/compacted the merged
+  // set from the step's input configuration, and the adopted buffers take
+  // precedence over the coupled step's mechanics outputs (topology step).
+  const twoLevelParticleStorageAdoption = twoLevelAuthoritative && resolvedParticleStorageAdoptionSource
+    ? createSchroederParticleStorageAdoption({
+      schroederParticleStorageMaterialization: resolvedParticleStorageAdoptionSource,
+      sphParticleState,
+      mlsMpmParticleState
+    })
+    : null;
+  const twoLevelAdopted = twoLevelParticleStorageAdoption?.adopted === true;
+  if (twoLevelAdopted && resolvedTwoLevelMechanics?.destroyOutputParticleBuffers) {
+    // The coupled step's retained outputs are superseded by the adopted
+    // storage; release them once the already-submitted GPU work (including
+    // the compact summary that read them) completes.
+    const supersededTwoLevel = resolvedTwoLevelMechanics;
+    deferSubmittedWorkCleanup(device, () => supersededTwoLevel.destroyOutputParticleBuffers());
+  }
+  const twoLevelNextSlot = (sphParticleUpload?.slot ?? 0) === 0 ? 1 : 0;
+  const twoLevelAdoptedUploads = twoLevelAdopted
+    ? {
+      sphParticleUpload: {
+        schema: 'peercompute.ulg.sph-gpu-particle-buffer-set.v0',
+        status: 'webgpu-uploaded',
+        sourceStage: 'schroeder-particle-storage-materialization',
+        particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount,
+        stateStrideBytes: twoLevelParticleStorageAdoption.stateStrideBytes,
+        thermoStrideBytes: twoLevelParticleStorageAdoption.thermoStrideBytes,
+        stateBuffer: twoLevelParticleStorageAdoption.stateBuffer,
+        thermoBuffer: twoLevelParticleStorageAdoption.thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        slot: twoLevelNextSlot,
+        sourceSlot: sphParticleUpload?.slot ?? 0,
+        nextSlot: twoLevelNextSlot
+      },
+      mlsMpmParticleUpload: {
+        schema: 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0',
+        status: 'webgpu-uploaded',
+        sourceStage: 'schroeder-particle-storage-materialization',
+        particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount,
+        mechanicsBuffer: twoLevelParticleStorageAdoption.mechanicsBuffer,
+        ownsMechanicsBuffer: true,
+        slot: twoLevelNextSlot,
+        sourceSlot: sphParticleUpload?.slot ?? 0,
+        nextSlot: twoLevelNextSlot
+      }
+    }
+    : null;
   // Authoritative two-level mode replaces the resident mechanics with a
   // synthesized resident-step-shaped envelope built from the coupled-step
   // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
@@ -13951,9 +14003,22 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         nextTime: resolvedTwoLevelMechanics?.nextSphParticleState?.time
           ?? ((sphParticleState?.time ?? 0) + finiteNumber(dt, 0))
       },
-      nextSphParticleState: resolvedTwoLevelMechanics?.nextSphParticleState ?? null,
-      nextMlsMpmParticleState: resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
-      nextParticleUploads: resolvedTwoLevelMechanics?.nextParticleUploads ?? null,
+      nextSphParticleState: twoLevelAdopted && resolvedTwoLevelMechanics?.nextSphParticleState
+        ? {
+          ...resolvedTwoLevelMechanics.nextSphParticleState,
+          particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount
+        }
+        : resolvedTwoLevelMechanics?.nextSphParticleState ?? null,
+      nextMlsMpmParticleState: twoLevelAdopted && resolvedTwoLevelMechanics?.nextMlsMpmParticleState
+        ? {
+          ...resolvedTwoLevelMechanics.nextMlsMpmParticleState,
+          particleCount: twoLevelParticleStorageAdoption.authoritativeParticleCount
+        }
+        : resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
+      nextParticleUploads: twoLevelAdoptedUploads
+        ?? resolvedTwoLevelMechanics?.nextParticleUploads
+        ?? null,
+      schroederParticleStorageAdoption: twoLevelParticleStorageAdoption,
       twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null,
       // Compact particle summary (fixed-size readback) doubles as the
       // resident-step diagnostics: residentMotionDiagnostic reads

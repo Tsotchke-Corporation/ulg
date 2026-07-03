@@ -13978,3 +13978,72 @@ test('SPH phase mounted SS scene proves particle motion numerically (anti-freeze
   expect(centerOfMassMoved || second.maxDisplacementM > 0).toBe(true);
   expect(centerOfMassMoved).toBe(true);
 });
+
+test('SPH phase mounted scene coarsens live under authoritative two-level SS mechanics', async ({ page }) => {
+  test.setTimeout(180_000);
+  // Flagship composition: admitted leader-elected merges (particle-storage
+  // materialization -> compaction -> adoption) run together with subcycled
+  // two-level coupled mechanics as the state authority. Gates are numeric:
+  // the live count shrinks below the initial pack, the adopted mass matches
+  // the two-level conservation summary's grid mass, and the continuation
+  // proves motion through the compact summary.
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  const sample = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const diagnostics = finalStep?.diagnostics || null;
+    return {
+      status: finalStep?.status ?? null,
+      count: finalStep?.nextParticleCount
+        ?? execution?.nextSphParticleState?.particleCount
+        ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      adopted: finalStep?.schroederParticleStorageAdoption?.adopted ?? null,
+      uploadSourceStage: finalStep?.nextParticleUploads?.sphParticleUpload?.sourceStage ?? null,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      summaryMassKg: diagnostics?.nextMassKg ?? null,
+      twoLevelGridMassKg: finalStep?.twoLevelConservation?.coarseMassKg ?? null
+    };
+  });
+
+  // Wait until the authoritative two-level step is executing on a merged
+  // set (count below the 35-particle initial pack) with a compact summary.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    const count = Number(finalStep?.nextParticleCount ?? execution?.nextSphParticleState?.particleCount);
+    return finalStep?.status === 'schroeder-two-level-authoritative-step-executed'
+      && finalStep?.diagnostics?.compactGpuSummaryAvailable === true
+      && Number.isFinite(time) && time > 0.05
+      && Number.isFinite(count) && count > 0 && count < 35;
+  }, null, { timeout: 120_000 });
+
+  const first = await sample();
+  await page.waitForTimeout(8_000);
+  const second = await sample();
+
+  expect(first.status).toBe('schroeder-two-level-authoritative-step-executed');
+  expect(first.adopted).toBe(true);
+  expect(first.uploadSourceStage).toBe('schroeder-particle-storage-materialization');
+  // Live merges shrank the set and the count stays stable (no runaway
+  // merging or oscillation).
+  expect(first.count).toBeGreaterThan(0);
+  expect(first.count).toBeLessThan(35);
+  expect(second.count).toBe(first.count);
+  // The adopted particle mass and the two-level coupled grids agree.
+  expect(first.summaryMassKg).toBeGreaterThan(0);
+  expect(Math.abs(first.summaryMassKg - first.twoLevelGridMassKg))
+    .toBeLessThan(1e-3 * first.summaryMassKg);
+  // Anti-freeze: the merged set evolves (nonzero per-step displacement) and
+  // sim time advances across schedules.
+  expect(second.maxDisplacementM).toBeGreaterThan(0);
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+});

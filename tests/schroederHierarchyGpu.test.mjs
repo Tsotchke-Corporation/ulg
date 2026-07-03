@@ -8760,21 +8760,92 @@ test('Schroeder same-level mechanics can make the two-level step authoritative',
   );
 });
 
-test('Schroeder two-level authoritative mode fail-closes with particle-storage materialization', async () => {
+test('Schroeder two-level authoritative mode adopts admitted merged storage over the coupled outputs', async () => {
   const device = createFakeWebGpuDevice();
   const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
-  await assert.rejects(
-    runSchroederSameLevelMechanicsWebGpu({
-      device,
-      ...buffers,
-      selectedLevel: 0,
-      baseGridSpacingM: 0.25,
-      enableTwoLevelMechanics: true,
-      twoLevelMechanicsAuthority: 'authoritative',
-      enableParticleStorageMaterialization: true,
-      particleStorageMaterializationAdmission: { committed: true },
-      residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
-    }),
-    /does not yet support particle-storage materialization/
+  const fakeBuffer = (label) => ({ label, destroy() {} });
+  const envelopeUploads = {
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: { label: 'two-level-state-out' },
+      thermoBuffer: { label: 'two-level-thermo' },
+      particleCount: 3,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: { label: 'two-level-mechanics-out' },
+      particleCount: 3,
+      slot: 0
+    }
+  };
+  let twoLevelOutputsDestroyed = 0;
+  const twoLevelMechanicsRunner = async (options) => ({
+    schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+    status: 'schroeder-two-level-mechanics-step-submitted',
+    couplingMode: 'composite-grid-subcycled-delta-prolongation',
+    fineLevel: options.fineLevel,
+    coarseLevel: options.fineLevel + 1,
+    fineSubstepCount: options.fineSubstepCount,
+    fineSubstepDt: options.dt / options.fineSubstepCount,
+    fineGridSpacingM: 0.25,
+    coarseGridSpacingM: 0.5,
+    conservation: { massResidualKg: 0 },
+    conservativeTransferStatus: 'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
+    nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+    nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+    nextParticleUploads: envelopeUploads,
+    destroyOutputParticleBuffers() { twoLevelOutputsDestroyed += 1; }
+  });
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner,
+    enableParticleStorageMaterialization: true,
+    enableParticleStorageCountSummary: false,
+    particleStorageMaterialization: {
+      schema: ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
+      status: 'schroeder-particle-storage-materialization-submitted',
+      particleStorageMaterializationAdmissionApproved: true,
+      retainedParticleBuffers: true,
+      sourceParticleCount: 3,
+      outputParticleCapacity: 6,
+      admittedParticleCountDelta: -1,
+      targetStateFamilies: [
+        'sph-particle-state',
+        'mls-mpm-particle-mechanics',
+        'sph-particle-thermo'
+      ],
+      particleStateBuffer: fakeBuffer('merged-state'),
+      particleThermoBuffer: fakeBuffer('merged-thermo'),
+      particleMechanicsBuffer: fakeBuffer('merged-mechanics'),
+      stateBufferByteLength: 6 * 8 * 4,
+      thermoBufferByteLength: 6 * 12 * 4,
+      mechanicsBufferByteLength: 6 * 32 * 4
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+
+  const step = result.residentStep;
+  assert.equal(step.status, 'schroeder-two-level-authoritative-step-executed');
+  // Admitted merged storage supersedes the coupled step's outputs: the
+  // continuation uploads carry the adopted buffers with the authoritative
+  // (merged) count, and the coupled outputs are released.
+  assert.equal(step.schroederParticleStorageAdoption.adopted, true);
+  assert.equal(step.schroederParticleStorageAdoption.authoritativeParticleCount, 2);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'merged-state');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.particleCount, 2);
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.sourceStage,
+    'schroeder-particle-storage-materialization'
   );
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'merged-mechanics');
+  assert.equal(step.nextSphParticleState.particleCount, 2);
+  assert.equal(step.nextMlsMpmParticleState.particleCount, 2);
 });

@@ -36685,3 +36685,23 @@ Validation:
 Follow-up recorded: native-renderer + replay-mode diagnostic scenes emit
 repeated AbortError refresh failures after count-changing adoption; the
 continuous path is unaffected.
+
+## 2026-07-02 AKDT - SS Performance Overhead Measurement (Slice 11)
+
+Measured the aggregate SS prepass cost with the existing
+`bench:sph-performance` harness (smoke profile, 3 batches x 16 steps,
+Chromium WebGPU on this device), SS off vs `ULG_BENCH_SCHROEDER_SIMULATION=1`
+(level assignment, active nodes + index, law queues, neighbor candidates,
+cross-level candidates/summaries, phase-volume chain, portable summaries,
+count summary):
+
+- 1024 particles: 270.3 -> 263.2 physics steps/s (meanBatchMs 29.47 ->
+  30.37), about 2.7% overhead, within a couple of run-to-run noise bands.
+- 8192 particles: 270.3 -> 277.8 physics steps/s (meanBatchMs 26.13 ->
+  25.13) - indistinguishable from noise; the SS run measured slightly
+  faster.
+
+Conclusion: the SS hierarchy machinery is noise-level at current demo scales
+on this device, closing the near-term performance risk flagged in the
+feasibility assessment. Re-measure when multi-level co-simulation and
+subcycling join the per-frame path, and at much larger particle counts.

@@ -8605,3 +8605,85 @@ test('Schroeder same-level mechanics skips compaction when no slots were freed',
     injectedMaterialization
   );
 });
+
+test('Schroeder same-level mechanics runs the two-level step in observation mode when enabled', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const residentStepRunner = async (options) => {
+    residentCalls.push(options);
+    return { status: 'resident-step-stubbed' };
+  };
+  const twoLevelCalls = [];
+  const twoLevelMechanicsRunner = async (options) => {
+    twoLevelCalls.push(options);
+    return {
+      schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+      status: 'schroeder-two-level-mechanics-step-submitted',
+      couplingMode: 'composite-grid-subcycled-delta-prolongation',
+      fineLevel: options.fineLevel,
+      coarseLevel: options.fineLevel + 1,
+      fineSubstepCount: options.fineSubstepCount,
+      fineSubstepDt: options.dt / options.fineSubstepCount,
+      fineGridSpacingM: 0.25,
+      coarseGridSpacingM: 0.5,
+      conservation: { massResidualKg: 0 },
+      conservativeTransferStatus: 'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation'
+    };
+  };
+
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 2,
+    baseGridSpacingM: 0.25,
+    minLevel: -2,
+    maxLevel: 6,
+    enableTwoLevelMechanics: true,
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner,
+    residentStepRunner
+  });
+
+  // The two-level stage received the orchestrated level assignment plus
+  // BOTH active-node lists: the selected level's retained list and a
+  // coarse list produced at selectedLevel + 1.
+  assert.equal(twoLevelCalls.length, 1);
+  const call = twoLevelCalls[0];
+  assert.equal(call.fineLevel, 2);
+  assert.equal(call.fineSubstepCount, 2);
+  assert.ok(call.levelAssignment.assignmentBuffer);
+  assert.ok(call.fineActiveNodeList.activeNodeBuffer);
+  assert.ok(call.coarseActiveNodeList.activeNodeBuffer);
+  assert.equal(call.fineActiveNodeList.selectedLevel, 2);
+  assert.equal(call.coarseActiveNodeList.selectedLevel, 3);
+  // Observation mode: outputs are released, telemetry only, and the
+  // resident authority path still runs.
+  assert.equal(call.retainOutputParticleBuffers, false);
+  assert.equal(call.conservationSummaryReadback, true);
+  assert.equal(residentCalls.length, 1);
+
+  assert.equal(result.twoLevelMechanics.status, 'schroeder-two-level-mechanics-step-submitted');
+  assert.equal(result.twoLevelMechanics.authority, 'observation-only-resident-step-remains-authoritative');
+  assert.equal(result.twoLevelMechanics.fineSubstepCount, 2);
+  assert.equal(result.twoLevelMechanics.coarseLevel, 3);
+});
+
+test('Schroeder same-level mechanics leaves two-level mode off by default', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const twoLevelCalls = [];
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    twoLevelMechanicsRunner: async (options) => {
+      twoLevelCalls.push(options);
+      return {};
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+  assert.equal(twoLevelCalls.length, 0);
+  assert.equal(result.twoLevelMechanics, null);
+});

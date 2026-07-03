@@ -152,6 +152,10 @@ import {
 import { runMlsMpmResidentStepWithOptionalWebGpu } from './sphMlsMpmGpuStep.js';
 import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
 import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
+import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
+import { createMlsMpmGridSpec, runMlsMpmP2gGridProjectionWebGpu } from './sphGridGpuKernel.js';
+import { runMlsMpmGridUpdateWebGpu } from './sphGridUpdateGpuKernel.js';
+import { runMlsMpmG2pWebGpu } from './sphG2pGpuKernel.js';
 
 export {
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
@@ -3903,6 +3907,7 @@ export function createSchroederActiveNodeListPlan({
     sourcePhaseVolumeLevelUpdateStatus: overlaySummary.sourcePhaseVolumeLevelUpdateStatus ?? null,
     particleCount,
     activeCandidateCount: particleCount,
+    selectedLevel: Math.round(finiteNumber(selectedLevel, 0)),
     tileCellCount: Math.max(1, Math.round(finiteNumber(tileCellCount, DEFAULT_TILE_CELL_COUNT))),
     supportInflateCells: Math.max(0, finiteNumber(supportInflateCells, DEFAULT_SUPPORT_INFLATE_CELLS)),
     minTileSpacingM: Math.max(0, finiteNumber(minTileSpacingM, 0)),
@@ -12777,6 +12782,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   mlsMpmParticleUpload = null,
   levelAssignment = null,
   activeNodeList = null,
+  coarseActiveNodeList = null,
+  enableTwoLevelMechanics = false,
+  twoLevelFineSubstepCount = 1,
   activeNodeIndex = null,
   activeNodeSortedIndex = null,
   lawQueue = null,
@@ -12982,6 +12990,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   phaseVolumeDiagnosticReadbackMode = SCHROEDER_COMPACT_PHASE_VOLUME_DIAGNOSTIC_READBACK_MODE,
   mergeEpoch = 0,
   residentStepRunner = runMlsMpmResidentStepWithOptionalWebGpu,
+  twoLevelMechanicsRunner = runSchroederTwoLevelMechanicsStepWebGpu,
   residentStepOptions = {}
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -13337,6 +13346,49 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     retainActiveNodeBuffer: true,
     readbackMode
   });
+  // Two-level mechanics (observation mode): produce the adjacent-level
+  // active-node list and run the coupled two-level step beside the resident
+  // authority path so its conservation is telemetered live before any
+  // authority switch.
+  const resolvedCoarseActiveNodeList = !enableTwoLevelMechanics
+    ? null
+    : coarseActiveNodeList || await runSchroederActiveNodeListWebGpu({
+      device,
+      levelAssignment: resolvedLevelAssignment,
+      phaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
+      phaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
+      selectedLevel: plan.selectedLevel + 1,
+      tileCellCount,
+      supportInflateCells,
+      retainActiveNodeBuffer: true,
+      readbackMode
+    });
+  const resolvedTwoLevelMechanics = !enableTwoLevelMechanics
+    ? null
+    : await twoLevelMechanicsRunner({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      levelAssignment: resolvedLevelAssignment,
+      fineActiveNodeList: resolvedActiveNodeList,
+      coarseActiveNodeList: resolvedCoarseActiveNodeList,
+      fineLevel: plan.selectedLevel,
+      baseGridSpacingM: plan.baseGridSpacingM,
+      boxDimsM,
+      dt,
+      gravityMPerS2,
+      fineSubstepCount: twoLevelFineSubstepCount,
+      gridSpecFactory: createMlsMpmGridSpec,
+      p2gRunner: runMlsMpmP2gGridProjectionWebGpu,
+      gridUpdateRunner: runMlsMpmGridUpdateWebGpu,
+      g2pRunner: runMlsMpmG2pWebGpu,
+      // Observation mode: the resident step remains the state authority, so
+      // the two-level outputs are released and only telemetry is kept.
+      retainOutputParticleBuffers: false,
+      conservationSummaryReadback: true
+    });
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
     ? null
     : activeNodeIndex || await activeNodeIndexRunner({
@@ -14541,6 +14593,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         resolvedParticleStorageMaterialization.admittedParticleCountDelta ?? null,
       particleBuffersSuperseded:
         resolvedParticleStorageMaterialization.particleBuffersSuperseded ?? null
+    } : null,
+    twoLevelMechanics: resolvedTwoLevelMechanics ? {
+      schema: resolvedTwoLevelMechanics.schema,
+      status: resolvedTwoLevelMechanics.status,
+      couplingMode: resolvedTwoLevelMechanics.couplingMode,
+      authority: 'observation-only-resident-step-remains-authoritative',
+      fineLevel: resolvedTwoLevelMechanics.fineLevel,
+      coarseLevel: resolvedTwoLevelMechanics.coarseLevel,
+      fineSubstepCount: resolvedTwoLevelMechanics.fineSubstepCount,
+      fineSubstepDt: resolvedTwoLevelMechanics.fineSubstepDt,
+      fineGridSpacingM: resolvedTwoLevelMechanics.fineGridSpacingM,
+      coarseGridSpacingM: resolvedTwoLevelMechanics.coarseGridSpacingM,
+      conservation: resolvedTwoLevelMechanics.conservation,
+      conservativeTransferStatus: resolvedTwoLevelMechanics.conservativeTransferStatus
     } : null,
     particleStorageCountSummary: resolvedParticleStorageCountSummary ? {
       schema: resolvedParticleStorageCountSummary.schema,

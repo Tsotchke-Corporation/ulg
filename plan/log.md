@@ -36797,3 +36797,50 @@ Validation:
 
 Next: scene-loop scheduling of the two-level step (the last piece of the
 multi-level milestone), then live split policy.
+
+## 2026-07-03 AKDT - SS Two-Level Observation Stage In The Orchestrator (Slice 14)
+
+The two-level coupled step now runs inside the production SS orchestrator as
+an opt-in observation stage, completing the operator-to-orchestration path
+for multi-level mechanics while leaving state authority untouched.
+
+`runSchroederSameLevelMechanicsWebGpu` changes:
+
+- `enableTwoLevelMechanics` (default off) plus `twoLevelFineSubstepCount`
+  and injectable `twoLevelMechanicsRunner`/`coarseActiveNodeList`. When
+  enabled, the orchestrator produces a second retained active-node list at
+  `selectedLevel + 1` with the same real producer, then runs the subcycled
+  two-level coupled step against the orchestrated level assignment and both
+  lists, using the production P2G/grid-update/G2P kernels.
+- Observation mode by design: outputs are released
+  (`retainOutputParticleBuffers: false`), the compact conservation row is
+  read back as live telemetry, and the resident step remains the state
+  authority (`authority: 'observation-only-resident-step-remains-
+  authoritative'` in the result block). Switching authority to the
+  two-level path is a deliberate later slice with its own gates.
+- Active-node list plans now expose `selectedLevel` (previously params-only)
+  so consumers can tell the two lists apart.
+
+Proofs:
+
+- Unit: orchestrator wiring with stub runners - both lists produced at the
+  right levels, observation-mode flags forwarded, resident authority still
+  invoked, telemetry block populated; default-off covered.
+- Browser: `Schroeder orchestrator runs the two-level observation stage with
+  live conservation telemetry` - only the admitted level-assignment decision
+  rows are fixture; both active-node lists and the subcycled coupled step
+  run on real GPU inside the orchestrator, gated on the combined coarse grid
+  carrying the full two-level mass/momentum.
+
+Validation:
+
+- PASS: `node --test tests/schroederHierarchyGpu.test.mjs` `126/126`.
+- PASS: orchestrator observation proof `1/1` (5.9s); sibling proofs
+  (mounted storage policy, live steam coarsening, standalone two-level
+  step) `3/3`.
+- PASS: `npm test` `974/977`, `3` skipped.
+- PASS: `git diff --check`.
+
+Next: authority switch for two-level mechanics (resident envelope
+integration with adoption/publication parity), live split policy, renderer
+AbortError triage, deferred distribution work.

@@ -13348,3 +13348,169 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
     }
   }
 });
+
+test('Schroeder orchestrator runs the two-level observation stage with live conservation telemetry', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const importWithRetry = async (path) => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await import(path);
+        } catch (error) {
+          if (attempt === 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+      return null;
+    };
+    const hierarchy = await importWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const buffersModule = await importWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await importWithRetry('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const ASSIGNMENT_FLOATS = abi.SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT.length;
+
+    const boxDimsM = [6, 6, 6];
+    const baseDx = 0.5;
+    const dt = 1e-4;
+    const velocity = [0.3, -0.2, 0.1];
+    const positions = [];
+    const levels = [];
+    for (let x = 0; x < 3; x += 1) {
+      for (let y = 0; y < 3; y += 1) {
+        positions.push([2.6 + x * 0.4, 2.6 + y * 0.4, 2.8]);
+        levels.push(0);
+      }
+    }
+    for (let x = 0; x < 2; x += 1) {
+      for (let y = 0; y < 2; y += 1) {
+        positions.push([2.6 + x * 0.8, 2.6 + y * 0.8, 3.4]);
+        levels.push(1);
+      }
+    }
+    const particleCount = positions.length;
+    const state = new Float32Array(particleCount * 8);
+    const thermo = new Float32Array(particleCount * 12);
+    const mechanics = new Float32Array(particleCount * MECHANICS_FLOATS);
+    let totalMass = 0;
+    for (let index = 0; index < particleCount; index += 1) {
+      const s = index * 8;
+      const mass = levels[index] === 0 ? 0.5 : 4.0;
+      totalMass += mass;
+      state[s] = positions[index][0];
+      state[s + 1] = positions[index][1];
+      state[s + 2] = positions[index][2];
+      state[s + 3] = mass;
+      state[s + 4] = velocity[0];
+      state[s + 5] = velocity[1];
+      state[s + 6] = velocity[2];
+      state[s + 7] = 1;
+      thermo[index * 12 + 3] = 1000;
+      thermo[index * 12 + 8] = levels[index] === 0 ? 0.5 : 1.0;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = mass / 1000;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      smoothingLengthM: baseDx,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: dt,
+      mechanics
+    };
+
+    // Admitted level-assignment decision rows; everything downstream (both
+    // active-node lists and the two-level coupled step) is produced by the
+    // real orchestrator on GPU.
+    const assignments = new Float32Array(particleCount * ASSIGNMENT_FLOATS);
+    for (let index = 0; index < particleCount; index += 1) {
+      const offset = index * ASSIGNMENT_FLOATS;
+      assignments[offset] = levels[index];
+      assignments[offset + 12] = positions[index][0];
+      assignments[offset + 13] = positions[index][1];
+      assignments[offset + 14] = positions[index][2];
+    }
+    const levelAssignment = {
+      schema: abi.ULG_SCHROEDER_LEVEL_ASSIGNMENT_SCHEMA,
+      status: 'schroeder-level-assignment-submitted',
+      particleCount,
+      assignmentStrideFloats: ASSIGNMENT_FLOATS,
+      assignments
+    };
+
+    const residentCalls = [];
+    const execution = await hierarchy.runSchroederSameLevelMechanicsWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      levelAssignment,
+      selectedLevel: 0,
+      baseGridSpacingM: baseDx,
+      boxDimsM,
+      dt,
+      gravityMPerS2: [0, 0, 0],
+      enableTwoLevelMechanics: true,
+      twoLevelFineSubstepCount: 2,
+      residentStepRunner: async (options) => {
+        residentCalls.push({ selectedLevel: options.schroederSelectedLevel });
+        return { status: 'resident-step-stubbed' };
+      }
+    });
+
+    const summary = {
+      status: 'ok',
+      executionStatus: execution.status,
+      twoLevelMechanics: execution.twoLevelMechanics,
+      residentCallCount: residentCalls.length,
+      totalMass,
+      expectedMomentum: velocity.map((v) => totalMass * v)
+    };
+    device.destroy?.();
+    return summary;
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.executionStatus).toBe('schroeder-same-level-mechanics-submitted');
+
+  // The observation-mode two-level stage ran inside the real orchestrator
+  // (both active-node lists produced on GPU from the admitted assignment)
+  // while the resident authority path still executed.
+  expect(result.residentCallCount).toBe(1);
+  const twoLevel = result.twoLevelMechanics;
+  expect(twoLevel).not.toBeNull();
+  expect(twoLevel.status).toBe('schroeder-two-level-mechanics-step-submitted');
+  expect(twoLevel.authority).toBe('observation-only-resident-step-remains-authoritative');
+  expect(twoLevel.couplingMode).toBe('composite-grid-subcycled-delta-prolongation');
+  expect(twoLevel.fineSubstepCount).toBe(2);
+  expect(twoLevel.fineLevel).toBe(0);
+  expect(twoLevel.coarseLevel).toBe(1);
+
+  // Live conservation telemetry from the coupled step: the combined coarse
+  // grid carries the full two-level mass and momentum.
+  const conservation = twoLevel.conservation;
+  expect(conservation).not.toBeNull();
+  expect(Math.abs(conservation.coarseMassKg - result.totalMass))
+    .toBeLessThan(1e-4 * Math.max(1, result.totalMass));
+  for (let axis = 0; axis < 3; axis += 1) {
+    expect(Math.abs(conservation.coarseMomentumKgMPerS[axis] - result.expectedMomentum[axis]))
+      .toBeLessThan(1e-4 * Math.max(1, Math.abs(result.expectedMomentum[axis])));
+  }
+});

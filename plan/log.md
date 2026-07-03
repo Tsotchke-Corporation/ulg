@@ -36613,3 +36613,40 @@ Remaining split/merge follow-up: internal energy of merged/split children
 (thermo currently copies the leader/source row; the aggregate
 internal-energy column exists but the target-aggregate producer writes
 zero).
+
+## 2026-07-02 AKDT - SS Thermal Averaging And Entity Counts Through Merges (Slice 9)
+
+The last split/merge conservation follow-up: merged children now carry the
+mass-weighted cell temperature and the summed represented-entity count, so
+thermal energy (under the coherent cell's uniform heat capacity) and entity
+bookkeeping survive count mutation.
+
+Plumbing (same retained-GPU pattern as momentum):
+
+- The target-aggregate producer binds the SPH thermo rows (binding 4, vec4
+  stride in the params pad2; zero disables) and writes `mass * T` into the
+  contribution internal-energy column; the existing node reducer sums it.
+- The proposal kernel forwards the matched cell's momentum AND summed
+  `mass * T` (node columns 10-13) through the existing
+  apply/allocation/assignment column chain (assignment column 27).
+- Materialization sets the merged child's temperature to
+  `sum(m*T) / child mass` (exact mass-weighted average; splits and rows
+  without the sum keep the source temperature, which conserves energy by
+  construction), and scales the represented-entity count by the child/source
+  mass ratio for merges and splits alike (exact under uniform composition).
+
+Proof upgrade: the real-chain merge proof gives the members 300/400/500 K
+and 1e6 entities each, and gates numerically on the child landing at
+exactly 400 K with 3e6 entities while the survivor keeps 600 K and 1e6.
+
+Validation:
+
+- PASS: real-chain merge and split proofs `2/2`.
+- PASS: targeted battery (steam diagnostics, mounted storage policy, both
+  fixture proofs, live steam coarsening) `5/5`.
+- PASS: `npm test` `970/973`, `3` skipped.
+- PASS: `git diff --check`.
+
+Split/merge conservation is now complete across mass, momentum,
+represented volume, thermal energy (uniform-c), and entity counts, in both
+directions, live in scenes for merges and chain-proven for splits.

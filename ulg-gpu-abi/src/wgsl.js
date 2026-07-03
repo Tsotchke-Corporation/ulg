@@ -9596,11 +9596,27 @@ struct SchroederPhaseVolumeTargetAggregateParams {
 @group(0) @binding(1) var<storage, read_write> aggregate_rows: array<f32>;
 @group(0) @binding(2) var<uniform> params: SchroederPhaseVolumeTargetAggregateParams;
 @group(0) @binding(3) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> sph_thermo: array<vec4<f32>>;
 
 const SCHROEDER_PVTA_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PVTA_AGGREGATE_STRIDE: u32 = 32u;
 const SCHROEDER_PVTA_STATE_VEC4_STRIDE: u32 = 2u;
+const SCHROEDER_PVTA_THERMO_VEC4_STRIDE: u32 = 3u;
 const SCHROEDER_PVTA_PI: f32 = 3.141592653589793;
+
+// Mass-weighted temperature contribution (mass * T). Under the uniform
+// heat capacity of a coherent same-material cell this is the thermal
+// energy proxy the reducer sums, so a merged child's temperature becomes
+// the mass-weighted cell average. pad2 carries the thermo vec4 stride;
+// zero disables the binding.
+fn ss_pvta_mass_temperature(particle_index: u32, mass_kg: f32) -> f32 {
+  if (params.pad2 <= 0.0) {
+    return 0.0;
+  }
+  let thermo_stride = max(u32(params.pad2), SCHROEDER_PVTA_THERMO_VEC4_STRIDE);
+  let temperature_k = sph_thermo[particle_index * thermo_stride].z;
+  return mass_kg * max(temperature_k, 0.0);
+}
 
 // Per-particle momentum for the contribution row so the reduced aggregate
 // node carries true cell momentum for momentum-conserving merges. pad0
@@ -9718,7 +9734,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   aggregate_rows[aggregate_offset + 10u] = particle_momentum.x;
   aggregate_rows[aggregate_offset + 11u] = particle_momentum.y;
   aggregate_rows[aggregate_offset + 12u] = particle_momentum.z;
-  aggregate_rows[aggregate_offset + 13u] = 0.0;
+  aggregate_rows[aggregate_offset + 13u] = ss_pvta_mass_temperature(particle_index, mass_kg);
   aggregate_rows[aggregate_offset + 14u] = f32(particle_index);
   aggregate_rows[aggregate_offset + 15u] = 1.0;
   aggregate_rows[aggregate_offset + 16u] = mass_kg;
@@ -11930,23 +11946,24 @@ const SCHROEDER_PVSMP_AGGREGATE_NODE_STRIDE: u32 = 32u;
 // already reduce member momentum (columns 10-12); forward it so the
 // materialized child can carry the mass-weighted cell velocity instead of
 // the merge leader's. Returns zero when no aggregate node rows are bound.
-fn ss_pvsmp_cell_momentum(aggregate_node_index: f32) -> vec3<f32> {
+fn ss_pvsmp_cell_momentum_energy(aggregate_node_index: f32) -> vec4<f32> {
   if (params.aggregate_node_count == 0u || aggregate_node_index < 0.0) {
-    return vec3<f32>(0.0, 0.0, 0.0);
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
   let node_index = u32(aggregate_node_index);
   if (node_index >= params.aggregate_node_count) {
-    return vec3<f32>(0.0, 0.0, 0.0);
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
   let node_stride = max(params.aggregate_node_stride, SCHROEDER_PVSMP_AGGREGATE_NODE_STRIDE);
   let node_offset = node_index * node_stride;
   if (aggregate_node_rows[node_offset + 3u] <= 0.0) {
-    return vec3<f32>(0.0, 0.0, 0.0);
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
-  return vec3<f32>(
+  return vec4<f32>(
     aggregate_node_rows[node_offset + 10u],
     aggregate_node_rows[node_offset + 11u],
-    aggregate_node_rows[node_offset + 12u]
+    aggregate_node_rows[node_offset + 12u],
+    aggregate_node_rows[node_offset + 13u]
   );
 }
 
@@ -12032,15 +12049,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   proposal_rows[proposal_offset + 15u] = migration_rows[migration_offset + 16u];
   proposal_rows[proposal_offset + 16u] = migration_rows[migration_offset + 17u];
   proposal_rows[proposal_offset + 17u] = migration_rows[migration_offset + 18u];
-  let cell_momentum = select(
-    vec3<f32>(0.0, 0.0, 0.0),
-    ss_pvsmp_cell_momentum(migration_rows[migration_offset + 12u]),
+  let cell_momentum_energy = select(
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    ss_pvsmp_cell_momentum_energy(migration_rows[migration_offset + 12u]),
     coarsen_eligible > 0.0
   );
-  proposal_rows[proposal_offset + 18u] = cell_momentum.x;
-  proposal_rows[proposal_offset + 19u] = cell_momentum.y;
-  proposal_rows[proposal_offset + 20u] = cell_momentum.z;
-  proposal_rows[proposal_offset + 21u] = 0.0;
+  proposal_rows[proposal_offset + 18u] = cell_momentum_energy.x;
+  proposal_rows[proposal_offset + 19u] = cell_momentum_energy.y;
+  proposal_rows[proposal_offset + 20u] = cell_momentum_energy.z;
+  proposal_rows[proposal_offset + 21u] = cell_momentum_energy.w;
   proposal_rows[proposal_offset + 22u] = migration_rows[migration_offset + 4u];
   proposal_rows[proposal_offset + 23u] = migration_rows[migration_offset + 5u];
   proposal_rows[proposal_offset + 24u] = migration_rows[migration_offset + 19u];
@@ -12630,11 +12647,31 @@ fn ss_psm_copy_particle(
   let thermo0 = source_sph_thermo[source_thermo_base];
   let thermo1 = source_sph_thermo[source_thermo_base + 1u];
   let thermo2 = source_sph_thermo[source_thermo_base + 2u];
-  out_sph_thermo[target_thermo_base] = thermo0;
+  // Merged child temperature: the assignment row's internal-energy column
+  // carries the cell's summed mass*T, so T_child = sum(m*T) / child mass is
+  // the mass-weighted average (exact thermal-energy conservation under the
+  // cell's uniform heat capacity). Splits and rows without the sum keep the
+  // source temperature, which conserves energy by construction.
+  let cell_mass_temperature = assignment_rows[assignment_offset + 27u];
+  var child_temperature = thermo0.z;
+  if (!divide_mass_split && cell_mass_temperature > 0.0 && child_mass > 0.0) {
+    child_temperature = cell_mass_temperature / child_mass;
+  }
+  // Represented entity count scales with the mass ratio: uniform
+  // composition means entities are proportional to mass for merges and
+  // splits alike.
+  let source_mass = max(state0.w, 1.0e-18);
+  let entity_scale = child_mass / source_mass;
+  out_sph_thermo[target_thermo_base] = vec4<f32>(
+    thermo0.x,
+    thermo0.y,
+    child_temperature,
+    thermo0.w
+  );
   out_sph_thermo[target_thermo_base + 1u] = thermo1;
   out_sph_thermo[target_thermo_base + 2u] = vec4<f32>(
     thermo2.x,
-    thermo2.y,
+    thermo2.y * entity_scale,
     max(thermo2.z, 1.0),
     thermo2.w
   );

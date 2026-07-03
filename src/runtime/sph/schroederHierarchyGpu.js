@@ -1646,7 +1646,8 @@ export function createSchroederPhaseVolumeTargetAggregateParamsArray({
   gasPhaseId = DEFAULT_GAS_PHASE_ID,
   aggregateEpoch = 0,
   stateFamilyId = 1,
-  stateVec4Stride = 0
+  stateVec4Stride = 0,
+  thermoVec4Stride = 0
 } = {}) {
   const buffer = new ArrayBuffer(64);
   const view = new DataView(buffer);
@@ -1676,7 +1677,9 @@ export function createSchroederPhaseVolumeTargetAggregateParamsArray({
   view.setFloat32(48, finiteNumber(gasPhaseId, DEFAULT_GAS_PHASE_ID), true);
   view.setFloat32(52, finiteNumber(aggregateEpoch, 0), true);
   view.setFloat32(56, finiteNumber(stateFamilyId, 1), true);
-  view.setFloat32(60, 0, true);
+  // pad2 carries the sph-thermo vec4 stride for contribution mass*T sums;
+  // zero keeps legacy zero-energy contributions.
+  view.setFloat32(60, Math.max(0, Math.round(finiteNumber(thermoVec4Stride, 0))), true);
   return buffer;
 }
 
@@ -9459,6 +9462,17 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       'ulg-schroeder-phase-volume-target-aggregate-state-in',
       stateRows || new Float32Array(SPH_GPU_PARTICLE_STATE_FLOATS)
     );
+  const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
+    ? sphParticleUpload.thermoBuffer
+    : null;
+  const thermoRows = sphParticleState?.thermo instanceof Float32Array ? sphParticleState.thermo : null;
+  const thermoProvided = Boolean(borrowedThermoBuffer || thermoRows);
+  const thermoBuffer = borrowedThermoBuffer
+    || writeStorageBuffer(
+      device,
+      'ulg-schroeder-phase-volume-target-aggregate-thermo-in',
+      thermoRows || new Float32Array(SPH_GPU_PARTICLE_THERMO_FLOATS)
+    );
   const aggregateBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-target-aggregate-out',
     size: plan.aggregateByteLength,
@@ -9466,7 +9480,8 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   });
   const paramsArray = createSchroederPhaseVolumeTargetAggregateParamsArray({
     ...plan,
-    stateVec4Stride: stateProvided ? SPH_GPU_PARTICLE_STATE_FLOATS / 4 : 0
+    stateVec4Stride: stateProvided ? SPH_GPU_PARTICLE_STATE_FLOATS / 4 : 0,
+    thermoVec4Stride: thermoProvided ? SPH_GPU_PARTICLE_THERMO_FLOATS / 4 : 0
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-schroeder-phase-volume-target-aggregate-params',
@@ -9488,10 +9503,11 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'uniform'),
-      computeBufferBinding(3, 'read-only-storage')
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v1',
+      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v2',
       label: 'ulg-schroeder-phase-volume-target-aggregate',
       code: schroederPhaseVolumeTargetAggregateWgsl,
       entryPoint: 'main',
@@ -9503,7 +9519,8 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
         { binding: 0, resource: { buffer: assignmentBuffer } },
         { binding: 1, resource: { buffer: aggregateBuffer } },
         { binding: 2, resource: { buffer: paramsBuffer } },
-        { binding: 3, resource: { buffer: stateBuffer } }
+        { binding: 3, resource: { buffer: stateBuffer } },
+        { binding: 4, resource: { buffer: thermoBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -9565,6 +9582,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
     const cleanup = () => {
       if (!borrowedAssignmentBuffer) assignmentBuffer.destroy?.();
       if (!borrowedStateBuffer) stateBuffer.destroy?.();
+      if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
       if (!retainAggregateBuffer || !returnedRetainedAggregateBuffer) aggregateBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();

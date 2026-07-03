@@ -12382,8 +12382,11 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
       state[s + 5] = velocities[index][1];
       state[s + 6] = velocities[index][2];
       state[s + 7] = 1;
-      thermo[index * 12 + 2] = 1;
+      // Distinct member temperatures: the merged child must land on the
+      // mass-weighted average. Entity counts are per-particle and must sum.
+      thermo[index * 12 + 2] = 300 + index * 100;
       thermo[index * 12 + 3] = 1000;
+      thermo[index * 12 + 9] = 1e6;
       const m = index * MECHANICS_FLOATS;
       mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
       mechanics[m + 18] = 1;
@@ -12447,6 +12450,12 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     aggregateNodeRows[10] = cellMomentum[0];
     aggregateNodeRows[11] = cellMomentum[1];
     aggregateNodeRows[12] = cellMomentum[2];
+    // Summed mass*T over members: 2*(300+400+500) = 2400.
+    const cellMassTemperature = [0, 1, 2].reduce(
+      (sum, index) => sum + massKg * (300 + index * 100),
+      0
+    );
+    aggregateNodeRows[13] = cellMassTemperature;
     const hierarchyAggregateNode = {
       aggregateNodeCount: 1,
       aggregateNodeRows
@@ -12571,17 +12580,27 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     });
 
     const stateFloats = outputParticleCapacity * 8;
+    const thermoFloats = outputParticleCapacity * 12;
     const readBuffer = device.createBuffer({
       size: stateFloats * 4,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
     });
+    const thermoReadBuffer = device.createBuffer({
+      size: thermoFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
     const encoder = device.createCommandEncoder();
     encoder.copyBufferToBuffer(compaction.particleStateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    encoder.copyBufferToBuffer(compaction.particleThermoBuffer, 0, thermoReadBuffer, 0, thermoFloats * 4);
     device.queue.submit([encoder.finish()]);
     await readBuffer.mapAsync(GPUMapMode.READ);
     const compactedState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
     readBuffer.unmap();
     readBuffer.destroy();
+    await thermoReadBuffer.mapAsync(GPUMapMode.READ);
+    const compactedThermo = new Float32Array(thermoReadBuffer.getMappedRange()).slice(0, thermoFloats);
+    thermoReadBuffer.unmap();
+    thermoReadBuffer.destroy();
 
     const liveCount = compaction.liveParticleCount;
     let compactedMass = 0;
@@ -12601,7 +12620,9 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
           compactedState[offset + 4],
           compactedState[offset + 5],
           compactedState[offset + 6]
-        ]
+        ],
+        temperatureK: compactedThermo[index * 12 + 2],
+        entityCount: compactedThermo[index * 12 + 9]
       });
     }
 
@@ -12667,6 +12688,15 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     const expectedTotalMomentum = result.cellMomentum[axis] + 2 * result.survivorVelocity[axis];
     expect(Math.abs(result.compactedMomentum[axis] - expectedTotalMomentum)).toBeLessThan(1e-5);
   }
+
+  // Thermal-energy conservation under the cell's uniform heat capacity:
+  // the child temperature is the mass-weighted average
+  // (2*300 + 2*400 + 2*500) / 6 = 400 K, and the survivor keeps its own.
+  expect(Math.abs(result.liveSlots[1].temperatureK - 400)).toBeLessThan(1e-3);
+  expect(Math.abs(result.liveSlots[0].temperatureK - 600)).toBeLessThan(1e-3);
+  // Represented entities sum through the merge: 3 members at 1e6 each.
+  expect(Math.abs(result.liveSlots[1].entityCount - 3e6)).toBeLessThan(1);
+  expect(Math.abs(result.liveSlots[0].entityCount - 1e6)).toBeLessThan(1);
 });
 
 test('SPH phase URL steam scene coarsens the live particle count through admitted merges', async ({ page }) => {

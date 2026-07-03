@@ -60,28 +60,26 @@ Standing measurement rule learned the hard way: headless probes MUST launch
 Chromium with `--use-angle=vulkan` or WebGPU canvas presentation silently
 never composites (compute works; screenshots show nothing).
 
+Composition milestone (2026-07-03, `660c168`, `e4ff639`): admitted
+merges/splits and the thermal sidecar now run under two-level authority.
+The storage chain merges from the step's input configuration and its
+adopted buffers supersede the coupled outputs (topology-step precedence,
+same as the single-level path); the thermal step runs sequentially on the
+combined coupled state and owns the continuation when no adoption
+happened. Gated live: the mounted steam scene coarsens 35 -> 27 under
+two-level authority with adopted mass matching the coupled grid mass to
+<1e-3 relative, and the heated scene's 650K drop cools toward the 300K
+bath across chained schedules. The merged-set continuation freeze
+(`660d6ce`: empty step.state poisoning the CPU chain, CPU-sized GPU
+outputs, render bridge transferring live arrays) is fixed and gated by
+the promoted anti-freeze e2e tests.
+
 Next up:
 
-1. **Two-level authority follow-ups**: sidecar operator splitting on the
-   two-level path (thermal/reaction/pressure post-step), then merges/splits
-   under two-level authority (lift the fail-closed storage guard) so
-   coarsening and hierarchy mechanics run together. Design notes: the resident step
-   envelope must be reproduced around the two-level outputs
-   (nextParticleUploads with retained state/thermo/mechanics buffers and
-   webgpu-uploaded status, particle ping-pong slots/step/time, commit-delta
-   payloads, storage-adoption compatibility so merges/splits keep working,
-   and the sidecar question: thermal/reaction/pressure stages currently run
-   inside the resident step at the single selected level - either run them
-   post-two-level on the combined state (sequential operator splitting,
-   simplest honest start) or per level (later). Gate the switch on the same
-   numeric conservation battery plus a continuation proof (sim time
-   advancing across scheduled refreshes with two-level authority on).
-1b. **Re-verify the SS live merge/split flagship gates on the now-moving
-   mounted sim** (they were proven while the mounted state was frozen; the
-   chain-level numeric gates were real, but live-scene coarsening now runs
-   on genuinely evolving state for the first time), and add a mounted
-   motion gate (maxDisplacementM > 0 across scheduled refreshes) to the e2e
-   battery so a frozen-state regression can never pass again.
+1. **Remaining two-level sidecars**: reaction and pressure-interface
+   stages on the authoritative path, at the same sequential insertion
+   point as the thermal sidecar (consume thermal output when present,
+   coupled outputs otherwise); gate on product-mass / impulse telemetry.
 1c. Sparse-grid efficiency follow-up: active-node GRID gating (not particle
    gating) for the fused path, if profiling justifies it.
 2. Live split policy: refine-pressure conditions near interfaces/walls in

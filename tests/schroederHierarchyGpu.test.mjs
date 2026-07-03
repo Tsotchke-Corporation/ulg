@@ -8925,3 +8925,93 @@ test('Schroeder two-level authoritative mode runs the thermal sidecar sequential
     'schroeder-two-level-thermal-sidecar'
   );
 });
+
+test('Schroeder two-level authoritative mode chains the reaction sidecar after thermal', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const coupledStateBuffer = { label: 'two-level-state-out', destroy() {} };
+  const coupledThermoBuffer = { label: 'two-level-thermo', destroy() {} };
+  const coupledMechanicsBuffer = { label: 'two-level-mechanics-out', destroy() {} };
+  const envelopeUploads = {
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: coupledStateBuffer,
+      thermoBuffer: coupledThermoBuffer,
+      ownsStateBuffer: true,
+      ownsThermoBuffer: false,
+      particleCount: 3,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: coupledMechanicsBuffer,
+      particleCount: 3,
+      slot: 0
+    }
+  };
+  const thermalStateBuffer = { label: 'thermal-state-out', destroy() {} };
+  const thermalThermoBuffer = { label: 'thermal-thermo-out', destroy() {} };
+  const reactionCalls = [];
+  const reactionStateBuffer = { label: 'reaction-state-out', destroy() {} };
+  const reactionThermoBuffer = { label: 'reaction-thermo-out', destroy() {} };
+  const reactionMechanicsBuffer = { label: 'reaction-mechanics-out', destroy() {} };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner: async (options) => ({
+      schema: 'peercompute.ulg.schroeder-two-level-mechanics-step-execution.v0',
+      status: 'schroeder-two-level-mechanics-step-submitted',
+      fineLevel: options.fineLevel,
+      coarseLevel: options.fineLevel + 1,
+      conservation: { massResidualKg: 0 },
+      stateBuffer: coupledStateBuffer,
+      mechanicsBuffer: coupledMechanicsBuffer,
+      nextSphParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+      nextMlsMpmParticleState: { step: 1, time: 5e-4, particleCount: 3 },
+      nextParticleUploads: envelopeUploads
+    }),
+    residentStepOptions: {
+      thermalMaterialTable: { schema: 'thermal-table-stub', materialCount: 1 },
+      thermalStepRunner: async () => ({
+        status: 'thermal-step-executed',
+        stateBuffer: thermalStateBuffer,
+        thermoBuffer: thermalThermoBuffer
+      }),
+      reactionTable: { schema: 'reaction-table-stub', reactionCount: 1 },
+      reactionStepRunner: async (options) => {
+        reactionCalls.push(options);
+        return {
+          status: 'reaction-step-executed',
+          stateBuffer: reactionStateBuffer,
+          thermoBuffer: reactionThermoBuffer,
+          mechanicsBuffer: reactionMechanicsBuffer
+        };
+      }
+    },
+    residentStepRunner: async () => ({ status: 'resident-step-stubbed' })
+  });
+
+  const step = result.residentStep;
+  assert.equal(step.sidecars, 'thermal-reaction-post-two-level-sequential');
+  assert.equal(reactionCalls.length, 1);
+  // Sequential chaining: the reaction consumes the thermal outputs and the
+  // coupled mechanics.
+  assert.equal(reactionCalls[0].sourceStateBuffer, thermalStateBuffer);
+  assert.equal(reactionCalls[0].sourceThermoBuffer, thermalThermoBuffer);
+  assert.equal(reactionCalls[0].sourceMechanicsBuffer, coupledMechanicsBuffer);
+  assert.equal(reactionCalls[0].readbackMode, 'no-full-readback');
+  // The continuation chains the reaction outputs (highest sidecar tier).
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer, reactionStateBuffer);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, reactionThermoBuffer);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer, reactionMechanicsBuffer);
+  assert.equal(
+    step.nextParticleUploads.sphParticleUpload.sourceStage,
+    'schroeder-two-level-reaction-sidecar'
+  );
+});

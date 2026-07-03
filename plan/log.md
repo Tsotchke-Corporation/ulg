@@ -37157,3 +37157,26 @@ unit test proves the sidecar consumes the coupled outputs and the
 continuation chains the thermal buffers. Unit suite 981/978/0.
 
 Reaction/pressure sidecars remain queued (same insertion point).
+
+## 2026-07-03 - Reaction sidecar on the two-level authoritative path
+   (plan item 1, part 3)
+
+The reaction stage now runs sequentially after the thermal sidecar on the
+authoritative two-level path, consuming the thermal outputs (or raw
+coupled outputs) plus the coupled mechanics buffer, with law queue and
+neighbor candidates forwarded from the orchestrator's own resolved stages.
+Continuation precedence is now the full single-level ordering: adopted
+merged storage > reaction > thermal > raw coupled outputs, with one
+unified superseded-buffer release behind submitted-work cleanup, and
+residentProductMass carried on the uploads when the reaction emits it.
+
+Numeric gates: molten-aluminum-in-oxygen mounted scene under two-level
+authority runs 'thermal-reaction-post-two-level-sequential', chains the
+continuation through 'schroeder-two-level-reaction-sidecar', evolves
+temperatures across schedules with accelerating melt motion, zero WebGPU
+validation errors. New e2e proof + unit test (reaction consumes thermal
+outputs; continuation carries reaction buffers). Unit suite 982/979/0.
+
+Remaining from plan item 1: the pressure-interface sidecar (heavier: gas
+cell field import/admission plumbing); queued next alongside live split
+policy near interfaces.

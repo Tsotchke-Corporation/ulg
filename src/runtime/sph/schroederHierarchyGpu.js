@@ -151,8 +151,11 @@ import {
 } from './sphGpuBuffers.js';
 import {
   createSchroederParticleStorageAdoption,
+  reactionOutputMutatesParticles,
+  retainedReactionOutputBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from './sphMlsMpmGpuStep.js';
+import { runSphReactionStepWebGpu } from './sphReactionGpuKernel.js';
 import { runSphThermalStepWebGpu } from './sphThermalGpuKernel.js';
 import { runSchroederParticleStorageCountSummaryWebGpu } from './schroederParticleStorageCountGpu.js';
 import { runSchroederParticleStorageCompactionWebGpu } from './schroederParticleStorageCompactionGpu.js';
@@ -13955,6 +13958,56 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   const twoLevelThermalOutputsRetained = Boolean(
     twoLevelThermalStep?.stateBuffer && twoLevelThermalStep?.thermoBuffer
   );
+  // Reaction sidecar (sequential, after thermal): consumes the thermal
+  // outputs when present, otherwise the raw coupled outputs, mirroring the
+  // resident step's source chaining.
+  const twoLevelReactionTable = residentStepOptions?.reactionTable ?? null;
+  const twoLevelReactionRunner = residentStepOptions?.reactionStepRunner ?? runSphReactionStepWebGpu;
+  let twoLevelReactionStep = null;
+  if (
+    twoLevelAuthoritative
+    && twoLevelReactionTable?.reactionCount > 0
+    && twoLevelThermalMaterialTable
+    && resolvedTwoLevelMechanics?.mechanicsBuffer
+  ) {
+    const reactionSourceStateBuffer = twoLevelThermalStep?.stateBuffer
+      || resolvedTwoLevelMechanics.stateBuffer
+      || null;
+    const reactionSourceThermoBuffer = twoLevelThermalStep?.thermoBuffer
+      || twoLevelCoupledUploads?.sphParticleUpload?.thermoBuffer
+      || null;
+    if (reactionSourceStateBuffer && reactionSourceThermoBuffer) {
+      twoLevelReactionStep = await twoLevelReactionRunner({
+        device,
+        sphParticleState,
+        mlsMpmParticleState,
+        reactionTable: twoLevelReactionTable,
+        thermalMaterialTable: twoLevelThermalMaterialTable,
+        sphParticleUpload: twoLevelCoupledUploads?.sphParticleUpload ?? sphParticleUpload,
+        mlsMpmParticleUpload: twoLevelCoupledUploads?.mlsMpmParticleUpload ?? mlsMpmParticleUpload,
+        sourceStateBuffer: reactionSourceStateBuffer,
+        sourceThermoBuffer: reactionSourceThermoBuffer,
+        sourceMechanicsBuffer: resolvedTwoLevelMechanics.mechanicsBuffer,
+        boxDimsM,
+        retainOutputParticleBuffers: true,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+        schroederLawQueue: resolvedLawQueue,
+        schroederLawNeighborCandidates: resolvedLawNeighborCandidates,
+        readCompactReactionSummary: false,
+        readReactionGasSpeciesSummary: false,
+        readReactionProductInventory: false,
+        readReactionAtomResidual: false,
+        ...(residentStepOptions?.reactionStepOptions || {})
+      });
+    }
+  }
+  const twoLevelReactionMutates = reactionOutputMutatesParticles(twoLevelReactionStep);
+  const twoLevelReactionBuffers = twoLevelReactionMutates
+    ? retainedReactionOutputBuffers(twoLevelReactionStep)
+    : null;
+  const twoLevelReactionOutputsRetained = Boolean(
+    twoLevelReactionBuffers?.stateBuffer && twoLevelReactionBuffers?.thermoBuffer
+  );
   // Under two-level authority, admitted merges/splits adopt exactly like the
   // single-level path: the storage chain materialized/compacted the merged
   // set from the step's input configuration, and the adopted buffers take
@@ -13967,33 +14020,43 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     })
     : null;
   const twoLevelAdopted = twoLevelParticleStorageAdoption?.adopted === true;
-  if (twoLevelAdopted && resolvedTwoLevelMechanics?.destroyOutputParticleBuffers) {
-    // The coupled step's retained outputs are superseded by the adopted
-    // storage; release them once the already-submitted GPU work (including
-    // the compact summary and thermal sidecar that read them) completes.
-    const supersededTwoLevel = resolvedTwoLevelMechanics;
-    deferSubmittedWorkCleanup(device, () => supersededTwoLevel.destroyOutputParticleBuffers());
-  }
-  if (twoLevelThermalOutputsRetained && twoLevelAdopted) {
-    // Topology step: the adopted merged storage supersedes the thermal
-    // sidecar outputs too (same precedence as the single-level path).
-    const supersededThermal = twoLevelThermalStep;
-    deferSubmittedWorkCleanup(device, () => {
-      supersededThermal.stateBuffer?.destroy?.();
-      supersededThermal.thermoBuffer?.destroy?.();
-    });
-  } else if (twoLevelThermalOutputsRetained && !twoLevelAdopted) {
-    // The thermal outputs replace the coupled step's state/thermo in the
-    // continuation; release the superseded coupled state buffer (mechanics
-    // stays live in the uploads) and the coupled thermo copy if owned.
-    const supersededState = resolvedTwoLevelMechanics?.stateBuffer ?? null;
-    const supersededThermo = twoLevelCoupledUploads?.sphParticleUpload?.ownsThermoBuffer
-      ? twoLevelCoupledUploads.sphParticleUpload.thermoBuffer
-      : null;
-    deferSubmittedWorkCleanup(device, () => {
-      supersededState?.destroy?.();
-      supersededThermo?.destroy?.();
-    });
+  // Continuation precedence: adopted merged storage > reaction sidecar >
+  // thermal sidecar > raw coupled outputs (same order the single-level
+  // resident path applies through buildNextParticleUploads). Every retained
+  // buffer that lost precedence is released once the already-submitted GPU
+  // work (compact summary, sidecars) completes.
+  {
+    const supersededBuffers = [];
+    const coupledStateSuperseded = twoLevelAdopted
+      || twoLevelReactionOutputsRetained
+      || twoLevelThermalOutputsRetained;
+    const coupledMechanicsSuperseded = twoLevelAdopted
+      || Boolean(twoLevelReactionOutputsRetained && twoLevelReactionBuffers?.mechanicsBuffer);
+    if (coupledStateSuperseded) {
+      supersededBuffers.push(resolvedTwoLevelMechanics?.stateBuffer ?? null);
+      if (twoLevelCoupledUploads?.sphParticleUpload?.ownsThermoBuffer) {
+        supersededBuffers.push(twoLevelCoupledUploads.sphParticleUpload.thermoBuffer);
+      }
+    }
+    if (coupledMechanicsSuperseded) {
+      supersededBuffers.push(resolvedTwoLevelMechanics?.mechanicsBuffer ?? null);
+    }
+    if (twoLevelThermalOutputsRetained && (twoLevelAdopted || twoLevelReactionOutputsRetained)) {
+      supersededBuffers.push(twoLevelThermalStep.stateBuffer, twoLevelThermalStep.thermoBuffer);
+    }
+    if (twoLevelReactionOutputsRetained && twoLevelAdopted) {
+      supersededBuffers.push(
+        twoLevelReactionBuffers.stateBuffer,
+        twoLevelReactionBuffers.thermoBuffer,
+        twoLevelReactionBuffers.mechanicsBuffer
+      );
+    }
+    const toDestroy = supersededBuffers.filter(Boolean);
+    if (toDestroy.length > 0) {
+      deferSubmittedWorkCleanup(device, () => {
+        for (const buffer of toDestroy) buffer.destroy?.();
+      });
+    }
   }
   const twoLevelNextSlot = (sphParticleUpload?.slot ?? 0) === 0 ? 1 : 0;
   const twoLevelAdoptedUploads = twoLevelAdopted
@@ -14026,9 +14089,35 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       }
     }
     : null;
+  // Reaction sidecar outputs own the continuation when they mutated
+  // particles and no merged storage was adopted this step.
+  const twoLevelReactionUploads = !twoLevelAdopted
+    && twoLevelReactionOutputsRetained
+    && twoLevelCoupledUploads
+    ? {
+      residentProductMass: twoLevelReactionBuffers.residentProductMass ?? null,
+      sphParticleUpload: {
+        ...twoLevelCoupledUploads.sphParticleUpload,
+        stateBuffer: twoLevelReactionBuffers.stateBuffer,
+        thermoBuffer: twoLevelReactionBuffers.thermoBuffer,
+        ownsStateBuffer: true,
+        ownsThermoBuffer: true,
+        sourceStage: 'schroeder-two-level-reaction-sidecar'
+      },
+      mlsMpmParticleUpload: twoLevelReactionBuffers.mechanicsBuffer
+        ? {
+          ...twoLevelCoupledUploads.mlsMpmParticleUpload,
+          mechanicsBuffer: twoLevelReactionBuffers.mechanicsBuffer,
+          ownsMechanicsBuffer: true,
+          sourceStage: 'schroeder-two-level-reaction-sidecar'
+        }
+        : twoLevelCoupledUploads.mlsMpmParticleUpload
+    }
+    : null;
   // Thermal sidecar outputs replace the coupled state/thermo in the
-  // continuation when no merged storage was adopted this step.
+  // continuation when neither adoption nor a mutating reaction happened.
   const twoLevelThermalUploads = !twoLevelAdopted
+    && !twoLevelReactionUploads
     && twoLevelThermalOutputsRetained
     && twoLevelCoupledUploads
     ? {
@@ -14059,10 +14148,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       stageStatus: { twoLevelMechanics: resolvedTwoLevelMechanics?.status ?? null },
       stageBackends: { twoLevelMechanics: 'webgpu' },
       twoLevelMechanicsAuthority: 'authoritative',
-      sidecars: twoLevelThermalStep
+      sidecars: twoLevelThermalStep && twoLevelReactionStep
+        ? 'thermal-reaction-post-two-level-sequential'
+        : twoLevelThermalStep
         ? 'thermal-post-two-level-sequential'
+        : twoLevelReactionStep
+        ? 'reaction-post-two-level-sequential'
         : 'none-two-level-mechanics-only',
       thermalStep: twoLevelThermalStep,
+      reactionStep: twoLevelReactionStep,
       // Provenance of the consumed particle inputs: chained scheduling must
       // show the previous two-level step here, not a fresh CPU upload.
       sourceSphUploadStatus: sphParticleUpload?.status ?? null,
@@ -14090,6 +14184,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         }
         : resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
       nextParticleUploads: twoLevelAdoptedUploads
+        ?? twoLevelReactionUploads
         ?? twoLevelThermalUploads
         ?? resolvedTwoLevelMechanics?.nextParticleUploads
         ?? null,

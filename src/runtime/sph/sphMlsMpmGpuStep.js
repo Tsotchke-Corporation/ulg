@@ -4960,7 +4960,7 @@ function nonzeroSummaryValue(value, tolerance = 1e-12) {
   return Number.isFinite(numeric) && Math.abs(numeric) > tolerance;
 }
 
-function reactionOutputMutatesParticles(reactionStep) {
+export function reactionOutputMutatesParticles(reactionStep) {
   const reactionResult = reactionStep?.result || reactionStep;
   if (!reactionResult) return false;
   const hasOutputBuffers = Boolean(
@@ -5781,7 +5781,7 @@ function thermalPhaseTransitionDiagnostics(thermalStep) {
   };
 }
 
-function retainedReactionOutputBuffers(reactionStep) {
+export function retainedReactionOutputBuffers(reactionStep) {
   const source = reactionStep?.result || reactionStep;
   const residentProductMass = residentProductMassFromReactionStep(reactionStep);
   return {

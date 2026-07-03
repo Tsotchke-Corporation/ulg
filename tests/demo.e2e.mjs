@@ -14097,3 +14097,63 @@ test('SPH phase thermal sidecar evolves temperature under authoritative two-leve
   expect(first.maxTemperatureK).toBeGreaterThan(400);
   expect(second.maxTemperatureK).toBeLessThan(first.maxTemperatureK - 0.5);
 });
+
+test('SPH phase reaction sidecar chains after thermal under authoritative two-level SS mechanics', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+  // Molten aluminum in oxygen: both sidecars must run sequentially after the
+  // coupled two-level mechanics, with the reaction outputs owning the
+  // continuation and thermodynamics evolving across schedules.
+  await page.goto('/?drop=Al&base=o2&dropt=3200&baset=1000&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  const sample = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const diagnostics = finalStep?.diagnostics || null;
+    const reactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
+    return {
+      status: finalStep?.status ?? null,
+      sidecars: finalStep?.sidecars ?? null,
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      uploadSourceStage: finalStep?.nextParticleUploads?.sphParticleUpload?.sourceStage ?? null,
+      reactionStatus: reactionResult?.status ?? null,
+      maxTemperatureK: diagnostics?.maxTemperatureK ?? null,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null
+    };
+  });
+
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const finalStep = execution?.finalStep || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    return finalStep?.status === 'schroeder-two-level-authoritative-step-executed'
+      && finalStep?.diagnostics?.compactGpuSummaryAvailable === true
+      && Number.isFinite(time) && time > 0.05;
+  }, null, { timeout: 120_000 });
+
+  const first = await sample();
+  await page.waitForTimeout(10_000);
+  const second = await sample();
+
+  expect(first.sidecars).toBe('thermal-reaction-post-two-level-sequential');
+  expect(first.uploadSourceStage).toBe('schroeder-two-level-reaction-sidecar');
+  expect(first.reactionStatus).toBe('reaction-step-executed');
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+  // Thermodynamics evolve through the chained sidecar outputs (a broken
+  // chain leaves temperatures bit-frozen), and the melt keeps moving.
+  expect(second.maxTemperatureK).not.toBe(first.maxTemperatureK);
+  expect(second.maxDisplacementM).toBeGreaterThan(0);
+  expect(consoleIssues).toEqual([]);
+});

@@ -1310,6 +1310,28 @@ export const SCHROEDER_PARTICLE_STORAGE_COUNT_SUMMARY_ROW_LAYOUT = Object.freeze
   'status:f32',
   'flags:f32'
 ]);
+export const ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-compaction.v0';
+export const ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA =
+  'peercompute.ulg.schroeder-particle-storage-compaction-execution.v0';
+export const SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'scannedSlotCount:f32',
+  'liveParticleCount:f32',
+  'freedHoleCount:f32',
+  'liveMassKg:f32',
+  'sourceParticleCount:f32',
+  'admittedParticleCountDelta:f32',
+  'reserved0:f32',
+  'reserved1:f32',
+  'reserved2:f32',
+  'reserved3:f32',
+  'reserved4:f32',
+  'authoritativeParticleCount:f32',
+  'reserved5:f32',
+  'reserved6:f32',
+  'status:f32',
+  'flags:f32'
+]);
 export const SCHROEDER_HIERARCHY_AGGREGATE_ROW_LAYOUT = Object.freeze([
   'targetAggregateKey:f32',
   'levelId:f32',

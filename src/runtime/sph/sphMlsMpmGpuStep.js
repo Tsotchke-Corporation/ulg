@@ -23,6 +23,7 @@ import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
+  ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA,
   ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
@@ -5380,7 +5381,11 @@ export function createSchroederParticleStorageAdoption({
   const admitted = source.particleStorageMaterializationAdmissionApproved === true
     || source.stateAuthorityStatus === 'state-manager-admitted-particle-storage-materialization-materialized';
   const submitted = source.status === 'schroeder-particle-storage-materialization-submitted'
-    || source.schema === ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA;
+    || source.schema === ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
+    // Compacted storage presents the same retained-buffer interface with an
+    // explicit (possibly negative) admitted count delta.
+    || source.status === 'schroeder-particle-storage-compaction-submitted'
+    || source.schema === ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA;
   const retainedParticleBuffers = source.retainedParticleBuffers !== false
     && Boolean(retained.stateBuffer && retained.thermoBuffer && retained.mechanicsBuffer);
   if (!admitted) blockers.push('schroeder-particle-storage-materialization-not-admitted');

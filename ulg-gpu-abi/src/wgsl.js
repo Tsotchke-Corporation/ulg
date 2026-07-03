@@ -13398,3 +13398,130 @@ fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
   }
 }
 `;
+
+export const schroederParticleStorageCompactionWgsl = `
+struct SchroederParticleStorageCompactionParams {
+  scan_slot_count: u32,
+  state_vec4_stride: u32,
+  thermo_vec4_stride: u32,
+  mechanics_vec4_stride: u32,
+  source_particle_count: u32,
+  flags: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> in_sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> in_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> in_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> out_sph_state: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> summary_row: array<f32>;
+@group(0) @binding(7) var<uniform> params: SchroederParticleStorageCompactionParams;
+
+const SCHROEDER_PSCOMP_WORKGROUP_SIZE: u32 = 64u;
+
+var<workgroup> wg_live_counts: array<u32, 64>;
+var<workgroup> wg_chunk_bases: array<u32, 64>;
+var<workgroup> wg_live_mass: array<f32, 64>;
+var<workgroup> wg_hole_count: array<f32, 64>;
+
+fn ss_pscomp_slot_live(slot: u32) -> bool {
+  let state_stride = max(params.state_vec4_stride, 2u);
+  return in_sph_state[slot * state_stride].w > 0.0;
+}
+
+fn ss_pscomp_copy_slot(source_slot: u32, target_slot: u32) {
+  let state_stride = max(params.state_vec4_stride, 2u);
+  let thermo_stride = max(params.thermo_vec4_stride, 3u);
+  let mechanics_stride = max(params.mechanics_vec4_stride, 8u);
+  for (var part = 0u; part < state_stride; part = part + 1u) {
+    out_sph_state[target_slot * state_stride + part] = in_sph_state[source_slot * state_stride + part];
+  }
+  for (var part = 0u; part < thermo_stride; part = part + 1u) {
+    out_sph_thermo[target_slot * thermo_stride + part] = in_sph_thermo[source_slot * thermo_stride + part];
+  }
+  for (var part = 0u; part < mechanics_stride; part = part + 1u) {
+    out_mls_mechanics[target_slot * mechanics_stride + part] =
+      in_mls_mechanics[source_slot * mechanics_stride + part];
+  }
+}
+
+// Order-preserving stream compaction over the particle live range: freed
+// (zero-mass) slots left by admitted split/merge materialization are removed
+// so live particles occupy a dense [0, liveCount) range. One workgroup owns
+// the pass: each thread counts live slots in its contiguous chunk, thread 0
+// computes the exclusive prefix, then each thread scatters its chunk in
+// order. Deterministic, no atomics; output buffers must be freshly created
+// (WebGPU zero-initializes) so trailing slots stay empty.
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
+  let local_index = local_id.x;
+  let chunk = (params.scan_slot_count + SCHROEDER_PSCOMP_WORKGROUP_SIZE - 1u)
+    / SCHROEDER_PSCOMP_WORKGROUP_SIZE;
+  let chunk_start = local_index * chunk;
+  let chunk_end = min(chunk_start + chunk, params.scan_slot_count);
+
+  var live_count = 0u;
+  var live_mass = 0.0;
+  var hole_count = 0.0;
+  for (var slot = chunk_start; slot < chunk_end; slot = slot + 1u) {
+    if (ss_pscomp_slot_live(slot)) {
+      live_count = live_count + 1u;
+      live_mass = live_mass + in_sph_state[slot * max(params.state_vec4_stride, 2u)].w;
+    } else {
+      hole_count = hole_count + 1.0;
+    }
+  }
+  wg_live_counts[local_index] = live_count;
+  wg_live_mass[local_index] = live_mass;
+  wg_hole_count[local_index] = hole_count;
+  workgroupBarrier();
+
+  if (local_index == 0u) {
+    var base = 0u;
+    for (var index = 0u; index < SCHROEDER_PSCOMP_WORKGROUP_SIZE; index = index + 1u) {
+      wg_chunk_bases[index] = base;
+      base = base + wg_live_counts[index];
+    }
+  }
+  workgroupBarrier();
+
+  var target_slot = wg_chunk_bases[local_index];
+  for (var slot = chunk_start; slot < chunk_end; slot = slot + 1u) {
+    if (ss_pscomp_slot_live(slot)) {
+      ss_pscomp_copy_slot(slot, target_slot);
+      target_slot = target_slot + 1u;
+    }
+  }
+  workgroupBarrier();
+
+  if (local_index == 0u) {
+    var total_live = 0.0;
+    var total_mass = 0.0;
+    var total_holes = 0.0;
+    for (var index = 0u; index < SCHROEDER_PSCOMP_WORKGROUP_SIZE; index = index + 1u) {
+      total_live = total_live + f32(wg_live_counts[index]);
+      total_mass = total_mass + wg_live_mass[index];
+      total_holes = total_holes + wg_hole_count[index];
+    }
+    summary_row[0] = f32(params.scan_slot_count);
+    summary_row[1] = total_live;
+    summary_row[2] = total_holes;
+    summary_row[3] = total_mass;
+    summary_row[4] = f32(params.source_particle_count);
+    summary_row[5] = total_live - f32(params.source_particle_count);
+    summary_row[6] = 0.0;
+    summary_row[7] = 0.0;
+    summary_row[8] = 0.0;
+    summary_row[9] = 0.0;
+    summary_row[10] = 0.0;
+    summary_row[11] = total_live;
+    summary_row[12] = 0.0;
+    summary_row[13] = 0.0;
+    summary_row[14] = 1.0;
+    summary_row[15] = f32(params.flags);
+  }
+}
+`;

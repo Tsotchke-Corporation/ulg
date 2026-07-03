@@ -36342,3 +36342,61 @@ Next:
 - Free-slot compaction so admitted merges can shrink the count.
 - Then resume the deferred distribution work (portable rematerializer,
   worker-owned adopted-storage consumption) on top of proven physics.
+
+## 2026-07-02 AKDT - SS Free-Slot Compaction Enables Admitted Merges (Slice 4)
+
+Fourth physics slice: admitted merges can now actually shrink the live
+particle count. This closes the follow-up the split slice documented
+(`append-only-freed-slots-await-compaction`) and completes the count-mutation
+pair the steam coarsening case needs.
+
+New module `src/runtime/sph/schroederParticleStorageCompactionGpu.js` plus
+ABI schema `peercompute.ulg.schroeder-particle-storage-compaction.v0`, a
+16-float compaction summary row layout, and one WGSL kernel:
+
+- `runSchroederParticleStorageCompactionWebGpu`: order-preserving GPU stream
+  compaction over the materialized particle range. One workgroup owns the
+  pass (per-thread chunk counts, thread-0 exclusive prefix, in-order
+  scatter); freed zero-mass holes from splits/merges are removed so live
+  particles occupy a dense `[0, liveCount)` range in freshly created
+  retained buffers (WebGPU zero-init keeps trailing slots empty). Only the
+  compact summary row is read back.
+- The result presents the same retained-buffer interface as a
+  materialization execution, carrying admission pass-through and
+  `admittedParticleCountDelta = liveCount - sourceParticleCount` (negative
+  for merges), so `createSchroederParticleStorageAdoption` consumes it
+  directly. Adoption now accepts the compaction execution schema/status as a
+  valid submitted source.
+
+New Playwright proof `Schroeder admitted merge compacts freed slots and
+shrinks the adopted count with mass conserved`:
+
+- Admitted slot-assignment rows merge source particles 0 and 1 into one
+  double-mass child appended at slot 3, freeing both source slots; the real
+  materialization kernel executes the merge.
+- Gates: pre-compaction append-only count 4 with 2 freed holes (documenting
+  why compaction is required), compaction live count exactly 2 with delta
+  exactly -1, adoption reporting authoritative count 2 against capacity 6,
+  order preservation (survivor first, merged child second, trailing slots
+  zero), and compacted live-range mass equal to the source total.
+
+Validation:
+
+- PASS: `node --test tests/schroederParticleStorageCompactionGpu.test.mjs`
+  `5/5` (including Node-level adoption of a compaction execution with a
+  negative delta).
+- PASS: targeted Playwright admitted-merge proof `1/1` (4.2s).
+- PASS: targeted Playwright reruns of the grid-coupling, two-level
+  co-simulation, and admitted-split proofs `3/3`.
+- PASS: `npm test` `967/970`, `3` skipped.
+- PASS: `git diff --check`.
+
+Note: the dev server needed restarting this session; HTTPS requires
+`ULG_VITE_HTTPS=1` with the certs in `.cache/vite-https/` (plain `npm run
+dev` serves HTTP only).
+
+Next:
+
+- Wire count summary + compaction into same-level SS orchestration so
+  scene-scheduled splits/merges produce adopted count changes automatically.
+- Then the deferred distribution work per `fable-plan-2026-07-02.md`.

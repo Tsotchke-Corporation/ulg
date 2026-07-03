@@ -12098,3 +12098,233 @@ test('Schroeder admitted split materializes appended particles and grows the ado
   expect(Math.abs(result.slotMasses[4] - 1.0)).toBeLessThan(1e-6);
   expect(Math.abs(result.adoptedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
 });
+
+test('Schroeder admitted merge compacts freed slots and shrinks the adopted count with mass conserved', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await import('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const SLOT_FLOATS = abi.SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT.length;
+    const sourceParticleCount = 3;
+    const massKg = 2.0;
+    const state = new Float32Array(sourceParticleCount * 8);
+    const thermo = new Float32Array(sourceParticleCount * 12);
+    const mechanics = new Float32Array(sourceParticleCount * MECHANICS_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const s = index * 8;
+      state[s] = 1 + index * 0.5;
+      state[s + 1] = 1.5;
+      state[s + 2] = 2;
+      state[s + 3] = massKg;
+      state[s + 4] = 0.25;
+      state[s + 5] = -0.5;
+      state[s + 6] = 0.75;
+      state[s + 7] = 1;
+      thermo[index * 12 + 2] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = massKg / 1000;
+      mechanics[m + 20] = 0;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      smoothingLengthM: 0.5,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: 1e-4,
+      mechanics
+    };
+
+    // Admitted slot assignment for one merge: source particles 0 and 1
+    // combine into a single double-mass child appended at slot 3, and both
+    // source slots are freed. Particle 2 keeps its slot.
+    const outputParticleCapacity = 6;
+    const rowCount = 3;
+    const slotAssignmentRows = new Float32Array(rowCount * SLOT_FLOATS);
+    const writeRow = (row, values) => {
+      const offset = row * SLOT_FLOATS;
+      for (const [column, value] of Object.entries(values)) {
+        slotAssignmentRows[offset + Number(column)] = value;
+      }
+    };
+    writeRow(0, {
+      0: 0,
+      3: 3,
+      6: 1,
+      7: -1,
+      9: 3,
+      10: 1,
+      11: 0,
+      12: 2,
+      19: massKg * 2,
+      22: (massKg * 2) / 1000,
+      29: 1,
+      30: 7,
+      31: 1
+    });
+    writeRow(1, { 0: 1, 3: 3, 6: 1, 9: -1, 11: -1, 29: 1, 30: 7, 31: 1 });
+    writeRow(2, { 0: 2, 3: 3, 6: 1, 9: -1, 11: -1, 29: 1, 30: 7, 31: 1 });
+    const particleStorageSlotAssignment = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_SCHEMA,
+      status: 'schroeder-particle-storage-slot-assignment-submitted',
+      allocationRowCount: rowCount,
+      slotAssignmentStrideFloats: SLOT_FLOATS,
+      slotAssignmentRows,
+      freeListCapacity: outputParticleCapacity,
+      assignmentEpoch: 1,
+      stateFamilyId: 1
+    };
+    const particleStorageMaterializationAdmission = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+      status: 'schroeder-particle-storage-materialization-admission-admitted',
+      particleStorageMaterializationApproved: true,
+      slotAssignmentDescriptorApproved: true,
+      outputFamilies: ['schroeder-particle-storage-materialization'],
+      targetStateFamilies: [
+        'sph-particle-state',
+        'mls-mpm-particle-mechanics',
+        'sph-particle-thermo'
+      ],
+      schroederParticleStorageMaterializationRowCount: rowCount,
+      requiredParticleCapacity: outputParticleCapacity,
+      hotBufferKey: 'ulg:test:ss-merge-materialization-admission',
+      sourceHotBufferKey: 'ulg:test:ss-merge-materialization-admission',
+      committed: true
+    };
+
+    const materialization = await hierarchy.runSchroederParticleStorageMaterializationWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      particleStorageSlotAssignment,
+      particleStorageMaterializationAdmission,
+      outputParticleCapacity
+    });
+
+    // Append-only count summary: the merge appends 1 child and frees 2
+    // slots, so the pre-compaction live range grows to 4 with 2 holes.
+    const countSummary = await countModule.runSchroederParticleStorageCountSummaryWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+
+    // Compaction removes the freed holes so the merge can actually shrink
+    // the live particle count.
+    const compaction = await compactionModule.runSchroederParticleStorageCompactionWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+
+    const adoptionResult = stepModule.createSchroederParticleStorageAdoption({
+      schroederParticleStorageMaterialization: compaction,
+      sphParticleState,
+      mlsMpmParticleState
+    });
+
+    // Mass and order integrity from the compacted state buffer (small
+    // diagnostic scene readback).
+    const stateFloats = outputParticleCapacity * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(compaction.particleStateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const compactedState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    const liveCount = compaction.liveParticleCount;
+    let compactedMass = 0;
+    const slots = [];
+    for (let index = 0; index < outputParticleCapacity; index += 1) {
+      const offset = index * 8;
+      const slotMass = compactedState[offset + 3];
+      if (index < liveCount) compactedMass += slotMass;
+      slots.push({
+        mass: slotMass,
+        x: compactedState[offset],
+        vx: compactedState[offset + 4]
+      });
+    }
+
+    materialization.destroyParticleBuffers?.();
+    materialization.destroyMaterializationBuffer?.();
+    compaction.destroyParticleBuffers?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      materializationStatus: materialization.status,
+      preCompactionCount: countSummary.authoritativeParticleCount,
+      preCompactionFreed: countSummary.countSummary.freedSourceSlotCount,
+      compactionStatus: compaction.status,
+      compactionSummary: compaction.compactionSummary,
+      liveParticleCount: compaction.liveParticleCount,
+      admittedParticleCountDelta: compaction.admittedParticleCountDelta,
+      adoptionStatus: adoptionResult?.status ?? null,
+      adoptionAuthoritativeParticleCount: adoptionResult?.authoritativeParticleCount ?? null,
+      adoptionOutputParticleCapacity: adoptionResult?.outputParticleCapacity ?? null,
+      sourceMassTotal: sourceParticleCount * massKg,
+      compactedMass,
+      slots
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+
+  // Before compaction the merge can only append: live range 4 with 2 holes.
+  expect(result.preCompactionCount).toBe(4);
+  expect(result.preCompactionFreed).toBe(2);
+
+  // Compaction turns the merge into a real count reduction: 3 -> 2.
+  expect(result.compactionStatus).toBe('schroeder-particle-storage-compaction-submitted');
+  expect(result.compactionSummary.freedHoleCount).toBe(4);
+  expect(result.liveParticleCount).toBe(2);
+  expect(result.admittedParticleCountDelta).toBe(-1);
+  expect(result.adoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.adoptionAuthoritativeParticleCount).toBe(2);
+  expect(result.adoptionOutputParticleCapacity).toBe(6);
+
+  // Order-preserving compaction: slot 0 is the untouched particle 2
+  // (x = 2.0, mass 2), slot 1 is the merged double-mass child (x = 1.0 from
+  // merge source 0, mass 4), trailing slots are zeroed.
+  expect(Math.abs(result.slots[0].mass - 2)).toBeLessThan(1e-6);
+  expect(Math.abs(result.slots[0].x - 2.0)).toBeLessThan(1e-6);
+  expect(Math.abs(result.slots[1].mass - 4)).toBeLessThan(1e-6);
+  expect(Math.abs(result.slots[1].x - 1.0)).toBeLessThan(1e-6);
+  expect(Math.abs(result.slots[1].vx - 0.25)).toBeLessThan(1e-6);
+  expect(result.slots[2].mass).toBe(0);
+  expect(result.slots[3].mass).toBe(0);
+
+  // Mass conservation: the merged child carries both source masses, so the
+  // compacted live-range total equals the source total.
+  expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+});

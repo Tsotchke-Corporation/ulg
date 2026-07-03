@@ -13395,7 +13395,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       // Observation mode releases outputs and keeps telemetry only;
       // authoritative mode retains the continuation envelope.
       retainOutputParticleBuffers: twoLevelAuthoritative,
-      conservationSummaryReadback: true
+      conservationSummaryReadback: true,
+      // When the two-level step is the state authority it must also carry
+      // the compact particle summary (maxDisplacementM/maxSpeedMPerS): the
+      // resident step that normally produces it is replaced, and the demo's
+      // numeric motion proof reads it from the synthesized envelope.
+      compactSummaryReadback: twoLevelAuthoritative
     });
   const resolvedActiveNodeIndex = !enableActiveNodeIndex
     ? null
@@ -13932,6 +13937,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       stageBackends: { twoLevelMechanics: 'webgpu' },
       twoLevelMechanicsAuthority: 'authoritative',
       sidecars: 'none-two-level-mechanics-only',
+      // Provenance of the consumed particle inputs: chained scheduling must
+      // show the previous two-level step here, not a fresh CPU upload.
+      sourceSphUploadStatus: sphParticleUpload?.status ?? null,
+      sourceSphUploadSourceStage: sphParticleUpload?.sourceStage ?? null,
+      sourceMlsUploadStatus: mlsMpmParticleUpload?.status ?? null,
+      sourceMlsUploadSourceStage: mlsMpmParticleUpload?.sourceStage ?? null,
       particlePingPong: {
         sourceSlot: sphParticleUpload?.slot ?? 0,
         nextSlot: (sphParticleUpload?.slot ?? 0) === 0 ? 1 : 0,
@@ -13943,7 +13954,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       nextSphParticleState: resolvedTwoLevelMechanics?.nextSphParticleState ?? null,
       nextMlsMpmParticleState: resolvedTwoLevelMechanics?.nextMlsMpmParticleState ?? null,
       nextParticleUploads: resolvedTwoLevelMechanics?.nextParticleUploads ?? null,
-      twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null
+      twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null,
+      // Compact particle summary (fixed-size readback) doubles as the
+      // resident-step diagnostics: residentMotionDiagnostic reads
+      // maxDisplacementM/maxSpeedMPerS/compactGpuSummaryAvailable from here.
+      diagnostics: resolvedTwoLevelMechanics?.compactSummary ?? null
     }
     : await residentStepRunner({
     ...residentStepOptions,

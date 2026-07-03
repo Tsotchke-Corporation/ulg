@@ -19,6 +19,10 @@ import {
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
+import {
+  MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
+  runMlsMpmResidentSummaryWebGpu
+} from './sphMlsMpmGpuSummary.js';
 
 export {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -859,7 +863,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   gridUpdateRunner,
   g2pRunner,
   retainOutputParticleBuffers = true,
-  conservationSummaryReadback = true
+  conservationSummaryReadback = true,
+  compactSummaryReadback = false
 } = {}) {
   assertWebGpuDevice(device, 'runSchroederTwoLevelMechanicsStepWebGpu');
   if (typeof gridSpecFactory !== 'function'
@@ -1105,6 +1110,26 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     })
     : null;
 
+  // Optional compact particle summary (fixed-size readback, allowed on the
+  // hot path): displacement/speed of the coupled step measured against the
+  // step's original source state. This is the numeric motion proof the demo
+  // banner consumes when the two-level step is the state authority. It must
+  // run before the deferred cleanup below queues destruction of the
+  // coarse-grid and G2P buffers it binds.
+  const compactSummary = compactSummaryReadback
+    ? await runMlsMpmResidentSummaryWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      gridUpdate: coarseGridUpdate,
+      g2pReconstruction: coarseG2p,
+      summaryScope: MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
+      readCompactSummary: true
+    })
+    : null;
+
   // Intermediates are released behind the queue; the caller owns the final
   // G2P outputs (and destroys pass-1 outputs once consumed).
   const transferThermoOwnership = retainOutputParticleBuffers && ownsThermoBuffer;
@@ -1147,6 +1172,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     fullParticleReadbackPerformed: false,
     normalHotLoopReadbackFree: !conservationSummaryReadback,
     conservation: conservation?.conservation ?? null,
+    compactSummary,
     conservativeTransferStatus:
       'two-level-composite-grid-step-submitted-restriction-and-delta-prolongation',
     scientificValidation: false,

@@ -280,6 +280,7 @@ export function resolvePeerComputeRenderOwnershipPolicy({
   peercomputePolicy = null,
   requestedMode = null,
   workerOffscreenPresentationRequested = false,
+  workerOffscreenPresentationExplicitlyDisabled = false,
   retainedGpuBufferHandoffRequested = null,
   retainedCompactSnapshotExportRequested = null,
   residentStepsPerScheduleOverride = null,
@@ -338,8 +339,16 @@ export function resolvePeerComputeRenderOwnershipPolicy({
     policy.workerOffscreenPresentationRequested ?? policy.workerOffscreenPresentation,
     false
   );
+  const urlWorkerOffscreenExplicitlyDisabled = normalizeBoolean(
+    workerOffscreenPresentationExplicitlyDisabled,
+    false
+  );
   if (!requested || requested === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.AUTO) {
-    requested = sameDeviceInteractiveUseCase
+    // An explicit offscreenPresentation=0 request wins over the interactive
+    // use-case default of worker-owned presentation.
+    requested = urlWorkerOffscreenExplicitlyDisabled
+      ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.MAIN_THREAD_RENDERER
+      : sameDeviceInteractiveUseCase
       ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.PRESENTATION_WORKER_RETAINED_OUTPUT_PRESENTATION_ONLY
       : ((urlRequestedWorkerOffscreen || policyRequestedWorkerOffscreen)
         ? ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OFFSCREEN_RENDER_ROWS

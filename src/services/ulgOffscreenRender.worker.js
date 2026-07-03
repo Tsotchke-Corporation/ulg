@@ -254,10 +254,14 @@ function colorToClearValue(color, alpha = clearAlpha) {
   const match = text.match(/^#?([0-9a-f]{6})$/i);
   if (!match) return { r: 0, g: 0, b: 0, a: alpha };
   const value = match[1];
+  // The canvas context is alphaMode 'premultiplied': color channels must be
+  // multiplied by alpha or the compositor treats the clear as an invalid
+  // premultiplied color (a washed-out veil at alpha 0 instead of
+  // transparency).
   return {
-    r: Number.parseInt(value.slice(0, 2), 16) / 255,
-    g: Number.parseInt(value.slice(2, 4), 16) / 255,
-    b: Number.parseInt(value.slice(4, 6), 16) / 255,
+    r: (Number.parseInt(value.slice(0, 2), 16) / 255) * alpha,
+    g: (Number.parseInt(value.slice(2, 4), 16) / 255) * alpha,
+    b: (Number.parseInt(value.slice(4, 6), 16) / 255) * alpha,
     a: alpha
   };
 }

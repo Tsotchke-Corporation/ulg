@@ -4007,6 +4007,18 @@ function isThreeResidentRenderRowBridgeMode(value) {
     || mode === 'three-spheres'
     || mode === 'three';
 }
+// Modes whose visible output is produced on the main thread from copied
+// compact data. When the caller marks the mode as an explicit selection
+// (URL param or render-mode menu), these must win over the auto
+// render-ownership policy's worker-owned presentation, mirroring the
+// existing native-webgpu-surface-consumer bypass.
+function isMainThreadResidentSurfaceDrawBridgeMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return isThreeResidentRenderRowBridgeMode(mode)
+    || isWebGpuResidentRenderRowBridgeMode(mode)
+    || mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+    || mode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
+}
 function isResidentRenderRowBridgeMode(value) {
   const mode = String(value || '').trim().toLowerCase();
   return isThreeResidentRenderRowBridgeMode(mode)
@@ -10361,10 +10373,25 @@ export function createSphPhaseScene(container, {
   function submitWorkerOffscreenRenderRows({
     decoded = null,
     sphParticleState = null,
-    reason = 'resident-render-rows-refresh'
+    reason = 'resident-render-rows-refresh',
+    suppressWorkerDrawForExplicitMainThreadBridge = false
   } = {}) {
     if (!workerOffscreenPresentationBridge?.drawRenderRows) {
       return publishWorkerOffscreenRenderRowsStatus(null);
+    }
+    if (suppressWorkerDrawForExplicitMainThreadBridge) {
+      // An explicitly selected main-thread bridge owns the visible output for
+      // this refresh; clear the worker-presented canvas (it sits above the
+      // main-thread canvas) so stale worker sprites do not occlude it.
+      workerOffscreenPresentationBridge.setBackgroundColor?.(sceneBackgroundColorHex, {
+        reason: `explicit-main-thread-bridge:${reason}`
+      });
+      return publishWorkerOffscreenRenderRowsStatus({
+        status: 'worker-offscreen-render-rows-suppressed-explicit-main-thread-bridge',
+        reason: 'explicit main-thread surface-draw bridge owns the visible output',
+        particleCount: sphParticleState?.particleCount ?? 0,
+        inputTransferBytes: 0
+      });
     }
     const positionsM = decoded?.positionsM || null;
     const policy = scene.userData.sphPeerComputeRenderOwnershipPolicy || null;
@@ -20488,6 +20515,11 @@ export function createSphPhaseScene(container, {
           const retainedSteps = [];
           const stepSummaries = [];
           const schroederStepSummaries = [];
+          // Compact per-step input provenance: catches silent chaining breaks
+          // where a step re-consumes the packed CPU state instead of the
+          // previous step's retained output (sim time advances, state does
+          // not - the numeric motion gate reads this trail to explain why).
+          const uploadProvenance = [];
           let currentPhaseVolumeAssignmentOverlayFeedback =
             cachedSchroederPhaseVolumeAssignmentOverlayFeedback;
           let finalPhaseVolumeAssignmentOverlayFeedback = null;
@@ -20521,6 +20553,15 @@ export function createSphPhaseScene(container, {
               currentPhaseVolumeAssignmentOverlayFeedback?.ready === true
                 ? currentPhaseVolumeAssignmentOverlayFeedback.phaseVolumeAssignmentOverlay
                 : null;
+            uploadProvenance.push({
+              index,
+              sphUploadStatus: currentSphParticleUpload?.status ?? null,
+              sphUploadSourceStage: currentSphParticleUpload?.sourceStage ?? null,
+              sphUploadStateBufferBound: Boolean(currentSphParticleUpload?.stateBuffer),
+              mlsUploadStatus: currentMlsMpmParticleUpload?.status ?? null,
+              mlsUploadMechanicsBufferBound: Boolean(currentMlsMpmParticleUpload?.mechanicsBuffer),
+              sourceStateStep: currentSphParticleState?.step ?? null
+            });
             const residentStepOptions = {
               ...baseOptions,
               sphParticleState: currentSphParticleState,
@@ -20736,6 +20777,7 @@ export function createSphPhaseScene(container, {
             retainedSteps,
             finalStep,
             stepSummaries,
+            schroederUploadProvenance: uploadProvenance,
             nextSphParticleState: currentSphParticleState,
             nextMlsMpmParticleState: currentMlsMpmParticleState,
             nextParticleUploads: finalStep?.nextParticleUploads ?? null,
@@ -24951,6 +24993,7 @@ export function createSphPhaseScene(container, {
     renderRowsReadbackMode = null,
     renderFieldSurfaceSummaryMode = 'auto',
     surfaceDrawDiagnosticMode = 'auto',
+    surfaceDrawDiagnosticModeExplicit = false,
     surfaceDrawDiagnosticMaxFieldCells = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT,
     surfaceDrawDiagnosticMaxResolution = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT,
     nativeMarchingCubesMaxVertexRowsBufferByteLength =
@@ -25035,11 +25078,27 @@ export function createSphPhaseScene(container, {
     const presentationWorkerRetainedOutputBypassedForNativeConsumer =
       String(surfaceDrawDiagnosticMode || '').toLowerCase()
       === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+    // An explicitly selected main-thread bridge mode (URL surfaceDraw= or the
+    // render-mode menu) must win over the auto render-ownership policy;
+    // otherwise the worker-owned presentation keeps display ownership and
+    // render-option changes have no visible effect.
+    const explicitMainThreadSurfaceDrawBridgeRequested = Boolean(
+      surfaceDrawDiagnosticModeExplicit
+      && isMainThreadResidentSurfaceDrawBridgeMode(surfaceDrawDiagnosticMode)
+    );
     const presentationWorkerRetainedOutputStatus = (
       renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
       && !presentationWorkerRetainedOutputBypassedForNativeConsumer
+      && !explicitMainThreadSurfaceDrawBridgeRequested
     )
-      ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
+      // The worker may only keep display ownership when its retained stage
+      // output is for the CURRENT step; a stale output (worker stages not
+      // running, e.g. under two-level authority) must fall through to the
+      // compact render-row transfer so fresh particle data reaches the
+      // worker-owned canvas every refresh.
+      ? workerOffscreenRetainedStageOutputStatusForParticleState(nextSphParticleState, {
+        requireSourceStepMatch: true
+      })
       : null;
     if (presentationWorkerRetainedOutputStatus) {
       const preservedWorkerRenderRowsStatus = publishWorkerOffscreenRenderRowsStatus({
@@ -25463,7 +25522,8 @@ export function createSphPhaseScene(container, {
       );
       const useWorkerOwnedResidentRenderProducer =
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.effectiveMode
-        === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER;
+        === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
+        && !explicitMainThreadSurfaceDrawBridgeRequested;
       const useWorkerOwnedResidentParticleStateProducer = Boolean(
         useWorkerOwnedResidentRenderProducer
         && nextSphParticleState?.state instanceof Float32Array
@@ -25477,7 +25537,8 @@ export function createSphPhaseScene(container, {
         useWorkerOffscreenPresentation: configuredWorkerOffscreenPresentation,
         usePresentationWorkerRetainedOutputPresentationOnly:
           scene.userData.sphPeerComputeRenderOwnershipPolicy
-            ?.presentationWorkerRetainedOutputPresentationOnlyReady === true,
+            ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+          && !explicitMainThreadSurfaceDrawBridgeRequested,
         workerOffscreenRetainedStageOutputAvailable: Boolean(
           workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
         ),
@@ -27278,10 +27339,12 @@ export function createSphPhaseScene(container, {
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
       });
-      const retainedStageOutputAlreadyRenderedStatus = (
-        scene.userData.sphPeerComputeRenderOwnershipPolicy
-          ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
-      )
+      const retainedStageOutputAlreadyRenderedStatus = explicitMainThreadSurfaceDrawBridgeRequested
+        ? null
+        : (
+          scene.userData.sphPeerComputeRenderOwnershipPolicy
+            ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
+        )
           ? workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
           : (workerOffscreenRetainedStageOutputMatchesParticleState(nextSphParticleState)
             ? currentWorkerOffscreenRenderRowsStatus()
@@ -27297,7 +27360,9 @@ export function createSphPhaseScene(container, {
         : submitWorkerOffscreenRenderRows({
             decoded,
             sphParticleState: nextSphParticleState,
-            reason: 'resident-render-state-assembly'
+            reason: 'resident-render-state-assembly',
+            suppressWorkerDrawForExplicitMainThreadBridge:
+              explicitMainThreadSurfaceDrawBridgeRequested
           });
       const workerOffscreenRetainedGpuBufferHandoffStatus = refreshWorkerOffscreenRetainedGpuBufferHandoff({
         renderRowsExecution,

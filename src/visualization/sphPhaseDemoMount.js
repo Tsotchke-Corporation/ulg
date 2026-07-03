@@ -2434,14 +2434,20 @@ export async function mountSphPhaseDemoOverlay({
     ?? null;
   const renderOwnershipUseCase = rawRenderOwnershipUseCase
     ?? (rawRenderOwnershipModeExplicitNonAuto ? null : DEFAULT_INTERACTIVE_RENDER_OWNERSHIP_USE_CASE);
-  const directWorkerOffscreenPresentationEnabled = booleanUrlParam(
+  const rawWorkerOffscreenPresentationParam =
     initialHash.get('workerOffscreenPresentation')
-      ?? initialQuery.get('workerOffscreenPresentation')
-      ?? initialHash.get('offscreenPresentation')
-      ?? initialQuery.get('offscreenPresentation')
-      ?? initialHash.get('workerCanvas')
-      ?? initialQuery.get('workerCanvas'),
+    ?? initialQuery.get('workerOffscreenPresentation')
+    ?? initialHash.get('offscreenPresentation')
+    ?? initialQuery.get('offscreenPresentation')
+    ?? initialHash.get('workerCanvas')
+    ?? initialQuery.get('workerCanvas');
+  const directWorkerOffscreenPresentationEnabled = booleanUrlParam(
+    rawWorkerOffscreenPresentationParam,
     false
+  );
+  const workerOffscreenPresentationExplicitlyDisabled = Boolean(
+    rawWorkerOffscreenPresentationParam != null
+    && !directWorkerOffscreenPresentationEnabled
   );
   const presentationWorkerResidentStagesRequested = booleanUrlParam(
     initialHash.get('presentationWorkerResidentStages')
@@ -2572,6 +2578,7 @@ export async function mountSphPhaseDemoOverlay({
       || null,
     requestedMode: rawRenderOwnershipMode,
     workerOffscreenPresentationRequested: directWorkerOffscreenPresentationEnabled,
+    workerOffscreenPresentationExplicitlyDisabled,
     presentationWorkerResidentStagesRequested,
     retainedCompactSnapshotExportRequested,
     residentStepsPerScheduleOverride,
@@ -2624,6 +2631,10 @@ export async function mountSphPhaseDemoOverlay({
     rawResidentSurfaceDrawDiagnosticMode,
     residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode
   );
+  // Explicit render-mode selections (URL surfaceDraw= or the render-mode
+  // menu) must override the auto render-ownership policy's worker-owned
+  // presentation; a defaulted mode must not.
+  let residentSurfaceDrawDiagnosticModeExplicit = rawResidentSurfaceDrawDiagnosticMode != null;
   renderModeSelect.value = residentSurfaceDrawDiagnosticMode;
   if (renderModeSelect.value !== residentSurfaceDrawDiagnosticMode) {
     renderModeSelect.value = defaultThreeResidentSurfaceDrawMode;
@@ -2677,7 +2688,9 @@ export async function mountSphPhaseDemoOverlay({
     );
     if (renderOwnershipUseCase) q.set('renderUseCase', renderOwnershipUseCase);
     if (nativeSurfacePixelValidationEnabled) q.set('nativeSurfacePixelValidation', '1');
-    q.set('surfaceDraw', currentResidentSurfaceDrawDiagnosticMode());
+    if (residentSurfaceDrawDiagnosticModeExplicit) {
+      q.set('surfaceDraw', currentResidentSurfaceDrawDiagnosticMode());
+    }
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
     if (initialContactBinMetadataReadbackEnabled) q.set('contactBinMetadataReadback', '1');
@@ -4483,6 +4496,7 @@ export async function mountSphPhaseDemoOverlay({
           renderFieldSurfaceSummaryMode:
             (residentSurfaceDrawModeUsesCompactBridge(mode) || nativeSurfaceConsumerRefresh) ? 'skip' : 'auto',
           surfaceDrawDiagnosticMode: mode,
+          surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
           allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
         });
         if (!overlay.isConnected || generation !== particleSyncGeneration) return renderState;
@@ -6247,7 +6261,13 @@ export async function mountSphPhaseDemoOverlay({
       pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
       stepCount: normalizedStepCount,
       readbackMode,
-      compactSummaryMode: readbackMode === 'no-full-readback' ? 'none' : undefined,
+      // final-only keeps the hot loop free of full readbacks while still
+      // producing the compact GPU summary (fixed-size readback, allowed on
+      // the hot path) once per scheduled batch: it carries maxDisplacementM,
+      // the demo's numeric motion proof. 'none' left every readback-free
+      // presentation path (native consumer, worker-owned producer) unable to
+      // prove motion, tripping the warning banner despite a healthy sim.
+      compactSummaryMode: readbackMode === 'no-full-readback' ? 'final-only' : undefined,
       continueFromResidentState,
       ...residentExecutionPolicy,
       ...schroederExecutionOptions,
@@ -6503,6 +6523,7 @@ export async function mountSphPhaseDemoOverlay({
                 ? 'skip'
                 : 'auto',
               surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode,
+              surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
               allowNativeSurfaceExtraction: selectedNativeSurfaceConsumerRefresh ? true : undefined,
               skipPressureInterfaceRefresh: true
             });
@@ -6689,6 +6710,7 @@ export async function mountSphPhaseDemoOverlay({
         renderFieldSurfaceSummaryMode:
           (residentSurfaceDrawModeUsesCompactBridge(mode) || nativeSurfaceConsumerRefresh) ? 'skip' : 'auto',
         surfaceDrawDiagnosticMode: mode,
+        surfaceDrawDiagnosticModeExplicit: residentSurfaceDrawDiagnosticModeExplicit,
         allowNativeSurfaceExtraction: nativeSurfaceConsumerRefresh ? true : undefined
       });
       if (token !== renderModeRefreshToken) return renderState;
@@ -6757,6 +6779,7 @@ export async function mountSphPhaseDemoOverlay({
     applyBackgroundColorFromControl('background-color-control-input');
   });
   renderModeSelect.addEventListener('change', () => {
+    residentSurfaceDrawDiagnosticModeExplicit = true;
     currentResidentSurfaceDrawDiagnosticMode();
     syncUrlFromControls();
     refreshResidentRenderForCurrentMode('render-mode-control-change');

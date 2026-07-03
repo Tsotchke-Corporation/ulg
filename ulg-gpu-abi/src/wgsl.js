@@ -12158,6 +12158,41 @@ fn ss_psal_active_apply(apply_offset: u32) -> bool {
   return status > 0.0 && status < 32.0 && apply_admission > 0.0 && params.admission_approved > 0u;
 }
 
+fn ss_psal_coarsen_row(apply_offset: u32) -> bool {
+  let status_bits = u32(max(apply_rows[apply_offset + 3u], 0.0));
+  return (status_bits & 2u) != 0u && (status_bits & 4u) == 0u;
+}
+
+struct SsPsalMergeGroup {
+  member_count: u32,
+  leader_source_index: f32,
+};
+
+// Exact same-cell merge-group scan over apply rows (aggregateNodeIndex at
+// column 21). The lowest source particle index in the cell is the merge
+// leader. O(rows^2) across the dispatch: the exact small-scene route, like
+// the law-neighbor exact fallback; a sorted/keyed reduction is the
+// escalation path for large row counts.
+fn ss_psal_merge_group(apply_offset: u32, apply_stride: u32) -> SsPsalMergeGroup {
+  let my_cell = apply_rows[apply_offset + 21u];
+  var group = SsPsalMergeGroup(0u, apply_rows[apply_offset + 0u]);
+  if (my_cell < 0.0) {
+    return group;
+  }
+  for (var row = 0u; row < params.apply_row_count; row = row + 1u) {
+    let other_offset = row * apply_stride;
+    if (!ss_psal_active_apply(other_offset) || !ss_psal_coarsen_row(other_offset)) {
+      continue;
+    }
+    if (apply_rows[other_offset + 21u] != my_cell) {
+      continue;
+    }
+    group.member_count = group.member_count + 1u;
+    group.leader_source_index = min(group.leader_source_index, apply_rows[other_offset + 0u]);
+  }
+  return group;
+}
+
 fn ss_psal_write_empty(allocation_offset: u32, apply_offset: u32, status: f32) {
   allocation_rows[allocation_offset + 0u] = apply_rows[apply_offset + 0u];
   allocation_rows[allocation_offset + 1u] = apply_rows[apply_offset + 1u];
@@ -12194,8 +12229,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let particle_delta = apply_rows[apply_offset + 7u];
-  let allocation_count = max(particle_delta, 0.0);
-  let free_count = max(-particle_delta, 0.0);
+  var allocation_count = max(particle_delta, 0.0);
+  var free_count = max(-particle_delta, 0.0);
+  if (ss_psal_coarsen_row(apply_offset)) {
+    // Merge group semantics: exactly one leader per aggregate cell writes
+    // the aggregated child (target mass/volume already carry the cell
+    // aggregates), and every member, leader included, frees its own source
+    // slot. Lone coarsen rows have nothing to merge with.
+    let group = ss_psal_merge_group(apply_offset, apply_stride);
+    if (group.member_count >= 2u) {
+      let is_leader = apply_rows[apply_offset + 0u] == group.leader_source_index;
+      allocation_count = select(0.0, 1.0, is_leader);
+      free_count = 1.0;
+    } else {
+      allocation_count = 0.0;
+      free_count = 0.0;
+    }
+  }
   let capacity_required_by_row = params.current_particle_capacity + allocation_count;
   let capacity_residual = max(capacity_required_by_row - params.required_particle_capacity, 0.0);
   let allocation_required = allocation_count > 0.0;

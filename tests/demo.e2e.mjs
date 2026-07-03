@@ -11562,12 +11562,25 @@ test('Schroeder two-level co-simulation couples real P2G grids and preserves a c
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const gridKernel = await import('/src/runtime/sph/sphGridGpuKernel.js');
-    const gridUpdateKernel = await import('/src/runtime/sph/sphGridUpdateGpuKernel.js');
-    const g2pKernel = await import('/src/runtime/sph/sphG2pGpuKernel.js');
-    const coupling = await import('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
-    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
-    const abi = await import('/ulg-gpu-abi/src/index.js');
+    // Vite may 504 dynamic imports while re-optimizing dependencies on a
+    // cold dev-server cache; retry instead of failing the physics proof.
+    const importWithRetry = async (path) => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await import(path);
+        } catch (error) {
+          if (attempt === 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+      return null;
+    };
+    const gridKernel = await importWithRetry('/src/runtime/sph/sphGridGpuKernel.js');
+    const gridUpdateKernel = await importWithRetry('/src/runtime/sph/sphGridUpdateGpuKernel.js');
+    const g2pKernel = await importWithRetry('/src/runtime/sph/sphG2pGpuKernel.js');
+    const coupling = await importWithRetry('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
+    const buffersModule = await importWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await importWithRetry('/ulg-gpu-abi/src/index.js');
 
     const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     const packParticles = ({ positions, velocity, massKg, smoothingLengthM, dt }) => {
@@ -12327,4 +12340,336 @@ test('Schroeder admitted merge compacts freed slots and shrinks the adopted coun
   // Mass conservation: the merged child carries both source masses, so the
   // compacted live-range total equals the source total.
   expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+});
+
+test('Schroeder coarsen-eligible cell merges through the real proposal chain and shrinks the count', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    if (!navigator.gpu) return { status: 'webgpu-unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable' };
+    const device = await adapter.requestDevice();
+    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await import('/ulg-gpu-abi/src/index.js');
+
+    const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    const MIGRATION_FLOATS = abi.SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
+    const sourceParticleCount = 4;
+    const massKg = 2.0;
+    const state = new Float32Array(sourceParticleCount * 8);
+    const thermo = new Float32Array(sourceParticleCount * 12);
+    const mechanics = new Float32Array(sourceParticleCount * MECHANICS_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const s = index * 8;
+      state[s] = 1 + index * 0.5;
+      state[s + 1] = 1.5;
+      state[s + 2] = 2;
+      state[s + 3] = massKg;
+      state[s + 4] = 0.25;
+      state[s + 5] = -0.5;
+      state[s + 6] = 0.75;
+      state[s + 7] = 1;
+      thermo[index * 12 + 2] = 1;
+      thermo[index * 12 + 3] = 1000;
+      const m = index * MECHANICS_FLOATS;
+      mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], m);
+      mechanics[m + 18] = 1;
+      mechanics[m + 19] = massKg / 1000;
+      mechanics[m + 21] = 1;
+      mechanics[m + 27] = 1;
+    }
+    const sphParticleState = {
+      schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      smoothingLengthM: 0.5,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    };
+    const mlsMpmParticleState = {
+      schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: sourceParticleCount,
+      step: 0,
+      time: 0,
+      mechanicsDtS: 1e-4,
+      mechanics
+    };
+
+    // Admitted migration decision rows: particles 0-2 are coarsen-eligible
+    // members of the same aggregate cell (node index 5, aggregate mass 6 kg);
+    // particle 3 is active but neither coarsen-eligible nor refine-required.
+    const migrationRows = new Float32Array(sourceParticleCount * MIGRATION_FLOATS);
+    for (let index = 0; index < sourceParticleCount; index += 1) {
+      const offset = index * MIGRATION_FLOATS;
+      migrationRows[offset + 0] = index;
+      migrationRows[offset + 1] = 0;
+      migrationRows[offset + 2] = 1;
+      migrationRows[offset + 3] = 1;
+      migrationRows[offset + 6] = massKg / 1000;
+      migrationRows[offset + 7] = massKg / 1000;
+      if (index < 3) {
+        migrationRows[offset + 12] = 5;
+        migrationRows[offset + 13] = 3;
+        migrationRows[offset + 15] = massKg * 3;
+        migrationRows[offset + 16] = (massKg * 3) / 1000;
+        migrationRows[offset + 22] = 1;
+      }
+    }
+    const phaseVolumeMigration = {
+      schema: abi.ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_SCHEMA,
+      status: 'schroeder-phase-volume-migration-submitted',
+      particleCount: sourceParticleCount,
+      migrationStrideFloats: MIGRATION_FLOATS,
+      migrationRows,
+      migrationEpoch: 1
+    };
+
+    const targetStateFamilies = [
+      'sph-particle-state',
+      'mls-mpm-particle-mechanics',
+      'sph-particle-thermo'
+    ];
+    const outputParticleCapacity = 8;
+    const phaseVolumeSplitMergeAdmission = {
+      schema: abi.ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_ADMISSION_SCHEMA,
+      status: 'schroeder-phase-volume-split-merge-admission-admitted',
+      phaseVolumeSplitMergeApproved: true,
+      outputFamilies: ['schroeder-phase-volume-split-merge-apply'],
+      schroederPhaseVolumeSplitMergeProposalRowCount: sourceParticleCount,
+      hotBufferKey: 'ulg:test:ss-real-merge-split-merge-admission',
+      sourceHotBufferKey: 'ulg:test:ss-real-merge-split-merge-admission',
+      committed: true
+    };
+    const particleStorageAllocatorAdmission = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_ALLOCATOR_ADMISSION_SCHEMA,
+      status: 'schroeder-particle-storage-allocator-admission-admitted',
+      particleStorageAllocationApproved: true,
+      particleCapacityApproved: true,
+      outputFamilies: ['schroeder-particle-storage-allocation'],
+      targetStateFamilies,
+      schroederParticleStorageAllocationRowCount: sourceParticleCount,
+      // The admission check reads currentParticleCapacity as the approved
+      // capacity ceiling; it must cover requiredParticleCapacity.
+      currentParticleCapacity: outputParticleCapacity,
+      requiredParticleCapacity: outputParticleCapacity,
+      hotBufferKey: 'ulg:test:ss-real-merge-allocator-admission',
+      sourceHotBufferKey: 'ulg:test:ss-real-merge-allocator-admission',
+      committed: true
+    };
+    const particleStorageSlotAssignmentAdmission = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ADMISSION_SCHEMA,
+      status: 'schroeder-particle-storage-slot-assignment-admission-admitted',
+      particleStorageSlotAssignmentApproved: true,
+      freeListDescriptorApproved: true,
+      outputFamilies: ['schroeder-particle-storage-slot-assignment'],
+      targetStateFamilies,
+      schroederParticleStorageSlotAssignmentRowCount: sourceParticleCount,
+      hotBufferKey: 'ulg:test:ss-real-merge-slot-assignment-admission',
+      sourceHotBufferKey: 'ulg:test:ss-real-merge-slot-assignment-admission',
+      committed: true
+    };
+    const particleStorageMaterializationAdmission = {
+      schema: abi.ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_ADMISSION_SCHEMA,
+      status: 'schroeder-particle-storage-materialization-admission-admitted',
+      particleStorageMaterializationApproved: true,
+      slotAssignmentDescriptorApproved: true,
+      outputFamilies: ['schroeder-particle-storage-materialization'],
+      targetStateFamilies,
+      schroederParticleStorageMaterializationRowCount: sourceParticleCount,
+      requiredParticleCapacity: outputParticleCapacity,
+      hotBufferKey: 'ulg:test:ss-real-merge-materialization-admission',
+      sourceHotBufferKey: 'ulg:test:ss-real-merge-materialization-admission',
+      committed: true
+    };
+
+    // The real production chain, no fixture rows past the migration decision.
+    const proposal = await hierarchy.runSchroederPhaseVolumeSplitMergeProposalWebGpu({
+      device,
+      phaseVolumeMigration
+    });
+    const apply = await hierarchy.runSchroederPhaseVolumeSplitMergeApplyWebGpu({
+      device,
+      phaseVolumeSplitMergeProposal: proposal,
+      phaseVolumeSplitMergeAdmission
+    });
+    const allocation = await hierarchy.runSchroederParticleStorageAllocationWebGpu({
+      device,
+      phaseVolumeSplitMergeApply: apply,
+      particleStorageAllocatorAdmission,
+      currentParticleCapacity: sourceParticleCount,
+      requiredParticleCapacity: outputParticleCapacity
+    });
+    const particleStorageFreeList = hierarchy.createSchroederParticleStorageFreeListPlan({
+      baseSlotIndex: sourceParticleCount,
+      slotCapacity: outputParticleCapacity - sourceParticleCount,
+      availableSlotCount: outputParticleCapacity - sourceParticleCount,
+      maxSlotsPerRow: 1
+    });
+    const slotAssignment = await hierarchy.runSchroederParticleStorageSlotAssignmentWebGpu({
+      device,
+      particleStorageAllocation: allocation,
+      particleStorageFreeList,
+      particleStorageSlotAssignmentAdmission
+    });
+    const materialization = await hierarchy.runSchroederParticleStorageMaterializationWebGpu({
+      device,
+      sphParticleState,
+      mlsMpmParticleState,
+      particleStorageSlotAssignment: slotAssignment,
+      particleStorageMaterializationAdmission,
+      outputParticleCapacity
+    });
+    const countSummary = await countModule.runSchroederParticleStorageCountSummaryWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+    const compaction = await compactionModule.runSchroederParticleStorageCompactionWebGpu({
+      device,
+      particleStorageMaterialization: materialization
+    });
+    const adoption = stepModule.createSchroederParticleStorageAdoption({
+      schroederParticleStorageMaterialization: compaction,
+      sphParticleState,
+      mlsMpmParticleState
+    });
+
+    const stateFloats = outputParticleCapacity * 8;
+    const readBuffer = device.createBuffer({
+      size: stateFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(compaction.particleStateBuffer, 0, readBuffer, 0, stateFloats * 4);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const compactedState = new Float32Array(readBuffer.getMappedRange()).slice(0, stateFloats);
+    readBuffer.unmap();
+    readBuffer.destroy();
+
+    const liveCount = compaction.liveParticleCount;
+    let compactedMass = 0;
+    const liveSlots = [];
+    for (let index = 0; index < liveCount; index += 1) {
+      const offset = index * 8;
+      compactedMass += compactedState[offset + 3];
+      liveSlots.push({ mass: compactedState[offset + 3], x: compactedState[offset] });
+    }
+
+    materialization.destroyParticleBuffers?.();
+    materialization.destroyMaterializationBuffer?.();
+    compaction.destroyParticleBuffers?.();
+    device.destroy?.();
+
+    return {
+      status: 'ok',
+      proposalStatus: proposal.status,
+      applyStatus: apply.status,
+      allocationStatus: allocation.status,
+      slotAssignmentStatus: slotAssignment.status,
+      materializationStatus: materialization.status,
+      countSummary: countSummary.countSummary,
+      liveParticleCount: liveCount,
+      admittedParticleCountDelta: compaction.admittedParticleCountDelta,
+      adoptionStatus: adoption?.status ?? null,
+      adoptionAuthoritativeParticleCount: adoption?.authoritativeParticleCount ?? null,
+      sourceMassTotal: sourceParticleCount * massKg,
+      compactedMass,
+      liveSlots
+    };
+  });
+
+  expect(result.status).toBe('ok');
+  expect(result.proposalStatus).toBe('schroeder-phase-volume-split-merge-proposal-submitted');
+  expect(result.applyStatus).toBe('schroeder-phase-volume-split-merge-apply-submitted');
+  expect(result.allocationStatus).toBe('schroeder-particle-storage-allocation-submitted');
+  expect(result.slotAssignmentStatus).toBe('schroeder-particle-storage-slot-assignment-submitted');
+  expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+
+  // The leader wrote one aggregated child (appended), every member freed its
+  // own slot: 1 appended, 3 freed.
+  expect(result.countSummary.appendedTargetSlotCount).toBe(1);
+  expect(result.countSummary.freedSourceSlotCount).toBe(3);
+
+  // The merge is a real count reduction through the production chain: 4 -> 2.
+  expect(result.liveParticleCount).toBe(2);
+  expect(result.admittedParticleCountDelta).toBe(-2);
+  expect(result.adoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.adoptionAuthoritativeParticleCount).toBe(2);
+
+  // Survivor keeps its mass, the merged child carries the whole cell
+  // aggregate (3 x 2 kg), and total mass is conserved.
+  expect(result.liveSlots.length).toBe(2);
+  expect(Math.abs(result.liveSlots[0].mass - 2)).toBeLessThan(1e-6);
+  expect(Math.abs(result.liveSlots[0].x - 2.5)).toBeLessThan(1e-6);
+  expect(Math.abs(result.liveSlots[1].mass - 6)).toBeLessThan(1e-6);
+  expect(Math.abs(result.liveSlots[1].x - 1.0)).toBeLessThan(1e-6);
+  expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
+});
+
+test('SPH phase URL steam scene coarsens the live particle count through admitted merges', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|Compute pass/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentStepsPerSchedule=1&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1');
+  await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
+
+  // Wait until an admitted merge cycle lands: the adoption source flips to a
+  // compaction execution with a negative admitted count delta.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const finalStep = overlay?.__mlsMpmResidentSteps?.finalStep || null;
+    const storage = finalStep?.schroederParticleStorageMaterialization || null;
+    const ready = Boolean(
+      finalStep?.schroederParticleStorageAdoptionStatus === 'schroeder-particle-storage-adopted'
+      && storage?.schema === 'peercompute.ulg.schroeder-particle-storage-compaction-execution.v0'
+      && Number(storage?.admittedParticleCountDelta) < 0
+    );
+    if (ready && !globalThis.__ssLiveCoarsenSnapshot) {
+      globalThis.__ssLiveCoarsenSnapshot = {
+        adoptionStatus: finalStep.schroederParticleStorageAdoptionStatus,
+        storageSchema: storage.schema,
+        admittedParticleCountDelta: Number(storage.admittedParticleCountDelta),
+        sourceParticleCount: Number(storage.sourceParticleCount),
+        liveParticleCount: Number(storage.liveParticleCount),
+        authoritativeParticleCount:
+          Number(finalStep.schroederParticleStorageAuthoritativeParticleCount),
+        nextParticleCount: Number(finalStep.nextParticleCount),
+        fullParticleReadbackPerformed:
+          finalStep.fullParticleReadbackPerformed === true
+          || finalStep.diagnostics?.noFullParticleReadback === false
+      };
+    }
+    return ready;
+  }, null, { timeout: 150_000 });
+
+  const result = await page.evaluate(() => globalThis.__ssLiveCoarsenSnapshot);
+
+  // The flagship SS coarsening gate, live: coherent bulk steam merges into
+  // coarser particles through the full admitted chain (proposal -> apply ->
+  // leader-elected allocation -> slot assignment -> materialization ->
+  // compaction -> adoption), shrinking the live particle count instead of
+  // exploding it.
+  expect(result.adoptionStatus).toBe('schroeder-particle-storage-adopted');
+  expect(result.storageSchema)
+    .toBe('peercompute.ulg.schroeder-particle-storage-compaction-execution.v0');
+  expect(result.admittedParticleCountDelta).toBeLessThan(0);
+  expect(result.liveParticleCount).toBeLessThan(result.sourceParticleCount);
+  expect(result.authoritativeParticleCount).toBe(result.liveParticleCount);
+  expect(result.nextParticleCount).toBe(result.liveParticleCount);
+  // Count-summary/compaction perform compact single-row readbacks (allowed
+  // by the SS GPU-first rules); the hard gate is no full particle readback.
+  expect(result.fullParticleReadbackPerformed).toBe(false);
+  expect(consoleIssues).toEqual([]);
 });

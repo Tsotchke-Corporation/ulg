@@ -36447,3 +36447,74 @@ Next:
   nonzero adopted count delta in the running demo (the H2O steam scene
   currently coarsens without split/merge slot movement).
 - Then the deferred distribution work per `fable-plan-2026-07-02.md`.
+
+## 2026-07-02 AKDT - SS Live Steam Coarsening Through Admitted Merges (Slice 6)
+
+The flagship SS acceptance gate now runs live: the URL-scheduled steam scene
+coarsens its own particle count through the full admitted chain, with no
+fixture rows past the migration decision.
+
+Merge group semantics (`schroederParticleStorageAllocationWgsl`):
+
+- Coarsen-eligible apply rows (status bit 2 set, refine bit clear) now run an
+  exact same-cell merge-group scan keyed on `aggregateNodeIndex` (apply
+  column 21). The lowest source particle index in the cell is the merge
+  leader: it requests exactly one child slot (the aggregated cell mass and
+  represented volume already flow through the target-mass/volume columns
+  into materialization), and every member, leader included, frees its own
+  source slot. Lone coarsen rows request nothing. The O(rows^2) scan is the
+  exact small-scene route, like the law-neighbor exact fallback, with a
+  sorted/keyed reduction as the escalation path.
+
+Latent admission bug found and fixed:
+
+- `schroederParticleStorageAllocatorAdmissionAllowsApplication` reads the
+  admission's `currentParticleCapacity` as the approved capacity ceiling and
+  requires it to cover `requiredParticleCapacity`. The scene runtime policy
+  (and the fixture in the mounted materialized-storage proof) published the
+  packed particle count there, so every live allocation silently blocked
+  fail-closed and wrote empty rows - which is why live deltas stayed zero.
+  The status-only proofs never caught it; the scene publisher now publishes
+  the approved capacity.
+
+New proofs:
+
+- `Schroeder coarsen-eligible cell merges through the real proposal chain
+  and shrinks the count`: admitted migration rows for one 3-member cell run
+  through the real proposal -> apply -> leader-elected allocation -> slot
+  assignment -> materialization -> count summary -> compaction -> adoption
+  chain. Gates: 1 appended child, 3 freed slots, live count 4 -> 2, delta
+  exactly -2, child mass equal to the 6 kg cell aggregate, survivor intact,
+  total mass conserved.
+- `SPH phase URL steam scene coarsens the live particle count through
+  admitted merges`: the water-to-steam URL with
+  `schroederParticleStorageMaterialization=1` waits for a live admitted
+  merge cycle and gates on the adoption source being a compaction execution
+  with a negative delta, authoritative/next particle counts matching the
+  compacted live count, and no full particle readback (compact single-row
+  summaries remain the only readbacks). Observed live: 35 -> 27 particles in
+  one cycle, shrinking progressively across refreshes.
+
+Also hardened the two-level co-simulation proof against Vite cold-cache 504s
+on dynamic imports (retry loop) after a dev-server restart this session.
+
+Known follow-ups recorded:
+
+- Merged-child velocity is the leader's velocity, not the mass-weighted cell
+  average: momentum conservation of live merges is approximate and the
+  residual is not yet reported. Needs aggregate momentum in the aggregate
+  node/proposal rows.
+- Refine/split rows keep legacy allocation semantics (children add target
+  mass without freeing or scaling the source): live splits stay blocked on a
+  mass-correct split rule before enabling refine paths in scenes.
+
+Validation:
+
+- PASS: `node --test tests/schroederMergeGroupAllocation.test.mjs` `1/1`.
+- PASS: real-chain merge proof `1/1` (6.1s), live steam coarsening proof
+  `1/1` (14.1s).
+- PASS: full targeted battery (grid coupling, two-level co-simulation,
+  split, merge, real-chain merge, both mounted storage proofs, steam
+  diagnostics) `8/8`.
+- PASS: `npm test` `970/973`, `3` skipped.
+- PASS: `git diff --check`.

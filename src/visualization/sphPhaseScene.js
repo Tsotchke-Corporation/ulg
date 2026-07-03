@@ -19655,7 +19655,10 @@ export function createSphPhaseScene(container, {
             stateKey: schroederAdmissionStateKey,
             peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
             allocationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
-            currentParticleCapacity: schroederPackedParticleCount,
+            // Approved capacity ceiling: the allocator admission check requires
+            // this to cover requiredParticleCapacity, or every allocation row
+            // blocks fail-closed and no slot movement ever happens.
+            currentParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
             requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
             targetStateFamilies: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILIES,
             sourceTaskId: computeTaskLaneId,
@@ -19666,7 +19669,10 @@ export function createSphPhaseScene(container, {
               status: 'schroeder-particle-storage-allocator-admission-requested',
               particleCount: schroederPackedParticleCount,
               allocationRowCount: resolvedSchroederParticleStorageAdmissionRowBudget,
-              currentParticleCapacity: schroederPackedParticleCount,
+              // Approved capacity ceiling: the allocator admission check requires
+            // this to cover requiredParticleCapacity, or every allocation row
+            // blocks fail-closed and no slot movement ever happens.
+            currentParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
               requiredParticleCapacity: resolvedSchroederParticleStorageRequiredCapacity,
               peerComputeUseCase: schroederPortableSummaryPeerComputeUseCase,
               outputFamilies: ['schroeder-particle-storage-allocation'],

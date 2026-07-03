@@ -37056,3 +37056,13 @@ Recorded as `test.fixme('SPH phase merged-set continuation proves motion
 numerically after live coarsening')` - the executable acceptance gate for
 the next slice. The original continuation proof keeps its count/sim-time
 gates plus a summary-presence assertion.
+
+Follow-up probe: the merged-set summary reports sourceMassKg = 0 AND
+nextMassKg = 0 over its 27 scanned rows - both of the summary's particle
+buffers are empty. So the compact summary demonstrably binds superseded or
+zero-hole buffers after storage adoption (the G2P outputs it binds precede
+the merge; adoption replaces the authoritative buffers). Whether the
+simulation itself also freezes on the merged set is still open - fix the
+summary's post-adoption bindings first (bind the adopted state/mechanics
+buffers as "next" and the pre-step adopted uploads as "source"), then
+re-read the motion gate to judge the mechanics.

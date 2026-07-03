@@ -14248,6 +14248,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
   });
+  if (residentStep && typeof residentStep === 'object') {
+    // Requested-vs-reported readback provenance on the step envelope: the
+    // scene's continuation gate needs the reported mode to match the
+    // requested one; a silent downgrade becomes a replay treadmill.
+    residentStep.schroederRequestedReadbackMode = readbackMode;
+  }
 
   return {
     ...plan,

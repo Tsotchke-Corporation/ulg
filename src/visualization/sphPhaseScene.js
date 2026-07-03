@@ -20562,7 +20562,8 @@ export function createSphPhaseScene(container, {
               mlsUploadMechanicsBufferBound: Boolean(currentMlsMpmParticleUpload?.mechanicsBuffer),
               sourceStateStep: currentSphParticleState?.step ?? null,
               sourceStateParticleCount: currentSphParticleState?.particleCount ?? null,
-              sourceStateCpuLen: currentSphParticleState?.state?.length ?? null
+              sourceStateCpuLen: currentSphParticleState?.state?.length ?? null,
+              requestedStepReadbackMode: requestedReadbackMode ?? null
             });
             const residentStepOptions = {
               ...baseOptions,

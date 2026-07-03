@@ -37233,3 +37233,41 @@ per SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT; scheduling likely passes
 full-parity for the initial pack and something in the hot scene keeps
 re-triggering the initial-pack path - e.g. a reset/invalidation per
 schedule from the count-changing adoption).
+
+## 2026-07-03 - Boiling-scene stall fixed: compact stage readbacks no longer
+   downgrade the envelope to full-parity
+
+Root cause: residentStepEnvelope derived the step's readbackMode by
+requiring EVERY stage to report the literal 'no-full-readback'. The
+compaction stage (present on every merge-bearing step) reports
+'compact-compaction-summary-readback' - a fixed-size compact readback that
+is explicitly hot-path-legal - so any step with actual merges downgraded
+the whole envelope to full-parity, the scene's continuation gate rejected
+it, and coarsening-heavy scenes replayed t=0 forever. The gate now accepts
+stages with fullParticleReadbackPerformed === false alongside no-full, and
+the envelope carries readbackDowngradeReasons naming any failing gate
+(this is how the culprit was found: 'stage-not-no-full:schroeder-gpu-
+particle-storage-compaction:webgpu:compact-compaction-summary-readback').
+The step envelope also carries schroederRequestedReadbackMode from the
+orchestrator for requested-vs-reported provenance.
+
+Validation: the ironh=1.5/baset=370 coarsening scene now advances to
+simT 1.09+ (was frozen at 0.002); unit suite 982/979/0; coarsening +
+anti-freeze e2e battery 5/5.
+
+## 2026-07-03 - Visual realism pass caught a stale-render defect
+
+Screenshot matrix (splash, ice, Al+O2, SS flagship) with fresh GPU-visible
+compositing: physics diagnostics are healthy (splash com falls 0.81 ->
+0.37 with damped speeds and conserved mass; Al+O2 peaks at 5484K with
+conserved total mass and bounded speeds) but the RENDERED particles sit at
+their initial positions in continuation scenes: the worker-owned
+particle-state producer renders from the CPU-state content-hash cache, and
+under no-full continuation the CPU arrays never change, so the cache is
+reused forever and the display freezes at t=0 while the HUD sim time
+advances. This is the next fidelity fix: feed the presentation worker
+fresh data per refresh (compact render-row transfer or retained-buffer
+handoff) instead of the stale CPU cache. Also noted: iceh/ironh URL params
+are HEIGHTS (geometry), not heater controls - the 'boiling' probe scene
+was misconfigured; a real boiling-realism scene needs wall/floor
+temperature controls.

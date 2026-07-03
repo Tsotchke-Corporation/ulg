@@ -15082,9 +15082,42 @@ async function residentStepEnvelope({
     && thermalOutputSatisfied
     && reactionOutputSatisfied
     && mechanicsRefreshOutputSatisfied;
+  // A stage keeps the hot loop readback-free when it either ran in
+  // no-full-readback mode or performed only a compact fixed-size readback
+  // (fullParticleReadbackPerformed === false) - compact summaries are
+  // explicitly allowed on the hot path. Requiring the literal
+  // 'no-full-readback' string here made every merge-bearing step (whose
+  // compaction stage reports 'compact-compaction-summary-readback')
+  // downgrade the envelope to full-parity, which the scene's continuation
+  // gate rejects - freezing coarsening-heavy scenes on a replay treadmill.
+  const stageHotLoopReadbackFree = (stage) => stage?.backend === 'webgpu'
+    && (
+      stage?.readbackMode === NO_FULL_READBACK_MODE
+      || stage?.fullParticleReadbackPerformed === false
+    );
   const noFullReadback = residentBuffersRetained
-    && stages.every((stage) => stage?.backend === 'webgpu' && stage?.readbackMode === NO_FULL_READBACK_MODE);
+    && stages.every(stageHotLoopReadbackFree);
   const readbackMode = noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  // A silent downgrade to full-parity readback defeats the scene's
+  // continuation gate (each schedule then restarts from the CPU pack - a
+  // replay treadmill). Name the failing gates so the downgrade is
+  // diagnosable from live telemetry.
+  const readbackDowngradeReasons = noFullReadback
+    ? []
+    : [
+      !stageBuffersRetained ? 'stage-buffers-not-retained' : null,
+      !g2pOutputBuffersRetained ? 'g2p-output-buffers-not-retained' : null,
+      !schroederFarForceOutputSatisfied ? 'schroeder-far-force-output-missing' : null,
+      !schroederGasStateDeltaSatisfied ? 'schroeder-gas-state-delta-missing' : null,
+      !schroederGasCellImportSatisfied ? 'schroeder-gas-cell-import-missing' : null,
+      !schroederParticleStorageMaterializationSatisfied ? 'schroeder-particle-storage-not-adopted' : null,
+      !thermalOutputSatisfied ? 'thermal-output-buffers-not-retained' : null,
+      !reactionOutputSatisfied ? 'reaction-output-buffers-not-retained' : null,
+      !mechanicsRefreshOutputSatisfied ? 'mechanics-refresh-output-not-retained' : null,
+      ...stages
+        .filter((stage) => !stageHotLoopReadbackFree(stage))
+        .map((stage) => `stage-not-no-full:${stage?.kernelScope || stage?.schema || stage?.status || 'unknown'}:${stage?.backend || 'no-backend'}:${stage?.readbackMode || 'no-mode'}`)
+    ].filter(Boolean);
   const dispatchTopology = stageTiming?.dispatchTopology
     || p2gGridProjection?.residentDispatchTopology
     || gridUpdate?.residentDispatchTopology
@@ -15514,6 +15547,7 @@ async function residentStepEnvelope({
         }
       : null,
     residentBuffersRetained,
+    readbackDowngradeReasons,
     stageBuffersRetained,
     g2pOutputBuffersRetained,
     thermalOutputBuffersRetained,

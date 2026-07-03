@@ -37298,3 +37298,11 @@ the matrix. Realism watch-items: ice appears submerged rather than
 floating (buoyancy at coarse resolution), and a real boiling-realism
 scene still needs wall/floor temperature controls (iceh/ironh are
 geometry heights, not heaters).
+
+Queue after the stale-render fix: (1) presentation e2e battery result
+(running - if retained-output tests assumed unconditional presentation,
+update them to the step-arbitrated contract); (2) live split policy - the
+boiling scene now advances but needs a REAL heat source (find the wall/
+floor temperature controls; iceh/ironh are geometry); (3) ice buoyancy
+realism check at higher resolution; (4) pressure-interface sidecar on the
+two-level authoritative path.

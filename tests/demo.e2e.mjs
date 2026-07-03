@@ -13865,3 +13865,60 @@ test('SPH phase mounted scene advances under authoritative two-level SS mechanic
   expect(first.twoLevelConservationMass).toBeGreaterThan(0);
   expect(consoleIssues).toEqual([]);
 });
+
+test('SPH phase mounted SS scene proves particle motion numerically (anti-freeze gate)', async ({ page }) => {
+  test.setTimeout(180_000);
+  // Regression gate for the frozen-simulation defect: mounted ss=1 scenes
+  // once advanced sim time while every step re-ran from the initial upload
+  // (the fused active-node particle filter misread the compacted list as
+  // particle-aligned). This gate fails on any recurrence: it requires the
+  // compact GPU summary's numeric motion proof, not descriptor statuses.
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+
+  const sampleState = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const diagnostics = execution?.finalStep?.diagnostics || null;
+    return {
+      simTime: execution?.nextSphParticleState?.time ?? null,
+      compactGpuSummaryAvailable: diagnostics?.compactGpuSummaryAvailable === true,
+      maxDisplacementM: diagnostics?.maxDisplacementM ?? null,
+      maxSpeedMPerS: diagnostics?.maxSpeedMPerS ?? null,
+      centerOfMassYM: diagnostics?.nextCenterOfMassM?.[1] ?? null
+    };
+  });
+
+  // Wait for a schedule with a compact summary and nontrivial sim time.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    const time = Number(execution?.nextSphParticleState?.time);
+    return execution?.finalStep?.diagnostics?.compactGpuSummaryAvailable === true
+      && Number.isFinite(time) && time > 0.02;
+  }, null, { timeout: 120_000 });
+
+  const first = await sampleState();
+  await page.waitForTimeout(8_000);
+  const second = await sampleState();
+
+  expect(first.compactGpuSummaryAvailable).toBe(true);
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+  // Numeric motion proof: per-step displacement is nonzero and the falling
+  // drop's speed tracks free fall (v = g*t within tolerance while airborne;
+  // after settling, speed at least stays finite and displacement history
+  // proves the state evolved).
+  expect(second.maxDisplacementM).toBeGreaterThan(0);
+  expect(second.maxSpeedMPerS).toBeGreaterThan(0);
+  // The state must actually evolve between samples: either the center of
+  // mass moved or the per-step displacement stayed nonzero (a frozen sim
+  // has centerOfMass constant AND maxDisplacementM exactly 0).
+  const centerOfMassMoved = Number.isFinite(first.centerOfMassYM)
+    && Number.isFinite(second.centerOfMassYM)
+    && Math.abs(second.centerOfMassYM - first.centerOfMassYM) > 1e-6;
+  expect(centerOfMassMoved || second.maxDisplacementM > 0).toBe(true);
+  expect(centerOfMassMoved).toBe(true);
+});

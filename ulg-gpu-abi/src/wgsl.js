@@ -12373,7 +12373,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   allocation_rows[allocation_offset + 15u] = capacity_residual;
   allocation_rows[allocation_offset + 16u] = apply_rows[apply_offset + 8u];
   allocation_rows[allocation_offset + 17u] = apply_rows[apply_offset + 9u];
-  allocation_rows[allocation_offset + 18u] = apply_rows[apply_offset + 10u];
+  // Coarsen rows repurpose the massResidual diagnostic column to carry the
+  // merge-group cell id so the materializer can place merged children at
+  // the group's mass-weighted centroid (first-moment conservation).
+  allocation_rows[allocation_offset + 18u] = select(
+    apply_rows[apply_offset + 10u],
+    apply_rows[apply_offset + 21u],
+    ss_psal_coarsen_row(apply_offset)
+  );
   allocation_rows[allocation_offset + 19u] = apply_rows[apply_offset + 11u];
   allocation_rows[allocation_offset + 20u] = apply_rows[apply_offset + 12u];
   allocation_rows[allocation_offset + 21u] = apply_rows[apply_offset + 13u];
@@ -12577,6 +12584,52 @@ fn ss_psm_source_represented_volume(source_index: u32, mechanics_stride: u32) ->
   return max(row4.z, 0.0) * max(row4.w, 0.0);
 }
 
+// Mass-weighted centroid of a merge group: merged children must conserve
+// the FIRST MOMENT of the mass distribution (like momentum and thermal
+// energy), not inherit the leader's position - leader placement relocates
+// the whole group's mass to one member and visibly teleports matter when
+// merge cells are large. Merge participants (slot action 2) carry their
+// aggregate cell id in assignment column 20 (stamped by the allocation
+// kernel over the massResidual diagnostic for coarsen rows only), so the
+// group is recovered with the same exact same-cell scan the allocator
+// used. Returns sum(m*x) in xyz and sum(m) in w; w <= 0 means no valid
+// multi-member group and the caller keeps the leader position.
+fn ss_psm_merge_centroid(assignment_offset: u32, state_stride: u32) -> vec4<f32> {
+  if (assignment_rows[assignment_offset + 8u] != 2.0) {
+    return vec4<f32>(0.0);
+  }
+  let my_cell = assignment_rows[assignment_offset + 20u];
+  if (my_cell < 0.0) {
+    return vec4<f32>(0.0);
+  }
+  let stride = ss_psm_stride(params.assignment_stride, SCHROEDER_PSM_ASSIGNMENT_STRIDE);
+  var moment = vec3<f32>(0.0);
+  var mass = 0.0;
+  var member_count = 0u;
+  for (var row = 0u; row < params.assignment_row_count; row = row + 1u) {
+    let other_offset = row * stride;
+    if (assignment_rows[other_offset + 8u] != 2.0) {
+      continue;
+    }
+    if (assignment_rows[other_offset + 20u] != my_cell) {
+      continue;
+    }
+    let member_index = u32(max(assignment_rows[other_offset + 0u], 0.0));
+    if (member_index >= params.source_particle_count) {
+      continue;
+    }
+    let member_state = source_sph_state[member_index * state_stride];
+    let member_mass = max(member_state.w, 0.0);
+    moment = moment + member_state.xyz * member_mass;
+    mass = mass + member_mass;
+    member_count = member_count + 1u;
+  }
+  if (member_count < 2u || mass <= 0.0) {
+    return vec4<f32>(0.0);
+  }
+  return vec4<f32>(moment, mass);
+}
+
 fn ss_psm_copy_particle(
   source_index: u32,
   target_index: u32,
@@ -12617,6 +12670,15 @@ fn ss_psm_copy_particle(
       f32((child_ordinal >> 2u) & 1u) * 2.0 - 1.0
     );
     child_position = state0.xyz + 0.25 * child_scale * corner;
+  }
+  if (!divide_mass_split) {
+    // Merged child position: mass-weighted centroid of the merge group
+    // (first-moment conservation). Falls back to the leader position when
+    // no valid multi-member group exists (plain copies, lone rows).
+    let centroid = ss_psm_merge_centroid(assignment_offset, state_stride);
+    if (centroid.w > 0.0) {
+      child_position = centroid.xyz / centroid.w;
+    }
   }
   out_sph_state[target_state_base] = vec4<f32>(
     child_position.x,

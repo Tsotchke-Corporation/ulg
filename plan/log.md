@@ -37437,3 +37437,32 @@ placement, and the split-policy review must land TOGETHER as one slice,
 gated by the new first-moment (center-of-mass) conservation proof; the
 clamp alone trades one instability for another. Reverted for now; the
 committed tree remains battery-green at 7f3da7b.
+
+## 2026-07-03 - Merge children placed at the mass-weighted centroid
+   (first-moment conservation); teleportation narrative corrected
+
+Implementation (no new bindings - the first attempt added a 10th storage
+buffer and hit the default 8-per-stage device limit, caught by an
+uncapturederror probe): the allocation kernel stamps the merge-group cell
+id (apply col 21) over the massResidual diagnostic column (col 18 ->
+assignment col 20) for coarsen rows only; the materializer recovers the
+group with the allocator's exact same-cell scan over the already-bound
+assignment rows (slot action 2 + matching cell id) and places the merged
+child at sum(m*x)/sum(m). The chain proof's old expectation encoded the
+leader-position bug and now gates the centroid ((1.0+1.5+2.0)/3 = 1.5).
+
+Honest correction of the teleportation narrative: the REAL defects were
+(a) runaway merging (28 -> 4, giant target cells) - now countered by the
+oscillation guard + hysteresis (count stays 27/28 in the same scene), and
+(b) physically wrong leader-position placement - now fixed and gated. The
+dramatic center-of-mass discrepancy in the live A/B probes was largely a
+TIME-SKEW artifact: classic was sampled after the (single, massive,
+dropn=1) drop landed while SS was sampled mid-fall. A time-matched
+comparison shows the plain SS path IDENTICAL to classic to three decimals
+(comY 2.43/1.42/0.53, meanT, maxT, mass at t = 0.2/0.5/0.8). That
+methodology is now a standing e2e physics-parity gate ('SS single-level
+path matches classic physics at matched sim times').
+
+Validation: unit suite 982/979/0; Schroeder battery 17 passed with one
+battery-load-only flake ('admitted merge compacts freed slots' passes in
+isolation, 4.9s); new parity gate passes (1.5m).

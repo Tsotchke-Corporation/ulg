@@ -12676,7 +12676,11 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
   expect(Math.abs(result.liveSlots[0].mass - 2)).toBeLessThan(1e-6);
   expect(Math.abs(result.liveSlots[0].x - 2.5)).toBeLessThan(1e-6);
   expect(Math.abs(result.liveSlots[1].mass - 6)).toBeLessThan(1e-6);
-  expect(Math.abs(result.liveSlots[1].x - 1.0)).toBeLessThan(1e-6);
+  // First-moment conservation: the merged child sits at the mass-weighted
+  // centroid of its members ((1.0 + 1.5 + 2.0) / 3 = 1.5 at equal masses),
+  // NOT at the leader position - leader placement relocates the group's
+  // mass and visibly teleports matter when merge cells are large.
+  expect(Math.abs(result.liveSlots[1].x - 1.5)).toBeLessThan(1e-6);
   expect(Math.abs(result.compactedMass - result.sourceMassTotal)).toBeLessThan(1e-5);
 
   // Momentum conservation of the merge: the child carries the mass-weighted
@@ -14156,4 +14160,52 @@ test('SPH phase reaction sidecar chains after thermal under authoritative two-le
   expect(second.maxTemperatureK).not.toBe(first.maxTemperatureK);
   expect(second.maxDisplacementM).toBeGreaterThan(0);
   expect(consoleIssues).toEqual([]);
+});
+
+test('SPH phase SS single-level path matches classic physics at matched sim times', async ({ page }) => {
+  test.setTimeout(360_000);
+  // Physics parity gate: with ss=1 and no split/merge chain, the Schroeder
+  // orchestrated path must reproduce the classic resident path's
+  // thermodynamics and mass distribution at MATCHED sim times (time-skewed
+  // sampling produced a false mass-teleportation alarm during
+  // development; this gate encodes the honest comparison method).
+  const base = '/?drop=h2o&base=h2o&dropt=300&baset=350&wymin=700&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&dropn=1&basen=3&boxx=4&boxy=4&boxz=4';
+  const ssUrl = `${base}&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1`;
+  const targets = [0.2, 0.5];
+  const sampleAt = async (url) => {
+    await page.goto(url);
+    if (await page.locator('#sph-phase-overlay').count() === 0) {
+      await page.locator('#run-sph-phase').click();
+    }
+    await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+    const out = [];
+    for (const target of targets) {
+      await page.waitForFunction((t) => {
+        const execution = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps;
+        return Number(execution?.nextSphParticleState?.time) >= t
+          && execution?.finalStep?.diagnostics?.compactGpuSummaryAvailable === true;
+      }, target, { timeout: 150_000 });
+      out.push(await page.evaluate(() => {
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const diagnostics = overlay.__mlsMpmResidentSteps?.finalStep?.diagnostics || null;
+        return {
+          comY: diagnostics?.nextCenterOfMassM?.[1] ?? null,
+          meanT: diagnostics?.temperatureMassWeightedMeanK ?? null,
+          maxT: diagnostics?.maxTemperatureK ?? null,
+          massKg: diagnostics?.nextMassKg ?? null
+        };
+      }));
+    }
+    return out;
+  };
+  const classic = await sampleAt(base);
+  const ss = await sampleAt(ssUrl);
+  for (let i = 0; i < targets.length; i += 1) {
+    expect(Math.abs(ss[i].massKg - classic[i].massKg)).toBeLessThan(1e-3 * classic[i].massKg);
+    // Center of mass within 5% of the box height of classic at the same
+    // sim time (allows scheduling-quantized sample-time differences).
+    expect(Math.abs(ss[i].comY - classic[i].comY)).toBeLessThan(0.2);
+    expect(Math.abs(ss[i].meanT - classic[i].meanT)).toBeLessThan(3);
+    expect(Math.abs(ss[i].maxT - classic[i].maxT)).toBeLessThan(25);
+  }
 });

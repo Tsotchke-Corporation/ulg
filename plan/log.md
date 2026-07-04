@@ -37425,3 +37425,15 @@ Fix plan (physics-first, two invariant repairs):
 3. Add the first-moment gate to the merge e2e proofs and the live
    coarsening proof: post-merge center of mass must match pre-merge
    center of mass to tolerance (per merge group and globally).
+
+Clamp experiment (tried, reverted pending the full slice): limiting
+coarsen targeting to source_level+1 in the target-aggregate kernel makes
+the SS thermodynamics MATCH classic (meanT 307 vs 306.3, maxT 700 both)
+- confirming the giant-cell mechanism - but destabilizes counts
+(28 -> 55: with coarsening slowed, divide-mass splits dominate) and the
+center of mass stays wrong (2.62) because merged children still sit at
+leader positions. Conclusion: the clamp, the mass-weighted-centroid child
+placement, and the split-policy review must land TOGETHER as one slice,
+gated by the new first-moment (center-of-mass) conservation proof; the
+clamp alone trades one instability for another. Reverted for now; the
+committed tree remains battery-green at 7f3da7b.

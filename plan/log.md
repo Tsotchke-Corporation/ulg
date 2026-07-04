@@ -37591,3 +37591,45 @@ updated: merged-buffer destroy now asserts deferred-then-destroyed).
 Remaining chemistry-slice follow-ups: none blocking; optional later -
 low-cadence compact reaction summary on the hot path for live chemistry
 telemetry (avoids the stale-counter trap for future probes).
+
+## 2026-07-04 - Buoyancy realism slice: cohort telemetry works, ice floats
+   short-term, but live resident water NEVER SETTLES (energy-injection
+   instability) - recorded as two executable fixme gates
+
+The compact resident summary already carries per-cohort telemetry
+(base/drop massKg, center of mass, bounds, max speed - GPU-computed,
+hot-loop-safe via cohortDiagnostics), so the ice-buoyancy gate needs no
+new plumbing. Live probes (mech=mlsmpm residentAuto=1, h2o base 293K,
+box 4x4x4, basen=5 dropn=2):
+
+- Ice (h2o drop at 253K): stays solid (phaseMassKg.solid == drop mass
+  throughout), floats correctly at the waterline through ~2.5s sim time
+  (drop com Y ~1.0 vs water com 0.43, minY ~0.9 far above the 0.1
+  floor).
+- Iron (Fe drop at 293K): sinks steadily (com 0.80 -> 0.61, minY -> 0.50
+  by 2.2s). Correct qualitative contrast with ice.
+- BUT long-horizon the scene destabilizes: water-on-water at equal
+  293K (the null case that must settle) GAINS kinetic energy - max
+  speed ~1 m/s at t=1.2 grows to 8-12 m/s by t=5+, the surface of a
+  0.9m pool climbs to ~3.5m (box top 4m), water com RISES 0.39 -> 0.58.
+  Same with and without residentFuseSequence. The churn drags the ice
+  cohort under and into a corner by t=6.7 (com 1.0 -> 0.35), so the
+  buoyancy assertions cannot hold at settled-state sampling times.
+  residentAuto=0 cannot serve as an A/B control because the classic
+  path does not free-run (state pinned at step 0); the parity gate's
+  window (~1s) is too short to catch the growth, which becomes obvious
+  after ~2.5s.
+
+This is the top realism defect for liquids: nothing can rest. Recorded
+as two executable fixme gates (same pattern as the merged-set
+continuation motion gap that later got promoted): 'ice floats and iron
+sinks in live resident water (cohort buoyancy)' (fresh page per
+scenario, time-matched sampling at 4.5s) and 'live resident still water
+settles after the initial splash' (max speed < 1 m/s and surface < 1.5m
+at t >= 6). Promote both once the energy source is fixed.
+
+Suspects for the instability (next slice): EOS/sound-speed ringing vs
+dt (no CFL/dt URL knob exists to probe parameter sensitivity),
+pressure-interface force feedback, APIC affine amplification in
+P2G/G2P, boundary restitution. A dt-halving override is the first
+discriminator to build.

@@ -6855,6 +6855,123 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
   expect(consoleIssues).toEqual([]);
 });
 
+// FIXME acceptance gate: blocked on the live resident water-settling
+// instability (see plan/log.md 2026-07-04). Water-on-water at equal
+// temperature gains kinetic energy instead of settling (max speed grows
+// ~1 -> 12 m/s over 8s of sim time, surface climbs 0.9m -> 3.5m), and the
+// churn eventually drags floating ice under. Promote to a real test once
+// still water settles.
+test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort buoyancy)', async ({ context }) => {
+  test.setTimeout(420_000);
+  const consoleIssues = [];
+
+  const runBuoyancyScenario = async ({ dropMaterial, dropTemperatureK }) => {
+    const page = await context.newPage();
+    page.on('console', (message) => {
+      const text = message.text();
+      if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|used in submit while destroyed/i.test(text)) {
+        consoleIssues.push(text);
+      }
+    });
+    await page.goto(`/?drop=${encodeURIComponent(dropMaterial)}&base=h2o&dropt=${dropTemperatureK}&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1`);
+    if (await page.locator('#sph-phase-overlay').count() === 0) {
+      await page.locator('#run-sph-phase').click();
+    }
+    await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+    // Time-matched sampling: wait for the same simulated time in both
+    // scenarios so cohort positions are comparable.
+    await page.waitForFunction(() => {
+      const fs = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps?.finalStep;
+      return (fs?.particlePingPong?.nextTime ?? 0) >= 4.5;
+    }, null, { timeout: 300_000 });
+    return page.evaluate(() => {
+      const fs = document.querySelector('#sph-phase-overlay').__mlsMpmResidentSteps?.finalStep || null;
+      const findSummary = (obj) => {
+        if (!obj || typeof obj !== 'object') return null;
+        if (obj.cohortDiagnostics) return obj;
+        for (const key of ['summary', 'compactSummary', 'compactGpuSummary', 'residentSummary', 'summaryStep']) {
+          const value = obj[key]?.result || obj[key];
+          if (value?.cohortDiagnostics) return value;
+        }
+        return null;
+      };
+      const summary = findSummary(fs);
+      const cohorts = summary?.cohortDiagnostics || null;
+      return {
+        simT: fs?.particlePingPong?.nextTime ?? 0,
+        cohortStatus: cohorts?.status ?? null,
+        solidMassKg: summary?.phaseMassKg?.solid ?? null,
+        base: cohorts ? {
+          massKg: cohorts.base.massKg,
+          comY: cohorts.base.centerOfMassM[1],
+          maxY: cohorts.base.boundsM.max[1]
+        } : null,
+        drop: cohorts ? {
+          massKg: cohorts.drop.massKg,
+          comY: cohorts.drop.centerOfMassM[1],
+          minY: cohorts.drop.boundsM.min[1]
+        } : null
+      };
+    }).finally(() => page.close());
+  };
+
+  const ice = await runBuoyancyScenario({ dropMaterial: 'h2o', dropTemperatureK: 253 });
+  expect(ice.cohortStatus).toBe('cohort-summary-ready');
+  // Ice (rho ~917) must float: the cohort rides the waterline instead of
+  // resting on the box floor, and its center stays well above the water's.
+  expect(ice.drop.minY).toBeGreaterThan(0.65);
+  expect(ice.drop.comY - ice.base.comY).toBeGreaterThan(0.3);
+  // The drop stays frozen solid in 293K water over this window.
+  expect(ice.solidMassKg).toBeGreaterThan(ice.drop.massKg * 0.8);
+
+  const iron = await runBuoyancyScenario({ dropMaterial: 'Fe', dropTemperatureK: 293 });
+  expect(iron.cohortStatus).toBe('cohort-summary-ready');
+  // Iron (rho ~7874) must sink toward the floor through the same water.
+  expect(iron.drop.minY).toBeLessThan(0.6);
+  // Relative contrast at matched sim times: ice rides far higher than iron.
+  expect(ice.drop.comY - ice.base.comY).toBeGreaterThan(iron.drop.comY - iron.base.comY + 0.1);
+  // Per-cohort mass conservation across both runs.
+  expect(Math.abs(ice.base.massKg - iron.base.massKg) / iron.base.massKg).toBeLessThan(1e-3);
+  expect(consoleIssues).toEqual([]);
+});
+
+// FIXME acceptance gate: same blocker as the buoyancy gate above - the
+// live resident loop injects energy into still water. Target physics:
+// after the initial splash a water-on-water scene decays toward rest.
+test.fixme('SPH phase live resident still water settles after the initial splash', async ({ page }) => {
+  test.setTimeout(300_000);
+  await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(() => {
+    const fs = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps?.finalStep;
+    return (fs?.particlePingPong?.nextTime ?? 0) >= 6;
+  }, null, { timeout: 240_000 });
+  const settled = await page.evaluate(() => {
+    const fs = document.querySelector('#sph-phase-overlay').__mlsMpmResidentSteps?.finalStep || null;
+    const findSummary = (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      if (obj.cohortDiagnostics) return obj;
+      for (const key of ['summary', 'compactSummary', 'compactGpuSummary', 'residentSummary', 'summaryStep']) {
+        const value = obj[key]?.result || obj[key];
+        if (value?.cohortDiagnostics) return value;
+      }
+      return null;
+    };
+    const summary = findSummary(fs);
+    return {
+      simT: fs?.particlePingPong?.nextTime ?? 0,
+      maxSpeedMPerS: summary?.maxSpeedMPerS ?? null,
+      surfaceMaxYM: summary?.cohortDiagnostics?.base?.boundsM?.max?.[1] ?? null
+    };
+  });
+  // A settled 0.9m pool: residual sloshing under 1 m/s and no spray past ~1.5m.
+  expect(settled.maxSpeedMPerS).toBeLessThan(1);
+  expect(settled.surfaceMaxYM).toBeLessThan(1.5);
+});
+
 test('SPH phase no-full render refresh can skip compact surface summary readback', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&residentAuto=0&visualCapture=1');

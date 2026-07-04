@@ -2071,6 +2071,13 @@ export async function mountSphPhaseDemoOverlay({
     const value = Number(initialHash.get('sdt') ?? initialQuery.get('sdt'));
     return Number.isFinite(value) && value > 0 && value <= 0.01 ? value : null;
   })();
+  const numericUrlOption = (key, { min = 0, max = 10 } = {}) => {
+    const value = Number(initialHash.get(key) ?? initialQuery.get(key));
+    return Number.isFinite(value) && value >= min && value <= max ? value : null;
+  };
+  const initialArtificialViscosityAlpha = numericUrlOption('avAlpha');
+  const initialLiquidVelocityDiffusionAlpha = numericUrlOption('diffAlpha');
+  const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -2814,7 +2821,16 @@ export async function mountSphPhaseDemoOverlay({
       allowReducedProductProperties: true,
       ...(initialGridCflFactor != null ? { gridCflFactor: initialGridCflFactor } : {}),
       ...(initialCflSafety != null ? { cflSafety: initialCflSafety } : {}),
-      ...(initialSimDtS != null ? { dt: initialSimDtS } : {})
+      ...(initialSimDtS != null ? { dt: initialSimDtS } : {}),
+      ...(initialArtificialViscosityAlpha != null
+        ? { mlsMpmArtificialViscosityAlpha: initialArtificialViscosityAlpha }
+        : {}),
+      ...(initialLiquidVelocityDiffusionAlpha != null
+        ? { mlsMpmLiquidVelocityDiffusionAlpha: initialLiquidVelocityDiffusionAlpha }
+        : {}),
+      ...(initialLiquidWallDampingAlpha != null
+        ? { mlsMpmLiquidWallDampingAlpha: initialLiquidWallDampingAlpha }
+        : {})
     };
   }
 

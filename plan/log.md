@@ -37669,3 +37669,28 @@ dissipation terms one at a time via new options, watch the doubling
 time; then inspect the grid-update WGSL gravity/pressure integration.
 The two fixme gates from the previous entry remain the acceptance
 criteria.
+
+## 2026-07-04 - Instability isolation: dissipation terms are not the
+   source; positive feedback lives in the core loop
+
+Added avAlpha / diffAlpha / wallAlpha URL knobs (artificial viscosity,
+liquid velocity diffusion, wall damping overrides). At sdt=2.5e-4 on the
+water-on-water null scene:
+
+- All dampers on (defaults): settles to ~0.3 m/s, then exponential
+  re-growth (previous entry).
+- diffAlpha=0: no settling phase at all - grows 1.7 (t=1.4) -> 3.8
+  (t=2.6) -> 7.7 m/s (t=6.2).
+- avAlpha=0: near-identical curve to diffAlpha=0 (within a few percent
+  at every sample).
+
+Two different dampers removed producing indistinguishable growth means
+neither is the energy source: each contributes similar marginal
+stabilization over a shared underlying instability. The feedback is in
+the core resident loop - P2G/grid-update/G2P (APIC affine transfer) or
+the EOS pressure integration, plausibly the hydrostatic gradient/gravity
+balance at the grid. Next slice: inspect mlsMpmGridUpdateWgsl gravity +
+pressure integration and the G2P C-matrix reconstruction; consider a
+grid-level hydrostatic balance test (fixed column, zero initial
+velocity, assert nodal accelerations ~0) as a unit-level gate before
+touching kernels.

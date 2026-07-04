@@ -37476,3 +37476,33 @@ aggregate, migration, and level update must all evaluate the SAME clamped
 target level - queued as its own slice. Reverted again; the tree keeps
 the centroid + guard + hysteresis stack, which already holds counts
 stable (27/28) in the sustained-heat scene.
+
+## 2026-07-04 - Live topology steady state needs a systematic slice
+   (frozen migrated mass vs mass creation - both experiments reverted)
+
+Two candidate fixes for the level-ratchet freeze were tested against the
+time-matched parity probe and both stay reverted:
+
+1. Consistent one-level-per-epoch clamp (both derivation sites): counts
+   stabilize (35 -> 27, no oscillation, no split burst), but merged scenes
+   still freeze positions while thermal evolves. Root cause isolated with
+   the diagnostic summary level ranges: particles RATCHET one level per
+   epoch up to level 5 (maxSourceLevel 5) - far outside the simulated
+   window (0-1 under two-level) - and mass at unsimulated levels gets
+   copy-through in every mechanics pass. My earlier 'buoyant steam rises'
+   reading was this freeze (drop-mass-dominated com), not buoyancy.
+2. Migration-window cap (orchestrator passes maxLevel =
+   min(configured, selectedLevel + [two-level ? 1 : 0]) to the
+   target-aggregate and migration stages): motion returns (com falls with
+   classic), but MASS GROWS 35.6 -> 91.4 kg over 0.8s - the in-window
+   steady-state chain duplicates mass (suspect: children admitted while
+   sources not freed across repeated epochs; note the odd count-summary
+   pattern written=1/appended=1/freed=9/blocked=9 recorded earlier).
+
+Conclusion: the live split/merge chain conserves mass only in its
+candidate-clearing regime (the committed tree). Sustained topology
+pressure needs one systematic slice with per-epoch bookkeeping and a live
+per-schedule conservation battery (mass, momentum, first moment, count)
+before the clamp/cap can land. The parity gate plus a new live
+mass-constancy gate on the merged config pin the committed tree's
+conservation so chain work cannot regress it silently.

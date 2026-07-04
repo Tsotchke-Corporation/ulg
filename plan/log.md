@@ -37506,3 +37506,28 @@ per-schedule conservation battery (mass, momentum, first moment, count)
 before the clamp/cap can land. The parity gate plus a new live
 mass-constancy gate on the merged config pin the committed tree's
 conservation so chain work cannot regress it silently.
+
+## 2026-07-04 - Chemistry realism: live resident path does not ignite
+   Al + O2 (no reaction events), O2 mass drifts unphysically to liquid,
+   product-event buffer grows unboundedly
+
+Live probe (mech=mlsmpm, residentAuto, drop=Al dropt=3200, base=o2
+baset=1000): the reaction table is present (reactionCount 1,
+4 Al + 3 O2 -> 2 Al2O3) and temperatures reach 5400-5500K, yet after
+0.69s sim time productEventActiveEventCount stays 0 and
+productInventoryCount stays 0 - combustion never ignites on the live
+resident path. Meanwhile gas mass fell 0.195 -> 0.091 kg with liquid
+rising by the same amount: O2 'liquefying' at >1000K is unphysical (O2
+critical point 154K) - the thermal phase machinery reclassifies gas
+mass without a reaction. Also the product event buffer grew 73KB ->
+12.6MB (98784 rows, generationCount 1372) holding zero active events -
+unbounded growth per schedule.
+
+Baseline: the sph/residentAuto=0 harness path (used by the passing
+'non-water binary reactions' e2e) produces products - rerunning that e2e
+now to confirm on the current tree. Investigation queue (chemistry
+slice): (1) why reaction candidate discovery yields no pairs on the
+resident path (contact bins vs SS law queue - the reaction stage runs
+and reports reaction-step-executed but finds nothing); (2) the gas ->
+liquid reclassification rule needs a temperature/critical-point guard;
+(3) cap or recycle the product-event buffer generations.

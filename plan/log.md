@@ -37402,3 +37402,26 @@ probe; then add a position-sanity gate to the live coarsening proof
 by physical motion) so mass teleportation can never pass again. Note the
 existing live-coarsening e2e asserts count reduction + mass conservation
 only - it cannot see relocation.
+
+Mechanism pinpointed in schroederPhaseVolumeTargetAggregateWgsl:
+target_cell = floor(position / (base_dx * 2^target_level)) with
+target_level derived from the ANTICIPATED steam represented volume (~700x
+liquid) - the level jumps several steps at once, the cell becomes
+box-scale, every candidate lands in the same giant cell, the leader
+(lowest index) wins, and the materializer writes the merged child at the
+LEADER'S position (state0.xyz) - conserving mass/momentum but collapsing
+the spatial distribution (com relocation up to meters).
+
+Fix plan (physics-first, two invariant repairs):
+1. Merge child position must be the mass-weighted CENTROID of the merged
+   set (conserves the first moment exactly, like momentum). Requires
+   accumulating sum(m*x) per group through the proposal/apply columns and
+   dividing by child mass in the materializer (same pattern as the
+   existing momentum and mass*T columns).
+2. Clamp coarsening to ONE level per aggregate epoch:
+   target_level = min(source_level + 1, computed) for merge targeting, so
+   giant-cell collapse cannot happen in a single step and steam ramps
+   levels gradually (matching the physical expansion timeline).
+3. Add the first-moment gate to the merge e2e proofs and the live
+   coarsening proof: post-merge center of mass must match pre-merge
+   center of mass to tolerance (per merge group and globally).

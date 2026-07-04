@@ -37372,3 +37372,33 @@ physics fps drops to ~24 there because the storage chain still re-runs
 its full propose/materialize work every step even when adoption is
 skipped - a chain-level idempotence skip (reuse prior proposal when
 aggregates unchanged) is a future perf slice.
+
+## 2026-07-03 - MAJOR: live coarsening teleports merged mass (wrong-cell
+   leaders) and over-merges
+
+Controlled comparison (same hot-floor scene, classic vs ss=1):
+
+- classic: count 28, comY 0.508 (mass at the floor - physical).
+- ss: count 28 -> 4 (86% collapse!) and comY 2.624 - the merged mass sits
+  near the top of the box even though nearly all source mass was floor
+  water. Earlier variant (dropn=2): classic comY 0.518 vs ss comY 2.828
+  with ~95% of summarized mass at drop altitude. Total mass conserved in
+  all cases (280.59 / 35.62 kg) - the mass is conserved but RELOCATED.
+
+Interpretation: the live merge chain assigns many particles to the same
+(wrong) aggregate cell; the leader election (lowest sourceParticleIndex)
+then picks a low-index particle (often a drop/high particle), and the
+materializer writes the merged mass at the leader's position - mass
+teleportation plus runaway merging. The chain-level e2e proofs pass
+because their fixtures construct aggregate cells carefully; the LIVE
+target-aggregate cell math is the suspect (grid convention mismatch:
+z-fastest vs row-major, spacing/shift, or stale bounds under
+continuation).
+
+Next: dissect the live target-aggregate cell computation (positions ->
+aggregateNodeIndex) against the grid convention with a controlled browser
+probe; then add a position-sanity gate to the live coarsening proof
+(post-merge center of mass must stay within the pre-merge bounds inflated
+by physical motion) so mass teleportation can never pass again. Note the
+existing live-coarsening e2e asserts count reduction + mass conservation
+only - it cannot see relocation.

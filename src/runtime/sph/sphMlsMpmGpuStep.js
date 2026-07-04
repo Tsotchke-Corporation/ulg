@@ -31,7 +31,8 @@ import {
 import {
   mlsMpmG2pReconstructWgsl,
   mlsMpmGridUpdateWgsl,
-  mlsMpmP2gGridProjectionWgsl
+  mlsMpmP2gGridProjectionWgsl,
+  sphReactionProductEventCompactWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
@@ -14635,6 +14636,102 @@ function residentProductMassSourceByteLengths(handle) {
   return [Math.max(0, Math.round(Number(handle?.productEventBufferByteLength) || 0))];
 }
 
+const RESIDENT_PRODUCT_EVENT_COMPACTION_THRESHOLD_BYTES = 262144;
+const RESIDENT_PRODUCT_EVENT_COMPACTION_MIN_GENERATIONS = 16;
+
+export async function compactResidentProductEventBufferWebGpu({
+  device,
+  sourceBuffer,
+  rowCount,
+  strideFloats,
+  strideBytes
+} = {}) {
+  if (!(rowCount > 0) || !sourceBuffer) return null;
+  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-resident-product-event-compact',
+    label: 'ulg-sph-resident-product-event-compact',
+    code: sphReactionProductEventCompactWgsl,
+    entryPoint: 'compact_rows',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const scratchBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-sph-resident-product-event-compact-scratch',
+    size: Math.max(strideBytes, rowCount * strideBytes),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  }), device);
+  const countBuffer = device.createBuffer({
+    label: 'ulg-sph-resident-product-event-compact-count',
+    size: 4,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const countReadbackBuffer = device.createBuffer({
+    label: 'ulg-sph-resident-product-event-compact-count-readback',
+    size: 4,
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-resident-product-event-compact-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  try {
+    device.pushErrorScope?.('validation');
+    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([rowCount, strideFloats / 4, 0, 0]));
+    const bindGroup = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: sourceBuffer } },
+        { binding: 1, resource: { buffer: scratchBuffer } },
+        { binding: 2, resource: { buffer: countBuffer } },
+        { binding: 3, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(countBuffer, 0, countReadbackBuffer, 0, 4);
+    device.queue.submit([encoder.finish()]);
+    if (device.popErrorScope) {
+      const scopeError = await device.popErrorScope();
+      if (scopeError) {
+        throw new Error(`product-event-compaction-validation:${scopeError.message}`);
+      }
+    }
+    await countReadbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    const liveRowCount = new Uint32Array(countReadbackBuffer.getMappedRange().slice(0))[0];
+    countReadbackBuffer.unmap();
+    const liveByteLength = liveRowCount * strideBytes;
+    // Keep at least one (zeroed) row so downstream array<vec4<f32>> bindings stay
+    // valid and the handle stays mergeable when every historical event is consumed.
+    const allocatedByteLength = Math.max(strideBytes, liveByteLength);
+    const compactBuffer = tagWebGpuBufferDevice(device.createBuffer({
+      label: 'ulg-sph-resident-product-event-compact-live-rows',
+      size: allocatedByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }), device);
+    if (liveByteLength > 0) {
+      const copyEncoder = device.createCommandEncoder();
+      copyEncoder.copyBufferToBuffer(scratchBuffer, 0, compactBuffer, 0, liveByteLength);
+      device.queue.submit([copyEncoder.finish()]);
+    }
+    if (device.queue?.onSubmittedWorkDone) await device.queue.onSubmittedWorkDone();
+    return { buffer: compactBuffer, rowCount: liveRowCount, byteLength: allocatedByteLength };
+  } finally {
+    scratchBuffer.destroy?.();
+    countBuffer.destroy?.();
+    countReadbackBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+  }
+}
+
 async function mergeResidentProductMassBuffersWebGpu({
   device,
   inputResidentProductMass = null,
@@ -14683,22 +14780,64 @@ async function mergeResidentProductMassBuffersWebGpu({
   } else {
     productEventMergeQueueCompletionStatus = 'queue-submitted-no-explicit-completion';
   }
+  const mergedRowCount = (inputResidentProductMass.productEventRowCount ?? 0)
+    + (emittedResidentProductMass.productEventRowCount ?? 0);
+  const strideFloats = Math.max(0, Math.round(Number(emittedResidentProductMass.productEventStrideFloats) || 0));
+  const strideBytes = Math.max(0, Math.round(Number(emittedResidentProductMass.productEventStrideBytes) || strideFloats * Float32Array.BYTES_PER_ELEMENT));
+  let finalBuffer = mergedBuffer;
+  let finalByteLength = mergedByteLength;
+  let finalRowCount = mergedRowCount;
+  let finalSourceRowCounts = sourceRowCounts;
+  let finalSourceByteLengths = sourceByteLengths;
+  let productEventCompactionStatus = 'product-event-compaction-not-required';
+  let productEventCompactionDroppedRowCount = 0;
+  const compactionEligible = mergedByteLength >= RESIDENT_PRODUCT_EVENT_COMPACTION_THRESHOLD_BYTES
+    && sourceRowCounts.length >= RESIDENT_PRODUCT_EVENT_COMPACTION_MIN_GENERATIONS
+    && strideFloats >= 20
+    && strideFloats % 4 === 0
+    && strideBytes === strideFloats * Float32Array.BYTES_PER_ELEMENT
+    && mergedRowCount * strideBytes <= mergedByteLength;
+  if (compactionEligible) {
+    try {
+      const compacted = await compactResidentProductEventBufferWebGpu({
+        device,
+        sourceBuffer: mergedBuffer,
+        rowCount: mergedRowCount,
+        strideFloats,
+        strideBytes
+      });
+      if (compacted?.buffer) {
+        deferSubmittedWorkCleanup(device, () => mergedBuffer.destroy?.());
+        finalBuffer = compacted.buffer;
+        finalByteLength = compacted.byteLength;
+        finalRowCount = compacted.rowCount;
+        finalSourceRowCounts = [compacted.rowCount];
+        finalSourceByteLengths = [compacted.byteLength];
+        productEventCompactionStatus = 'product-event-compaction-performed';
+        productEventCompactionDroppedRowCount = mergedRowCount - compacted.rowCount;
+      }
+    } catch (error) {
+      productEventCompactionStatus = `product-event-compaction-failed:${error instanceof Error ? error.message : error}`;
+      console.warn('[ulg] resident product-event compaction failed; retaining concatenated buffer', error);
+    }
+  }
   let destroyed = false;
   const handle = {
     schema: inputResidentProductMass.schema || emittedResidentProductMass.schema,
     status: 'resident-product-mass-merged-gpu-resident',
     source: 'resident-product-mass-merged-product-events',
-    productEventBuffer: mergedBuffer,
+    productEventBuffer: finalBuffer,
     productEventBufferRetained: true,
-    productEventBufferByteLength: mergedByteLength,
-    productEventRowCount: (inputResidentProductMass.productEventRowCount ?? 0)
-      + (emittedResidentProductMass.productEventRowCount ?? 0),
+    productEventBufferByteLength: finalByteLength,
+    productEventRowCount: finalRowCount,
     productEventActiveEventCount: (inputResidentProductMass.productEventActiveEventCount ?? 0)
       + (emittedResidentProductMass.productEventActiveEventCount ?? 0),
     productEventStrideFloats: emittedResidentProductMass.productEventStrideFloats,
     productEventStrideBytes: emittedResidentProductMass.productEventStrideBytes,
-    productEventGenerationCount: sourceRowCounts.length,
-    productEventSourceRowCounts: sourceRowCounts,
+    productEventGenerationCount: finalSourceRowCounts.length,
+    productEventSourceRowCounts: finalSourceRowCounts,
+    productEventCompactionStatus,
+    productEventCompactionDroppedRowCount,
     productInventorySchema: emittedResidentProductMass.productInventorySchema || inputResidentProductMass.productInventorySchema || null,
     productInventoryCount: (inputResidentProductMass.productInventoryCount ?? 0)
       + (emittedResidentProductMass.productInventoryCount ?? 0),
@@ -14721,10 +14860,12 @@ async function mergeResidentProductMassBuffersWebGpu({
       + (emittedResidentProductMass.unplacedGasProductMassKg ?? 0),
     consumeMassPolicy: 'unplaced-product-mass-only',
     visibleMassAlreadyInParticleBuffers: true,
-    mergePolicy: 'gpu-buffer-concat-preserve-sparse-product-event-rows',
-    mergeSourceProductEventBufferCount: sourceByteLengths.length,
-    mergeSourceProductEventRowCounts: sourceRowCounts,
-    mergeSourceProductEventBufferByteLengths: sourceByteLengths,
+    mergePolicy: productEventCompactionStatus === 'product-event-compaction-performed'
+      ? 'gpu-buffer-concat-compact-live-product-event-rows'
+      : 'gpu-buffer-concat-preserve-sparse-product-event-rows',
+    mergeSourceProductEventBufferCount: finalSourceByteLengths.length,
+    mergeSourceProductEventRowCounts: finalSourceRowCounts,
+    mergeSourceProductEventBufferByteLengths: finalSourceByteLengths,
     productEventMergeQueueCompletionStatus,
     productEventMergeQueueCompletionMethod,
     eosCouplingStatus: emittedResidentProductMass.eosCouplingStatus ?? inputResidentProductMass.eosCouplingStatus ?? null,
@@ -14732,7 +14873,7 @@ async function mergeResidentProductMassBuffersWebGpu({
     destroyResidentProductMassBuffers() {
       if (destroyed) return;
       destroyed = true;
-      mergedBuffer.destroy?.();
+      deferSubmittedWorkCleanup(device, () => finalBuffer.destroy?.());
     },
     scientificValidation: false,
     chemistryValidation: false,

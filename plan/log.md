@@ -37531,3 +37531,63 @@ resident path (contact bins vs SS law queue - the reaction stage runs
 and reports reaction-step-executed but finds nothing); (2) the gas ->
 liquid reclassification rule needs a temperature/critical-point guard;
 (3) cap or recycle the product-event buffer generations.
+
+## 2026-07-04 - Chemistry re-diagnosis: ignition works (telemetry artifact);
+   product-event buffer growth fixed with merge-time GPU compaction
+
+Re-diagnosis of yesterday's "ignition gap": decoding the live render rows
+(GPU-authoritative, via refreshSphResidentRenderState against the live
+execution) shows the Al + O2 scene DOES react on the resident path - of
+the initial 64 O2 + 8 Al particles, 47 are al2o3|liquid (molten alumina,
+the correct thermite product), 17 remain o2|gas, 8 Al|liquid. The
+reaction record decodes sensibly: activation 2907K, contact radius
+0.775m, phase masks 0 (any phase), status enabled. The earlier "zero
+events" reading came from summary counters that are legitimately
+disabled on the no-full-readback hot path (readCompactReactionSummary
+etc. default false), while the CPU thermo array still held the initial
+state - the same stale-CPU-array trap as the earlier render bugs. The
+"O2 -> liquid drift" was the same artifact: those particles are al2o3
+liquid, not liquefied O2. Items (1) and (2) of the chemistry slice are
+therefore closed as misdiagnoses; a one-shot full-parity refresh is NOT
+a valid live sampler (it re-uploads the stale CPU state and resets the
+sim) - live sampling must go through render-row decoding.
+
+Item (3) was real and is now fixed. Cause: every step,
+mergeResidentProductMassBuffersWebGpu concatenated the carried
+product-event buffer with the step emission (one generation per step,
+one row per particle per step, forever) - 24.7MB / 2688 generations in
+45s on the probe scene, all of it dead rows (every consumer skips rows
+unless status == 1 AND unplacedMassKg > 0; unplaced mass was 0 - all
+product mass had been placed into particles).
+
+Fix (sphReactionProductEventCompactWgsl + merge integration in
+sphMlsMpmGpuStep.js): when the concatenated buffer crosses 256KiB AND
+16 generations, a single-invocation compaction kernel copies only live
+rows (status == 1 && unplacedMassKg > 0) in source order (deterministic
+f32 accumulation downstream), reads back a 4-byte live-row count
+(in-pattern with existing compact-summary readbacks), and the merged
+handle adopts the compacted buffer. The compacted allocation keeps at
+least one zeroed row so array<vec4<f32>> bindings stay valid and the
+handle stays mergeable when history empties (byteLength 0 handles fail
+canMergeResidentProductMassBuffers and broke the carry chain - first
+attempt produced a 4-byte buffer, invalid bind groups, and a wiped
+chemistry ledger every ~29 steps). Superseded merged buffers now destroy
+via deferSubmittedWorkCleanup because consumers that encoded against a
+superseded handle may submit after the swap (one 'used in submit while
+destroyed' hit in the first e2e run; deferred destroy cleared it).
+
+Live steady state after fix: byteLength sawtooths 28KB-250KB (compact
+at ~29 generations, rebuild, repeat), zero GPU errors over 48s, sim rate
+unchanged, chemistry identical (47 al2o3 at the matched sample time).
+Scalar ledgers (sealedBoxGasProductMoles, visible/unplaced mass, gas
+species ledger) accumulate across compactions unchanged.
+
+Gates: new e2e 'live reaction product-event buffer stays bounded under
+merge-time compaction' (byteLength < 768KB and generations < 120 across
+30s of the Al+O2 resident scene, sim advancing, al2o3 present in decoded
+render rows, zero WebGPU console errors). Units 979/0 (merge unit test
+updated: merged-buffer destroy now asserts deferred-then-destroyed).
+
+Remaining chemistry-slice follow-ups: none blocking; optional later -
+low-cadence compact reaction summary on the hot path for live chemistry
+telemetry (avoids the stale-counter trap for future probes).

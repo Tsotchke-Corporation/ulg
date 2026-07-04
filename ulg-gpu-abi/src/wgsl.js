@@ -1941,6 +1941,45 @@ fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphReactionProductEventCompactWgsl = `
+struct ProductEventCompactParams {
+  row_count: u32,
+  row_stride_vec4: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> source_events: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> compact_events: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> compact_counts: array<u32>;
+@group(0) @binding(3) var<uniform> params: ProductEventCompactParams;
+
+// Single-invocation loop keeps compacted row order identical to source order so
+// downstream f32 accumulations over events stay deterministic across runs.
+@compute @workgroup_size(1)
+fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) {
+    return;
+  }
+  let stride = max(params.row_stride_vec4, 5u);
+  var live_rows = 0u;
+  for (var row = 0u; row < params.row_count; row = row + 1u) {
+    let base = row * stride;
+    let unplaced_mass_kg = source_events[base + 3u].y;
+    let status = source_events[base + 4u].z;
+    if (status != 1.0 || unplaced_mass_kg <= 0.0) {
+      continue;
+    }
+    let out_base = live_rows * stride;
+    for (var component = 0u; component < stride; component = component + 1u) {
+      compact_events[out_base + component] = source_events[base + component];
+    }
+    live_rows = live_rows + 1u;
+  }
+  compact_counts[0] = live_rows;
+}
+`;
+
 export const sphReactionSummaryPartialsWgsl = `
 struct ReactionSummaryParams {
   particle_count: u32,

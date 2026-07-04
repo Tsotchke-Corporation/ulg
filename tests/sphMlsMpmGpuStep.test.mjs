@@ -6930,6 +6930,10 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(carriedResidentProductMass.productEventBuffer.destroyed, false);
   assert.equal(emittedResidentProductMass.destroyCalls, 1);
   assert.equal(emittedResidentProductMass.productEventBuffer.destroyed, true);
+  // Merged-buffer destruction defers behind queue drain so consumers that
+  // encoded against a superseded handle can still submit safely.
+  assert.equal(step.residentProductMass.productEventBuffer.destroyed, false);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(step.residentProductMass.productEventBuffer.destroyed, true);
   assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-cleaned');
   assert.equal(step.residentBufferLeaseCleanup.destroyedResourceCount, 2);

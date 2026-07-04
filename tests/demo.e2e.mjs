@@ -6791,6 +6791,70 @@ test('SPH phase mounted non-water binary reactions retain condensed product even
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase live reaction product-event buffer stays bounded under merge-time compaction', async ({ page }) => {
+  test.setTimeout(300_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+  await page.goto('/?drop=Al&base=o2&dropt=3200&baset=1000&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const fs = overlay?.__mlsMpmResidentSteps?.finalStep;
+    return (fs?.particlePingPong?.nextTime ?? 0) > 0.05
+      && (fs?.residentProductMass?.productEventBufferByteLength ?? 0) > 0;
+  }, null, { timeout: 120_000 });
+
+  const samples = [];
+  for (let sampleIndex = 0; sampleIndex < 4; sampleIndex += 1) {
+    await page.waitForTimeout(8_000);
+    samples.push(await page.evaluate(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const fs = overlay.__mlsMpmResidentSteps?.finalStep || null;
+      const rpm = fs?.residentProductMass || null;
+      return {
+        simT: fs?.particlePingPong?.nextTime ?? 0,
+        productEventBufferByteLength: rpm?.productEventBufferByteLength ?? 0,
+        productEventGenerationCount: rpm?.productEventGenerationCount ?? 0
+      };
+    }));
+  }
+  // The baseline concat-only merge grew past 20 MB (2000+ generations) in this
+  // window; merge-time compaction keeps the buffer inside a sawtooth around the
+  // 256 KiB threshold because consumed rows (status != 1 or no unplaced mass)
+  // are dropped once the generation/byte thresholds trip.
+  for (const sample of samples) {
+    expect(sample.productEventBufferByteLength).toBeLessThan(786_432);
+    expect(sample.productEventGenerationCount).toBeLessThan(120);
+  }
+  expect(samples[samples.length - 1].simT).toBeGreaterThan(samples[0].simT);
+
+  const chemistry = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay.__sphScene;
+    const renderState = await scene.refreshSphResidentRenderState({
+      preferWebGpu: true,
+      residentSteps: overlay.__mlsMpmResidentSteps,
+      materialProperties: overlay.__sphPhaseViewState?.materialProperties || {},
+      renderFieldReadbackMode: 'full-parity-readback',
+      renderRowsReadbackMode: 'full-parity-readback'
+    });
+    return renderState?.renderRowsDecodedMaterialPhaseCounts || {};
+  });
+  const productParticleCount = Object.entries(chemistry)
+    .filter(([key]) => key.startsWith('al2o3|'))
+    .reduce((total, [, count]) => total + count, 0);
+  expect(productParticleCount).toBeGreaterThan(0);
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase no-full render refresh can skip compact surface summary readback', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&residentAuto=0&visualCapture=1');

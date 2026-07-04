@@ -12889,6 +12889,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   enableParticleStorageCompaction = true,
   particleStorageCountSummary = null,
   particleStorageCompaction = null,
+  // Oscillation guard: the previous step's adoption summary. When this
+  // step's admitted count delta exactly reverses the previous one (a
+  // merge/split period-2 orbit re-deriving opposite topologies from the
+  // alternating snapshots), adoption is skipped for this step so the
+  // mechanics outputs chain and real physics breaks the orbit.
+  particleStorageAdoptionOscillationGuard = null,
   enablePhaseVolumeLevelUpdate = Boolean(phaseVolumeMigrationAdmission),
   enablePhaseVolumeDiagnosticSummary = enablePhaseVolumeLevelUpdate,
   enablePortableSummary = false,
@@ -13866,8 +13872,46 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     resolvedParticleStorageMaterialization.particleBuffersSuperseded =
       'schroeder-particle-storage-compaction';
   }
-  const resolvedParticleStorageAdoptionSource =
+  const candidateParticleStorageAdoptionSource =
     resolvedParticleStorageCompaction || resolvedParticleStorageMaterialization;
+  // Oscillation guard: an admitted delta that exactly reverses the previous
+  // step's (source count matching the previous authoritative count) is a
+  // merge/split period-2 orbit, not new topology. Skip adoption for this
+  // step - the mechanics outputs chain instead - and report it.
+  const previousAdoptionGuard = particleStorageAdoptionOscillationGuard || null;
+  const candidateAdoptionDelta = Math.round(finiteNumber(
+    candidateParticleStorageAdoptionSource?.admittedParticleCountDelta,
+    0
+  ));
+  const candidateAdoptionSourceCount = Math.round(finiteNumber(
+    candidateParticleStorageAdoptionSource?.sourceParticleCount ?? sphParticleState?.particleCount,
+    0
+  ));
+  const particleStorageAdoptionOscillationDetected = Boolean(
+    candidateParticleStorageAdoptionSource
+    && previousAdoptionGuard
+    && Number.isFinite(Number(previousAdoptionGuard.admittedParticleCountDelta))
+    && candidateAdoptionDelta !== 0
+    && candidateAdoptionDelta === -Math.round(Number(previousAdoptionGuard.admittedParticleCountDelta))
+    && candidateAdoptionSourceCount === Math.round(finiteNumber(
+      previousAdoptionGuard.authoritativeParticleCount,
+      Number.NaN
+    ))
+  );
+  const resolvedParticleStorageAdoptionSource = particleStorageAdoptionOscillationDetected
+    ? null
+    : candidateParticleStorageAdoptionSource;
+  if (particleStorageAdoptionOscillationDetected) {
+    // The superseded (never-adopted) materialization/compaction buffers are
+    // released behind the already-submitted GPU work.
+    const supersededSource = candidateParticleStorageAdoptionSource;
+    deferSubmittedWorkCleanup(device, () => {
+      supersededSource.destroyParticleBuffers?.();
+      supersededSource.particleStateBuffer?.destroy?.();
+      supersededSource.particleThermoBuffer?.destroy?.();
+      supersededSource.particleMechanicsBuffer?.destroy?.();
+    });
+  }
   const resolvedPhaseVolumeLevelUpdate = phaseVolumeLevelUpdate || (
     !resolvedPhaseVolumeMigration || !enablePhaseVolumeLevelUpdate
       ? null
@@ -14262,6 +14306,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     status: 'schroeder-same-level-mechanics-submitted',
     backend: 'webgpu',
     readbackMode,
+    particleStorageAdoptionOscillationDetected,
+    particleStorageAdoptionOscillationGuard: previousAdoptionGuard
+      ? {
+        admittedParticleCountDelta: Math.round(finiteNumber(previousAdoptionGuard.admittedParticleCountDelta, 0)),
+        authoritativeParticleCount: Math.round(finiteNumber(previousAdoptionGuard.authoritativeParticleCount, 0))
+      }
+      : null,
     fullParticleReadbackPerformed: false,
     normalHotLoopReadbackFree: readbackMode === SCHROEDER_NO_FULL_READBACK_MODE,
     localRetainedRenderBuffers: resolvedLocalRetainedRenderBuffers,

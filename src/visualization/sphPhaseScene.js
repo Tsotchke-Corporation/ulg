@@ -10811,6 +10811,9 @@ export function createSphPhaseScene(container, {
   let pendingMlsMpmResidentSteps = null;
   let mlsMpmResidentExecutionGeneration = 0;
   let schroederPhaseVolumeAssignmentOverlayFeedback = null;
+  // Previous adopted merge/split summary for the orchestrator's
+  // oscillation guard (see particleStorageAdoptionOscillationGuard).
+  let schroederParticleStorageAdoptionGuardState = null;
   let sphThermalMaterialTable = null;
   let sphThermalClosureGraphBuffers = null;
   let sphThermalPhaseResponseTable = null;
@@ -13157,6 +13160,7 @@ export function createSphPhaseScene(container, {
     scene.userData.mlsMpmResidentSteps = null;
     scene.userData.schroederPhaseVolumeDiagnostics = null;
     scene.userData.schroederPhaseVolumeAssignmentOverlayFeedback = null;
+    schroederParticleStorageAdoptionGuardState = null;
     scene.userData.schroederRenderSource = null;
     scene.userData.schroederRenderProxyDescriptorPlan = null;
     scene.userData.schroederRenderProxyVisibleConsumer = null;
@@ -20648,6 +20652,7 @@ export function createSphPhaseScene(container, {
               enableCrossLevelCoupling: Boolean(schroederEnableCrossLevelCoupling),
               enableLawQueue: Boolean(schroederEnableLawQueue),
               enableLawNeighborCandidates: Boolean(schroederEnableLawNeighborCandidates),
+              particleStorageAdoptionOscillationGuard: schroederParticleStorageAdoptionGuardState,
               boxDimsM: dims,
               dt: effectiveDt,
               gravityMPerS2: effectiveGravity,
@@ -20736,6 +20741,22 @@ export function createSphPhaseScene(container, {
             finalStep = step;
             finalSchroederResult = schroederResult;
             {
+              // Oscillation guard bookkeeping: remember the adopted
+              // merge/split summary for the next step; while the guard is
+              // tripping (adoption skipped), keep it armed so repeated
+              // reversal proposals stay suppressed until the pattern breaks.
+              const stepAdoptionForGuard = step.schroederParticleStorageAdoption;
+              if (stepAdoptionForGuard?.adopted === true
+                && Math.round(Number(stepAdoptionForGuard.admittedParticleCountDelta) || 0) !== 0) {
+                schroederParticleStorageAdoptionGuardState = {
+                  admittedParticleCountDelta: stepAdoptionForGuard.admittedParticleCountDelta,
+                  authoritativeParticleCount: stepAdoptionForGuard.authoritativeParticleCount
+                };
+              } else if (!schroederResult?.particleStorageAdoptionOscillationDetected) {
+                schroederParticleStorageAdoptionGuardState = null;
+              }
+            }
+            {
               const provenanceEntry = uploadProvenance[uploadProvenance.length - 1];
               if (provenanceEntry) {
                 provenanceEntry.stepReadbackMode = step.readbackMode ?? null;
@@ -20744,6 +20765,26 @@ export function createSphPhaseScene(container, {
                   (step.thermalStep?.result || step.thermalStep)?.state?.length ?? null;
                 provenanceEntry.stepReactionStateLen =
                   (step.reactionStep?.result || step.reactionStep)?.state?.length ?? null;
+                const stepAdoption = step.schroederParticleStorageAdoption || null;
+                provenanceEntry.stepAdopted = stepAdoption?.adopted ?? null;
+                provenanceEntry.stepAdoptSourceCount = stepAdoption?.sourceParticleCount ?? null;
+                provenanceEntry.stepAdoptDelta = stepAdoption?.admittedParticleCountDelta ?? null;
+                provenanceEntry.stepAdoptAuthCount = stepAdoption?.authoritativeParticleCount ?? null;
+                const stepCountSummary =
+                  schroederResult?.particleStorageCountSummary?.countSummary
+                  || step.schroederParticleStorageMaterialization?.countSummary
+                  || null;
+                provenanceEntry.stepCountSummary = stepCountSummary
+                  ? {
+                    rows: stepCountSummary.materializationRowCount ?? null,
+                    admittedRows: stepCountSummary.admittedRowCount ?? null,
+                    written: stepCountSummary.writtenTargetSlotCount ?? null,
+                    appended: stepCountSummary.appendedTargetSlotCount ?? null,
+                    freed: stepCountSummary.freedSourceSlotCount ?? null,
+                    delta: stepCountSummary.admittedParticleCountDelta ?? null,
+                    blocked: stepCountSummary.blockedRowCount ?? null
+                  }
+                  : null;
               }
             }
             currentSphParticleState = cloneSphParticleStateForNext(currentSphParticleState, step);

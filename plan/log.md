@@ -37336,3 +37336,39 @@ to their coarser level assignment (phase-volume level update overlay) so
 they stop being candidates; (3) the anti-freeze e2e gate should add the
 sustained-heat config once fixed (it currently only covers the
 candidate-clearing case).
+
+## 2026-07-03 - Merge/split oscillation guard breaks the period-2 fixed point
+
+Diagnosis chain (per-step provenance with adoption + count-summary
+internals): the sustained-heat scene alternates admitted deltas +9/-9
+every step - the storage chain re-derives opposite topologies from the
+two alternating snapshots and each adoption discards the step's mechanics
+and thermal outputs (topology precedence), freezing physics at a
+period-2 orbit while sim time advances. Two changes:
+
+1. Migration-kernel hysteresis: only INTEGRITY refine-pressure reasons
+   (missing aggregate, residual violation) force a refine; the
+   sparse-surface bit stays in the telemetry mask but no longer converts
+   coarsen-worthy lone particles (i.e. every just-merged particle) into
+   splits. Lone coarsen rows are already ignored by the allocator.
+2. Orchestrator oscillation guard: the scene threads the previous adopted
+   merge/split summary (delta + authoritative count) into each step; when
+   the new candidate adoption EXACTLY reverses it, adoption is skipped for
+   that step (mechanics outputs chain; superseded buffers released behind
+   submitted work; particleStorageAdoptionOscillationDetected reported).
+   The guard stays armed while reversals repeat and clears when the
+   pattern breaks; scene resets clear it.
+
+Validation: the boiling scene now advances with evolving temperatures and
+physically credible buoyancy (heated steam rises; comY ~2.8 near the top
+of the box), adoption treadmill gone; unit suite 982/979/0; the
+coarsening/anti-freeze/flagship/sidecar battery passes 7/7 (legitimate
+first-time merges still adopt; the ironh=1.01 steam scene still coarsens
+35 -> 27 with mass conserved).
+
+Watch-items: the boiling scene's compact-summary center of mass looks
+inconsistent with the rendered layout (needs a dedicated look), and
+physics fps drops to ~24 there because the storage chain still re-runs
+its full propose/materialize work every step even when adoption is
+skipped - a chain-level idempotence skip (reuse prior proposal when
+aggregates unchanged) is a future perf slice.

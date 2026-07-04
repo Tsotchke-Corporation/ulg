@@ -11847,12 +11847,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     refine_pressure_reason_mask_u32 = refine_pressure_reason_mask_u32 | 4u;
   }
   let refine_pressure_reason_mask = f32(refine_pressure_reason_mask_u32);
+  // Hysteresis: only INTEGRITY reasons (missing aggregate, residual
+  // violation - bits 1|2) force a refine. The sparse-surface bit stays in
+  // the telemetry mask but must not convert a coarsen-worthy lone particle
+  // into a split: a just-merged particle is always alone in its cell, so
+  // sparse-surface-as-refine manufactures a merge/split oscillation
+  // (+N/-N admitted deltas alternating every step, freezing the physics at
+  // a fixed point). Lone coarsen-eligible particles simply keep their
+  // coarsen eligibility (the allocator ignores partnerless coarsen rows)
+  // and in-place level migration handles them via the phase-volume level
+  // update overlay.
+  let integrity_refine_mask_u32 = refine_pressure_reason_mask_u32 & 3u;
   let coarsen = phase_expanded
     && level_delta >= delta_threshold
     && aggregate_matched
     && residual_ok
-    && refine_pressure_reason_mask_u32 == 0u;
-  let refine = phase_expanded && refine_pressure_reason_mask_u32 != 0u;
+    && integrity_refine_mask_u32 == 0u;
+  let refine = phase_expanded && integrity_refine_mask_u32 != 0u;
 
   var status = 1.0;
   if (phase_expanded) {

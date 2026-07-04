@@ -37466,3 +37466,13 @@ path matches classic physics at matched sim times').
 Validation: unit suite 982/979/0; Schroeder battery 17 passed with one
 battery-load-only flake ('admitted merge compacts freed slots' passes in
 isolation, 4.9s); new parity gate passes (1.5m).
+
+Clamp retest with centroid in place: no oscillation (deltas settle to 0,
+sim advances), but a one-time split burst appears (35 -> 62): clamping
+the TARGET-AGGREGATE level while the migration stage still evaluates
+unclamped expectations makes 'missing aggregate' integrity refine
+pressure fire spuriously. The clamp needs a consistency pass - target
+aggregate, migration, and level update must all evaluate the SAME clamped
+target level - queued as its own slice. Reverted again; the tree keeps
+the centroid + guard + hysteresis stack, which already holds counts
+stable (27/28) in the sustained-heat scene.

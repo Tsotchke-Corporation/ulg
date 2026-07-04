@@ -14209,3 +14209,35 @@ test('SPH phase SS single-level path matches classic physics at matched sim time
     expect(Math.abs(ss[i].maxT - classic[i].maxT)).toBeLessThan(25);
   }
 });
+
+test('SPH phase live merged scene conserves total mass across schedules', async ({ page }) => {
+  test.setTimeout(240_000);
+  // Conservation pin for the live split/merge chain: total summarized mass
+  // must stay constant across scheduled refreshes in a coarsening scene.
+  // (A migration-window experiment produced 35.6 -> 91.4 kg growth; this
+  // gate makes any such regression fail loudly.)
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=350&wymin=700&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&dropn=1&basen=3&boxx=4&boxy=4&boxz=4&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=64&schroederParticleStorageCapacityMargin=64');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(() => {
+    const execution = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps;
+    return execution?.finalStep?.diagnostics?.compactGpuSummaryAvailable === true
+      && Number(execution?.nextSphParticleState?.time) > 0.02;
+  }, null, { timeout: 120_000 });
+  const sample = () => page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const diagnostics = overlay.__mlsMpmResidentSteps?.finalStep?.diagnostics || null;
+    return {
+      simTime: overlay.__mlsMpmResidentSteps?.nextSphParticleState?.time ?? null,
+      massKg: diagnostics?.nextMassKg ?? null
+    };
+  });
+  const first = await sample();
+  await page.waitForTimeout(15_000);
+  const second = await sample();
+  expect(first.massKg).toBeGreaterThan(0);
+  expect(second.simTime).toBeGreaterThan(first.simTime);
+  expect(Math.abs(second.massKg - first.massKg)).toBeLessThan(1e-3 * first.massKg);
+});

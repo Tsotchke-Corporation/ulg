@@ -37633,3 +37633,39 @@ dt (no CFL/dt URL knob exists to probe parameter sensitivity),
 pressure-interface force feedback, APIC affine amplification in
 P2G/G2P, boundary restitution. A dt-halving override is the first
 discriminator to build.
+
+## 2026-07-04 - Settling instability characterized: exponential energy
+   growth from near-rest, dt-sensitive; diagnostic URL knobs added
+
+Added URL knobs to the demo mount for parameter discrimination: `cfl`
+(gridCflFactor), `cflSafety`, and `sdt` (carrier dt override,
+options.dt). Findings on the water-on-water null scene (293K/293K,
+mech=mlsmpm residentAuto=1):
+
+- cfl=0.3: no effect on the instability (gridCflFactor is only a clamp
+  input; carrier dt stays 5e-4 - confirmed via
+  mlsMpmGpuParticleState.mechanicsDtS).
+- sdt=2.5e-4 (halved dt): the splash now settles properly (max speed
+  ~0.3 m/s by t=2s, surface quiet at 0.84m) - and then the system
+  EXPONENTIALLY re-grows from near-rest: 0.5 m/s (t=3.6) -> 1.1 (t=4.4)
+  -> 2.1 (t=5.9) -> 5.4 (t=6.8), doubling roughly every second of sim
+  time. Growth from a settled hydrostatic state means positive feedback
+  in the loop, not residual splash energy.
+
+Note the entanglement: cflMaxSoundSpeedMPerS = cflSafety * mechLength /
+carrierDt (sphPhaseDemo ~3650) - halving dt also doubles the EOS
+sound-speed clamp, so the improved early settling may come from stiffer
+(more realistic) EOS rather than the smaller step per se.
+
+Next slice (kernel-level): find the feedback term. Suspects, in order:
+(1) hydrostatic equilibrium error at the grid (pressure gradient vs
+gravity mismatch ringing, under-damped at dt=5e-4, anti-damped
+somewhere); (2) APIC affine (C-matrix) transfer amplification at the
+free surface; (3) one of the liquid dissipation terms
+(mlsMpmArtificialViscosityAlpha 0.04, liquidVelocityDiffusionAlpha 0.1,
+liquidWallDampingAlpha 0.2) with a sign/stability defect at low speeds;
+(4) EOS clamp interaction. Probe plan: sdt=2.5e-4 scene, toggle the
+dissipation terms one at a time via new options, watch the doubling
+time; then inspect the grid-update WGSL gravity/pressure integration.
+The two fixme gates from the previous entry remain the acceptance
+criteria.

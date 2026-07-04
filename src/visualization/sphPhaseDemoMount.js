@@ -2059,6 +2059,18 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('reactionParticleBinMetadataReadback'),
     false
   );
+  const initialGridCflFactor = (() => {
+    const value = Number(initialHash.get('cfl') ?? initialQuery.get('cfl'));
+    return Number.isFinite(value) && value > 0 && value <= 2 ? value : null;
+  })();
+  const initialCflSafety = (() => {
+    const value = Number(initialHash.get('cflSafety') ?? initialQuery.get('cflSafety'));
+    return Number.isFinite(value) && value > 0 && value <= 2 ? value : null;
+  })();
+  const initialSimDtS = (() => {
+    const value = Number(initialHash.get('sdt') ?? initialQuery.get('sdt'));
+    return Number.isFinite(value) && value > 0 && value <= 0.01 ? value : null;
+  })();
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -2799,7 +2811,10 @@ export async function mountSphPhaseDemoOverlay({
       baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT,
       mechanics: mechanicsModeFromControls(),
       physicalLawGroups: physicalLawGroupsFromControls(),
-      allowReducedProductProperties: true
+      allowReducedProductProperties: true,
+      ...(initialGridCflFactor != null ? { gridCflFactor: initialGridCflFactor } : {}),
+      ...(initialCflSafety != null ? { cflSafety: initialCflSafety } : {}),
+      ...(initialSimDtS != null ? { dt: initialSimDtS } : {})
     };
   }
 

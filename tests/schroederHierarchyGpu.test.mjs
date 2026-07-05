@@ -7841,6 +7841,20 @@ test('Schroeder same-level mechanics forwards admitted particle-storage material
       rowCount: 3,
       requiredParticleCapacity: 8
     }),
+    particleStorageCountSummary: {
+      schema: 'peercompute.ulg.schroeder-particle-storage-count-summary-execution.v0',
+      status: 'schroeder-particle-storage-count-summary-submitted',
+      admittedParticleCountDelta: 1,
+      countSummary: {
+        materializationRowCount: 3,
+        admittedRowCount: 3,
+        writtenTargetSlotCount: 3,
+        appendedTargetSlotCount: 1,
+        freedSourceSlotCount: 0,
+        admittedParticleCountDelta: 1,
+        blockedRowCount: 0
+      }
+    },
     mergeEpoch: 16,
     residentStepRunner: async (options) => {
       calls.push(options);
@@ -7919,9 +7933,9 @@ test('Schroeder same-level mechanics forwards admitted particle-storage material
     ULG_SCHROEDER_PARTICLE_STORAGE_MATERIALIZATION_EXECUTION_SCHEMA
   );
   assert.equal(calls[0].schroederPhaseVolumeLevelUpdate, null);
-  // 22 SS prepass dispatches plus the default-on particle-storage count
-  // summary reduction over the admitted materialization rows.
-  assert.equal(device.dispatches.length, 23);
+  // 22 SS prepass dispatches; the count summary is caller-injected here so
+  // the default-on summary reduction dispatch does not run.
+  assert.equal(device.dispatches.length, 22);
   assert.equal(
     device.createdBuffers.some((buffer) => String(buffer.label).includes('materialization-readback')),
     false
@@ -8586,9 +8600,9 @@ test('Schroeder same-level mechanics skips compaction when no slots were freed',
     particleStorageCountSummaryRunner: async () => ({
       status: 'schroeder-particle-storage-count-summary-submitted',
       countPolicy: 'append-only-freed-slots-await-compaction',
-      admittedParticleCountDelta: 0,
-      authoritativeParticleCount: 3,
-      countSummary: { admittedRowCount: 3, appendedTargetSlotCount: 0, freedSourceSlotCount: 0 }
+      admittedParticleCountDelta: 1,
+      authoritativeParticleCount: 4,
+      countSummary: { admittedRowCount: 3, appendedTargetSlotCount: 1, freedSourceSlotCount: 0 }
     }),
     particleStorageCompactionRunner: async (options) => {
       compactionCalls.push(options);
@@ -8599,11 +8613,56 @@ test('Schroeder same-level mechanics skips compaction when no slots were freed',
 
   assert.equal(compactionCalls.length, 0);
   assert.equal(result.particleStorageCompaction, null);
-  assert.equal(injectedMaterialization.admittedParticleCountDelta, 0);
+  assert.equal(injectedMaterialization.admittedParticleCountDelta, 1);
   assert.equal(
     residentCalls[0].schroederParticleStorageMaterialization,
     injectedMaterialization
   );
+});
+
+test('Schroeder same-level mechanics skips adoption for pure-copy materialization epochs', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const injectedMaterialization = {
+    schema: 'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    particleStorageMaterializationAdmissionApproved: true,
+    materializationBuffer: { label: 'retained-materialization-rows' },
+    particleStateBuffer: { label: 'materialized-state' },
+    particleThermoBuffer: { label: 'materialized-thermo' },
+    particleMechanicsBuffer: { label: 'materialized-mechanics' },
+    assignmentRowCount: 3,
+    materializationStrideFloats: 32,
+    sourceParticleCount: 3,
+    outputParticleCapacity: 6,
+    retainedParticleBuffers: true
+  };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    particleStorageMaterialization: injectedMaterialization,
+    particleStorageCountSummaryRunner: async () => ({
+      status: 'schroeder-particle-storage-count-summary-submitted',
+      countPolicy: 'append-only-freed-slots-await-compaction',
+      admittedParticleCountDelta: 0,
+      authoritativeParticleCount: 3,
+      countSummary: { admittedRowCount: 3, appendedTargetSlotCount: 0, freedSourceSlotCount: 0 }
+    }),
+    residentStepRunner: async (options) => {
+      residentCalls.push(options);
+      return { status: 'resident-step-stubbed' };
+    }
+  });
+
+  // A zero-delta epoch with nothing appended and nothing freed rebuilds the
+  // identical particle set from step-input state; adopting it would supersede
+  // the step's mechanics/thermal outputs every tick and freeze the sim.
+  assert.equal(result.particleStorageAdoptionNoTopologyChange, true);
+  assert.equal(result.particleStorageAdoptionSkipped, true);
+  assert.equal(residentCalls[0].schroederParticleStorageMaterialization, null);
 });
 
 test('Schroeder same-level mechanics runs the two-level step in observation mode when enabled', async () => {

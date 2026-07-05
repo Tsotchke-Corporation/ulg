@@ -12652,18 +12652,24 @@ fn ss_psm_source_represented_volume(source_index: u32, mechanics_stride: u32) ->
 // group is recovered with the same exact same-cell scan the allocator
 // used. Returns sum(m*x) in xyz and sum(m) in w; w <= 0 means no valid
 // multi-member group and the caller keeps the leader position.
-fn ss_psm_merge_centroid(assignment_offset: u32, state_stride: u32) -> vec4<f32> {
+struct SsPsmMergeGroup {
+  moment: vec3<f32>,
+  mass: f32,
+  momentum: vec3<f32>,
+  mass_temperature: f32,
+  member_count: u32,
+};
+
+fn ss_psm_merge_group(assignment_offset: u32, state_stride: u32, thermo_stride: u32) -> SsPsmMergeGroup {
+  var group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
   if (assignment_rows[assignment_offset + 8u] != 2.0) {
-    return vec4<f32>(0.0);
+    return group;
   }
   let my_cell = assignment_rows[assignment_offset + 20u];
   if (my_cell < 0.0) {
-    return vec4<f32>(0.0);
+    return group;
   }
   let stride = ss_psm_stride(params.assignment_stride, SCHROEDER_PSM_ASSIGNMENT_STRIDE);
-  var moment = vec3<f32>(0.0);
-  var mass = 0.0;
-  var member_count = 0u;
   for (var row = 0u; row < params.assignment_row_count; row = row + 1u) {
     let other_offset = row * stride;
     if (assignment_rows[other_offset + 8u] != 2.0) {
@@ -12677,15 +12683,19 @@ fn ss_psm_merge_centroid(assignment_offset: u32, state_stride: u32) -> vec4<f32>
       continue;
     }
     let member_state = source_sph_state[member_index * state_stride];
+    let member_velocity = source_sph_state[member_index * state_stride + 1u];
+    let member_temperature = source_sph_thermo[member_index * thermo_stride].z;
     let member_mass = max(member_state.w, 0.0);
-    moment = moment + member_state.xyz * member_mass;
-    mass = mass + member_mass;
-    member_count = member_count + 1u;
+    group.moment = group.moment + member_state.xyz * member_mass;
+    group.momentum = group.momentum + member_velocity.xyz * member_mass;
+    group.mass_temperature = group.mass_temperature + max(member_temperature, 0.0) * member_mass;
+    group.mass = group.mass + member_mass;
+    group.member_count = group.member_count + 1u;
   }
-  if (member_count < 2u || mass <= 0.0) {
-    return vec4<f32>(0.0);
+  if (group.member_count < 2u || group.mass <= 0.0) {
+    return SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
   }
-  return vec4<f32>(moment, mass);
+  return group;
 }
 
 fn ss_psm_copy_particle(
@@ -12718,6 +12728,17 @@ fn ss_psm_copy_particle(
   let divisor = f32(max(child_count, 1u));
   var child_mass = ss_psm_target_mass(assignment_offset, state0.w);
   var child_position = state0.xyz;
+  // Live merge-group scan: mass, first moment, momentum, and thermal energy
+  // summed over the group members from the SOURCE buffers the materializer
+  // itself copies from. This conserves all four invariants even when the
+  // aggregate stamps (assignment cols 19/22/24-27) read zero because the
+  // aggregate stage bound a superseded buffer (observed live: merges lost
+  // exactly the non-leader members' mass).
+  var merge_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+  if (!divide_mass_split) {
+    merge_group = ss_psm_merge_group(assignment_offset, state_stride, thermo_stride);
+  }
+  let merge_group_valid = merge_group.member_count >= 2u && merge_group.mass > 0.0;
   if (divide_mass_split) {
     child_mass = max(state0.w, 0.0) / divisor;
     let child_volume = max(assignment_rows[assignment_offset + 22u], 0.0) / divisor;
@@ -12729,14 +12750,9 @@ fn ss_psm_copy_particle(
     );
     child_position = state0.xyz + 0.25 * child_scale * corner;
   }
-  if (!divide_mass_split) {
-    // Merged child position: mass-weighted centroid of the merge group
-    // (first-moment conservation). Falls back to the leader position when
-    // no valid multi-member group exists (plain copies, lone rows).
-    let centroid = ss_psm_merge_centroid(assignment_offset, state_stride);
-    if (centroid.w > 0.0) {
-      child_position = centroid.xyz / centroid.w;
-    }
+  if (merge_group_valid) {
+    child_mass = merge_group.mass;
+    child_position = merge_group.moment / merge_group.mass;
   }
   out_sph_state[target_state_base] = vec4<f32>(
     child_position.x,
@@ -12757,7 +12773,9 @@ fn ss_psm_copy_particle(
   let momentum_provided = child_mass > 0.0
     && !divide_mass_split
     && (target_momentum.x != 0.0 || target_momentum.y != 0.0 || target_momentum.z != 0.0);
-  if (momentum_provided) {
+  if (merge_group_valid) {
+    out_sph_state[target_state_base + 1u] = vec4<f32>(merge_group.momentum / merge_group.mass, state1.w);
+  } else if (momentum_provided) {
     out_sph_state[target_state_base + 1u] = vec4<f32>(target_momentum / child_mass, state1.w);
   } else {
     out_sph_state[target_state_base + 1u] = state1;
@@ -12773,7 +12791,9 @@ fn ss_psm_copy_particle(
   // source temperature, which conserves energy by construction.
   let cell_mass_temperature = assignment_rows[assignment_offset + 27u];
   var child_temperature = thermo0.z;
-  if (!divide_mass_split && cell_mass_temperature > 0.0 && child_mass > 0.0) {
+  if (merge_group_valid) {
+    child_temperature = merge_group.mass_temperature / merge_group.mass;
+  } else if (!divide_mass_split && cell_mass_temperature > 0.0 && child_mass > 0.0) {
     child_temperature = cell_mass_temperature / child_mass;
   }
   // Represented entity count scales with the mass ratio: uniform
@@ -12803,6 +12823,12 @@ fn ss_psm_copy_particle(
   var target_volume = assignment_rows[assignment_offset + 22u];
   if (divide_mass_split) {
     target_volume = target_volume / divisor;
+  }
+  // Merged child rest-volume fallback: when the aggregate volume stamp is
+  // absent, size the child from its conserved mass at the source rest
+  // density so the EOS does not read an N-times over-dense particle.
+  if (merge_group_valid && !(target_volume > 0.0) && thermo0.w > 0.0) {
+    target_volume = merge_group.mass / thermo0.w;
   }
   if (target_volume > 0.0 && row4.w > 0.0) {
     row4 = vec4<f32>(row4.x, row4.y, max(target_volume / row4.w, 1.0e-9), row4.w);

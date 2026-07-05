@@ -12363,7 +12363,7 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       computeBufferBinding(8, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-materialization.v2',
+      cacheKey: 'ulg-schroeder-particle-storage-materialization.v3',
       label: 'ulg-schroeder-particle-storage-materialization',
       code: schroederParticleStorageMaterializationWgsl,
       entryPoint: 'main',
@@ -13898,10 +13898,28 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       Number.NaN
     ))
   );
-  const resolvedParticleStorageAdoptionSource = particleStorageAdoptionOscillationDetected
+  // No-topology-change guard: a materialization epoch whose admitted rows are
+  // pure copies (zero count delta, nothing appended, nothing freed) rebuilds
+  // the identical particle set from the STEP-INPUT state. Adopting it would
+  // supersede the step's mechanics/thermal/reaction outputs every tick and
+  // freeze the simulation (observed live: boiling scene pinned at 293K with
+  // zero motion under steady assignment pressure). Real topology changes
+  // always append or free slots, so those still adopt.
+  const candidateCountSummaryRows = resolvedParticleStorageCountSummary?.countSummary || null;
+  const particleStorageAdoptionNoTopologyChange = Boolean(
+    candidateParticleStorageAdoptionSource
+    && !particleStorageAdoptionOscillationDetected
+    && candidateAdoptionDelta === 0
+    && candidateCountSummaryRows
+    && !(candidateCountSummaryRows.freedSourceSlotCount > 0)
+    && !(candidateCountSummaryRows.appendedTargetSlotCount > 0)
+  );
+  const particleStorageAdoptionSkipped =
+    particleStorageAdoptionOscillationDetected || particleStorageAdoptionNoTopologyChange;
+  const resolvedParticleStorageAdoptionSource = particleStorageAdoptionSkipped
     ? null
     : candidateParticleStorageAdoptionSource;
-  if (particleStorageAdoptionOscillationDetected) {
+  if (particleStorageAdoptionSkipped) {
     // The superseded (never-adopted) materialization/compaction buffers are
     // released behind the already-submitted GPU work.
     const supersededSource = candidateParticleStorageAdoptionSource;
@@ -14307,6 +14325,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     backend: 'webgpu',
     readbackMode,
     particleStorageAdoptionOscillationDetected,
+    particleStorageAdoptionNoTopologyChange,
+    particleStorageAdoptionSkipped,
     particleStorageAdoptionOscillationGuard: previousAdoptionGuard
       ? {
         admittedParticleCountDelta: Math.round(finiteNumber(previousAdoptionGuard.admittedParticleCountDelta, 0)),

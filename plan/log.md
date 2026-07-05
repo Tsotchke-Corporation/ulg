@@ -38084,3 +38084,48 @@ behind a per-schedule conservation battery (mass, momentum, first
 moment, count). The boiling scene should become that slice's proof
 scene (it generates genuine sustained phase-volume pressure, unlike the
 synthetic coarsening configs).
+
+## 2026-07-04 - Steady-state slice, part 1: no-op adoption guard (fixes
+   live freeze) + group-conserving merge materializer; live 24 kg loss
+   still unattributed
+
+Live repro established for the steady-state regime: boiling scene with
+the storage chain enabled (flagship params + schroederMaxLevel=1 so
+steam targets stay in-window).
+
+LANDED:
+1. No-topology-change adoption guard (schroederHierarchyGpu): a
+   materialization epoch with zero count delta, nothing appended and
+   nothing freed is a pure-copy rebuild from STEP-INPUT state; adopting
+   it superseded the step's mechanics/thermal/reaction outputs every
+   tick and froze the sim (live: pinned at 293K, zero motion, adoption
+   true every step). Such epochs now skip adoption (superseded buffers
+   released behind submitted work) and report
+   particleStorageAdoptionNoTopologyChange/...Skipped. Live result:
+   heating restored (373.15K plateau), boiling proceeds, real topology
+   still adopts. Unit fixtures updated to inject real-topology count
+   summaries; new pure-copy skip test. 131/131 orchestrator tests.
+2. Group-conserving merge materializer (WGSL materialization v3): the
+   merge-centroid scan extended to a full conservation group (mass,
+   first moment, momentum, mass*T summed over members from the SOURCE
+   buffers the materializer copies from). Child mass/position/velocity/
+   temperature now come from the live group when >= 2 members share the
+   stamped cell id, overriding aggregate stamps that read zero when the
+   aggregate stage binds superseded buffers; rest-volume fallback sizes
+   the child from conserved mass at source rest density. Aggregate
+   stamps remain the fallback for lone rows.
+
+OPEN (next window): the live repro still loses exactly 3 particles'
+mass (1064 -> 1040 kg, count 133 -> 130) during the initial settle
+(t~0.7-1.5s window) AFTER the group fix - so either those events are
+NOT slot-action-2 merges (a cull/blocked-row path freeing slots without
+a conserving child), or their cell ids (assignment col 20) are
+unstamped (-1) so the group scan bails to leader mass. Diagnosis plan:
+probe-merge-body-style isolation - drive the materializer with (a)
+stamped and (b) unstamped merge rows under full readback to verify
+group-scan engagement, then decode one live materialization epoch's
+rows (slot actions + col 20 + cols 16-18 source/target mass) at the
+merge moment. The countSummary already carries per-row source/target
+mass and residuals; the scene should surface stepCountSummary into the
+compact schroeder summaries on the storage-enabled path (currently only
+visible via uploadProvenance).

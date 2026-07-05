@@ -1977,7 +1977,7 @@ export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 8_000;
 export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 14;
 export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
-export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 32 * 1024 * 1024;
+export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 128 * 1024 * 1024;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
 const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT = Object.freeze({});
 const SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS = Object.freeze({
@@ -5902,7 +5902,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let ndoth = clamp(dot(normal, half_dir), 0.0, 1.0);
   let roughness = clamp(optical.roughness, 0.04, 1.0);
   let metalness = clamp(optical.metalness, 0.0, 1.0);
-  let diffuse = base_color * (1.0 - metalness) * (0.24 + 0.76 * ndotl);
+  let diffuse = base_color * (1.0 - metalness) * (0.34 + 0.66 * ndotl);
   let ior = max(optical.ior, 1.0);
   let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
   let fresnel = dielectric_f0 + (1.0 - dielectric_f0) * pow(1.0 - clamp(dot(normal, view_dir), 0.0, 1.0), 5.0);
@@ -5911,7 +5911,8 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let specular = (f0 + vec3<f32>(fresnel * (1.0 - metalness))) * pow(ndoth, specular_power) * (0.35 + 0.65 * ndotl);
   let scatter_haze = clamp(log2(1.0 + optical.scattering_coefficient_per_m) * 0.018, 0.0, 0.35);
   let rim = pow(1.0 - clamp(dot(normal, view_dir), 0.0, 1.0), 3.0) * (0.08 + scatter_haze) * (1.0 - roughness);
-  let lit = diffuse + specular + base_color * rim;
+  let sky_fill = base_color * (1.0 - metalness) * (0.05 + 0.11 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+  let lit = diffuse + sky_fill + specular + base_color * rim;
   let is_vapor = round(in.phase_id) == 3.0;
   let transmissive_surface_alpha = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
   let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
@@ -5919,7 +5920,10 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let transmissive_alpha = clamp(max(0.08, 1.0 - optical.transmission * 0.72 + optical_alpha * 0.5), 0.08, 1.0);
   let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), vapor_alpha, is_vapor);
   let alpha = select(base_alpha, transmissive_alpha, transmissive_surface_alpha);
-  return vec4<f32>(lit * alpha, alpha);
+  // The canvas format is non-sRGB (getPreferredCanvasFormat), so linear-light
+  // shading must be display-encoded here or everything reads ~2x too dark.
+  let display_lit = pow(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
+  return vec4<f32>(display_lit * alpha, alpha);
 }
 
 @fragment
@@ -22110,9 +22114,14 @@ export function createSphPhaseScene(container, {
   }
 
   function createRenderFieldSurfaceTableForBatches(batches, {
-    maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+    maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+    minResolution = null
   } = {}) {
     const resolvedMaxResolution = Math.max(2, Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION));
+    // GPU-resident marching cubes can afford far denser fields than the
+    // legacy CPU-tuned SURFACE_CONFIG resolutions; callers with a memory
+    // budget pass it as a floor so the field actually uses the budget.
+    const resolvedMinResolution = Math.max(0, Math.round(Number(minResolution) || 0));
     const descriptors = batches.map((batch) => {
       const baseConfig = SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default;
       const config = adaptiveCpuSurfaceConfig(baseConfig, batch.count);
@@ -22120,9 +22129,12 @@ export function createSphPhaseScene(container, {
         batch.count <= SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES
         || batch.source === 'merged-same-material-phase-render-surface'
       );
-      const renderFieldResolution = needsAliasSafeRenderField
-        ? Math.max(baseConfig.resolution, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN)
-        : baseConfig.resolution;
+      const renderFieldResolution = Math.max(
+        needsAliasSafeRenderField
+          ? Math.max(baseConfig.resolution, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN)
+          : baseConfig.resolution,
+        resolvedMinResolution
+      );
       const radiusM = surfaceRadiusMForBatch(batch);
       const radiusNorm = normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM);
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, currentMaterialProperties);
@@ -25921,7 +25933,11 @@ export function createSphPhaseScene(container, {
         : null;
       const residentBudgetedSurfaceTable = useNativeMarchingCubesSurfaceTableBudget
         ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
-          maxResolution: nativeMarchingCubesSurfaceTableMaxResolution
+          maxResolution: nativeMarchingCubesSurfaceTableMaxResolution,
+          // Use the whole vertex-rows budget: the budgeted resolution is a
+          // memory bound, and the CPU-era base resolutions (16-18) are far
+          // below what the GPU path renders smoothly.
+          minResolution: nativeMarchingCubesSurfaceTableMaxResolution
         })
         : residentSurfaceTable;
       const nativeMarchingCubesSurfaceTableBudgetStatus = useNativeMarchingCubesSurfaceTableBudget

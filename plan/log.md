@@ -38621,3 +38621,36 @@ marching-cubes surfaces render. Units 981/0.
 
 Open (user feedback, tasks #5/#6): native surface is too dark and too
 chunky - lighting/optical table and MC resolution/normals next.
+
+## 2026-07-05 - Native surface fidelity pass 1: gamma, lighting, budgeted
+   resolution (user: "too dark ... looks really chunky")
+
+Darkness root cause: the surface-draw WGSL shades in linear light and
+wrote it raw to a non-sRGB canvas (getPreferredCanvasFormat) - the
+whole surface read ~2x too dark perceptually. resident_surface_color
+now display-encodes (pow 1/2.2) before premultiplying; the OIT
+composite path inherits it (it averages already-encoded colors).
+Supporting tweaks: diffuse wrap 0.24->0.34, small hemispheric sky-fill
+term.
+
+Chunkiness: the render-field resolution came from CPU-era
+SURFACE_CONFIG (h2o: 18 -> 22^3 padded cells, 0.18m facets on a 4m
+box). The native path already computed a vertex-rows byte-budget
+resolution CAP but base 18 always bound first. Now
+createRenderFieldSurfaceTableForBatches takes minResolution and the
+native call site floors to the budgeted resolution (memory bound
+unchanged in shape), with the default budget raised 32MB -> 128MB
+(resolution 52 single-surface, ~40 at two surfaces). MC vertex
+placement was already edge-interpolated (sv_interpolate); normals
+remain flat per-triangle - smooth field-gradient normals are the
+remaining chunkiness lever (three-webgpu-marching-cubes declares
+compact-normal-rows but produced:false).
+
+Visual A/B (same drop scene, 20s): brighter translucent blue-grey
+water, facets ~half size, physics fps 475 (was 396-424) - no perf
+regression. Remaining artifacts: sparse dark-red speckle pixels =
+the WGSL blocked-optical-record debug color (0.55,0.05,0.18) - some
+fragments miss the optical table; investigating next under task #5.
+
+Unit expectation updated: default budgeted resolution 33 -> 52
+(tests/sphPhaseRenderer.test.mjs). Units 980/0 + 93/0.

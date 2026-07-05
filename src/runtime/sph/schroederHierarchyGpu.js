@@ -13848,9 +13848,20 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   // Freed source slots are zero-mass holes; compaction rebuilds a dense live
   // range so merges become real count reductions. Only runs when holes
   // exist and the materialized buffers are retained.
+  // Torn-group detection must precede compaction: an epoch that freed source
+  // slots while writing NO targets is a merge group split apart by admission
+  // (participants admitted, their child-writing leader blocked). Its
+  // materialized buffers are discarded wholesale below, so compacting them
+  // would be wasted work on state that must never become authoritative.
+  const tornFreeOnlyEpochDetected = Boolean(
+    resolvedParticleStorageCountSummary?.countSummary
+    && resolvedParticleStorageCountSummary.countSummary.freedSourceSlotCount > 0
+    && !(resolvedParticleStorageCountSummary.countSummary.writtenTargetSlotCount > 0)
+  );
   const resolvedParticleStorageCompaction = particleStorageCompaction || (
     !resolvedParticleStorageCountSummary
     || !enableParticleStorageCompaction
+    || tornFreeOnlyEpochDetected
     || !(resolvedParticleStorageCountSummary.countSummary?.freedSourceSlotCount > 0)
     || !resolvedParticleStorageMaterialization?.particleStateBuffer
       ? null
@@ -13914,8 +13925,21 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && !(candidateCountSummaryRows.freedSourceSlotCount > 0)
     && !(candidateCountSummaryRows.appendedTargetSlotCount > 0)
   );
+  // Torn-group guard: an epoch that freed source slots while writing NO
+  // targets is a merge group split apart by admission (participants admitted,
+  // their child-writing leader blocked - observed live as free-only epochs
+  // losing exactly the freed members' mass). Adopting it destroys mass, so
+  // the epoch is discarded and the merge retries next epoch; group-atomic
+  // admission sizing is the upstream fix.
+  const particleStorageAdoptionTornGroupDetected = Boolean(
+    candidateParticleStorageAdoptionSource
+    && !particleStorageAdoptionOscillationDetected
+    && tornFreeOnlyEpochDetected
+  );
   const particleStorageAdoptionSkipped =
-    particleStorageAdoptionOscillationDetected || particleStorageAdoptionNoTopologyChange;
+    particleStorageAdoptionOscillationDetected
+    || particleStorageAdoptionNoTopologyChange
+    || particleStorageAdoptionTornGroupDetected;
   const resolvedParticleStorageAdoptionSource = particleStorageAdoptionSkipped
     ? null
     : candidateParticleStorageAdoptionSource;
@@ -14326,6 +14350,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     readbackMode,
     particleStorageAdoptionOscillationDetected,
     particleStorageAdoptionNoTopologyChange,
+    particleStorageAdoptionTornGroupDetected,
     particleStorageAdoptionSkipped,
     particleStorageAdoptionOscillationGuard: previousAdoptionGuard
       ? {

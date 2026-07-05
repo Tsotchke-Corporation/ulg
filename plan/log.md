@@ -38257,3 +38257,31 @@ admission case proving frees are withheld.
 Also observed en route: nextParticleUploads state buffers read as
 zero-initialized when copied mid-flight from a probe (fresh ping-pong
 targets) - probe-side note, not a defect.
+
+## 2026-07-04 - Steady-state part 3: torn-group guard lands - live
+   boiling churn now conserves mass exactly
+
+Guard implemented in the orchestrator: an epoch whose count summary
+shows freedSourceSlotCount > 0 with writtenTargetSlotCount == 0 is a
+torn merge group (admission split participants from their child-writing
+leader). Torn epochs now skip BOTH compaction and adoption (the
+materialized buffers are discarded; the merge retries when admission
+covers the whole group). New unit test for the torn skip; compaction
+fixture updated to carry writtenTargetSlotCount; 981/0.
+
+Live proof on the boiling steady scene (storage chain enabled,
+maxLevel=1): the churn window now adopts REAL conserving topology -
+count 133 -> 122 with TOTAL MASS EXACTLY 1064 kg (previously 1064 ->
+1040, losing exactly the freed members). Sustained coarsening pressure
+with per-epoch conservation is the steady-state slice's core promise,
+now holding on the live proof scene.
+
+Remaining in the slice: (a) acceptance gate - e2e on the boiling
+steady scene asserting mass constancy across the churn window plus a
+count change (proving churn happened); (b) the upstream group-atomic
+admission sizing so torn epochs stop being produced at all (currently
+they retry until admission happens to cover the group - safe but
+wasteful); (c) then revisit the one-level-per-epoch clamp + migration
+window cap (the original 2026-07-03 reverts) on top of conserving
+foundations, unlocking SS Slice 5 phase-volume migration for the steam
+1700x case.

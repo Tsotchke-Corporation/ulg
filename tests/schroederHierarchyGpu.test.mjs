@@ -8499,6 +8499,7 @@ test('Schroeder same-level mechanics runs count summary and compaction over mate
       authoritativeParticleCount: 4,
       countSummary: {
         admittedRowCount: 3,
+        writtenTargetSlotCount: 1,
         appendedTargetSlotCount: 1,
         freedSourceSlotCount: 2,
         admittedParticleCountDelta: 1
@@ -8661,6 +8662,51 @@ test('Schroeder same-level mechanics skips adoption for pure-copy materializatio
   // identical particle set from step-input state; adopting it would supersede
   // the step's mechanics/thermal outputs every tick and freeze the sim.
   assert.equal(result.particleStorageAdoptionNoTopologyChange, true);
+  assert.equal(result.particleStorageAdoptionSkipped, true);
+  assert.equal(residentCalls[0].schroederParticleStorageMaterialization, null);
+});
+
+test('Schroeder same-level mechanics skips adoption for torn free-only epochs', async () => {
+  const device = createFakeWebGpuDevice();
+  const buffers = manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 });
+  const residentCalls = [];
+  const injectedMaterialization = {
+    schema: 'peercompute.ulg.schroeder-particle-storage-materialization-execution.v0',
+    status: 'schroeder-particle-storage-materialization-submitted',
+    particleStorageMaterializationAdmissionApproved: true,
+    materializationBuffer: { label: 'retained-materialization-rows' },
+    particleStateBuffer: { label: 'materialized-state' },
+    particleThermoBuffer: { label: 'materialized-thermo' },
+    particleMechanicsBuffer: { label: 'materialized-mechanics' },
+    assignmentRowCount: 3,
+    materializationStrideFloats: 32,
+    sourceParticleCount: 3,
+    outputParticleCapacity: 6,
+    retainedParticleBuffers: true
+  };
+  const result = await runSchroederSameLevelMechanicsWebGpu({
+    device,
+    ...buffers,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    particleStorageMaterialization: injectedMaterialization,
+    particleStorageCountSummaryRunner: async () => ({
+      status: 'schroeder-particle-storage-count-summary-submitted',
+      countPolicy: 'append-only-freed-slots-await-compaction',
+      admittedParticleCountDelta: 0,
+      authoritativeParticleCount: 3,
+      countSummary: { admittedRowCount: 3, writtenTargetSlotCount: 0, appendedTargetSlotCount: 0, freedSourceSlotCount: 3 }
+    }),
+    residentStepRunner: async (options) => {
+      residentCalls.push(options);
+      return { status: 'resident-step-stubbed' };
+    }
+  });
+
+  // Frees with no written targets = a merge group split apart by admission
+  // (participants admitted, their child-writing leader blocked). Adopting it
+  // would delete the freed members' mass; the epoch is discarded instead.
+  assert.equal(result.particleStorageAdoptionTornGroupDetected, true);
   assert.equal(result.particleStorageAdoptionSkipped, true);
   assert.equal(residentCalls[0].schroederParticleStorageMaterialization, null);
 });

@@ -20457,6 +20457,8 @@ export function createSphPhaseScene(container, {
               result.particleStorageAdoptionSkipped === true,
             particleStorageAdoptionNoTopologyChange:
               result.particleStorageAdoptionNoTopologyChange === true,
+            particleStorageAdoptionTornGroupDetected:
+              result.particleStorageAdoptionTornGroupDetected === true,
             phaseVolumeDiagnosticSummaryStatus:
               result.phaseVolumeDiagnosticSummaryStatus ?? null,
             phaseVolumeDiagnosticSummaryConsumerStatus:

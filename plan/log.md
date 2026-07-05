@@ -37842,3 +37842,38 @@ deserves a check on the resident path.
 
 Next: bisect the live composition (thermal-only law group vs full),
 and decode render rows by height to localize where gas ids appear.
+
+## 2026-07-04 - Boiling slice refined: live path boils at a
+   reduced-pressure plateau (329K); vapor mass equilibrates ~800x high
+
+Bisection on the live boiling scene (600K floor): thermal law off ->
+zero gas (the flip is in the thermal path); reactions off / gas-pressure
+coupling off / cleared static-table+localStorage caches -> unchanged.
+Decoding the constants: gas mass 94.4 kg = exactly the 25 bottom-layer
+particles at phase fraction 0.5 (summary phaseMassKg is
+fraction-weighted), with T pinned at 329.3K - i.e. the live
+phase-response places the vaporization plateau at 329K (water boiling
+at ~15 kPa). The isolated thermal probe (fresh
+buildSphThermalPhaseResponseTable defaults) boils at 377K (~1 atm). So
+the live path IS pressure-aware (right direction for a sealed
+vacuum-headspace box) but the equilibrium vapor inventory is wildly
+wrong: flash evaporation into the ~5 m^3 headspace should throttle at
+vapor pressure (~2.3 kPa at 293K -> ~0.1 kg total vapor; at 329K
+~15 kPa -> ~0.6 kg), yet 94 kg sits at fraction 0.5 - roughly 150-800x
+too much - and the latent budget for that fraction (~214 MJ) exceeds
+the delivered wall heat by an order of magnitude.
+
+Next slice steps: (1) find where the live thermalPhaseResponseTable /
+graph upload gets its pressure input (scene rebuild with gas pressure
+summary?) and what pressure it assumed here (329K implies 15 kPa -
+from where, in an initially-vacuum box?); (2) check the plateau's
+latent WIDTH in the reduced-pressure response (constant-fraction 0.5
+pinning suggests particles enter the plateau and stall without paying
+latent energy - possibly the graph's segment width shrinks with
+pressure while u sits mid-segment); (3) design the vapor-inventory
+feedback: vapor mass must back-pressure the boiling point (Clausius-
+Clapeyron closure via Eshkol/Moonlab derivation) so the headspace
+equilibrates at the vapor-pressure curve; (4) acceptance gates: sealed
+pool at 293K flashes only ~0.1 kg vapor; 600K floor drives rolling boil
+with vapor inventory tracking the vapor-pressure curve and latent
+energy balanced within tolerance.

@@ -2375,8 +2375,20 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialQuery.get('surfaceDraw')
     ?? initialHash.get('surfaceDrawDiagnostic')
     ?? initialQuery.get('surfaceDrawDiagnostic');
+  // No-overlay policy: an unset or 'auto' surface-draw mode resolves to the
+  // native WebGPU surface consumer whenever WebGPU exists. The legacy CPU
+  // MarchingCubes overlay path and the particle diagnostics stay reachable
+  // only by explicit mode selection (URL or render-mode menu).
+  const surfaceDrawNativeAutoResolve = Boolean(globalThis?.navigator?.gpu);
+  const resolvedResidentSurfaceDrawDiagnosticMode = (() => {
+    const normalized = String(rawResidentSurfaceDrawDiagnosticMode ?? '').trim().toLowerCase();
+    if (surfaceDrawNativeAutoResolve && (normalized === '' || normalized === 'auto')) {
+      return 'native-webgpu-surface-consumer';
+    }
+    return rawResidentSurfaceDrawDiagnosticMode;
+  })();
   const nativeSurfaceDrawRequested =
-    String(rawResidentSurfaceDrawDiagnosticMode || '').trim().toLowerCase()
+    String(resolvedResidentSurfaceDrawDiagnosticMode || '').trim().toLowerCase()
     === 'native-webgpu-surface-consumer';
   const rawRendererBackend =
     initialHash.get('renderer')
@@ -2652,7 +2664,7 @@ export async function mountSphPhaseDemoOverlay({
     ? 'three-render-row-spheres'
     : 'three-render-row-points';
   let residentSurfaceDrawDiagnosticMode = normalizeResidentSurfaceDrawDiagnosticMode(
-    rawResidentSurfaceDrawDiagnosticMode,
+    resolvedResidentSurfaceDrawDiagnosticMode,
     residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode
   );
   // Explicit render-mode selections (URL surfaceDraw= or the render-mode
@@ -3826,6 +3838,21 @@ export async function mountSphPhaseDemoOverlay({
   } else {
     driver = createDriverFromControls();
   }
+  const initialSchroederRenderProxyOverlayEnabled = booleanUrlParam(
+    initialHash.get('schroederRenderProxy')
+      ?? initialQuery.get('schroederRenderProxy')
+      ?? initialHash.get('schroederRenderProxyOverlay')
+      ?? initialQuery.get('schroederRenderProxyOverlay'),
+    false
+  );
+
+  function applySchroederRenderProxyOverlayFlag(target) {
+    if (target?.scene?.userData) {
+      target.scene.userData.sphSchroederRenderProxyOverlayEnabled =
+        initialSchroederRenderProxyOverlayEnabled;
+    }
+    return target;
+  }
   let sceneBoxDimsM = driver?.demo.box.dimensionsM ?? boxDimensionsFromControls();
   let scene = createSphPhaseScene(sceneContainer, {
     boxDimsM: sceneBoxDimsM,
@@ -3846,6 +3873,7 @@ export async function mountSphPhaseDemoOverlay({
     materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
+  applySchroederRenderProxyOverlayFlag(scene);
   overlay.__sphScene = scene;
   overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
   overlay.__sphPeerComputeRenderOwnershipPolicy =
@@ -6955,6 +6983,7 @@ export async function mountSphPhaseDemoOverlay({
       materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
+    applySchroederRenderProxyOverlayFlag(scene);
     overlay.__sphScene = scene;
     overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
     overlay.__sphPeerComputeRenderOwnershipPolicy =

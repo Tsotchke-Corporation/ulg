@@ -38569,3 +38569,55 @@ three-webgpu-surface-buffers renders nothing; native consumer's frozen
 drop-domain surface) - fixing those now. The no-overlay row-source
 simplification stays as the architecture rule for the selection maze
 even though it did not cause this symptom.
+
+## 2026-07-05 - Fix: frozen "drop-domain surface" was the worker particle
+   canvas replaying a stale t=0 snapshot over the live native surface
+
+Root cause chain (probe-driven, three false layers peeled):
+1. The native consumer's marching-cubes pipeline was NEVER frozen -
+   extraction + extension translation re-ran every field pass (743/743
+   markers) and a live GPU readback of the bridge's drawIndirectRows
+   showed evolving actual vertex counts (1128 @ t=12.8s -> 1584 @
+   t=22.8s; the constant 159,720 in the summary is a conservative
+   upper bound under surface-draw-summary-not-read).
+2. The three scene graph contains ZERO meshes on this path - every
+   visible pixel is native-WebGPU drawn, so no retained THREE.Mesh.
+3. The frozen light-blue voxel blob was the WORKER-OFFSCREEN
+   presentation canvas: under GPU-resident continuation the resident
+   particle-state producer's content-hash source cache pins
+   cpuStateStale:true arrays (identical hash at t=14.7s and t=24.7s,
+   0 transfer bytes), so the worker re-presented the packed t=0
+   particle sprites forever, composited over the live surface -
+   exactly the banned overlay/double-painter architecture.
+
+Fix (sphPhaseScene.js):
+- isMainThreadResidentSurfaceDrawBridgeMode now includes
+  native-webgpu-surface-consumer (it paints the MAIN canvas).
+- New mainThreadSurfaceDrawDisplayOwnershipRequested = explicit
+  main-thread bridge OR native-consumer mode (covers the defaulted
+  auto->native resolution); drives the four display-ownership sites:
+  worker producer selection, retained-output presentation-only,
+  retained-stage-output short-circuit, and the worker draw suppression
+  (which also clears the worker canvas).
+- Readback plan: useWorkerOffscreenPresentation is masked by display
+  ownership - without this, the plan coerced a FULL physics readback
+  per visual refresh to feed the suppressed worker draw (physics fps
+  414 -> 240, and bridge reuse broke). With the mask: fps 424, bridge
+  reuse restored (updateCount 237->545), worker rows status
+  'worker-offscreen-render-rows-suppressed-explicit-main-thread-bridge'.
+- The g2p mechanics stage payload's retained-stage-output render
+  request returns null under main-thread display ownership (second
+  worker painter, same no-overlay rule).
+- Ownership decision published at
+  scene.userData.sphMainThreadSurfaceDrawDisplayOwnership.
+
+Also in this change (sphPhaseDemoMount.js): surfaceDraw auto/default
+resolves to native-webgpu-surface-consumer when navigator.gpu exists,
+and the Schroeder render proxy overlay is opt-in
+(schroederRenderProxy=1) instead of always-on.
+
+Visual proof: blob gone at sim t 2.7s/4.3s screenshots; only live
+marching-cubes surfaces render. Units 981/0.
+
+Open (user feedback, tasks #5/#6): native surface is too dark and too
+chunky - lighting/optical table and MC resolution/normals next.

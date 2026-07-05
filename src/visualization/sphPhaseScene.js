@@ -4017,7 +4017,8 @@ function isMainThreadResidentSurfaceDrawBridgeMode(value) {
   return isThreeResidentRenderRowBridgeMode(mode)
     || isWebGpuResidentRenderRowBridgeMode(mode)
     || mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
-    || mode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
+    || mode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+    || mode === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
 }
 function isResidentRenderRowBridgeMode(value) {
   const mode = String(value || '').trim().toLowerCase();
@@ -13559,6 +13560,16 @@ export function createSphPhaseScene(container, {
     reason = 'native-surface-render-pass'
   } = {}) {
     if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      return null;
+    }
+    // No-overlay policy: the Schroeder render proxy is a diagnostic marker
+    // layer drawn onto the production canvas. It is opt-in only - and when
+    // disabled it must not even build an executor (its signature-cached draw
+    // commands bind retained buffers once and were observed frozen at the
+    // drop's initial position for the whole run).
+    if (scene.userData.sphSchroederRenderProxyOverlayEnabled !== true) {
+      bridge.schroederRenderProxyNativeExecutor = null;
+      bridge.schroederRenderProxyNativeExecutorSignature = null;
       return null;
     }
     const drawSource =
@@ -25168,6 +25179,23 @@ export function createSphPhaseScene(container, {
       surfaceDrawDiagnosticModeExplicit
       && isMainThreadResidentSurfaceDrawBridgeMode(surfaceDrawDiagnosticMode)
     );
+    // The native WebGPU surface consumer paints the MAIN canvas even when it
+    // was reached by defaulting (auto-resolve) rather than an explicit URL
+    // selection. Letting the worker-presented particle canvas keep drawing on
+    // top of it is a banned overlay: under GPU-resident continuation the
+    // worker's producer cache re-renders the packed t=0 particle snapshot
+    // forever, freezing stale sprites over the live surface.
+    const mainThreadSurfaceDrawDisplayOwnershipRequested = Boolean(
+      explicitMainThreadSurfaceDrawBridgeRequested
+      || presentationWorkerRetainedOutputBypassedForNativeConsumer
+    );
+    scene.userData.sphMainThreadSurfaceDrawDisplayOwnership = {
+      schema: 'peercompute.ulg.sph-main-thread-surface-draw-display-ownership.v0',
+      requested: mainThreadSurfaceDrawDisplayOwnershipRequested,
+      explicit: explicitMainThreadSurfaceDrawBridgeRequested,
+      surfaceDrawDiagnosticMode: surfaceDrawDiagnosticMode || null,
+      updatedAtMs: nowMs()
+    };
     const presentationWorkerRetainedOutputStatus = (
       renderOwnershipPolicyForRefresh?.presentationWorkerRetainedOutputPresentationOnlyReady === true
       && !presentationWorkerRetainedOutputBypassedForNativeConsumer
@@ -25605,7 +25633,7 @@ export function createSphPhaseScene(container, {
       const useWorkerOwnedResidentRenderProducer =
         scene.userData.sphPeerComputeRenderOwnershipPolicy?.effectiveMode
         === ULG_PEERCOMPUTE_RENDER_OWNERSHIP_MODES.WORKER_OWNED_RESIDENT_RENDER_PRODUCER
-        && !explicitMainThreadSurfaceDrawBridgeRequested;
+        && !mainThreadSurfaceDrawDisplayOwnershipRequested;
       // Callers that explicitly pin no-full rows (diagnostic refreshes)
       // cannot receive fresh rows anyway; for them the stale producer frame
       // is the accepted presentation and the fallback must not force a
@@ -25628,11 +25656,18 @@ export function createSphPhaseScene(container, {
         requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeFromCaller,
         useThreeRenderRowBridge: shouldUseThreeRenderRowPointsBridge,
         useWebGpuRenderRowOverlayBridge: shouldUseWebGpuRenderRowOverlayBridge,
-        useWorkerOffscreenPresentation: configuredWorkerOffscreenPresentation,
+        // When a main-thread presenter (native WebGPU surface consumer or an
+        // explicit main-thread bridge) owns the display, the worker canvas is
+        // suppressed for this refresh — planning a worker render-row transfer
+        // would coerce a full physics readback purely to feed a draw that is
+        // then discarded.
+        useWorkerOffscreenPresentation:
+          configuredWorkerOffscreenPresentation
+          && !mainThreadSurfaceDrawDisplayOwnershipRequested,
         usePresentationWorkerRetainedOutputPresentationOnly:
           scene.userData.sphPeerComputeRenderOwnershipPolicy
             ?.presentationWorkerRetainedOutputPresentationOnlyReady === true
-          && !explicitMainThreadSurfaceDrawBridgeRequested,
+          && !mainThreadSurfaceDrawDisplayOwnershipRequested,
         workerOffscreenRetainedStageOutputAvailable: Boolean(
           workerOffscreenRetainedStageOutputAvailableForParticleState(nextSphParticleState)
         ),
@@ -27433,7 +27468,7 @@ export function createSphPhaseScene(container, {
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
       });
-      const retainedStageOutputAlreadyRenderedStatus = explicitMainThreadSurfaceDrawBridgeRequested
+      const retainedStageOutputAlreadyRenderedStatus = mainThreadSurfaceDrawDisplayOwnershipRequested
         ? null
         : (
           scene.userData.sphPeerComputeRenderOwnershipPolicy
@@ -27456,7 +27491,7 @@ export function createSphPhaseScene(container, {
             sphParticleState: nextSphParticleState,
             reason: 'resident-render-state-assembly',
             suppressWorkerDrawForExplicitMainThreadBridge:
-              explicitMainThreadSurfaceDrawBridgeRequested
+              mainThreadSurfaceDrawDisplayOwnershipRequested
           });
       const workerOffscreenRetainedGpuBufferHandoffStatus = refreshWorkerOffscreenRetainedGpuBufferHandoff({
         renderRowsExecution,
@@ -29304,6 +29339,10 @@ export function createSphPhaseScene(container, {
     reason = 'presentation-worker-retained-stage-output-render'
   } = {}) {
     if (stageId !== 'g2p') return null;
+    // A main-thread presenter (native WebGPU surface consumer or an explicit
+    // main-thread bridge) owns the visible output; the presentation worker
+    // must not paint retained stage particles over it (no-overlay policy).
+    if (scene.userData.sphMainThreadSurfaceDrawDisplayOwnership?.requested === true) return null;
     const particleCount = Math.max(0, Math.floor(Number(sphParticleState?.particleCount) || 0));
     if (particleCount <= 0) return null;
     const backingMinPx = Math.max(

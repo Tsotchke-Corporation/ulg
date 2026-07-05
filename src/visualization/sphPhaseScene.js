@@ -20443,6 +20443,20 @@ export function createSphPhaseScene(container, {
               result.phaseVolumeNextTickAssignmentOverlayStatus ?? null,
             phaseVolumeNextTickAssignmentOverlayConsumerStatus:
               result.phaseVolumeNextTickAssignmentOverlayConsumerStatus ?? null,
+            // Storage-chain per-step accounting (already read back inside the
+            // chain on the hot path) - the conservation battery's raw signal.
+            particleStorageCountSummary:
+              result.particleStorageCountSummary?.countSummary
+                ? { ...result.particleStorageCountSummary.countSummary }
+                : null,
+            particleStorageAdoptionDelta:
+              result.particleStorageCountSummary?.admittedParticleCountDelta ?? null,
+            particleStorageCompactionLiveCount:
+              result.particleStorageCompaction?.liveParticleCount ?? null,
+            particleStorageAdoptionSkipped:
+              result.particleStorageAdoptionSkipped === true,
+            particleStorageAdoptionNoTopologyChange:
+              result.particleStorageAdoptionNoTopologyChange === true,
             phaseVolumeDiagnosticSummaryStatus:
               result.phaseVolumeDiagnosticSummaryStatus ?? null,
             phaseVolumeDiagnosticSummaryConsumerStatus:

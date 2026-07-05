@@ -38217,3 +38217,43 @@ hypothesis cycle. The conservation acceptance battery for this slice
 scene) lands with the fix.
 
 Units 980/0 throughout; flagship + SS gates green as of f3436be.
+
+## 2026-07-04 - Steady-state ROOT CAUSE: free-only rows admitted without
+   their group's child row (admission not group-atomic)
+
+The compact schroeder step summaries now surface the storage chain's
+per-step count summary (scene change: particleStorageCountSummary /
+adoption delta / compaction live count / skip flags on
+compactSchroederSameLevelMechanicsForScene). The live boiling repro's
+accounting at the churn window (count 133 -> 122 -> 130) shows the
+killer epoch verbatim:
+
+  admittedRowCount 3, writtenTargetSlotCount 0, appended 0,
+  freedSourceSlotCount 3, delta 0, blockedRowCount 119 of 122,
+  compaction live 130, adoption proceeded (freed > 0 passes the
+  no-topology guard - correctly, topology DID change).
+
+Three participant rows freed their source slots while every
+child-writing row sat among the 119 BLOCKED rows - the admission
+(row budget 32 in this config) cut the group apart: frees admitted,
+their leader's write not. 'Sources freed while child blocked' is the
+historical freed=9/blocked=9 pattern, now reproduced live with full
+accounting. The materializer-side conservation work (group scan,
+freed-range) cannot help when the write row never executes.
+
+FIX (next window): make storage admission GROUP-ATOMIC - a merge
+group's rows (leader + free_required participants, joined by the
+apply aggregateNodeIndex / allocation cell stamp) must be admitted
+together or not at all; a row budget that would split a group excludes
+the whole group. Enforcement belongs at slot-assignment admission
+sizing (the runtime policy that produced rowCount 3 of 122) plus a
+GPU-side belt: the materializer refuses frees on action-2 rows whose
+epoch wrote no targets (writtenTargetSlotCount == 0 epochs must be
+free-less). Acceptance: the boiling steady scene conserves mass
+across the churn window (per-schedule battery: mass, momentum, first
+moment, count), and the isolation harness gains a split-group
+admission case proving frees are withheld.
+
+Also observed en route: nextParticleUploads state buffers read as
+zero-initialized when copied mid-flight from a probe (fresh ping-pong
+targets) - probe-side note, not a defect.

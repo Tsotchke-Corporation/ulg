@@ -37877,3 +37877,42 @@ equilibrates at the vapor-pressure curve; (4) acceptance gates: sealed
 pool at 293K flashes only ~0.1 kg vapor; 600K floor drives rolling boil
 with vapor inventory tracking the vapor-pressure curve and latent
 energy balanced within tolerance.
+
+## 2026-07-04 - CORRECTION: boiling defect is in the h2o closure
+   derivation itself, not the cache and not the thermal chain
+
+The graph-diff probe (cached vs freshly built graph set + phase
+response from the same table, h2o segments side by side) shows they are
+IDENTICAL - the static-table cache was never stale. Both encode:
+
+- melt plateau at 286K (real: 273.15K), fusion width 0.229 MJ/kg
+  (real: 0.334)
+- vaporization plateau at 329K (real: 373.15K at 1 atm), latent width
+  1.665 MJ/kg (real: 2.26)
+- gas segment 3.056 -> 1848.6 MJ/kg spanning 329K -> 1e6 K
+
+This also corrects the previous entry's misreading: the isolated
+probe's "boils correctly at 377.5K" was the 329K plateau EXITED plus
+~48K into the gas segment (u = 3.145 MJ/kg vs plateau end 3.056) - the
+same wrong closures, heated further. The live scene faithfully
+simulates water whose derived boiling point is 44K low and whose
+melting point is 13K high. The 'pressure-aware plateau' hypothesis is
+withdrawn; there is no pressure input to the phase response builder.
+
+The cross-family source-consistency hardening added to
+sphColdStartCache (derived thermal families now carry and validate
+sourceThermalMaterialTableRowHash; mixed-generation records rebuild)
+stays - it closes a real staleness hole - but it was not the cause
+here.
+
+NEXT SLICE (realism, user-directed): fix the h2o phase-boundary
+derivation. Trace where properties.phases temperatureRange /
+transitions for h2o come from (algorithm-derived material properties /
+Moonlab first-principles path vs material-property JSON bank reference
+data), compare derived boundaries against known values, and either
+correct the derivation or admit bank reference boundaries as the
+authority with derivation residuals reported. Acceptance: h2o melts at
+273.15 +- 2K, boils at 373.15 +- 2K, latent heats within ~10% of
+reference; ice/water/steam scenes re-validated (buoyancy gate,
+boiling probe); other common materials (Fe, Al, O2) boundary-audited
+the same way.

@@ -225,8 +225,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
     reactionTable = null
   } = tableInputs || {};
   const records = [];
+  let thermalMaterialTableRecord = null;
   if (thermalMaterialTable) {
-    records.push(tableCacheRecord({
+    thermalMaterialTableRecord = tableCacheRecord({
       family: 'sph-thermal-material-table',
       table: thermalMaterialTable,
       arrays: {
@@ -250,8 +251,10 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       },
       generatorFingerprint,
       updatedAt
-    }));
+    });
+    if (thermalMaterialTableRecord) records.push(thermalMaterialTableRecord);
   }
+  const sourceThermalMaterialTableRowHash = thermalMaterialTableRecord?.rowHash ?? null;
   if (thermalClosureGraphSet?.graphBank) {
     const graphBank = thermalClosureGraphSet.graphBank;
     records.push(tableCacheRecord({
@@ -274,7 +277,8 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         statusCount: graphBank.statusCount,
         graphRecords: graphBank.graphRecords,
         graphMetadata: thermalClosureGraphSet.metadata,
-        skippedSegments: thermalClosureGraphSet.skippedSegments
+        skippedSegments: thermalClosureGraphSet.skippedSegments,
+        sourceThermalMaterialTableRowHash
       },
       generatorFingerprint,
       updatedAt
@@ -298,7 +302,8 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         responseStrideFloats: thermalPhaseResponseTable.responseStrideFloats,
         recordLayout: thermalPhaseResponseTable.recordLayout,
         responseLayout: thermalPhaseResponseTable.responseLayout,
-        tableMetadata: thermalPhaseResponseTable.metadata
+        tableMetadata: thermalPhaseResponseTable.metadata,
+        sourceThermalMaterialTableRowHash
       },
       generatorFingerprint,
       updatedAt
@@ -873,9 +878,31 @@ function restoreReactionTable(record) {
 export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
   const rehydrated = rehydrateSphStaticTableCache(snapshotOrCache, options);
   const byFamily = latestRecordByFamily(rehydrated.records);
-  const thermalMaterialTable = restoreThermalMaterialTable(byFamily.get('sph-thermal-material-table'));
-  const thermalClosureGraphSet = restoreThermalClosureGraphSet(byFamily.get('sph-thermal-closure-graph-bank'));
-  const thermalPhaseResponseTable = restoreThermalPhaseResponseTable(byFamily.get('sph-thermal-phase-response-table'));
+  const thermalMaterialTableRecord = byFamily.get('sph-thermal-material-table') || null;
+  // Derived thermal families are only reusable when they were built from the
+  // exact thermal-material-table rows being restored alongside them. Serving a
+  // graph bank or phase-response table from a different table generation moves
+  // phase/plateau boundaries (observed: cached graphs boiling water at 329K
+  // while the co-cached table derives 377K) - stale-by-source records rebuild.
+  const staleDerivedFamilies = [];
+  const derivedThermalRecord = (family) => {
+    const record = byFamily.get(family);
+    if (!record) return null;
+    const sourceRowHash = record.metadata?.sourceThermalMaterialTableRowHash ?? null;
+    if (!sourceRowHash || !thermalMaterialTableRecord || sourceRowHash !== thermalMaterialTableRecord.rowHash) {
+      staleDerivedFamilies.push({
+        family,
+        reason: sourceRowHash
+          ? 'source-thermal-material-table-row-hash-mismatch'
+          : 'missing-source-thermal-material-table-row-hash'
+      });
+      return null;
+    }
+    return record;
+  };
+  const thermalMaterialTable = restoreThermalMaterialTable(thermalMaterialTableRecord);
+  const thermalClosureGraphSet = restoreThermalClosureGraphSet(derivedThermalRecord('sph-thermal-closure-graph-bank'));
+  const thermalPhaseResponseTable = restoreThermalPhaseResponseTable(derivedThermalRecord('sph-thermal-phase-response-table'));
   const opticalGpuTable = restoreOpticalGpuTable(byFamily.get('optical-pbr-table'));
   const reactionTable = restoreReactionTable(byFamily.get('sph-reaction-table'));
   const restored = {
@@ -894,7 +921,8 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
     storageStatus: rehydrated.storageStatus,
     restoredFamilies,
     hitCount: restoredFamilies.length,
-    staleCount: rehydrated.staleCount,
+    staleDerivedFamilies,
+    staleCount: rehydrated.staleCount + staleDerivedFamilies.length,
     tableCount: rehydrated.tableCount,
     gpuWarmupCount: rehydrated.gpuWarmupCount,
     source: rehydrated,

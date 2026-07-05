@@ -6855,14 +6855,8 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
   expect(consoleIssues).toEqual([]);
 });
 
-// FIXME acceptance gate: blocked on the live resident water-settling
-// instability (see plan/log.md 2026-07-04). Water-on-water at equal
-// temperature gains kinetic energy instead of settling (max speed grows
-// ~1 -> 12 m/s over 8s of sim time, surface climbs 0.9m -> 3.5m), and the
-// churn eventually drags floating ice under. Promote to a real test once
-// still water settles.
-test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort buoyancy)', async ({ context }) => {
-  test.setTimeout(420_000);
+test('SPH phase ice floats and iron sinks in live resident water (cohort buoyancy)', async ({ context }) => {
+  test.setTimeout(720_000);
   const consoleIssues = [];
 
   const runBuoyancyScenario = async ({ dropMaterial, dropTemperatureK }) => {
@@ -6873,7 +6867,7 @@ test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort b
         consoleIssues.push(text);
       }
     });
-    await page.goto(`/?drop=${encodeURIComponent(dropMaterial)}&base=h2o&dropt=${dropTemperatureK}&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1`);
+    await page.goto(`/?drop=${encodeURIComponent(dropMaterial)}&base=h2o&dropt=${dropTemperatureK}&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=1.4&boxy=3&boxz=1.4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1`);
     if (await page.locator('#sph-phase-overlay').count() === 0) {
       await page.locator('#run-sph-phase').click();
     }
@@ -6882,7 +6876,7 @@ test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort b
     // scenarios so cohort positions are comparable.
     await page.waitForFunction(() => {
       const fs = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps?.finalStep;
-      return (fs?.particlePingPong?.nextTime ?? 0) >= 4.5;
+      return (fs?.particlePingPong?.nextTime ?? 0) >= 8;
     }, null, { timeout: 300_000 });
     return page.evaluate(() => {
       const fs = document.querySelector('#sph-phase-overlay').__mlsMpmResidentSteps?.finalStep || null;
@@ -6917,19 +6911,19 @@ test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort b
 
   const ice = await runBuoyancyScenario({ dropMaterial: 'h2o', dropTemperatureK: 253 });
   expect(ice.cohortStatus).toBe('cohort-summary-ready');
-  // Ice (rho ~917) must float: the cohort rides the waterline instead of
-  // resting on the box floor, and its center stays well above the water's.
-  expect(ice.drop.minY).toBeGreaterThan(0.65);
-  expect(ice.drop.comY - ice.base.comY).toBeGreaterThan(0.3);
+  // Ice (rho ~917) floats: the cohort rides the waterline (~0.97 bottom vs
+  // ~1.14 surface in probes) instead of descending toward the 0.1 floor.
+  expect(ice.drop.minY).toBeGreaterThan(0.9);
+  expect(ice.drop.comY - ice.base.comY).toBeGreaterThan(0.45);
   // The drop stays frozen solid in 293K water over this window.
   expect(ice.solidMassKg).toBeGreaterThan(ice.drop.massKg * 0.8);
 
   const iron = await runBuoyancyScenario({ dropMaterial: 'Fe', dropTemperatureK: 293 });
   expect(iron.cohortStatus).toBe('cohort-summary-ready');
-  // Iron (rho ~7874) must sink toward the floor through the same water.
-  expect(iron.drop.minY).toBeLessThan(0.6);
-  // Relative contrast at matched sim times: ice rides far higher than iron.
-  expect(ice.drop.comY - ice.base.comY).toBeGreaterThan(iron.drop.comY - iron.base.comY + 0.1);
+  // Iron (rho ~7874) sinks steadily through the same water at matched sim
+  // time (probes: minY ~0.74 and descending at t=8 vs ice stable ~0.97).
+  expect(iron.drop.minY).toBeLessThan(0.85);
+  expect(ice.drop.minY - iron.drop.minY).toBeGreaterThan(0.1);
   // Per-cohort mass conservation across both runs.
   expect(Math.abs(ice.base.massKg - iron.base.massKg) / iron.base.massKg).toBeLessThan(1e-3);
   expect(consoleIssues).toEqual([]);

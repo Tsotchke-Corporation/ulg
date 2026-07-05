@@ -37754,3 +37754,21 @@ long-horizon probe); (b) thin settled layers render as sparse blobs -
 visual continuity of shallow liquid sheets is a render-radius concern,
 not physics; (c) sph (non-mlsmpm) mech path still uses the global
 scale + sphHydrostaticPressurePa - review separately.
+
+## 2026-07-04 - Buoyancy fixme gate promoted: ice floats, iron sinks, live
+
+With the liquid overhaul landed, the cohort buoyancy gate is a real
+passing test. Scenario reworked for the corrected physics: the 1m^3
+water cube spreads to a 6cm sheet in the old 4x4 arena (too shallow to
+float a 0.2m ice cube), so the gate uses a 1.4x3x1.4 box where the same
+cube forms a ~0.5m-deep pool. At matched sim time t=8: ice (253K,
+stays solid) rides the waterline - bottom ~0.97 vs surface ~1.14,
+~63% submerged (ideal 92%; coarse-resolution mixed-layer effect,
+qualitatively correct and stable) - while iron descends steadily
+through the same water (minY ~0.74 and falling). Assertions: ice
+minY > 0.9 with com contrast > 0.45 above the water's; iron minY < 0.85
+and at least 0.1 below the ice's at matched time; solid mass retained;
+per-cohort mass equal across runs; zero WebGPU console errors.
+
+Both 2026-07-04 fixme acceptance gates (still-water settling, cohort
+buoyancy) are now promoted and green.

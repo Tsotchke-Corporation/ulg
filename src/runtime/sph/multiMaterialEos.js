@@ -57,14 +57,21 @@ export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, c
       const cReal = Math.sqrt(Math.max(gamma * Rspecific * eq.temperatureK, 0));
       const c = Math.max(cReal * phaseScale(cReal), minGasSoundSpeedMPerS);
       // Drives liquid-packed steam to expand toward the gas rest density.
-      return { pressurePa: Math.max(0, c * c * (density - rho0)), soundSpeedMPerS: c };
+      // Capped near the rest density so condensed-packed vapor pushes at a
+      // bounded, saturation-like pressure instead of c^2*(rho_liquid - rho0).
+      const effectiveDensity = Math.min(density, rho0 * 3);
+      return { pressurePa: Math.max(0, c * c * (effectiveDensity - rho0)), soundSpeedMPerS: c };
     }
     // Condensed: sound speed from the bulk modulus.
     const cReal = ph.bulkModulusPa ? Math.sqrt(ph.bulkModulusPa / rho0) : 0;
     const c = cReal * phaseScale(cReal);
     const ratio = density / Math.max(rho0, 1e-9);
     const bulk = (rho0 * c * c) / TAIT_EXPONENT;
-    const pressurePa = bulk * (ratio ** TAIT_EXPONENT - 1);
+    // Vaporization-plateau partial pressure: the gas fraction pushes at
+    // saturation scale so the mixture inflates gradually (GPU P2G parity).
+    const eqForFractions = cachedParticleEquilibriumFromSpecificEnergy(props, particle, specificInternalEnergyJPerKg);
+    const gasFraction = Math.min(Math.max(eqForFractions?.phaseFractions?.gas ?? 0, 0), 1);
+    const pressurePa = bulk * (ratio ** TAIT_EXPONENT - 1) + gasFraction * 101325;
     // Condensed phases need the signed side of the Tait law so the reduced carrier has a restoring
     // stress on both sides of the rest density. Cavitation/surface tension are still separate laws,
     // but clamping this to zero removes the liquid's basic volume correction and lets blobs drift

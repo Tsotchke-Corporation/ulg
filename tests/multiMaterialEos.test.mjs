@@ -36,9 +36,13 @@ test('molten iron is pinned near its liquid rest density, not puffed up like a g
   assert.ok(Math.abs(atRest.pressurePa) < 1e3); // huge internal energy does NOT create gas-like pressure
 });
 
-test('just-vaporized (liquid-packed) steam carries a large positive pressure that drives expansion', () => {
+test('just-vaporized (liquid-packed) steam carries a bounded positive pressure that drives expansion', () => {
   const packed = eos({ density: 1000, specificInternalEnergyJPerKg: steamU, particle: { material: 'h2o' } });
-  assert.ok(packed.pressurePa > 1e6); // rho >> rho0_gas (~0.8) -> expansion drive
+  // rho >> rho0_gas -> expansion drive, but capped near the rest density so a
+  // condensed-packed vapor particle pushes at saturation scale instead of
+  // c^2*(rho_liquid - rho0) (which detonated particles at the CFL clamp).
+  assert.ok(packed.pressurePa > 1e4);
+  assert.ok(packed.pressurePa < 1e7);
   // Once expanded to near the gas rest density, the drive vanishes.
   const expanded = eos({ density: 0.804, specificInternalEnergyJPerKg: steamU, particle: { material: 'h2o' } });
   assert.ok(expanded.pressurePa < 1e3);

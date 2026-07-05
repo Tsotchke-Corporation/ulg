@@ -5165,7 +5165,11 @@ fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_sp
     return 0.0;
   }
   if (eos_model_id > 1.5 && eos_model_id < 2.5) {
-    return max(0.0, sound_speed_m_per_s * sound_speed_m_per_s * (density_kg_per_m3 - rest_density_kg_per_m3));
+    // Gas pressure push is capped near a few times the rest density so a
+    // just-vaporized particle at condensed packing exerts a bounded,
+    // saturation-scale expansion pressure instead of c^2*(1000 - 0.6).
+    let effective_density = min(density_kg_per_m3, rest_density_kg_per_m3 * 3.0);
+    return max(0.0, sound_speed_m_per_s * sound_speed_m_per_s * (effective_density - rest_density_kg_per_m3));
   }
   if (eos_model_id > 0.5 && eos_model_id < 1.5) {
     let ratio = density_kg_per_m3 / max(rest_density_kg_per_m3, 1.0e-9);
@@ -5286,8 +5290,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // per-particle static hydrostatic prestress (row7.x) is intentionally
       // NOT added: a depth-frozen pressure field becomes unbalanced as soon
       // as particles circulate and pumps energy into the liquid.
+      // On a vaporization plateau the growing gas fraction exerts its
+      // saturation-scale partial pressure so steam inflates gradually and
+      // buoyancy emerges from falling grid density.
+      let thermo1 = sph_thermo[thermo_base + 1u];
+      let gas_fraction = clamp(thermo1.z, 0.0, 1.0);
       let pressure = params.internal_pressure_scale
-        * packed_pressure(density, thermo0.w, row6.y, row6.z);
+        * (packed_pressure(density, thermo0.w, row6.y, row6.z)
+          + gas_fraction * 101325.0);
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
       let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
@@ -6867,6 +6877,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   rest_volume = rest_volume + material_bank_warm_input_anchor();
 
   var row4 = out_mechanics[mechanics_base + 4u];
+  // Vaporization continuity: a liquid->gas flip must NOT snap the reference
+  // rest volume to the gas phase (a ~1700x jump that makes the EOS read
+  // "already expanded" while positions never moved - inert steam). Rate-limit
+  // rest-volume growth per refresh; the deformation J carries real expansion
+  // and the SS phase-volume path owns large represented-volume changes.
+  let previous_rest_volume_m3 = row4.w;
+  if (previous_rest_volume_m3 > 0.0 && rest_volume > previous_rest_volume_m3 * 4.0) {
+    rest_volume = previous_rest_volume_m3;
+  }
   let row5 = out_mechanics[mechanics_base + 5u];
   let row6 = out_mechanics[mechanics_base + 6u];
   if (mechanics_refresh_should_reset(row4, row5, row6, phase_mechanics, rest_volume)) {

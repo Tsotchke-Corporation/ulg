@@ -6856,7 +6856,7 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
 });
 
 test('SPH phase ice floats and iron sinks in live resident water (cohort buoyancy)', async ({ context }) => {
-  test.setTimeout(720_000);
+  test.setTimeout(1_080_000);
   const consoleIssues = [];
 
   const runBuoyancyScenario = async ({ dropMaterial, dropTemperatureK }) => {
@@ -6877,7 +6877,9 @@ test('SPH phase ice floats and iron sinks in live resident water (cohort buoyanc
     await page.waitForFunction(() => {
       const fs = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps?.finalStep;
       return (fs?.particlePingPong?.nextTime ?? 0) >= 8;
-    }, null, { timeout: 300_000 });
+      // Budget covers a fully cold start: fresh browser profiles re-derive all
+      // closures (~60-90s) before stepping ~170s of sim time.
+    }, null, { timeout: 480_000 });
     return page.evaluate(() => {
       const fs = document.querySelector('#sph-phase-overlay').__mlsMpmResidentSteps?.finalStep || null;
       const findSummary = (obj) => {

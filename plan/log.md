@@ -38019,3 +38019,46 @@ Acceptance: boiling pool produces a rising steam plume with bounded
 velocities (no CFL-clamp saturation), mass conserved, particle count
 bounded via migration, and the two mechanics paths agree at matched sim
 times up to tolerance.
+
+## 2026-07-04 - Steam expansion fixed: mixture-transition constitutive
+   (bounded saturation push), both mechanics paths now erupt boundedly
+
+Implemented the transition-aware constitutive slice (GPU WGSL + CPU
+carrier EOS in lockstep):
+
+1. Mechanics refresh (mechanicsRefresh WGSL): rest-volume growth
+   rate-limited per refresh (>4x jumps keep the previous reference
+   volume). A liquid->gas flip no longer snaps V0 to the gas phase's
+   12.6 m3 - deformation J carries physical expansion, and large
+   represented-volume changes stay the SS phase-volume path's job.
+2. packed_pressure gas branch (P2G WGSL) and createPhaseAwareEos gas
+   branch (CPU): expansion drive capped near the rest density
+   (effective density min(rho, 3*rho0)), so condensed-packed vapor
+   pushes at saturation scale (~2.5 atm) instead of c^2*(1000-0.6).
+3. P2G liquid branch + CPU condensed branch: vaporization-plateau
+   partial pressure - the gas phase FRACTION (thermo row1.z) adds
+   fraction*101325 Pa so the mixture pre-stresses gradually through
+   the plateau.
+
+Result: the boiling pool now produces a real steam eruption on BOTH
+paths - plain resident: burst at t~1.9, speeds 25-55 m/s (was inert at
+0.03 m/s), steam rises to the box top, rolling-boil circulation,
+superheated steam reaching 548K, mass conserved exactly (1064 kg); SS
+two-level authoritative: same t~1.47 eruption at 71.75 m/s (was
+2707 m/s CFL-clamp detonation), mass conserved. The violence matches
+the known ~100x wall heat flux (explosive-boiling regime) - the
+wallRate scale remains the open realism tunable for gentle nucleate
+boiling. SS migration/adoption still does not engage on the expansion
+(J-capped steam at ~16 kg/m3 rather than migrating levels) - that
+remains the SS Slice 5 live-engagement work item.
+
+Units 979/0 (steam-pressure contract test updated from 'large' to
+'bounded positive' drive).
+
+Post-slice battery: 9/9 effective. The cohort buoyancy gate needed its
+sim-time wait widened 300s -> 480s (test timeout 720s -> 1080s): fresh
+Playwright profiles re-derive all closures cold (~60-90s, larger since
+the cache method-version bump) before ~170s of stepping - the old
+budget was marginal and tipped over, physics unchanged (probe: ice
+floats stably, dropComY 1.19->1.12 above the waterline, no melt, no
+spurious gas).

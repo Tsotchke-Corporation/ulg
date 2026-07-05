@@ -38062,3 +38062,25 @@ the cache method-version bump) before ~170s of stepping - the old
 budget was marginal and tipped over, physics unchanged (probe: ice
 floats stably, dropComY 1.19->1.12 above the waterline, no melt, no
 spurious gas).
+
+## 2026-07-04 - SS migration on boiling converges with the live-topology
+   steady-state slice
+
+Probing the boiling SS scene's migration chain: every stage runs and
+publishes each tick (level assignment, phase-volume migration
+'submitted', level-update overlay ready with 133 row-aligned rows,
+StateManager-admitted target levels), but aggregateNodeCount == 
+particleCount (no multi-particle aggregates form) and storage adoption
+never fires. The J-capped steam particle (64x liquid volume ~0.48 m3)
+should target roughly level 2 - outside the simulated two-level window
+(selectedLevel 0..1) - which is precisely the level-ratchet freeze /
+migration-window-cap dilemma documented on 2026-07-03 (three reverted
+experiments: clamps disagree between aggregate and migration stages, or
+window caps create mass). The canonical SS Slice 5 boiling case is
+therefore BLOCKED on the queued 'live topology steady-state slice':
+per-epoch bookkeeping so sustained coarsening pressure conserves mass,
+then land the one-level-per-epoch clamp + migration window cap together
+behind a per-schedule conservation battery (mass, momentum, first
+moment, count). The boiling scene should become that slice's proof
+scene (it generates genuine sustained phase-volume pressure, unlike the
+synthetic coarsening configs).

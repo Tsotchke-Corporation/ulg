@@ -38163,3 +38163,21 @@ the materializer where zero stamps can hide the join).
 
 Orchestrator/units all green (980/0). Flagship gate reworked earlier
 today to persistent adoption evidence remains green.
+
+## 2026-07-04 - CORRECTION to part 2a: the zero-stamp "proof" was invalid
+   (mutation writeBuffer failed on a non-COPY_DST buffer)
+
+The probe's stamp-zeroing writeBuffer was rejected ("usage ... doesn't
+include BufferUsage::CopyDst"), so the "conserves under zero stamps"
+run was actually the healthy-stamp path: the child's 6 kg came from the
+intact col-19 stamp, not from either new conservation path. Full row
+dump also settles the encoding: the leader row (action 2, tgtCount 1)
+frees ONLY ITSELF (freeStart=own slot, freeCount=1) and participants
+free themselves individually - so the freed-range group can never
+recover the merge group in this encoding (leader's range has one
+member). Merge conservation therefore rests entirely on (a) the col-19/
+24-27 aggregate stamps or (b) the col-20 cell id + action-2 scan. The
+part-2a commit's claim is retracted; the freed-range path stays as a
+harmless extra but is not the fix. Redoing the mutation with an
+injected rebuilt assignment buffer to get the REAL zero-stamp behavior,
+then determining which stamp is broken live (col 20 vs col 19).

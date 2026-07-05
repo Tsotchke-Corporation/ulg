@@ -38373,3 +38373,38 @@ NEXT WINDOW (single focus): fix live aggregate grouping.
    re-green with tightened mass tolerance (1e-3).
 Keep: torn guard (conservation-correct), churn gate (green), merge
 proof update to member-derived values still pending with the fix.
+
+## 2026-07-05 - Tear source #2 found: slot assignment's row-indexed slot
+   window drops writes for rows beyond slot capacity
+
+Slot-assignment kernel (ss_pssa main): target slots are addressed as
+base_slot + row_index * max_slots_per_row, and the grant is refused
+(target_start = -1, no error surfaced beyond status bit 16) when
+row_slot_start + target_count exceeds base_slot + slot_capacity. With
+slot_capacity = 32 (the capacity-margin free list) and one slot per
+row, ONLY ROWS 0..31 can ever receive a target - the window consumes
+one slot per ROW, not per writer. In the 122-row boiling scene any
+merge leader with row index >= 32 silently loses its child write while
+its own free and its participants' frees (free_start = source index,
+never slot-gated) all proceed: the torn epoch, structurally.
+Additionally allocation_capacity_residual only flags status bit 16; it
+never gates frees either. Flagship arithmetic (35 rows, leader at row
+27) says its leader should be granted - so the flagship free-only
+epochs need the row-level dump to disambiguate (candidates: leader
+election finding <2 members because per-particle aggregate matching
+made aggregate_matching_count 1 with... but then frees would be 0 too;
+or admission truncation).
+
+DEFINITIVE NEXT ARTIFACT (fresh window): extend the probe-merge-body
+synthetic harness to the flagship shape (27 base + 8 packed hot-steam
+drop particles, real prepass kernels end to end) and dump EVERY
+stage's rows (proposal cols 0/4/5/6/11/12/13; apply 0/3/7/21/22;
+allocation 0/3/9-12/15/18; assignment 0/3/8-12/19/20/22/24-27;
+materialization 0/3/12-18). Deterministic, fully readable, no live
+timing. Then fix, in order: (1) slot addressing - compact slot indices
+per WRITER (prefix over allocation_count or a small atomic bump
+allocator) instead of per row, so capacity is consumed by writers
+only; (2) frees gated on the row's own granted target when
+allocation_required (leader) and on the leader's grant for
+participants; (3) re-green flagship + merge proof with 1e-3 mass
+tolerance, churn gate stays green, torn skips -> 0.

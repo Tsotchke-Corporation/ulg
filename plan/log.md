@@ -38654,3 +38654,17 @@ fragments miss the optical table; investigating next under task #5.
 
 Unit expectation updated: default budgeted resolution 33 -> 52
 (tests/sphPhaseRenderer.test.mjs). Units 980/0 + 93/0.
+
+## 2026-07-05 - Fix: blocked-red speckle pixels were degenerate-triangle
+   varying garbage; ids now flat-interpolated
+
+The sparse crimson pixels on the native surface turned green when the
+WGSL blocked-debug color was swapped (definitive attribution), yet the
+compact path passes material/phase/optical ids as per-draw constants.
+Cause: zero-area marching-cubes triangles rasterize a pixel whose
+perspective barycentrics are garbage; the interpolated id varyings
+then miss every optical record and fall into fallback_optical_material,
+which constructs with blocked=1.0 -> debug red. Fix: the id varyings
+are constant per triangle, so they are now @interpolate(flat) in
+VertexOut (both WGSL variants share the struct). Post-fix scan: 0
+reddish samples on the same scene; fps unchanged (470).

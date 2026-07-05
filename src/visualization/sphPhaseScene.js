@@ -5673,9 +5673,13 @@ struct CameraUniform {
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) normal: vec3<f32>,
-  @location(1) material_id: f32,
-  @location(2) phase_id: f32,
-  @location(3) optical_state_id: f32,
+  // The ids are constant per triangle; flat interpolation keeps them exact
+  // even for degenerate (zero-area) marching-cubes triangles, whose
+  // perspective barycentrics otherwise produce garbage ids that miss the
+  // optical table and rasterize single blocked-red pixels.
+  @location(1) @interpolate(flat) material_id: f32,
+  @location(2) @interpolate(flat) phase_id: f32,
+  @location(3) @interpolate(flat) optical_state_id: f32,
 };
 
 @group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;

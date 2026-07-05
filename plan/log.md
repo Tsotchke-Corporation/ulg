@@ -38492,3 +38492,54 @@ probe: capture translation output buffer identity across passes vs
 what sphResidentSurfaceDraw binds; suspect
 releasePreviousSphResidentSurfaceDrawResources / render-bridge caching
 on the extension lane.
+
+## 2026-07-05 - Render verification slice: user reports confirmed at data
+   level; no-overlay architecture directive recorded
+
+USER DIRECTIVE (durable, also in memory): no overlay/hybrid render
+paths. Exactly two acceptable architectures: (1) the entire three
+renderer AND engine in the worker lane, or (2) particles copied into
+the main thread - one authoritative row source per frame, never
+merged/fallback-layered sources.
+
+VERIFIED (probes + screenshots, all on explicit render modes):
+1. PARTICLE CHAINS (spheres mode, three-render-row-spheres): the base
+   InstancedMesh has 125 instances but 195 near-duplicate position
+   pairs at ~0.4mm separation - the render-row source mixes two step
+   generations of the same particles; fused time-shifted copies render
+   as pills/chains. Data-level, not geometry: SphereGeometry(8,6) +
+   MeshPhysicalMaterial (metalness 0, roughness 0.08) are fine.
+2. POINTS OVER SPHERES: same family - a second row lane draws point
+   strings on top of the sphere instances (two sources active at
+   once; the white dot rows in the screenshot).
+3. SURFACE MODES: auto resolves to the LEGACY CPU MarchingCubes
+   readback path (4.8 physics fps + 'MarchingCubes still consumes CPU
+   arrays' banner); three-webgpu-surface-buffers renders NOTHING (no
+   mesh in the scene graph); native-webgpu-surface-consumer works and
+   is fast (~399 physics fps) but has the frozen drop-domain surface
+   (translation re-runs, draw binds first buffers - earlier entry).
+4. WEBGPU-OCEAN STATUS (user question): the ocean-style hot-loop
+   disciplines ARE adopted (fused per-step mechanics, active-grid
+   dispatch plans, compactSummaryMode=plan-only with zero readback
+   bytes, atomic resident-scatter P2G - the 2026-06-18 audit's
+   performance routing). The ocean TILED P2G kernel itself is NOT:
+   MLS_MPM_P2G_BACKEND_OCEAN_TILED_EXPERIMENTAL exists as policy but
+   supportsOceanTiledKernel=false everywhere and all callers fall back
+   to resident-scatter.
+
+RENDER SLICE PLAN (no-overlay constraint as the design rule):
+a. Make the render-row source single-authoritative per frame: remove
+   the mixed staleness-fallback assembly (worker-owned producer rows
+   layered with compact render-row transfer); pick per config either
+   worker-owned rows or a clean main-thread copy of resident rows,
+   and make the OTHER lane structurally unreachable that frame.
+b. Route 'auto' surfaceDraw to native-webgpu-surface-consumer when the
+   device supports it (never the CPU MarchingCubes readback path);
+   keep CPU MC only as an explicit legacy/diagnostic mode.
+c. Fix or remove three-webgpu-surface-buffers (currently draws
+   nothing); fix the native path's frozen drop-domain surface (draw
+   must rebind each translation's output buffers).
+d. Then evaluate enabling the ocean tiled P2G kernel behind its
+   existing policy flag with a perf A/B on the dam-break scene.
+Steady-state slice (intra-batch epoch sequencing) continues in
+parallel - neither track skipped.

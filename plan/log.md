@@ -38543,3 +38543,29 @@ d. Then evaluate enabling the ocean tiled P2G kernel behind its
    existing policy flag with a perf A/B on the dam-break scene.
 Steady-state slice (intra-batch epoch sequencing) continues in
 parallel - neither track skipped.
+
+## 2026-07-05 - CORRECTION + diagnosis: no duplicate-row bug; chains are
+   film beading, points are specular glints
+
+Strict re-test of the sphere lane at a settled state (t=2.7, pair
+threshold 2mm): ZERO near-duplicate instances - the earlier "195
+pairs at <5cm" were physically-close particles mid-collapse, and the
+0.4mm pair was transient overlap during the fall. The mixed-generation
+claim in the previous entry is RETRACTED.
+
+What the visuals actually are:
+- "Particle chains": the settled pool is a sub-monolayer film (125
+  particles, ~0.06m equivalent depth over the 4x4 floor). The signed
+  Tait EOS provides cohesion below rest density, so the film beads
+  into droplet strings at rest spacing (~0.2m = touching rendered
+  spheres) - physically plausible thin-film breakup, visually odd only
+  because sphere mode fuses touching neighbors into pills.
+- "Points drawn over spheres": per-sphere specular glints
+  (MeshPhysicalMaterial roughness 0.08 under two directional lights) -
+  one evenly spaced dot per chain member.
+
+Real defects remain the surface modes (auto -> legacy CPU MC readback;
+three-webgpu-surface-buffers renders nothing; native consumer's frozen
+drop-domain surface) - fixing those now. The no-overlay row-source
+simplification stays as the architecture rule for the selection maze
+even though it did not cause this symptom.

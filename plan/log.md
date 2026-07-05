@@ -38336,3 +38336,40 @@ BLOCKING WORK (next window, one slice):
 3. Re-green: flagship (count < 35 via a real written child, mass
    conserved at 1e-3 not 2%), merge-compacts proof, churn gate stays
    green, torn-skip telemetry drops to zero on both scenes.
+
+## 2026-07-05 - Complete causal map: free-only deletion originates at the
+   AGGREGATE stage (one node per particle -> ungrouped removal rows)
+
+Allocator branch analysis closes the loop. ss_psal main branches:
+(a) bit4 rows -> divide-mass split (allocation delta+1, free own slot);
+(b) bit2&!bit4 rows -> merge-group semantics: same-cell scan over apply
+    col 21 elects the lowest-source-index leader, leader gets
+    allocation_count 1, every member frees its own slot - BUT lone rows
+    (member_count < 2) get allocation 0 / free 0;
+(c) everything else -> allocation = max(delta,0), free = max(-delta,0).
+
+Live free-only epochs (freed 8/2/3, written 0) can only come from
+branch (c): negative-delta apply rows WITHOUT merge classification.
+With aggregateNodeCount == particleCount live (each particle its own
+aggregate node - observed on the boiling scene 2026-07-04), the
+proposal/apply chain emits per-particle 'remove' rows instead of
+grouped merges; the allocator's leader election never sees a group.
+The whole failure family - boiling 24 kg loss, flagship drop deletion -
+is the aggregate stage failing to GROUP particles into shared nodes on
+the live path (the bf1fa2a zero-mass/superseded-binding thread).
+
+NEXT WINDOW (single focus): fix live aggregate grouping.
+1. Instrument the aggregateNodeReduce inputs on the live path: which
+   buffers does it bind (particle state? level assignments? target
+   aggregate cells from schroederPhaseVolumeTargetAggregateWgsl), and
+   why do distinct particles land in distinct nodes (cell key
+   derivation vs gridSpacing/level mismatch, or a superseded/zeroed
+   input making every key unique).
+2. The synthetic probe-merge-body chain groups correctly (its apply
+   rows carry shared col 21) - diff its aggregate inputs against the
+   live scene's to find the divergent key.
+3. Then the allocator's existing leader election just works, children
+   get written, torn-epoch skips drop to zero, and the two red gates
+   re-green with tightened mass tolerance (1e-3).
+Keep: torn guard (conservation-correct), churn gate (green), merge
+proof update to member-derived values still pending with the fix.

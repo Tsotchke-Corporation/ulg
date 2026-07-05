@@ -207,7 +207,7 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /row6\.z > 0\.5 && row6\.z < 1\.5/);
   assert.match(mlsMpmG2pReconstructWgsl, /params\.internal_pressure_scale == 0\.0/);
   assert.match(mlsMpmG2pReconstructWgsl, /if \(condensed\)/);
-  assert.match(mlsMpmG2pReconstructWgsl, /g2p_clamp\(previous_j, 0\.995, 1\.005\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /g2p_clamp\(previous_j, 0\.95, 1\.05\)/);
   assert.match(mlsMpmG2pReconstructWgsl, /liquid_wall_damping_alpha: f32/);
   assert.match(mlsMpmG2pReconstructWgsl, /velocity = velocity \* keep/);
   assert.match(mlsMpmG2pReconstructWgsl, /if \(!solid\)/);

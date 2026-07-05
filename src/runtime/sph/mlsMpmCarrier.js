@@ -76,7 +76,7 @@ function corotatedCauchyStress(F, mu, lambda) {
   ]);
 }
 const IDENTITY3 = () => new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-3;
+const CONDENSED_VOLUME_STRAIN_TOLERANCE = 5e-2;
 const CONDENSED_MIN_VOLUME_RATIO_J = 1 - CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const CONDENSED_MAX_VOLUME_RATIO_J = 1 + CONDENSED_VOLUME_STRAIN_TOLERANCE;
 const CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP = 1.5;
@@ -378,8 +378,9 @@ export function createMlsMpmCarrier({
       if (con.solid) {
         sigma = corotatedCauchyStress(p.mpmF, con.shearModulusPa, con.lambdaPa);
       } else {
-        const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa
-          + Math.max(Number(con.hydrostaticPressurePa ?? p.hydrostaticPressurePa) || 0, 0);
+        // EOS-only pressure via tracked J; the depth-frozen hydrostatic
+        // prestress is excluded (it destabilizes once particles circulate).
+        const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa;
         sigma = new Float64Array([-pressure, 0, 0, 0, -pressure, 0, 0, 0, -pressure]);
         addNewtonianViscousStress(sigma, C, con.dynamicViscosityPaS);
       }
@@ -434,9 +435,10 @@ export function createMlsMpmCarrier({
       // it a spike in velocity jumps particles across grid cells and the sim blows up.
       const sp2 = vx * vx + vy * vy + vz * vz;
       if (sp2 > vMax2) { const s = vMax / Math.sqrt(sp2); vx *= s; vy *= s; vz *= s; }
-      // No-slip floor BC: the support wall is stationary, which removes the wall-contact kinetic
-      // energy that a slip-only floor leaves as long-lived liquid slosh. Other sealed walls retain the
-      // normal-only clamp so free-falling material near the top/side boundary is not damped early.
+      // Free-slip floor BC (normal-only clamp, matching the other walls). The
+      // old no-slip floor zeroed tangential velocity across a full grid cell,
+      // creating an artificial boundary layer that froze liquid spreading;
+      // near-wall dissipation is the liquid wall damping term's job.
       const i = Math.floor(idx / plane);
       const rem = idx - i * plane;
       const j = Math.floor(rem / gnz);
@@ -444,8 +446,8 @@ export function createMlsMpmCarrier({
       const wx = (i - shift) * dx;
       const wy = (j - shift) * dx;
       const wz = (k - shift) * dx;
-      if (wy < dx) {
-        vx = 0; vy = 0; vz = 0;
+      if (wy < dx && vy < 0) {
+        vy = 0;
       }
       if ((wx < dx && vx < 0) || (wx > dims[0] - dx && vx > 0)) vx = 0;
       if (wy > dims[1] - dx && vy > 0) vy = 0;

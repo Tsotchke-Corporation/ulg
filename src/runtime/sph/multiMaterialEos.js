@@ -39,7 +39,10 @@ const R_GAS = 8.314462618; // J/(mol K)
  * would force a tiny dt). It scales all materials equally, so the RELATIVE stiffnesses stay
  * physical (iron stiffer than ice stiffer than water). Returns { pressurePa, soundSpeedMPerS }.
  */
-export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, minGasSoundSpeedMPerS = 0 } = {}) {
+export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, cflMaxSoundSpeedMPerS = 0, minGasSoundSpeedMPerS = 0 } = {}) {
+  const phaseScale = (cReal) => (cflMaxSoundSpeedMPerS > 0
+    ? (cReal > 0 ? Math.min(1, cflMaxSoundSpeedMPerS / cReal) : 1)
+    : soundSpeedScale);
   return function phaseAwareEos({ density, specificInternalEnergyJPerKg, particle }) {
     const props = materialProperties[particle?.material];
     if (!props) return { pressurePa: 0, soundSpeedMPerS: 0 };
@@ -52,13 +55,13 @@ export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, m
       const cp = ph.cpJPerKgK;
       const gamma = cp > Rspecific ? cp / (cp - Rspecific) : 1.33; // cp/cv, cv = cp - R/M
       const cReal = Math.sqrt(Math.max(gamma * Rspecific * eq.temperatureK, 0));
-      const c = Math.max(cReal * soundSpeedScale, minGasSoundSpeedMPerS);
+      const c = Math.max(cReal * phaseScale(cReal), minGasSoundSpeedMPerS);
       // Drives liquid-packed steam to expand toward the gas rest density.
       return { pressurePa: Math.max(0, c * c * (density - rho0)), soundSpeedMPerS: c };
     }
     // Condensed: sound speed from the bulk modulus.
     const cReal = ph.bulkModulusPa ? Math.sqrt(ph.bulkModulusPa / rho0) : 0;
-    const c = cReal * soundSpeedScale;
+    const c = cReal * phaseScale(cReal);
     const ratio = density / Math.max(rho0, 1e-9);
     const bulk = (rho0 * c * c) / TAIT_EXPONENT;
     const pressurePa = bulk * (ratio ** TAIT_EXPONENT - 1);

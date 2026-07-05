@@ -6935,10 +6935,7 @@ test.fixme('SPH phase ice floats and iron sinks in live resident water (cohort b
   expect(consoleIssues).toEqual([]);
 });
 
-// FIXME acceptance gate: same blocker as the buoyancy gate above - the
-// live resident loop injects energy into still water. Target physics:
-// after the initial splash a water-on-water scene decays toward rest.
-test.fixme('SPH phase live resident still water settles after the initial splash', async ({ page }) => {
+test('SPH phase live resident still water settles after the initial splash', async ({ page }) => {
   test.setTimeout(300_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
   if (await page.locator('#sph-phase-overlay').count() === 0) {

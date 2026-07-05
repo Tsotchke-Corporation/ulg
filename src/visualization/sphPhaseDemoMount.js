@@ -2076,6 +2076,11 @@ export async function mountSphPhaseDemoOverlay({
     return Number.isFinite(value) && value >= min && value <= max ? value : null;
   };
   const initialArtificialViscosityAlpha = numericUrlOption('avAlpha');
+  const initialHydrostaticInitialization = (() => {
+    const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
+    if (raw == null || raw === '') return null;
+    return raw !== '0' && raw !== 'false';
+  })();
   const initialLiquidVelocityDiffusionAlpha = numericUrlOption('diffAlpha');
   const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
   const peerSchroederSimulationPolicy =
@@ -2830,6 +2835,9 @@ export async function mountSphPhaseDemoOverlay({
         : {}),
       ...(initialLiquidWallDampingAlpha != null
         ? { mlsMpmLiquidWallDampingAlpha: initialLiquidWallDampingAlpha }
+        : {}),
+      ...(initialHydrostaticInitialization != null
+        ? { hydrostaticInitialization: initialHydrostaticInitialization }
         : {})
     };
   }

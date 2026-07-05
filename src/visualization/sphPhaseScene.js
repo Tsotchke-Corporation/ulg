@@ -22915,6 +22915,7 @@ export function createSphPhaseScene(container, {
       materialProperties
         ? buildMlsMpmMechanicsMaterialTable(materialProperties, {
           soundSpeedScale: nextMlsMpmGpuParticleState?.soundSpeedScale,
+          cflMaxSoundSpeedMPerS: nextMlsMpmGpuParticleState?.cflMaxSoundSpeedMPerS,
           minGasSoundSpeedMPerS: nextMlsMpmGpuParticleState?.minGasSoundSpeedMPerS,
           viscosityEnabled: currentPhysicalLawGroups.viscosity,
           mlsMpmArtificialViscosityAlpha: nextMlsMpmGpuParticleState?.mlsMpmArtificialViscosityAlpha,

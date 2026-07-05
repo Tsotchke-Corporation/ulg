@@ -296,7 +296,9 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   assert.match(mlsMpmP2gGridProjectionWgsl, /schroeder_active_node_filter_enabled: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn p2g_particle_enabled/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /max\(row7\.x, 0\.0\)/);
+  // The depth-frozen hydrostatic prestress (row7.x) must NOT feed the stress:
+  // pressure comes from the EOS via tracked J only.
+  assert.doesNotMatch(mlsMpmP2gGridProjectionWgsl, /max\(row7\.x, 0\.0\)/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(0\.0, sound_speed_m_per_s \* sound_speed_m_per_s/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /pow\(ratio, 7\.0\) - 1\.0\);[\s\S]{0,80}return pressure;/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);

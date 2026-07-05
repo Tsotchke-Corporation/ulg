@@ -41,6 +41,7 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
 
 const AVOGADRO = 6.02214076e23;
 const R_GAS = 8.314462618;
+import { phaseSoundSpeedScaleFor } from './sphMechanicsMaterialTable.js';
 const DEFAULT_SOUND_SPEED_SCALE = 1;
 const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
 const DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA = 0.04;
@@ -150,6 +151,7 @@ function mechanicsScaleOptions(state, {
       soundSpeedScale ?? stateParams.soundSpeedScale,
       DEFAULT_SOUND_SPEED_SCALE
     ),
+    cflMaxSoundSpeedMPerS: finiteNumber(stateParams.cflMaxSoundSpeedMPerS, 0),
     minGasSoundSpeedMPerS: finiteNumber(
       minGasSoundSpeedMPerS ?? stateParams.minGasSoundSpeedMPerS,
       DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
@@ -223,7 +225,12 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
   }
   const phase = eq?.stablePhase || 'liquid';
   const ph = phasePropertiesFor(properties, phase);
-  const soundSpeedScale = finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE);
+  // Per-phase CFL clamp: each phase is as stiff as the carrier dt allows,
+  // instead of a global factor set by the stiffest phase in the table.
+  const soundSpeedScale = phaseSoundSpeedScaleFor(properties, ph, {
+    soundSpeedScale: finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE),
+    cflMaxSoundSpeedMPerS: finiteNumber(options.cflMaxSoundSpeedMPerS, 0)
+  });
   const modulusScale = soundSpeedScale * soundSpeedScale;
   const restDensity = finiteNumber(ph?.densityKgPerM3 ?? particle.restDensityKgPerM3, 0);
   const bulkRaw = finiteNumber(ph?.bulkModulusPa, 0);
@@ -533,6 +540,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     soundSpeedScale: scaleOptions.soundSpeedScale,
+    cflMaxSoundSpeedMPerS: scaleOptions.cflMaxSoundSpeedMPerS,
     minGasSoundSpeedMPerS: scaleOptions.minGasSoundSpeedMPerS,
     viscosityEnabled: scaleOptions.viscosityEnabled,
     mlsMpmArtificialViscosityAlpha: scaleOptions.mlsMpmArtificialViscosityAlpha,

@@ -3727,7 +3727,7 @@ export function createSphPhaseDemo(options = {}) {
   };
   demo.gpuMechanics = gpuMechanics;
   demo.state.gpuMechanics = gpuMechanics;
-  const phaseAwareEos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS });
+  const phaseAwareEos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, cflMaxSoundSpeedMPerS, minGasSoundSpeedMPerS });
   const eos = (args) => {
     const result = phaseAwareEos(args);
     if (physicalLawGroups.eos) return result;

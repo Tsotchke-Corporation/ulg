@@ -5282,9 +5282,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       );
     } else {
       let density = pos_mass.w / max(volume, 1.0e-30);
-      let pressure = params.internal_pressure_scale * (
-        packed_pressure(density, thermo0.w, row6.y, row6.z) + max(row7.x, 0.0)
-      );
+      // Pressure comes from the EOS via the tracked volume ratio J only. The
+      // per-particle static hydrostatic prestress (row7.x) is intentionally
+      // NOT added: a depth-frozen pressure field becomes unbalanced as soon
+      // as particles circulate and pumps energy into the liquid.
+      let pressure = params.internal_pressure_scale
+        * packed_pressure(density, thermo0.w, row6.y, row6.z);
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
       let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
@@ -5584,15 +5587,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let floor_no_slip_limit_m = params.grid_spacing_m - boundary_epsilon_m;
     if (node_pos.y < floor_no_slip_limit_m) {
       let floor_gap_m = max(0.0, node_pos.y);
-      let floor_response_alpha = wall_barrier_response_alpha(mass, floor_gap_m);
+      // Free-slip floor: only the normal component is corrected, matching the
+      // x/z walls. Grid-level tangential kill created a one-cell-thick
+      // artificial boundary layer that froze liquid spreading (dam-break
+      // fronts crept at ~0.1 m/s); near-wall dissipation is handled by the
+      // tunable liquid wall damping in G2P instead.
       velocity.y = wall_barrier_corrected_normal_velocity(velocity.y, mass, floor_gap_m);
-      let tangential_keep = 1.0 - floor_response_alpha;
-      velocity.x = velocity.x * tangential_keep;
-      velocity.z = velocity.z * tangential_keep;
-      if (floor_response_alpha >= 1.0 - 1.0e-6) {
-        velocity.x = 0.0;
-        velocity.z = 0.0;
-      }
     }
     if (node_pos.x <= params.grid_spacing_m + boundary_epsilon_m && velocity.x < 0.0) {
       velocity.x = wall_barrier_corrected_normal_velocity(
@@ -6529,9 +6529,9 @@ fn g2p_clamp(value: f32, lower: f32, upper: f32) -> f32 {
 }
 
 fn g2p_condensed_target_j(raw_next_j: f32, previous_j: f32) -> f32 {
-  let previous_bounded = g2p_clamp(previous_j, 0.995, 1.005);
-  let lower = max(0.995, previous_bounded / 1.5);
-  let upper = min(1.005, previous_bounded * 1.5);
+  let previous_bounded = g2p_clamp(previous_j, 0.95, 1.05);
+  let lower = max(0.95, previous_bounded / 1.5);
+  let upper = min(1.05, previous_bounded * 1.5);
   return g2p_clamp(raw_next_j, lower, upper);
 }
 

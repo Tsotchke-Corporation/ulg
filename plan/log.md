@@ -37694,3 +37694,63 @@ pressure integration and the G2P C-matrix reconstruction; consider a
 grid-level hydrostatic balance test (fixed column, zero initial
 velocity, assert nodal accelerations ~0) as a unit-level gate before
 touching kernels.
+
+## 2026-07-04 - LIQUID MECHANICS OVERHAUL: settling instability root-caused
+   and fixed (frozen hydrostatic prestress + dead EOS + no-slip floor)
+
+Root cause chain for "water never settles", found by isolating each layer:
+
+1. THE LIQUID EOS WAS EFFECTIVELY DEAD. The global soundSpeedScale =
+   cflMax / maxRealSoundSpeed is dragged down by the STIFFEST phase in
+   the whole material table (h2o's stiffest phase pushes ~196 km/s), so
+   live water ran at c = 3.81 m/s (bulk 13.7 kPa - 160,000x too soft).
+   Max EOS pressure at the old J clamp (+-0.5%) was ~900 Pa: unable to
+   support even 10 cm of water column.
+2. The static hydrostatic prestress (hydrostaticPressurePa stamped per
+   particle at build from INITIAL depth, added to stress every step)
+   was the crutch holding columns up. Once particles circulate, the
+   depth-frozen pressure field no longer matches configuration ->
+   unbalanced forces grow with mixing -> the exponential energy pump
+   (doubling ~1s) that churned every liquid scene.
+3. The grid-level no-slip floor (tangential kill across a full grid
+   cell) froze liquid spreading: dam-break fronts crept at 0.1 m/s in a
+   one-cell-thick artificial boundary layer.
+
+Fixes (GPU WGSL + CPU carrier changed together, parity preserved):
+- Per-phase CFL sound-speed clamp (phaseSoundSpeedScaleFor in
+  sphMechanicsMaterialTable, used by sphGpuBuffers constitutive rows,
+  the mechanics material table, and createPhaseAwareEos): every phase
+  runs as stiff as the fixed carrier dt allows (c_eff = min(c_real,
+  cflSafety*dx/dt)), instead of one global factor. Water now ~200-500
+  m/s effective - nearly incompressible, dt-stable by construction.
+- Hydrostatic prestress removed from stress in P2G WGSL and the CPU
+  carrier (field still packed; init J preload kept).
+- Condensed J clamp widened 0.5% -> 5% (WGSL g2p_condensed_target_j,
+  carrier, sphG2pGpuKernel constant) so the EOS can actually carry
+  hydrostatic density gradients (0.9m column needs J ~0.9991).
+- Floor BC free-slip (normal-only, matching side walls) in grid-update
+  WGSL + carrier; near-wall dissipation stays with the tunable G2P
+  liquid wall damping.
+
+Validation of the physics (probes, water-on-water null scene):
+- 1m^3 water cube dam break: inertial collapse, front 3.8 m/s (analytic
+  sqrt(2gh) ~4.2), full-floor spread, wave reflection, settles to the
+  correct 6cm equilibrium layer by t~3s, J in [0.996, 1.005]
+  (hydrostatic-like), max speed decays monotonically - the instability
+  is gone at DEFAULT dt.
+- Isolated P2G probe (2 stationary particles, J=0.9): 111 kg m/s of
+  symmetric pressure momentum - kernel-level EOS confirmed live.
+
+Gates: 'still water settles' fixme PROMOTED to a real test and passes.
+Full battery green (8/8): parity (SS == classic), live mass
+conservation, flagship two-level SS, thermal+reaction sidecars,
+non-water binary reactions, bounded product events. Units 979/0 (two
+WGSL pin tests updated to the new clamp/no-prestress contract).
+
+Notes for follow-up: (a) buoyancy fixme gate scenario needs a deep-pool
+box (water cube spreads to 6cm in the 4x4 arena; probe in 1.4x3x1.4 box
+shows ice riding the waterline as expected - promote after a
+long-horizon probe); (b) thin settled layers render as sparse blobs -
+visual continuity of shallow liquid sheets is a render-radius concern,
+not physics; (c) sph (non-mlsmpm) mech path still uses the global
+scale + sphHydrostaticPressurePa - review separately.

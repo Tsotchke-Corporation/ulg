@@ -6931,6 +6931,60 @@ test('SPH phase ice floats and iron sinks in live resident water (cohort buoyanc
   expect(consoleIssues).toEqual([]);
 });
 
+test('SPH phase boiling SS storage churn conserves mass across live topology changes', async ({ page }) => {
+  test.setTimeout(720_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL|used in submit while destroyed/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+  // Boiling pool with the storage chain enabled and steam level targets kept
+  // inside the simulated two-level window: sustained coarsening pressure with
+  // real adopted topology churn - the steady-state slice's live proof scene.
+  await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=1.4&boxy=3&boxz=1.4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&wymin=600&ss=1&schroederLevel=0&schroederMaxLevel=1&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.evaluate(() => {
+    window.__massSamples = [];
+    window.__counts = new Set();
+    setInterval(() => {
+      const overlay = document.querySelector('#sph-phase-overlay');
+      const ex = overlay?.__mlsMpmResidentSteps || null;
+      const fs = ex?.finalStep || null;
+      const mass = fs?.diagnostics?.nextMassKg;
+      const count = ex?.nextSphParticleState?.particleCount;
+      const simT = ex?.nextSphParticleState?.time;
+      if (Number.isFinite(mass) && mass > 0 && Number.isFinite(count)) {
+        window.__counts.add(count);
+        if (window.__massSamples.length < 400) window.__massSamples.push({ simT, mass, count });
+      }
+    }, 250);
+  });
+  // Run through the churn window (count changes near simT ~1.3-1.5) and past
+  // the first vaporization eruption.
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return (overlay?.__mlsMpmResidentSteps?.nextSphParticleState?.time ?? 0) >= 2.2;
+  }, null, { timeout: 480_000 });
+  const result = await page.evaluate(() => ({
+    samples: window.__massSamples,
+    distinctCounts: [...window.__counts]
+  }));
+  expect(result.samples.length).toBeGreaterThan(10);
+  // Topology churn actually happened: more than one live particle count seen.
+  expect(result.distinctCounts.length).toBeGreaterThan(1);
+  // Mass constancy through every sample, churn included.
+  const initialMass = result.samples[0].mass;
+  for (const sample of result.samples) {
+    expect(Math.abs(sample.mass - initialMass) / initialMass).toBeLessThan(1e-3);
+  }
+  expect(consoleIssues).toEqual([]);
+});
+
 test('SPH phase live resident still water settles after the initial splash', async ({ page }) => {
   test.setTimeout(300_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');

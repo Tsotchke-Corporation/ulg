@@ -11948,7 +11948,7 @@ export async function runSchroederParticleStorageAllocationWebGpu({
       computeBufferBinding(2, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-allocation.v1',
+      cacheKey: 'ulg-schroeder-particle-storage-allocation.v2',
       label: 'ulg-schroeder-particle-storage-allocation',
       code: schroederParticleStorageAllocationWgsl,
       entryPoint: 'main',

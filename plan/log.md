@@ -38181,3 +38181,39 @@ part-2a commit's claim is retracted; the freed-range path stays as a
 harmless extra but is not the fix. Redoing the mutation with an
 injected rebuilt assignment buffer to get the REAL zero-stamp behavior,
 then determining which stamp is broken live (col 20 vs col 19).
+
+## 2026-07-04 - Steady-state part 2b: real zero-stamp repro landed; two
+   upstream stamp fixes did NOT move the live loss - next step is live
+   row readback
+
+With the corrected mutation (injected rebuilt assignment buffer), the
+isolation harness now truly reproduces the live failure: zeroed stamps
++ cell id -1 lose exactly the non-leader mass (compacted 4 of 8 kg,
+child = leader's 2 kg at leader position/temperature). Mechanism
+confirmed: merge conservation currently REQUIRES either healthy col-19/
+24-27 stamps or a valid col-20 group id; the leader-frees-only-itself
+encoding leaves no other join.
+
+Two upstream attempts did not change the live boiling loss (still
+1064 -> 1040 at the 133 -> 130 event):
+- materializer freed-range group (part 2a) - cannot see the group in
+  this encoding (kept as harmless coverage for range-encoded frees);
+- allocation stamp predicate relaxed to any merge-family row with a
+  valid apply aggregateNodeIndex (ss_psal_merge_group_stamp_row,
+  allocation cache v2) - live unchanged, implying apply col 21 is -1
+  or the live merge rows are not status-bit-2 family.
+
+NEXT (fresh window): decode LIVE rows at the merge moment - the scene
+device is the shared requestOpticalGpuDevice singleton, so a page probe
+can copyBufferToBuffer the retained materialization buffer
+(fs.schroederParticleStorageMaterialization.materializationBuffer, 32
+floats/row: status col 3, action col 8, target 12/13, freed 14/15,
+masses 16/17, residual 18) and the assignment buffer (action col 8,
+cell col 20, stamps 19/22/24-27) into MAP_READ staging at the moment
+count drops 133 -> 130 (t ~ 1.3-1.45 in the boiling steady scene).
+That determines which columns are actually broken live, ending the
+hypothesis cycle. The conservation acceptance battery for this slice
+(per-schedule mass/momentum/first-moment/count on the boiling proof
+scene) lands with the fix.
+
+Units 980/0 throughout; flagship + SS gates green as of f3436be.

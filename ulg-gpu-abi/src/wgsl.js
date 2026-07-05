@@ -12291,6 +12291,16 @@ fn ss_psal_coarsen_row(apply_offset: u32) -> bool {
   return (status_bits & 2u) != 0u && (status_bits & 4u) == 0u;
 }
 
+// Merge-group stamp eligibility: any merge-family row (status bit 2) whose
+// apply row carries a valid aggregate node index. Broader than
+// ss_psal_coarsen_row on purpose - rows that also carry bit 4 still belong
+// to their merge group, and unstamped groups made the materializer fall
+// back to leader-only mass (observed live as exact non-leader mass loss).
+fn ss_psal_merge_group_stamp_row(apply_offset: u32) -> bool {
+  let status_bits = u32(max(apply_rows[apply_offset + 3u], 0.0));
+  return (status_bits & 2u) != 0u && apply_rows[apply_offset + 21u] >= 0.0;
+}
+
 struct SsPsalMergeGroup {
   member_count: u32,
   leader_source_index: f32,
@@ -12437,7 +12447,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   allocation_rows[allocation_offset + 18u] = select(
     apply_rows[apply_offset + 10u],
     apply_rows[apply_offset + 21u],
-    ss_psal_coarsen_row(apply_offset)
+    ss_psal_merge_group_stamp_row(apply_offset)
   );
   allocation_rows[allocation_offset + 19u] = apply_rows[apply_offset + 11u];
   allocation_rows[allocation_offset + 20u] = apply_rows[apply_offset + 12u];

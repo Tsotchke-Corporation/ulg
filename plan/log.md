@@ -37971,3 +37971,51 @@ derivations; irrelevant to current scenes); remaining ~80 uncommon
 elements still carry polluted bank transition rows (unanchored because
 they lack crc provenance - the anchoring filter keeps their garbage out
 of the sim; fix rows opportunistically).
+
+## 2026-07-04 - Steam expansion is the next core physics slice: inert on
+   the plain path, explosive (2707 m/s) on the SS path; migration never
+   engages
+
+With boiling thermodynamics now correct (373.15K plateau, latent paid),
+the boiling scene exposes the water->steam EXPANSION defect on both
+mechanics paths:
+
+- Plain resident path (residentAuto=1, no SS): on phase flip the
+  mechanics refresh snaps rest volume to the gas phase density
+  (7.56 kg particle -> 12.6 m3 nominal volume), so the EOS sees
+  "already expanded" while positions never move: steam stays inert at
+  liquid packing (gas mass 112 kg, max speed 0.03 m/s, no plume, no
+  buoyancy - the grid still carries liquid-like mass density).
+- SS two-level authoritative path (ss=1 flagship config): heating and
+  plateau behavior identical and mass conserved exactly (1064 kg) until
+  the first particles COMPLETE vaporization at t~1.47 - then max speed
+  jumps 0.04 -> 2707 m/s (the CFL velocity clamp) and bounds blow to
+  the box top in one sample: the constitutive flip to the gas EOS at
+  liquid packing produces astronomically wrong pressure (c^2*(rho -
+  rho0_gas) with rho ~ 1000 vs rho0 0.6).
+- schroederParticleStorageAdoption never fires during any of this: a
+  1700x represented-phase-volume expansion - THE canonical SS Slice 5
+  case ('700x expansion migrates ~3 levels without 700x particles') -
+  does not engage phase-volume migration on this scene.
+
+Design direction (next slice, core physics): transition-aware mixture
+constitutive + SS migration engagement.
+1. While a particle is ON a transition plateau (phase fractions
+   strictly between 0 and 1), its mechanics rows should represent the
+   MIXTURE: rest volume interpolated from phase fractions (Amagat/
+   linear in mass fractions over phase rest densities), pressure from
+   the mixture EOS - the vapor fraction exerts bounded expansion
+   pressure (ideal-gas partial pressure at plateau temperature ~1 atm,
+   NOT stiff-liquid c^2*delta-rho), driving gradual inflation and
+   natural buoyancy as grid density falls.
+2. The mechanics refresh must stop snapping rest volume discontinuously
+   at the dominantAtHalf phase flip (both failure modes above are the
+   two halves of that snap decision).
+3. The represented phase volume growth must feed the SS phase-volume
+   target-aggregate path so migration/coarsening engages (bounded
+   particle counts for bulk steam) - wire the boiling scene as the
+   migration proof scene.
+Acceptance: boiling pool produces a rising steam plume with bounded
+velocities (no CFL-clamp saturation), mass conserved, particle count
+bounded via migration, and the two mechanics paths agree at matched sim
+times up to tolerance.

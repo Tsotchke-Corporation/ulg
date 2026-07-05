@@ -38302,3 +38302,37 @@ SsPsalMergeGroup same-cell scan (allocation WGSL ~12294) so untorn
 groups in the same epoch still proceed. Acceptance: the churn gate
 stays green AND torn-epoch skip telemetry goes to zero on the boiling
 proof scene (merges land the first time instead of retrying).
+
+## 2026-07-05 - Torn guard exposes the flagship 'coarsening' as free-only
+   deletion; allocation-side merge-child fix is now the blocking work
+
+Flagship probe with the new per-step accounting: EVERY coarsening epoch
+in the flagship scene is free-only (freed 8/2/3, written 0, appended 0)
+and the torn guard now blocks them (count stays 35). The scene's
+historical 'coarsen' (35 -> 27) was deletion of the 8-particle drop
+(~0.1 kg total vs the 1000 kg base - invisible inside the gate's 2%
+mass tolerance). The chain has NEVER written merge children in these
+live scenes; the boiling mass loss and the flagship 'coarsening' are
+the same allocation-stage defect at different mass scales. The
+'admitted merge compacts freed slots' proof also fails (0.25 vs 1e-6)
+- its fixture stamps disagree with member-derived child values now
+that the materializer prefers the live group scan; expectation update
+pending alongside the allocation fix.
+
+CONSEQUENCE: two gates legitimately red until the fix lands -
+'mounted scene coarsens live...' and 'admitted merge compacts freed
+slots...'. This is conservation-correct behavior replacing silent mass
+deletion; not reverting the guard.
+
+BLOCKING WORK (next window, one slice):
+1. Allocation/slot-assignment: merge groups must produce their child
+   write - elect the leader via the existing SsPsalMergeGroup same-cell
+   scan and grant it a target slot (append or in-place) in the SAME
+   epoch as (or before) any participant frees; frees gate on the
+   leader's granted target.
+2. Update the merge-compacts proof to member-derived child values
+   (mass/momentum/temperature from the live group; stamps as
+   diagnostics).
+3. Re-green: flagship (count < 35 via a real written child, mass
+   conserved at 1e-3 not 2%), merge-compacts proof, churn gate stays
+   green, torn-skip telemetry drops to zero on both scenes.

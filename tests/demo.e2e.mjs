@@ -14305,6 +14305,9 @@ test('SPH phase reaction sidecar chains after thermal under authoritative two-le
       uploadSourceStage: finalStep?.nextParticleUploads?.sphParticleUpload?.sourceStage ?? null,
       reactionStatus: reactionResult?.status ?? null,
       maxTemperatureK: diagnostics?.maxTemperatureK ?? null,
+      meanTemperatureK: diagnostics?.temperatureMassWeightedMeanK
+        ?? diagnostics?.meanTemperatureK
+        ?? null,
       maxDisplacementM: diagnostics?.maxDisplacementM ?? null
     };
   });
@@ -14329,7 +14332,14 @@ test('SPH phase reaction sidecar chains after thermal under authoritative two-le
   expect(second.simTime).toBeGreaterThan(first.simTime);
   // Thermodynamics evolve through the chained sidecar outputs (a broken
   // chain leaves temperatures bit-frozen), and the melt keeps moving.
-  expect(second.maxTemperatureK).not.toBe(first.maxTemperatureK);
+  // Thermal evolution proof must survive plateau pinning: a drop sitting on
+  // its (reference-anchored) boiling plateau reports a constant max
+  // temperature while latent heat still flows, so accept either the max or
+  // the mass-weighted mean temperature moving between samples.
+  expect(
+    second.maxTemperatureK !== first.maxTemperatureK
+    || (second.meanTemperatureK !== null && second.meanTemperatureK !== first.meanTemperatureK)
+  ).toBe(true);
   expect(second.maxDisplacementM).toBeGreaterThan(0);
   expect(consoleIssues).toEqual([]);
 });

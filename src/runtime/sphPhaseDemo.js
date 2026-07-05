@@ -8,7 +8,7 @@
 // phase physics. Evidence-only throughout.
 
 import { createReferenceMaterialClosures } from './material/materialClosures.js';
-import { createDerivedMaterialClosure, resolveMaterialSpec } from './material/materialDerivation.js';
+import { createDerivedMaterialClosure, createReferenceAnchoredMaterialClosure, resolveMaterialSpec } from './material/materialDerivation.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -958,8 +958,20 @@ function initializeSupportedHydrostaticMpmState(demo, {
   };
 }
 
-function resolveSingleMaterialClosure(key, { allowFixtureMaterialProperties = false } = {}) {
+function resolveSingleMaterialClosure(key, {
+  allowFixtureMaterialProperties = false,
+  strictFirstPrinciplesMaterials = false
+} = {}) {
   const spec = resolveMaterialSpec(key);
+  // Default path: derived properties with phase boundaries anchored to the
+  // reference bank (reference-fallback provenance, derivation residuals
+  // retained). Strict mode reruns the pure lower-closure path per the
+  // algorithm-derived-material-properties plan.
+  if (!strictFirstPrinciplesMaterials) {
+    return createReferenceAnchoredMaterialClosure(key, {
+      elementOptions: { allowReducedEstimates: allowFixtureMaterialProperties }
+    });
+  }
   if (spec.phaseModel !== 'element') return createDerivedMaterialClosure(key);
   const Z = zForSymbol(key);
   const elementClosure = Z != null
@@ -1182,7 +1194,8 @@ export function buildSphPhaseDemoState({
     for (const [key, closure] of Object.entries(resolved)) {
       requireFirstPrinciplesMaterialProperties(closure.properties, {
         material: key,
-        context: 'buildSphPhaseDemoState'
+        context: 'buildSphPhaseDemoState',
+        allowedFallbackSources: ['material-property-reference-bank']
       });
     }
   }
@@ -3579,7 +3592,7 @@ function computeDerivedDemoPreflight(demo) {
 export function createSphPhaseDemo(options = {}) {
   const demo = buildSphPhaseDemoState(options);
   if (!demo.allowFixtureMaterialProperties) {
-    requireFirstPrinciplesMaterialMap(demo.materialProperties, { context: 'createSphPhaseDemo.initial-materials' });
+    requireFirstPrinciplesMaterialMap(demo.materialProperties, { context: 'createSphPhaseDemo.initial-materials', allowedFallbackSources: ['material-property-reference-bank'] });
   }
   const physicalLawGroups = normalizeSphPhysicalLawGroups(options.physicalLawGroups);
   const pendingPhysicalLawGroups = pendingSphPhysicalLawGroups(physicalLawGroups);
@@ -3879,7 +3892,8 @@ export function createSphPhaseDemo(options = {}) {
     if (!demo.allowFixtureMaterialProperties && options.allowReducedProductProperties !== true) {
       requireFirstPrinciplesMaterialProperties(closure.properties, {
         material: key,
-        context: 'createSphPhaseDemo.product-material'
+        context: 'createSphPhaseDemo.product-material',
+        allowedFallbackSources: ['material-property-reference-bank']
       });
     }
     demo.materialProperties[key] = closure.properties;

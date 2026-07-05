@@ -197,10 +197,22 @@ export function assertFullyLowerLevelDerived(properties = {}) {
   return true;
 }
 
-export function requireFirstPrinciplesMaterialProperties(properties = {}, { material = null, context = 'material-resolution' } = {}) {
+export function requireFirstPrinciplesMaterialProperties(properties = {}, {
+  material = null,
+  context = 'material-resolution',
+  allowedFallbackSources = []
+} = {}) {
   assertNoUnprovenancedMaterialProperties(properties);
   const summary = materialDerivationSummary(properties);
   if (!summary.fullyLowerLevelDerived) {
+    // Reference-bank anchoring is an admitted fallback tier (see
+    // algorithm-derived-material-properties plan): fallback entries whose
+    // source is explicitly allowed do not fail the gate, everything else does.
+    const allowed = new Set(allowedFallbackSources);
+    const blockingFallbacks = (properties.propertyProvenance?.entries || []).filter((entry) => (
+      NON_DERIVED_STATUSES.has(entry.status) && !allowed.has(entry.source)
+    ));
+    if (allowed.size > 0 && blockingFallbacks.length === 0) return true;
     throw new MaterialFirstPrinciplesResolutionError(
       `${material ? `${material} ` : ''}material properties are not first-principles-derived`,
       { material, context, blockers: summary.blockers, summary }
@@ -209,9 +221,9 @@ export function requireFirstPrinciplesMaterialProperties(properties = {}, { mate
   return true;
 }
 
-export function requireFirstPrinciplesMaterialMap(materialProperties = {}, { context = 'material-map' } = {}) {
+export function requireFirstPrinciplesMaterialMap(materialProperties = {}, { context = 'material-map', allowedFallbackSources = [] } = {}) {
   for (const [material, properties] of Object.entries(materialProperties)) {
-    requireFirstPrinciplesMaterialProperties(properties, { material, context });
+    requireFirstPrinciplesMaterialProperties(properties, { material, context, allowedFallbackSources });
   }
   return true;
 }

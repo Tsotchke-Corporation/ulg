@@ -2,6 +2,7 @@ import { createMaterialClosureArtifact, hashPayload } from '../../../ulg-gpu-abi
 import { atomicMassKg, symbolForZ, zForSymbol } from '../electronicStructure/periodicTable.js';
 import { allElementMolecularEnergy } from '../electronicStructure/allElementMolecularSolver.js';
 import { atomizationEnergyHa, rhf } from '../electronicStructure/molecularHartreeFock.js';
+import { anchorDerivedMaterialProperties } from './referenceBankAnchoring.js';
 import { idealGasHeatCapacity } from '../electronicStructure/molecularThermochemistry.js';
 import { PHYSICAL_CONSTANTS, idealGasDensityKgPerM3 } from '../materials/referenceMaterials.js';
 import { deriveElementProperties, elementMaterialClosure } from './elementClosures.js';
@@ -486,6 +487,64 @@ export function deriveMaterialProperties(materialKey, options = {}) {
     phaseModel: spec.phaseModel,
     options: options.elementOptions || {}
   });
+}
+
+// Reference-anchored variant: derive first, then anchor phase boundaries with
+// bank reference data (reference-fallback provenance, residuals retained).
+// The strict first-principles gate is skipped only when anchoring applied -
+// strict callers keep using createDerivedMaterialClosure directly.
+export function createReferenceAnchoredMaterialClosure(materialKey, options = {}) {
+  const derived = deriveMaterialProperties(materialKey, options);
+  const anchoring = anchorDerivedMaterialProperties(derived, materialKey);
+  if (!anchoring.anchored) return createDerivedMaterialClosure(materialKey, options);
+  const properties = anchoring.properties;
+  assertNoUnprovenancedMaterialProperties(properties);
+  const materialDerivation = materialDerivationSummary(properties);
+  const validityDomain = options.validityDomain || {
+    temperatureK: [0, 6000],
+    pressurePa: [1, 1e9],
+    composition: properties.formula || 'pure'
+  };
+  const inputHash = hashPayload({ material: materialKey, spec: resolveMaterialSpec(materialKey, options.materialSpecs || {}), provenance: properties.propertyProvenance });
+  const methodHash = hashPayload({ method: 'ulg.reference-anchored-material-derivation.v0', properties });
+  const base = createMaterialClosureArtifact({
+    closureFamily: 'material',
+    closureId: `ulg-reference-anchored-${materialKey}-material-closure`,
+    material: materialKey,
+    inputRefs: [{ schema: 'ulg.first-principles-material-input.v0', material: materialKey, status: 'produced', inputHash }],
+    producer: { service: 'ulg-runtime', commit: null, toolchain: 'generic-derivation+reference-bank-anchoring' },
+    validityDomain,
+    units: {
+      density: 'kg/m^3',
+      heatCapacity: 'J/(kg*K)',
+      specificInternalEnergy: 'J/kg',
+      latentHeat: 'J/kg',
+      temperature: 'K'
+    },
+    properties,
+    derivatives: true,
+    materialDerivation,
+    validation: { status: 'reference-bank-anchored-model-unvalidated', evidenceRefs: [] },
+    provenance: {
+      source: 'generic-first-principles-material-derivation+reference-bank-anchoring',
+      inputHash,
+      methodHash,
+      notes: [
+        `Material closure for ${materialKey}; phase boundaries anchored to the reference bank (residuals retained).`,
+        `Anchored paths: ${anchoring.anchoredPaths.join(', ')}.`
+      ]
+    }
+  });
+  return {
+    ...base,
+    materialDerivation,
+    referenceBankAnchoring: properties.referenceBankAnchoring,
+    inputHash,
+    methodHash,
+    execution: { mode: 'generic-first-principles-material-derivation+reference-bank-anchoring' },
+    validity: { temperatureK: validityDomain.temperatureK },
+    provenance: { ...base.provenance, inputHash, methodHash }
+  };
 }
 
 export function createDerivedMaterialClosure(materialKey, options = {}) {

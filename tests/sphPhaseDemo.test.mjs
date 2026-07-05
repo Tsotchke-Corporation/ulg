@@ -38,15 +38,31 @@ async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'));
 }
 
-test('demo default builds with fully derived material closures', () => {
+test('demo default builds with reference-anchored derived material closures', () => {
   const demo = buildSphPhaseDemoState();
   assert.ok(demo.counts.total > 0);
   for (const key of ['fe', 'h2o', 'air']) {
-    const summary = materialDerivationSummary(demo.materialProperties[key]);
-    assert.equal(summary.fullyLowerLevelDerived, true);
-    assert.equal(summary.hasReferenceFallbacks, false);
+    const properties = demo.materialProperties[key];
+    const summary = materialDerivationSummary(properties);
+    // Anchored materials may carry reference fallbacks, but only from the
+    // material reference bank; everything else stays first-principles.
+    const fallbackSources = new Set(
+      (properties.propertyProvenance?.entries || [])
+        .filter((entry) => ['reference-fallback', 'reduced-estimate', 'blocked'].includes(entry.status))
+        .map((entry) => entry.source)
+    );
+    for (const source of fallbackSources) {
+      assert.equal(source, 'material-property-reference-bank');
+    }
     assert.equal(summary.hasReducedEstimates, false);
   }
+  // The anchoring must land the known reference boundaries.
+  const h2o = demo.materialProperties.h2o;
+  const boiling = h2o.transitions.find((t) => t.to === 'gas');
+  const melting = h2o.transitions.find((t) => t.to === 'liquid');
+  assert.ok(Math.abs(melting.temperatureK - 273.15) < 0.01);
+  assert.ok(Math.abs(boiling.temperatureK - 373.15) < 0.01);
+  assert.ok(Math.abs(boiling.latentHeatJPerKg - 2256000) < 1);
 });
 
 test('demo consumes partial cached closures and derives only missing runtime materials', () => {
@@ -58,9 +74,17 @@ test('demo consumes partial cached closures and derives only missing runtime mat
   });
   assert.equal(demo.materialProperties.h2o, cachedH2o.properties);
   for (const key of ['fe', 'air', 'h2', 'o2']) {
-    const summary = materialDerivationSummary(demo.materialProperties[key]);
-    assert.equal(summary.fullyLowerLevelDerived, true);
-    assert.equal(summary.hasReferenceFallbacks, false);
+    const properties = demo.materialProperties[key];
+    const summary = materialDerivationSummary(properties);
+    const fallbackSources = new Set(
+      (properties.propertyProvenance?.entries || [])
+        .filter((entry) => ['reference-fallback', 'reduced-estimate', 'blocked'].includes(entry.status))
+        .map((entry) => entry.source)
+    );
+    for (const source of fallbackSources) {
+      assert.equal(source, 'material-property-reference-bank');
+    }
+    assert.equal(summary.hasReducedEstimates, false);
   }
 });
 

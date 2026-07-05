@@ -372,7 +372,8 @@ function requireCompositionFirstPrinciples(key, comp, options = {}) {
   }
   requireFirstPrinciplesMaterialProperties(properties, {
     material: key,
-    context: 'reactionDiscovery.materialComposition'
+    context: 'reactionDiscovery.materialComposition',
+    allowedFallbackSources: ['material-property-reference-bank']
   });
 }
 

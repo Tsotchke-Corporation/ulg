@@ -37916,3 +37916,58 @@ authority with derivation residuals reported. Acceptance: h2o melts at
 reference; ice/water/steam scenes re-validated (buoyancy gate,
 boiling probe); other common materials (Fe, Al, O2) boundary-audited
 the same way.
+
+## 2026-07-04 - Reference-bank anchoring: materials now match known physical
+   constants (water boils at 373.15K); bank pollution corrected
+
+Implemented the algorithm-derived-material-properties plan's bank-seeding
+policy end to end:
+
+- AUDIT (Node, derived vs CRC): h2o melt +5% boil -12% latents ~-30%;
+  Fe melt +22% (no boiling at all); Al melt +211% (2907K!); Al2O3 melt
+  -86% (326K) boil -88%; element bank records themselves were polluted
+  with derivation output (109 transition rows, e.g. N melting 12834K,
+  F 27829K, Al solid density 383 kg/m3).
+- BANK: corrected transitions (melting/boiling temperatures + latent
+  heats) for 27 common elements with CRC reference values, plus phase
+  densities/heat capacities where polluted (>20% off). New
+  data/material-properties/compounds.json with h2o, al2o3, nacl records
+  (phase ranges, densities, cp, transitions), provenance
+  'crc-standard-reference-data'.
+- ANCHORING (src/runtime/material/referenceBankAnchoring.js): derived
+  properties get transitions/latents/phase ranges/densities/cp replaced
+  by bank reference rows when a record with crc provenance exists;
+  derived values retained as derivationResiduals; provenance entries
+  stamped reference-fallback with source
+  'material-property-reference-bank'. Elements whose derivation stops
+  at liquid get a synthesized liquid->gas transition + ideal-gas phase
+  from the bank boiling row (so Fe/Al can vaporize instead of
+  superheating forever).
+- CLOSURES: createReferenceAnchoredMaterialClosure (materialDerivation)
+  derives-then-anchors; falls back to the pure derived closure when no
+  bank record matches (o2 et al). Demo resolveSingleMaterialClosure uses
+  it by default; strictFirstPrinciplesMaterials option reruns the pure
+  lower-closure path per plan. The first-principles gates
+  (propertyProvenance requireFirstPrinciples*, reactionDiscovery
+  composition gate) accept fallback entries whose source is explicitly
+  allowed ('material-property-reference-bank') and reject all others.
+- CACHES: PEER_CLOSURE_CACHE_METHOD_VERSION bumped to
+  'ulg.generic-derivation+reference-bank-anchoring.v1' so peer/static
+  caches rebuild from anchored properties.
+
+Verification: anchored closures report h2o 273.15/373.15 (rho 917/1000,
+L_vap 2.256 MJ/kg), Fe 1811/3134 (rho 7874/6980), Al 933.47/2743
+(rho 2700/2375), Al2O3 2345/3250, Cu 1357.77/2835. Live boiling scene
+(600K floor): plateau pins at maxT 373.1K with gradual latent-paying
+transition and exact mass conservation (1064 kg with the corrected
+1000 kg/m3 water density). Units 979/0 (two contract tests updated to
+the anchored-default contract with explicit reference-boundary
+assertions).
+
+Known follow-ups: wall heating coefficient delivers ~23 MW/m2 (about
+100x physical film boiling) - separate tunable realism item; o2/h2
+cryogenic transitions unanchored (no condensed phases in their
+derivations; irrelevant to current scenes); remaining ~80 uncommon
+elements still carry polluted bank transition rows (unanchored because
+they lack crc provenance - the anchoring filter keeps their garbage out
+of the sim; fix rows opportunistically).

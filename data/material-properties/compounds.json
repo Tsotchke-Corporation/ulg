@@ -1,0 +1,195 @@
+{
+ "schema": "peercompute.ulg.material-property-bank.compounds.v0",
+ "schemaVersion": 1,
+ "bankFamily": "ulg-material-property-bank-compounds",
+ "generatorFingerprint": "crc-standard-reference-seed-2026-07-04",
+ "generatedAt": "2026-07-04T00:00:00Z",
+ "records": [
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "h2o",
+   "formula": "H2O",
+   "name": "water",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      273.15
+     ],
+     "densityKgPerM3": 917,
+     "heatCapacityJPerKgK": 2090
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      273.15,
+      373.15
+     ],
+     "densityKgPerM3": 1000,
+     "heatCapacityJPerKgK": 4186
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      373.15,
+      1000000
+     ],
+     "densityKgPerM3": 0.804,
+     "heatCapacityJPerKgK": 1996
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 273.15,
+     "latentHeatJPerKg": 333550
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 373.15,
+     "latentHeatJPerKg": 2256000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "al2o3",
+   "formula": "Al2O3",
+   "name": "aluminum oxide (alumina)",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      2345
+     ],
+     "densityKgPerM3": 3987,
+     "heatCapacityJPerKgK": 880
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      2345,
+      3250
+     ],
+     "densityKgPerM3": 2930,
+     "heatCapacityJPerKgK": 1420
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      3250,
+      1000000
+     ],
+     "densityKgPerM3": 0.5,
+     "heatCapacityJPerKgK": 1300
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 2345,
+     "latentHeatJPerKg": 620000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 3250,
+     "latentHeatJPerKg": 4290000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "nacl",
+   "formula": "NaCl",
+   "name": "sodium chloride",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      1073.8
+     ],
+     "densityKgPerM3": 2165,
+     "heatCapacityJPerKgK": 864
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      1073.8,
+      1738
+     ],
+     "densityKgPerM3": 1556,
+     "heatCapacityJPerKgK": 1000
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      1738,
+      1000000
+     ],
+     "densityKgPerM3": 0.7,
+     "heatCapacityJPerKgK": 850
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 1073.8,
+     "latentHeatJPerKg": 480000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 1738,
+     "latentHeatJPerKg": 2790000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  }
+ ]
+}

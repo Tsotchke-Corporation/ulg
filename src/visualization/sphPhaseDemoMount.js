@@ -90,7 +90,7 @@ const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
 const PEER_CLOSURE_CACHE_GENERATOR_SCHEMA = 'peercompute.ulg.material-closure-generator-fingerprint.v1';
 const PEER_CLOSURE_CACHE_APP_VERSION = '0.1.0';
-const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-first-principles-material-derivation.v0';
+const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v1';
 const PEER_CLOSURE_CACHE_MAX_RECORDS_PER_MATERIAL = 32;
 const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   schema: PEER_CLOSURE_CACHE_GENERATOR_SCHEMA,

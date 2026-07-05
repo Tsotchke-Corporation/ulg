@@ -12703,7 +12703,9 @@ fn ss_psm_copy_particle(
   target_index: u32,
   assignment_offset: u32,
   child_ordinal: u32,
-  child_count: u32
+  child_count: u32,
+  freed_group: SsPsmMergeGroup,
+  freed_includes_source: bool
 ) -> f32 {
   if (source_index >= params.source_particle_count || target_index >= params.output_particle_capacity) {
     return 0.0;
@@ -12738,7 +12740,29 @@ fn ss_psm_copy_particle(
   if (!divide_mass_split) {
     merge_group = ss_psm_merge_group(assignment_offset, state_stride, thermo_stride);
   }
-  let merge_group_valid = merge_group.member_count >= 2u && merge_group.mass > 0.0;
+  var merge_group_valid = merge_group.member_count >= 2u && merge_group.mass > 0.0;
+  // Leader-with-freed-range merge encoding: one assignment row writes the
+  // child and frees the merged-away members' source slots. When no action-2
+  // participant rows exist, the freed range IS the merge group; combine it
+  // with the leader (unless the leader's own slot is inside the range) so
+  // mass, first moment, momentum, and thermal energy are conserved.
+  if (!merge_group_valid && !divide_mass_split && child_count == 1u && freed_group.mass > 0.0) {
+    var combined = freed_group;
+    if (!freed_includes_source) {
+      let leader_mass = max(state0.w, 0.0);
+      let leader_velocity = source_sph_state[source_state_base + 1u];
+      let leader_temperature = source_sph_thermo[source_thermo_base].z;
+      combined.moment = combined.moment + state0.xyz * leader_mass;
+      combined.momentum = combined.momentum + leader_velocity.xyz * leader_mass;
+      combined.mass_temperature = combined.mass_temperature + max(leader_temperature, 0.0) * leader_mass;
+      combined.mass = combined.mass + leader_mass;
+      combined.member_count = combined.member_count + 1u;
+    }
+    if (combined.member_count >= 2u && combined.mass > 0.0) {
+      merge_group = combined;
+      merge_group_valid = true;
+    }
+  }
   if (divide_mass_split) {
     child_mass = max(state0.w, 0.0) / divisor;
     let child_volume = max(assignment_rows[assignment_offset + 22u], 0.0) / divisor;
@@ -12909,6 +12933,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let target_start = ss_psm_index(target_start_value);
   let free_start = ss_psm_index(free_start_value);
 
+  // Freed-range conservation sums: the slots this row will free are the
+  // merged-away members; their SOURCE state is still intact here (frees
+  // zero the OUT buffers), so the child copy can conserve their mass,
+  // first moment, momentum, and thermal energy.
+  let freed_state_stride = ss_psm_stride(params.state_vec4_stride, SCHROEDER_PSM_STATE_VEC4_STRIDE);
+  let freed_thermo_stride = ss_psm_stride(params.thermo_vec4_stride, SCHROEDER_PSM_THERMO_VEC4_STRIDE);
+  var freed_group = SsPsmMergeGroup(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0u);
+  var freed_includes_source = false;
+  if (free_start_value >= 0.0 && free_count > 0u) {
+    for (var slot = 0u; slot < free_count; slot = slot + 1u) {
+      let member_index = free_start + slot;
+      if (member_index >= params.source_particle_count) {
+        continue;
+      }
+      if (member_index == source_index) {
+        freed_includes_source = true;
+      }
+      let member_state = source_sph_state[member_index * freed_state_stride];
+      let member_velocity = source_sph_state[member_index * freed_state_stride + 1u];
+      let member_temperature = source_sph_thermo[member_index * freed_thermo_stride].z;
+      let member_mass = max(member_state.w, 0.0);
+      freed_group.moment = freed_group.moment + member_state.xyz * member_mass;
+      freed_group.momentum = freed_group.momentum + member_velocity.xyz * member_mass;
+      freed_group.mass_temperature = freed_group.mass_temperature + max(member_temperature, 0.0) * member_mass;
+      freed_group.mass = freed_group.mass + member_mass;
+      freed_group.member_count = freed_group.member_count + 1u;
+    }
+  }
+
   var written_target_count = 0.0;
   if (target_start_value >= 0.0 && target_count > 0u) {
     for (var slot = 0u; slot < target_count; slot = slot + 1u) {
@@ -12917,7 +12970,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         target_start + slot,
         assignment_offset,
         slot,
-        target_count
+        target_count,
+        freed_group,
+        freed_includes_source
       );
     }
   }

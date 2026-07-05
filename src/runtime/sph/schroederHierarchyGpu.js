@@ -12363,7 +12363,7 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       computeBufferBinding(8, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-materialization.v3',
+      cacheKey: 'ulg-schroeder-particle-storage-materialization.v4',
       label: 'ulg-schroeder-particle-storage-materialization',
       code: schroederParticleStorageMaterializationWgsl,
       entryPoint: 'main',

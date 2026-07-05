@@ -38129,3 +38129,37 @@ merge moment. The countSummary already carries per-row source/target
 mass and residuals; the scene should surface stepCountSummary into the
 compact schroeder summaries on the storage-enabled path (currently only
 visible via uploadProvenance).
+
+## 2026-07-04 - Steady-state part 2a: freed-range merge conservation
+   proven under zero stamps; remaining live loss isolated to
+   blocked-leader atomicity
+
+Extended the materializer (WGSL, cache v4): merge child copies now
+combine a freed-range conservation group (mass, first moment, momentum,
+mass*T summed over the slots the SAME row frees, leader included unless
+its own slot is in the range) whenever the action-2 participant scan
+finds no group. This covers the leader-with-freed-range merge encoding.
+
+Isolation proof (probe-merge-zerostamp, real chain, full readback):
+zeroing ALL aggregate-derived stamps on the assignment rows (target
+mass col 19 -> 0, cell id col 20 -> -1, volume col 22 -> 0, momentum
+cols 24-26 -> 0, mass*T col 27 -> 0) before materialization now
+CONSERVES EXACTLY: compacted mass 8 = source 8, merged child mass 6
+(3x2), centroid x=1.5, momentum-conserving velocity, mass-weighted
+temperature 400K. The storage chain no longer depends on aggregate
+stamp health for merge conservation.
+
+The live boiling repro still loses 3 particles' mass (1064 -> 1040)
+with this fix active - so those events are NOT written-child merges:
+they must be free-only rows whose LEADER row never wrote (allocation
+blocked by capacity/row budget while participants remained admitted
+and freed themselves) - exactly the historical
+freed=9/blocked=9 count-summary pattern. NEXT: reproduce in the
+harness by blocking the leader's allocation (capacity admission) while
+participants stay admitted, then fix atomicity upstream - a blocked
+leader must block its whole group's frees (slot-assignment knows the
+grouping via the allocator's cell stamps; the fix belongs there, not in
+the materializer where zero stamps can hide the join).
+
+Orchestrator/units all green (980/0). Flagship gate reworked earlier
+today to persistent adoption evidence remains green.

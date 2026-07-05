@@ -38460,3 +38460,24 @@ copy source still contained pre-A slot contents... with 133-slot
 layout). One decisive dump: epoch B's materialization row for one
 resurrected participant (was it a copy row with positive mass from a
 buffer where A's free should have zeroed it?).
+
+## 2026-07-05 - Visual-fidelity correction: checks now use the native
+   WebGPU surface renderer; stale drop-domain surface bug found
+
+User caught that visual screenshots were taken on the default WebGL
+diagnostic particle renderer (blocky blob view) rather than the native
+WebGPU marching-cubes surface path (`surfaceDraw=native-webgpu-surface-
+consumer`). Re-shot the settled dam-break scene on the native path:
+
+- Settled water renders as a proper faceted surface sheet across the
+  floor - matches the physics.
+- BUG (render, queued): a voxelized drop-domain surface hovers at the
+  drop's INITIAL position at sim t ~6.9s, long after the drop merged
+  into the pool - a stale render-domain surface not tracking its
+  material. The diagnostic renderer hid this entirely.
+- The WebGL diagnostic path also throttles the sim loop (~130 physics
+  fps vs ~399 under the native renderer) - earlier perf observations
+  on visual probes were renderer-bound.
+
+Policy recorded (memory + here): fidelity screenshots always use the
+native surface renderer and state which renderer they came from.

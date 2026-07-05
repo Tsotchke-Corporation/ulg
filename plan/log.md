@@ -37772,3 +37772,41 @@ per-cohort mass equal across runs; zero WebGPU console errors.
 
 Both 2026-07-04 fixme acceptance gates (still-water settling, cohort
 buoyancy) are now promoted and green.
+
+## 2026-07-04 - Boiling realism audit (post-overhaul): unphysical
+   evaporation without latent-heat budget; steam inert - NEXT SLICE
+
+Probe (water pool in 1.4x3x1.4 box, floor wall at 600K via wymin=600,
+mech=mlsmpm residentAuto=1): mass conserved exactly (1005.34 kg), heat
+flows (maxT 329K, mean 300->304K over 7s), stability fine (max speed
+<=0.13 m/s). But:
+
+1. UNPHYSICAL EVAPORATION: gas phase mass reaches 43 kg by t=0.4s and
+   139 kg by t=6.7s while maxT stays 329K (44K below boiling) and mean
+   temperature only rises ~4K (~17 MJ total heat input). Vaporizing
+   139 kg requires ~314 MJ of latent heat - conversion is not paying
+   the energy budget. The CPU classifier
+   (stablePhaseFromSpecificEnergy) honors latent plateau segments, so
+   the defect is upstream: either particle specific energies are
+   inflated on the GPU thermal path, the GPU phase-response graph's
+   segment boundaries disagree with the CPU closures, or a separate
+   (density-based?) reclassifier flips thermo phase ids without
+   touching energy.
+2. INERT STEAM: the "gas" mass neither rises nor expands (bounds maxY
+   flat ~1.12, max speed 0.03-0.06). If thermo rest density (thermo0.w)
+   is not updated to the gas phase density on reclassification, the
+   gasLinearized EOS sees rho ~= rho0_liquid and produces no expansion
+   pressure; buoyancy machinery (thermalPhase.js) may also not be
+   active on this path.
+
+Slice plan: (a) dump per-particle u/T/phaseId/restDensity along the
+height of the pool (live GPU state via a diagnostic readback or decoded
+render rows) to see WHERE the gas ids appear and what u they carry;
+(b) compare the GPU phase-response graph segments against
+orderedSegments(properties) for h2o (same boundaries and latent
+widths?); (c) verify reclassification updates thermo rest density and
+that vaporization DEBITS the latent heat from u (and condensation
+credits it); (d) acceptance gates: sealed-pool heating shows no gas
+below ~370K at ~1 atm-equivalent conditions, latent energy balance
+within tolerance across a boil, and steam that does form rises
+(gas-phase com above liquid com within a few seconds).

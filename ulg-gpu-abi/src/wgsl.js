@@ -12496,6 +12496,89 @@ fn ss_pssa_active_allocation(allocation_offset: u32) -> bool {
   return status > 0.0 && status < 32.0 && allocation_admission > 0.0 && params.admission_approved > 0u;
 }
 
+// Per-WRITER slot compaction: the appended-slot window is consumed by rows
+// that actually allocate targets, not by every row. The old row-indexed
+// addressing (base + row_index * max_slots_per_row) silently refused writes
+// for any writer whose ROW INDEX exceeded the free-list capacity while frees
+// still executed - the torn-epoch mass-deletion source. O(rows) prefix per
+// call; rows are bounded by the storage row budget (exact small-scene route).
+fn ss_pssa_writer_slot_offset(row_index: u32, allocation_stride: u32) -> f32 {
+  var offset = 0.0;
+  for (var row = 0u; row < row_index; row = row + 1u) {
+    let other = row * allocation_stride;
+    if (!ss_pssa_active_allocation(other)) {
+      continue;
+    }
+    offset = offset + max(allocation_rows[other + 10u], 0.0);
+  }
+  return offset;
+}
+
+fn ss_pssa_target_granted(row_index: u32, allocation_offset: u32, allocation_stride: u32) -> bool {
+  let target_count = allocation_rows[allocation_offset + 10u];
+  if (!(target_count > 0.0)) {
+    return false;
+  }
+  let free_list_offset = 0u;
+  let slot_capacity = free_list_rows[free_list_offset + 1u];
+  let available_slot_count = free_list_rows[free_list_offset + 2u];
+  let writer_offset = ss_pssa_writer_slot_offset(row_index, allocation_stride);
+  return writer_offset + target_count <= slot_capacity
+    && writer_offset + target_count <= available_slot_count;
+}
+
+// A merge participant may free its slot ONLY when its group's leader (the
+// same-cell row that allocates the merged child) has a granted target.
+// Frees without a written child delete mass; ungrouped free_required rows
+// never free.
+fn ss_pssa_free_allowed(
+  row_index: u32,
+  allocation_offset: u32,
+  allocation_stride: u32,
+  target_granted: bool
+) -> bool {
+  let free_count = allocation_rows[allocation_offset + 12u];
+  if (!(free_count > 0.0)) {
+    return false;
+  }
+  let slot_action = allocation_rows[allocation_offset + 8u];
+  if (abs(slot_action - 2.0) >= 0.5) {
+    // Non-merge frees (mass-correct splits free their own source alongside
+    // their granted children) gate on this row's own grant when it writes.
+    if (allocation_rows[allocation_offset + 10u] > 0.0) {
+      return target_granted;
+    }
+    return true;
+  }
+  if (allocation_rows[allocation_offset + 10u] > 0.0) {
+    // Merge leader: frees only alongside its granted child write.
+    return target_granted;
+  }
+  let my_cell = allocation_rows[allocation_offset + 18u];
+  if (my_cell < 0.0) {
+    return false;
+  }
+  for (var row = 0u; row < params.allocation_row_count; row = row + 1u) {
+    let other = row * allocation_stride;
+    if (!ss_pssa_active_allocation(other)) {
+      continue;
+    }
+    if (abs(allocation_rows[other + 8u] - 2.0) >= 0.5) {
+      continue;
+    }
+    if (allocation_rows[other + 18u] != my_cell) {
+      continue;
+    }
+    if (!(allocation_rows[other + 10u] > 0.0)) {
+      continue;
+    }
+    if (ss_pssa_target_granted(row, other, allocation_stride)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 fn ss_pssa_write_empty(assignment_offset: u32, allocation_offset: u32, free_list_offset: u32, status: f32) {
   assignment_rows[assignment_offset + 0u] = allocation_rows[allocation_offset + 0u];
   assignment_rows[assignment_offset + 1u] = allocation_rows[allocation_offset + 1u];
@@ -12537,22 +12620,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let base_slot = free_list_rows[free_list_offset + 0u];
   let slot_capacity = free_list_rows[free_list_offset + 1u];
   let available_slot_count = free_list_rows[free_list_offset + 2u];
-  let descriptor_max_slots = max(free_list_rows[free_list_offset + 3u], 1.0);
-  let max_slots_per_row = max(max(params.max_slots_per_row, descriptor_max_slots), 1.0);
   let target_count = allocation_rows[allocation_offset + 10u];
   let free_count = allocation_rows[allocation_offset + 12u];
   let allocation_capacity_residual = allocation_rows[allocation_offset + 15u];
-  let row_slot_start = base_slot + f32(row_index) * max_slots_per_row;
-  let target_slot_residual = max((row_slot_start + target_count) - (base_slot + slot_capacity), 0.0);
-  let available_slot_residual = max(target_count - available_slot_count, 0.0);
-  let target_start = select(-1.0, row_slot_start, target_count > 0.0 && target_slot_residual <= 0.0);
-  let free_start = select(-1.0, allocation_rows[allocation_offset + 0u], free_count > 0.0);
+  let writer_slot_offset = ss_pssa_writer_slot_offset(row_index, allocation_stride);
+  let row_slot_start = base_slot + writer_slot_offset;
+  let target_slot_residual = max((writer_slot_offset + target_count) - slot_capacity, 0.0);
+  let available_slot_residual = max((writer_slot_offset + target_count) - available_slot_count, 0.0);
+  let target_granted = target_count > 0.0
+    && target_slot_residual <= 0.0
+    && available_slot_residual <= 0.0;
+  let target_start = select(-1.0, row_slot_start, target_granted);
+  let free_allowed = ss_pssa_free_allowed(row_index, allocation_offset, allocation_stride, target_granted);
+  let free_start = select(-1.0, allocation_rows[allocation_offset + 0u], free_allowed);
 
   var status = 1.0 + 8.0;
   if (target_count > 0.0 && target_start >= 0.0) {
     status = status + 2.0;
   }
-  if (free_count > 0.0 && free_start >= 0.0) {
+  let effective_free_count = select(0.0, free_count, free_allowed);
+  if (effective_free_count > 0.0 && free_start >= 0.0) {
     status = status + 4.0;
   }
   if (target_slot_residual > 0.0 || available_slot_residual > 0.0 || allocation_capacity_residual > 0.0) {
@@ -12571,7 +12658,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   assignment_rows[assignment_offset + 9u] = target_start;
   assignment_rows[assignment_offset + 10u] = target_count;
   assignment_rows[assignment_offset + 11u] = free_start;
-  assignment_rows[assignment_offset + 12u] = free_count;
+  assignment_rows[assignment_offset + 12u] = effective_free_count;
   assignment_rows[assignment_offset + 13u] = base_slot;
   assignment_rows[assignment_offset + 14u] = slot_capacity;
   assignment_rows[assignment_offset + 15u] = available_slot_count;
@@ -12688,6 +12775,14 @@ fn ss_psm_merge_group(assignment_offset: u32, state_stride: u32, thermo_stride: 
     if (assignment_rows[other_offset + 20u] != my_cell) {
       continue;
     }
+    // Conservation join: only members whose FREE was actually granted count
+    // toward the merged child. A member whose free was denied keeps its
+    // slot and its mass; including it would create mass out of nothing
+    // (observed live: children carrying full aggregate-stamp mass while
+    // only some members freed, +88 kg on the boiling proof scene).
+    if (assignment_rows[other_offset + 11u] < 0.0 || !(assignment_rows[other_offset + 12u] > 0.0)) {
+      continue;
+    }
     let member_index = u32(max(assignment_rows[other_offset + 0u], 0.0));
     if (member_index >= params.source_particle_count) {
       continue;
@@ -12738,7 +12833,15 @@ fn ss_psm_copy_particle(
   let divide_mass_split = assignment_rows[assignment_offset + 8u] == 4.0
     && child_count > 0u;
   let divisor = f32(max(child_count, 1u));
-  var child_mass = ss_psm_target_mass(assignment_offset, state0.w);
+  // Merge (action 2) writes derive mass from the granted-free group scan or
+  // degrade to a pure move of the leader; the aggregate target-mass stamp is
+  // never authoritative for merges (it describes the whole aggregate cell,
+  // not the members actually freed this epoch).
+  let is_merge_write = assignment_rows[assignment_offset + 8u] == 2.0;
+  var child_mass = state0.w;
+  if (!is_merge_write) {
+    child_mass = ss_psm_target_mass(assignment_offset, state0.w);
+  }
   var child_position = state0.xyz;
   // Live merge-group scan: mass, first moment, momentum, and thermal energy
   // summed over the group members from the SOURCE buffers the materializer
@@ -12806,6 +12909,7 @@ fn ss_psm_copy_particle(
   );
   let momentum_provided = child_mass > 0.0
     && !divide_mass_split
+    && !is_merge_write
     && (target_momentum.x != 0.0 || target_momentum.y != 0.0 || target_momentum.z != 0.0);
   if (merge_group_valid) {
     out_sph_state[target_state_base + 1u] = vec4<f32>(merge_group.momentum / merge_group.mass, state1.w);
@@ -12827,7 +12931,7 @@ fn ss_psm_copy_particle(
   var child_temperature = thermo0.z;
   if (merge_group_valid) {
     child_temperature = merge_group.mass_temperature / merge_group.mass;
-  } else if (!divide_mass_split && cell_mass_temperature > 0.0 && child_mass > 0.0) {
+  } else if (!divide_mass_split && !is_merge_write && cell_mass_temperature > 0.0 && child_mass > 0.0) {
     child_temperature = cell_mass_temperature / child_mass;
   }
   // Represented entity count scales with the mass ratio: uniform
@@ -12861,7 +12965,11 @@ fn ss_psm_copy_particle(
   // Merged child rest-volume fallback: when the aggregate volume stamp is
   // absent, size the child from its conserved mass at the source rest
   // density so the EOS does not read an N-times over-dense particle.
-  if (merge_group_valid && !(target_volume > 0.0) && thermo0.w > 0.0) {
+  if (is_merge_write && thermo0.w > 0.0) {
+    // Merge child rest volume tracks conserved mass at source rest density;
+    // the aggregate volume stamp describes the whole cell, not this child.
+    target_volume = child_mass / thermo0.w;
+  } else if (merge_group_valid && !(target_volume > 0.0) && thermo0.w > 0.0) {
     target_volume = merge_group.mass / thermo0.w;
   }
   if (target_volume > 0.0 && row4.w > 0.0) {

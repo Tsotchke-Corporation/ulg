@@ -12131,7 +12131,7 @@ export async function runSchroederParticleStorageSlotAssignmentWebGpu({
       computeBufferBinding(3, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-slot-assignment.v0',
+      cacheKey: 'ulg-schroeder-particle-storage-slot-assignment.v1',
       label: 'ulg-schroeder-particle-storage-slot-assignment',
       code: schroederParticleStorageSlotAssignmentWgsl,
       entryPoint: 'main',
@@ -12363,7 +12363,7 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       computeBufferBinding(8, 'uniform')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-particle-storage-materialization.v4',
+      cacheKey: 'ulg-schroeder-particle-storage-materialization.v5',
       label: 'ulg-schroeder-particle-storage-materialization',
       code: schroederParticleStorageMaterializationWgsl,
       entryPoint: 'main',

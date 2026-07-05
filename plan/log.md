@@ -38408,3 +38408,55 @@ only; (2) frees gated on the row's own granted target when
 allocation_required (leader) and on the leader's grant for
 participants; (3) re-green flagship + merge proof with 1e-3 mass
 tolerance, churn gate stays green, torn skips -> 0.
+
+## 2026-07-05 - Per-writer slot compaction + free gating landed; flagship
+   coarsens conservatively; boiling exposes layer 3 (stale-source double
+   epoch resurrects freed participants)
+
+LANDED (slot assignment v1, materialization v5, units 981/0):
+1. Per-writer slot compaction: appended-slot addressing is now a prefix
+   over WRITERS' target counts, not row index - writers beyond the old
+   row-window get their slots; capacity checks against writer offsets.
+2. Free gating: leaders free only alongside their granted child write;
+   merge participants free only when their group's leader has a granted
+   target (same-cell scan); split rows free only with granted children;
+   ungrouped free_required rows never free.
+3. Conservation join in the materializer: the merge-group scan counts
+   ONLY members whose free was actually granted (assignment cols 11/12),
+   and merge writes NEVER take aggregate stamps for mass/momentum/
+   temperature/volume (stamps describe the whole cell, not the members
+   freed this epoch); merge child rest volume = conserved mass at source
+   rest density.
+
+RESULTS:
+- Synthetic harness: exact conservation (8 = 8, child 6 kg, centroid,
+  momentum, mass-weighted T).
+- FLAGSHIP: coarsens again and CONSERVATIVELY - 35 -> 28 (8 drop
+  particles merged into one WRITTEN child, previously deletion to 27),
+  mass 1000.1 constant, zero torn epochs.
+- Boiling: layer 3 exposed. Per-epoch accounting (now visible in the
+  compact summaries): epoch A writes 3 / frees 14 (children sum = freed
+  members, conserving), epoch B on the post-A state writes 1 / frees 3
+  A-children (srcMass 112 = merged children, conserving in isolation) -
+  but the FINAL adopted state has count 131 / mass 1152: epoch A's 11
+  freed participants are alive again (+11 particles, +88 kg = exactly
+  their mass). Two topology epochs inside one batch are not chaining
+  their adopted sources correctly - the second epoch's adoption
+  resurrects slots the first epoch freed (stale source buffers or
+  adoption composition across intra-batch epochs).
+- The churn conservation gate correctly FAILS on this build - it is the
+  acceptance criterion for the sequencing fix and stays red on purpose;
+  torn deletion (silent mass loss) remains impossible.
+
+NEXT: intra-batch epoch chaining - when a step adopts storage, the NEXT
+step's SS prepass (proposals/apply/allocation source particle state AND
+the free-list/count baseline) must consume the adopted continuation,
+not the batch-entry state; suspect the same-batch handoff of
+sourceParticleCount/free-list base (appended slots) plus the
+countSummary authoritative baseline. Instrument epoch B's
+sourceParticleCount (was 122 in its summary - correct!) vs the buffers
+its MATERIALIZER copy pass actually bound (the resurrected 11 imply the
+copy source still contained pre-A slot contents... with 133-slot
+layout). One decisive dump: epoch B's materialization row for one
+resurrected participant (was it a copy row with positive mass from a
+buffer where A's free should have zeroed it?).

@@ -37810,3 +37810,35 @@ credits it); (d) acceptance gates: sealed-pool heating shows no gas
 below ~370K at ~1 atm-equivalent conditions, latent energy balance
 within tolerance across a boil, and steam that does form rises
 (gas-phase com above liquid com within a few seconds).
+
+## 2026-07-04 - Boiling slice narrowed: isolated thermal chain is CORRECT;
+   the spurious gas comes from the live composition
+
+Isolated-kernel probe (runSphThermalStepWebGpu directly, scene-borrowed
+h2o closures + thermal material table, 133-particle pool, floor wall
+600K, dt 5e-4, full readback each step; device needs the app's raised
+maxStorageBuffersPerShaderStage - default-limit devices fail with the
+9-storage-buffer error):
+
+- 0.1s: bottom layer 293 -> 322K, u 1.22 -> 1.36 MJ/kg, ALL still
+  liquid. No premature gas.
+- 1.5s: bottom 25 particles at T = 377.5K (plateau-pinned, closure
+  boiling point), u = 3.14 MJ/kg - the latent plateau is PAID
+  (+1.9 MJ/kg = sensible + latent), phase flips to gas AND thermo rest
+  density updates to steam (0.67 kg/m3). Physically correct boiling.
+
+Therefore the live-loop defect (gas ids at maxT 329K without latent
+budget, from the previous entry) is in the composition, not the thermal
+kernel/graphs: live phase-3 ids appear while NO particle's u can have
+crossed the plateau (plateau particles report T ~377; live maxT was
+329). Suspects for what else writes thermo phase ids on the live
+resident path: the mechanics refresh / phase-transition coupling, the
+SS two-level thermal sidecar variant of the step (different wall-param
+plumbing), gas-species/product routing (should be inert for h2o-only),
+or a render-domain reclassification feeding back into thermo. Also
+explain why live wall heating is slower than isolated (maxT 329 at
+0.4s vs 322 at 0.1s isolated) - wall param mapping (wymin -> yMin)
+deserves a check on the resident path.
+
+Next: bisect the live composition (thermal-only law group vs full),
+and decode render rows by height to localize where gas ids appear.

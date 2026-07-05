@@ -5948,7 +5948,7 @@ fn fs_oit_main(in: VertexOut) -> OitFragmentOut {
 `;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH =
-  16 * Float32Array.BYTES_PER_ELEMENT + 144;
+  16 * Float32Array.BYTES_PER_ELEMENT + 176;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
@@ -5994,11 +5994,20 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   bounds_center_y_m: f32,
   bounds_center_z_m: f32,
   bounds_radius_m: f32,
+  field_dim_x: u32,
+  field_dim_y: u32,
+  field_dim_z: u32,
+  field_stride_x: u32,
+  field_stride_y: u32,
+  field_stride_z: u32,
+  field_offset: u32,
+  field_gradient_enabled: f32,
 };`
     )
     .replace(
       '@group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;',
-      '@group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;'
+      `@group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
+@group(0) @binding(4) var<storage, read> render_field_scalars: array<f32>;`
     )
     .replace(
       /@vertex\nfn vs_main\(@builtin\(vertex_index\) vertex_index: u32\) -> VertexOut \{[\s\S]*?\n\}\n\nfn resident_surface_color/,
@@ -6054,6 +6063,49 @@ fn compact_normal(vertex_index: u32) -> vec3<f32> {
   return normalize(n);
 }
 
+fn field_scalar_at(ix: i32, iy: i32, iz: i32) -> f32 {
+  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
+  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
+  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
+  let index = camera_data.field_offset
+    + u32(cx) * camera_data.field_stride_x
+    + u32(cy) * camera_data.field_stride_y
+    + u32(cz) * camera_data.field_stride_z;
+  return render_field_scalars[index];
+}
+
+fn field_sample(p: vec3<f32>) -> f32 {
+  let base = floor(p);
+  let f = p - base;
+  let ix = i32(base.x);
+  let iy = i32(base.y);
+  let iz = i32(base.z);
+  let c00 = mix(field_scalar_at(ix, iy, iz), field_scalar_at(ix + 1, iy, iz), f.x);
+  let c10 = mix(field_scalar_at(ix, iy + 1, iz), field_scalar_at(ix + 1, iy + 1, iz), f.x);
+  let c01 = mix(field_scalar_at(ix, iy, iz + 1), field_scalar_at(ix + 1, iy, iz + 1), f.x);
+  let c11 = mix(field_scalar_at(ix, iy + 1, iz + 1), field_scalar_at(ix + 1, iy + 1, iz + 1), f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+// Smooth outward normal from the density gradient (density falls outward,
+// so the outward normal is -gradient). Grid-space central differences over
+// the retained render field; returns vec3(0) where the gradient degenerates
+// so the caller can keep the flat triangle normal.
+fn field_gradient_normal(grid_position: vec3<f32>) -> vec3<f32> {
+  let h = 1.0;
+  let gx = field_sample(grid_position + vec3<f32>(h, 0.0, 0.0))
+    - field_sample(grid_position - vec3<f32>(h, 0.0, 0.0));
+  let gy = field_sample(grid_position + vec3<f32>(0.0, h, 0.0))
+    - field_sample(grid_position - vec3<f32>(0.0, h, 0.0));
+  let gz = field_sample(grid_position + vec3<f32>(0.0, 0.0, h))
+    - field_sample(grid_position - vec3<f32>(0.0, 0.0, h));
+  let g = vec3<f32>(gx, gy, gz);
+  if (dot(g, g) <= 0.000000000001) {
+    return vec3<f32>(0.0);
+  }
+  return normalize(-g);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   let position_m = compact_world_position(vertex_index);
@@ -6064,7 +6116,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
   }
   out.position = clip;
-  out.normal = compact_normal(vertex_index);
+  var normal = compact_normal(vertex_index);
+  if (camera_data.field_gradient_enabled > 0.5) {
+    let smooth_normal = field_gradient_normal(compact_position(vertex_index));
+    if (dot(smooth_normal, smooth_normal) > 0.25) {
+      normal = smooth_normal;
+    }
+  }
+  out.normal = normal;
   out.material_id = camera_data.material_id;
   out.phase_id = camera_data.phase_id;
   out.optical_state_id = camera_data.optical_state_id;
@@ -16565,7 +16624,16 @@ export function createSphPhaseScene(container, {
       positionClampMaxM: clampEnabled ? finiteVector3(positionClamp.maxM, [0, 0, 0]) : [0, 0, 0],
       positionClampEnabled: clampEnabled ? 1 : 0,
       boundsCenterM: finiteVector3(surface.boundsCenterM, [0, 0, 0]),
-      boundsRadiusM: Number.isFinite(Number(surface.boundsRadiusM)) ? Number(surface.boundsRadiusM) : 0
+      boundsRadiusM: Number.isFinite(Number(surface.boundsRadiusM)) ? Number(surface.boundsRadiusM) : 0,
+      fieldGradientDims: finiteVector3(surfaceDrawExecution?.renderFieldGradientVolume?.dims, [0, 0, 0]),
+      fieldGradientStrides: finiteVector3(
+        surfaceDrawExecution?.renderFieldGradientVolume?.scalarStrides,
+        [0, 0, 0]
+      ),
+      fieldGradientOffset: Math.max(0, Math.round(Number(
+        surfaceDrawExecution?.renderFieldGradientVolume?.scalarOffset
+      ) || 0)),
+      fieldGradientEnabled: surfaceDrawExecution?.renderFieldGradientVolume?.buffer ? 1 : 0
     };
   }
 
@@ -16634,6 +16702,16 @@ export function createSphPhaseScene(container, {
     f32(132, boundsCenterM[1]);
     f32(136, boundsCenterM[2]);
     f32(140, state.boundsRadiusM);
+    const fieldDims = finiteVector3(state.fieldGradientDims, [0, 0, 0]);
+    const fieldStrides = finiteVector3(state.fieldGradientStrides, [0, 0, 0]);
+    u32(144, fieldDims[0]);
+    u32(148, fieldDims[1]);
+    u32(152, fieldDims[2]);
+    u32(156, fieldStrides[0]);
+    u32(160, fieldStrides[1]);
+    u32(164, fieldStrides[2]);
+    u32(168, state.fieldGradientOffset);
+    f32(172, state.fieldGradientEnabled ? 1 : 0);
     return payload;
   }
 
@@ -16838,6 +16916,7 @@ export function createSphPhaseScene(container, {
         && previousBridge.opticalGpuBuffers?.spectralSamplesBuffer
         && previousBridge.opticalGpuTable === bridgeOpticalGpuTable
         && previousBridge.opticalGpuTableReuseKey === bridgeOpticalGpuTableReuseKey
+        && previousBridge.fieldGradientDummyBuffer
       );
       if (canReuseNativeBridge) {
         const bindGroup = device.createBindGroup({
@@ -16847,7 +16926,14 @@ export function createSphPhaseScene(container, {
             { binding: 0, resource: { buffer: surfaceInputBuffer } },
             { binding: 1, resource: { buffer: previousBridge.cameraBuffer } },
             { binding: 2, resource: { buffer: previousBridge.opticalGpuBuffers.recordsBuffer } },
-            { binding: 3, resource: { buffer: previousBridge.opticalGpuBuffers.spectralSamplesBuffer } }
+            { binding: 3, resource: { buffer: previousBridge.opticalGpuBuffers.spectralSamplesBuffer } },
+            {
+              binding: 4,
+              resource: {
+                buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
+                  || previousBridge.fieldGradientDummyBuffer
+              }
+            }
           ]
         });
         const indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT;
@@ -17018,6 +17104,11 @@ export function createSphPhaseScene(container, {
             binding: 3,
             visibility: GPU_SHADER_STAGE.FRAGMENT,
             buffer: { type: 'read-only-storage' }
+          },
+          {
+            binding: 4,
+            visibility: GPU_SHADER_STAGE.VERTEX,
+            buffer: { type: 'read-only-storage' }
           }
         ]
       });
@@ -17152,6 +17243,11 @@ export function createSphPhaseScene(container, {
         size: cameraBufferByteLength,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       });
+      const fieldGradientDummyBuffer = device.createBuffer({
+        label: 'ulg-sph-resident-surface-draw-field-gradient-dummy',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.STORAGE
+      });
       const bindGroup = device.createBindGroup({
         label: 'ulg-sph-resident-surface-draw-overlay-bind-group',
         layout: bindGroupLayout,
@@ -17159,7 +17255,14 @@ export function createSphPhaseScene(container, {
           { binding: 0, resource: { buffer: surfaceInputBuffer } },
           { binding: 1, resource: { buffer: cameraBuffer } },
           { binding: 2, resource: { buffer: opticalGpuBuffers.recordsBuffer } },
-          { binding: 3, resource: { buffer: opticalGpuBuffers.spectralSamplesBuffer } }
+          { binding: 3, resource: { buffer: opticalGpuBuffers.spectralSamplesBuffer } },
+          {
+            binding: 4,
+            resource: {
+              buffer: surfaceDrawExecution?.renderFieldGradientVolume?.buffer
+                || fieldGradientDummyBuffer
+            }
+          }
         ]
       });
       const indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT;
@@ -17271,6 +17374,7 @@ export function createSphPhaseScene(container, {
         oitSampler,
         cameraBuffer,
         cameraBufferByteLength,
+        fieldGradientDummyBuffer,
         surfaceInputLayout,
         surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
@@ -24616,7 +24720,8 @@ export function createSphPhaseScene(container, {
     renderBridgeMode = null,
     materialProperties = currentMaterialProperties,
     waitForQueueCompletion = true,
-    rendererOwnedDevice = false
+    rendererOwnedDevice = false,
+    renderFieldGradientVolume = null
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
@@ -24722,6 +24827,21 @@ export function createSphPhaseScene(container, {
       const extensionSurfaceTranslationElapsedMs = Math.max(0, nowMs() - translationStartedMs);
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
+      if (renderFieldGradientVolume?.buffer) {
+        // Retained render-field scalar view for smooth gradient normals in
+        // the native draw; the bind group is rebuilt with each refresh, so
+        // the buffer only needs to outlive this surface-draw generation.
+        surfaceDrawExecution.renderFieldGradientVolume = {
+          buffer: renderFieldGradientVolume.buffer,
+          dims: Array.isArray(renderFieldGradientVolume.dims)
+            ? [...renderFieldGradientVolume.dims]
+            : [0, 0, 0],
+          scalarStrides: Array.isArray(renderFieldGradientVolume.scalarStrides)
+            ? [...renderFieldGradientVolume.scalarStrides]
+            : [0, 0, 0],
+          scalarOffset: Math.max(0, Math.round(Number(renderFieldGradientVolume.scalarOffset) || 0))
+        };
+      }
       const renderBridgeBuildStartedMs = nowMs();
       const renderBridge = renderBridgePlan.useThreeCompactBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
@@ -26896,7 +27016,13 @@ export function createSphPhaseScene(container, {
                         ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
                         : SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE),
                     materialProperties,
-                    waitForQueueCompletion: !shouldUseNativeWebGpuSurfaceConsumerBridge
+                    waitForQueueCompletion: !shouldUseNativeWebGpuSurfaceConsumerBridge,
+                    renderFieldGradientVolume: {
+                      buffer: nativeDescriptor.scalarBuffer ?? null,
+                      dims: nativeDescriptor.dims ?? null,
+                      scalarStrides: nativeDescriptor.scalarStrides ?? null,
+                      scalarOffset: nativeDescriptor.scalarOffset ?? 0
+                    }
                   });
                   nextResidentSurfaceDraw = {
                     ...nativeSurfaceDraw,

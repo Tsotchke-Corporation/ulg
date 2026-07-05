@@ -38668,3 +38668,30 @@ which constructs with blocked=1.0 -> debug red. Fix: the id varyings
 are constant per triangle, so they are now @interpolate(flat) in
 VertexOut (both WGSL variants share the struct). Post-fix scan: 0
 reddish samples on the same scene; fps unchanged (470).
+
+## 2026-07-05 - Smooth field-gradient normals on the native surface
+   consumer (chunky fix, part 2)
+
+Flat per-triangle normals were the dominant chunkiness after the
+resolution bump (the MC kernel edge-interpolates positions but emits
+sv_triangle_normal, and the compact-position draw path reconstructs
+the same flat normal from cross products). The dependency declares
+compact-normal-rows but produced:false, so normals now come from the
+physics side: the compact-position WGSL binds the RETAINED render-field
+scalar buffer (binding 4) and computes the outward normal as
+-normalize(gradient) via trilinear central differences in grid space
+(compact positions are already grid-space, no inverse transform
+needed); falls back to the flat triangle normal where the gradient
+degenerates.
+
+Plumbing: nativeDescriptor scalar view (buffer/dims/scalarStrides/
+scalarOffset) -> refreshSphResidentSurfaceDrawFromExtension
+(renderFieldGradientVolume param) -> surfaceDrawExecution ->
+bind group (rebuilt every refresh; 16-byte dummy buffer when absent)
++ 8 new camera-uniform fields (byte length 208 -> 240; bridge reuse
+guard covers the resize and the dummy-buffer requirement).
+
+Visual: rounded liquid blobs with smooth shading gradients replace the
+pyramid facets; fps 479 (no cost - ~48 extra field reads per vertex).
+Unit expectations updated (uniform byte length + new WGSL matchers).
+Units 981/0.

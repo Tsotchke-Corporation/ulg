@@ -38481,3 +38481,14 @@ consumer`). Re-shot the settled dam-break scene on the native path:
 
 Policy recorded (memory + here): fidelity screenshots always use the
 native surface renderer and state which renderer they came from.
+
+Addendum (stale drop surface): the extension-surface translation lane
+DOES re-run per render-field pass (translation-started/kernel/buffers/
+encoded/complete every cycle, surfaces=1 per pass vs 3 in the field),
+yet the drawn blob is pixel-identical from t=1.8 to t=6.9 - so the
+DRAW side keeps binding the first translation's vertex buffers (or the
+one extension-routed surface's input field is frozen upstream). Next
+probe: capture translation output buffer identity across passes vs
+what sphResidentSurfaceDraw binds; suspect
+releasePreviousSphResidentSurfaceDrawResources / render-bridge caching
+on the extension lane.

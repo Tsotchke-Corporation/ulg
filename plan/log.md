@@ -38285,3 +38285,20 @@ wasteful); (c) then revisit the one-level-per-epoch clamp + migration
 window cap (the original 2026-07-03 reverts) on top of conserving
 foundations, unlocking SS Slice 5 phase-volume migration for the steam
 1700x case.
+
+## 2026-07-04 - Steady-state next: per-group free gating at slot
+   assignment (tear localization refined)
+
+Refined localization: the killer epoch's 119 'blocked' rows are no-op
+rows; the 3 free-only rows were the epoch's ONLY action rows - the
+leader's child-writing row was ABSENT from the epoch, not merely
+unadmitted. Participants' frees are not allocation-gated, so when the
+allocator's row budget / capacity window skips the leader's allocation
+row, the participants still free. The epoch-level torn guard (landed,
+conserving) discards such epochs wholesale; the per-group fix is to
+gate free_required rows on their leader's granted target at the
+slot-assignment/allocation stage, reusing the existing
+SsPsalMergeGroup same-cell scan (allocation WGSL ~12294) so untorn
+groups in the same epoch still proceed. Acceptance: the churn gate
+stays green AND torn-epoch skip telemetry goes to zero on the boiling
+proof scene (merges land the first time instead of retrying).

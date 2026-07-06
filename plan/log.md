@@ -38835,3 +38835,39 @@ blue water (3061144), additionalNativeSurfaceDrawCount=5, zero console
 errors, 487 fps. Single-material default scene regression-free
 (478 fps, additional count 0). Units 981/0; still-water settle and
 merged-scene mass gates pass.
+
+## 2026-07-05 - Full visual audit: surface + spheres across materials
+   and particle counts (user request)
+
+13 headless Vulkan-ANGLE runs: water (293K default / 372K boiling /
+250K frozen base), fe (molten 1900K + solid 300K drops, iron base),
+Cu (derived closure, 1500K), at 152 / 1,064 / 2,960 particles, both
+render modes, captures at ~8s and ~25s wall. Zero console errors in
+all runs. Report with evidence screenshots published as an artifact
+(claude.ai/code/artifact/999ea237-bb46-4756-afd2-ca261ffbb52c).
+
+PASSES: per-material PBR everywhere incl. on-the-fly Cu closure (all
+phase surfaces attach); frozen base holds shape statically; solid iron
+sinks and rests in the splash crater; fidelity scales with count (152
+= boulder blobs, 1064 = connected sheet); perf degrades gracefully
+(492 fps @152p -> 351 @2960p surface mode; extra material surfaces
+~8%); sphere mode readback-bound ~120 fps at all counts.
+
+FINDINGS (new work items):
+1. Hot metals render BLACK in surface mode (optical records are
+   reflectance-only; sphere lane heat-tints, so modes disagree).
+   -> temperature-driven emissive term in the optical closure.
+2. Small liquid volumes VANISH below the isosurface once spread
+   (27-particle drop on iron base invisible by t=4s).
+   -> adaptive isovalue for sparse surfaces or impostor fallback.
+3. WALL/CORNER CLIMBING (new physics artifact): water particles stack
+   in single-file vertical columns along box edges/corners in every
+   sphere run - real water cannot do this at meter scale. Suspect
+   wall damping + residual tension; corners double it.
+4. Pinhole dimples in settled sheets + detached shards in splash
+   ejecta (MC around clumped/isolated particles; ties to task #8).
+5. No steam within the ~5s boiling window at 372K (surface slot
+   attached and empty) - needs a longer-horizon boil test; ties to
+   the known layer-3 resurrection issue.
+Pearl-chain clumping reconfirmed at 1,064 particles (task #8 remains
+the structural fix).

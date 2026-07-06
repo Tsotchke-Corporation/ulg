@@ -7758,6 +7758,17 @@ export async function mountSphPhaseDemoOverlay({
     const thermalMeanK = compactDiagnostics?.temperatureMassWeightedMeanK;
     const thermalMinK = compactDiagnostics?.minTemperatureK;
     const thermalMaxK = compactDiagnostics?.maxTemperatureK;
+    if (Number.isFinite(Number(thermalMaxK)) && scene.scene?.userData) {
+      // Live thermal summary for the render side: the surface shader's
+      // blackbody emission tracks the hottest live temperature instead of
+      // static phase-transition anchors (hot SOLID iron must still glow).
+      scene.scene.userData.sphLiveThermalSummary = {
+        maxTemperatureK: Number(thermalMaxK),
+        minTemperatureK: Number(thermalMinK) || null,
+        meanTemperatureK: Number(thermalMeanK) || null,
+        updatedAtMs: performance.now()
+      };
+    }
     const thermalProblemCount = compactDiagnostics?.thermalProblemCount;
     const residentThermalStatus = residentStep?.stageStatus?.thermal
       || residentStep?.thermalStep?.status

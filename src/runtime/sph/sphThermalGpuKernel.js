@@ -69,6 +69,13 @@ const THERMAL_SCOPE = 'sph-thermal-closure-table-conduction-walls';
 const THERMAL_SEGMENT_TYPES = Object.freeze({ phase: 1, plateau: 2 });
 const THERMAL_STATUS = Object.freeze({ ready: 1, missingMaterial: 255 });
 const PAIR_CONDUCTION_RELAXATION_LIMIT = 0.25;
+// Demo-scale pair conduction coefficient. Like the sound speeds, thermal
+// coupling is scaled for an interactive timestep: at the physical-ish rate 15
+// a molten 1900K iron drop needed ~650 sim-seconds to shed its latent heat
+// into surrounding water/ice (verified by live-GPU energy readback), which
+// reads as "no thermal transfer". 1500 keeps the same relaxation clamps and
+// wall-rate ratio while making conduction visible in seconds.
+export const SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT = 1500;
 const THERMAL_DEBYE_GRAPH_SAMPLE_COUNT = 32;
 const FACE_IDS = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const FULL_READBACK_MODE = 'full-parity-readback';
@@ -1093,7 +1100,7 @@ export function runSphThermalStepCpu({
   wallTemperaturesK = {},
   boxDimsM = [5, 5, 5],
   dtS = 0,
-  conductionRate = 15,
+  conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM
 } = {}) {
@@ -1468,7 +1475,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   wallTemperaturesK = {},
   boxDimsM = [5, 5, 5],
   dtS = 0,
-  conductionRate = 15,
+  conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,

@@ -22576,9 +22576,27 @@ export function createSphPhaseScene(container, {
       const boilTransitionK = properties?.transitions
         ?.find((transition) => transition.from === 'liquid' && transition.to === 'gas')
         ?.temperatureK ?? 0;
+      // Live refinement: when the sim's hottest temperature plausibly belongs
+      // to this material (within its solid-glow..vapor band), the emission
+      // tracks it - so freshly solidified iron still glows near its melt
+      // point and dims as it conducts heat away. Water/ice can never match a
+      // metal-hot band, so they stay dark regardless of the global maximum.
+      const liveMaxK = Math.max(0, Number(
+        scene.userData.sphLiveThermalSummary?.maxTemperatureK
+      ) || 0);
+      const materialBandFloorK = meltTransitionK > 0 ? 0.6 * meltTransitionK : Infinity;
+      const materialBandCeilK = (boilTransitionK > 0 ? boilTransitionK : meltTransitionK) + 450;
+      const liveBandMatchK = liveMaxK >= materialBandFloorK && liveMaxK <= materialBandCeilK
+        ? liveMaxK
+        : 0;
       const emissiveTemperatureK = batch.phase === 'liquid'
-        ? meltTransitionK
-        : (batch.phase === 'gas' ? boilTransitionK : 0);
+        ? Math.max(meltTransitionK, Math.min(
+          liveBandMatchK,
+          boilTransitionK > 0 ? boilTransitionK + 100 : liveBandMatchK
+        ))
+        : (batch.phase === 'gas'
+          ? Math.max(boilTransitionK, liveBandMatchK)
+          : Math.min(liveBandMatchK, meltTransitionK > 0 ? meltTransitionK + 50 : 0));
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);

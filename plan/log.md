@@ -39007,3 +39007,38 @@ Post-fix: compact iron block falls onto intact water block (sphere
 truth), glowing surface block proportional, units 981/0, still-water
 settle + merged-mass gates pass (one settle failure in-batch was a
 loaded-box page-load flake; solo re-run green).
+
+## 2026-07-06 - Demo-scale conduction + live-temperature glow (user: "hot
+   iron still doesn't glow... does not transfer thermal energy to the ice")
+
+Diagnosis (live-GPU energy readback; CPU mirrors are stale-at-t0 under
+no-full-readback and had misled earlier probes):
+- Conduction WAS running but at the physical-ish default rate 15 the
+  1900K iron drop shed only ~440 J/kg/s -> ~650 sim-seconds to
+  solidify: invisible in practice. (The thermal e2e passes under SS
+  because any strict decrease counts.)
+- The glow bug: emission was anchored to phase-transition constants
+  and SOLID surfaces never glowed - the iron's phase flag flips to
+  solid near-immediately in some scenes, so visibly hot iron rendered
+  cold. (Current build DID glow while the batch stayed liquid - the
+  ice scene showed ember iron - but any solid flip killed it.)
+
+Fixes:
+- SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT = 1500 (100x, exported
+  constant; same relaxation clamps and wall-rate ratio) - iron now
+  sheds ~84 kJ/kg/s and the full quench chain emerges in seconds:
+  ice melts (125->91 solid over ~2s), meltwater pools, contact water
+  flash-boils (steam batch appears), iron solidifies progressively
+  (27 liquid -> 18+9). Live max temperature falls 1900->1868 in 2s.
+- Emission now tracks the LIVE compact-summary max temperature
+  (published to scene.userData.sphLiveThermalSummary by the mount),
+  band-filtered per material (0.6x melt .. boil+450K) so only the
+  material that can plausibly be that hot glows: hot SOLID iron glows
+  near its melt point and dims as it cools; water/ice/steam can never
+  match a metal-hot band and stay dark.
+
+Thermal e2e gate updated for demo-scale rates: the 650K drop parks on
+the 373K latent plateau before the first sample, so the anti-freeze
+assertion is now "max OR min temperature moves between samples"
+(frozen thermodynamics is bit-equal on both). Units 981/0; thermal,
+reaction-chain, still-water, merged-mass gates green.

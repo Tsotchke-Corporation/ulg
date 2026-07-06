@@ -386,3 +386,26 @@ Status on 2026-06-11:
   into PeerCompute state, then add warm-reload and stale-record browser probes.
 - Remaining: record cold, warm, clear, cold-after-clear, and
   warm-after-repopulate startup deltas in this plan.
+
+## Diagnosis - 2026-07-06, Sn/Cu "hang" Is Cold Atomic DFT Cost, Not A Hang
+
+The earlier Sn->Cu spot-check freeze (fps 0.0) reproduces in Node as plain
+cold-start closure derivation, not a hang:
+
+- `createSphPhaseDemo({ Sn, Cu })` cold: 15.8 s total; state build 13.9 s,
+  reaction discovery 1.9 s.
+- CPU profile: 79.7% of the state build is `nthEigenpair` (Sturm bisection)
+  in `radialKohnSham.js`, i.e. the all-electron Kohn-Sham solves.
+- Per-atom timings: Cu 1.7 s (LDA) / 3.7 s (scalar-relativistic KH);
+  Sn 3.0 s / 7.3 s KH / 5.7 s LSDA. Heavy elements pay for grid resolution
+  (1200 + 12Z points) and per-orbital energy-dependent KH iteration.
+- The solver already has the intended accelerations: per-l warm-started
+  orbital energies across SCF iterations and bracket-hinted bisection.
+
+Assessment: in a headless browser worker this lands at roughly 30-60 s cold
+for a heavy element pair, which reads as a hang in short probes. Warm runs
+hit the localStorage closure cache. Do NOT micro-optimize the DFT solver as
+a cache workaround - it is anchored, physics-critical code. The remaining
+cache-plan items (worker-side rehydration, measured cold/warm deltas) stay
+the remediation track; spot-check harnesses must wait out the first cold
+derivation or pre-warm the cache before timing.

@@ -39064,3 +39064,28 @@ resident-execution-complete path; verified live: fe liquid AND solid
 surfaces carry the live 1834K emissive (tracking the cooling), ice/
 water/steam stay dark (per-material plausibility bands). Post-fix
 sequence shows zero near-black iron patches. Units 981/0.
+
+## 2026-07-06 - Drop block physical size fixed (mount pinned drop volume
+   = base volume); ice-on-molten-iron verified on a longer horizon
+
+Drop size (user: "perpetually too big for defined particle counts"):
+scenarioFromControls overrode ironVolumeFractionOfIce to 1, so the drop
+block's PHYSICAL volume equaled the whole base block at any particle
+edge. Reverted to the scenario default (1/8): measured spawn extents
+are now count-invariant at the 0.5m reference edge (h2o dropn 4/8 and
+fe dropn 3/6 all ~0.5m) - particle edges control resolution only.
+drop-edge-large-size-respect-plan moved to plan/done.
+
+Ice-on-hot-surface (user: "ice isn't melting"): reproduced ice drop
+(250K) onto molten iron base (1900K). The physics works but the flat
+stacked interface has ~9 contact particles vs yesterday's violent
+mixed-contact case: first melt at sim t=3.7 (exactly the 3x3 bottom
+contact layer -> h2o liquid drop:9), iron solidifying from floor and
+contact (25 -> 76 of 125), ice interior warming (min temp 250 -> 258
+by t=6). Slow-by-geometry, not broken; longer windows show the chain.
+Two follow-ups noted: liquid iron base holds a cube shape while
+static-flagged (ties to #9/#12 boundary/pairing work), and steam from
+the interface meltwater needs a longer horizon still.
+
+Spot checks re-run post-change: Na+H2O still detonates (2530K, mass
+conserved, both render modes clean).

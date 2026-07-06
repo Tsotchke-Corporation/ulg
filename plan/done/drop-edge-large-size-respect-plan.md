@@ -178,3 +178,18 @@ Remaining:
 - Full resident stepping at the expanded `dropn=7, basen=5` total remains
   performance-roadmap work rather than an initialization/drop-edge contract
   blocker.
+
+2026-07-06 resolution (SS branch):
+
+- Root cause of the standing "drop is perpetually too big" live report: the
+  mount's `scenarioFromControls` overrode `ironVolumeFractionOfIce: 1`,
+  pinning the drop's physical volume EQUAL to the base block. Every drop
+  spawned base-sized regardless of the requested particle edge.
+- Fix: the mount now uses the scenario default (1/8 -> drop edge = half the
+  base edge). Measured post-fix (sphere-lane spawn extents, mlsmpm):
+  h2o dropn 4 -> 0.5m, dropn 8 -> 0.5m; fe dropn 3 -> 0.5m, dropn 6 -> 0.5m.
+  Block size is count-invariant; the particle-edge inputs now purely control
+  sampling resolution inside the scenario's physical block, which is the
+  documented contract.
+- Mounted drop-edge gates (edge > 6 spheres + points), still-water settle,
+  and the random-element spot checks stay green. Moved to plan/done.

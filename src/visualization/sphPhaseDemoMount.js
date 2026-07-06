@@ -2811,10 +2811,15 @@ export async function mountSphPhaseDemoOverlay({
   function scenarioFromControls() {
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
+    // Scenario default drop volume is 1/8 of the base block (drop edge = half
+    // the base edge). The old override pinned the drop volume EQUAL to the
+    // base block, which made every drop read as implausibly huge regardless
+    // of the requested particle edge (user report: "drop block size is
+    // perpetually too big"). The particle-edge inputs control sampling
+    // resolution within these physical blocks, not the physical size itself.
     return createSphPhaseScenario({
       wallFaces,
-      boxDimensionsM: boxDimensionsFromControls(),
-      ironVolumeFractionOfIce: 1
+      boxDimensionsM: boxDimensionsFromControls()
     });
   }
 

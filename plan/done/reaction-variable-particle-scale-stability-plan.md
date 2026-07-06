@@ -487,3 +487,13 @@ Remaining:
 
 - Optional broadening to additional binary/non-water pairs after their
   activation and product-render expectations are intentionally selected.
+
+## Closure - 2026-07-06
+
+All required fixes and acceptance gates in this plan are implemented and
+validated (G2P particle-scale stability caps + policy retention, resident
+scale diagnostics, mounted browser gates for Na/H2O, Mg/O2, Al/O2, Na/Cl2
+product routes). Only "optional broadening to additional pairs" remains,
+which is covered by the standing random-element spot-check directive
+(today's K->H2O check ran a 2536 K exothermic route in both render modes
+with bounded scales and no console issues). Moving to done.

@@ -4316,6 +4316,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         relaxation: mlsMpmParticleState?.particleSeparationRelaxation
           ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
         maxPairRestDistanceM: separationMaxPairRestDistanceM,
+        // Thermal conduction shares these bins; its clamped scan radius (<=3)
+        // must cover the 2h support, so cells are at least 2h/3.
+        minCellSizeM: (2 / 3) * Math.max(finiteNumber(sphParticleState?.smoothingLengthM, 0), 0),
         scratch: separationScratch
       });
       separationScratch = separation.scratch;
@@ -4336,6 +4339,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           dtS: dtSeconds,
           retainOutputParticleBuffers: true,
           readbackMode: NO_FULL_READBACK_MODE,
+          // Reuse the separation pass's per-substep neighbor bins for pair
+          // conduction instead of the exhaustive particle scan.
+          neighborBins: separation.enabled ? separation.scratch?.neighborBins ?? null : null,
           ...thermalStepOptions
         });
         thermalStage.encode(encoder);

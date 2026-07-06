@@ -514,8 +514,12 @@ struct ThermalParams {
   wall_y_max_k: f32,
   wall_z_min_k: f32,
   wall_z_max_k: f32,
-  _pad1: f32,
-  _pad2: f32,
+  bins_enabled: u32,
+  bin_capacity: u32,
+  bin_nx: u32,
+  bin_ny: u32,
+  bin_nz: u32,
+  bin_cell_size_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -528,6 +532,11 @@ struct ThermalParams {
 @group(0) @binding(7) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> params: ThermalParams;
 @group(0) @binding(9) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
+// Shared per-substep neighbor bins (built by the separation bin-fill pass):
+// counts prefix [0, cell_count) then entry slots. When bins_enabled == 0
+// (standalone/legacy paths) the kernel falls back to the exhaustive pair
+// scan and a tiny placeholder buffer is bound.
+@group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;
 
 const PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;
 
@@ -849,6 +858,58 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  var neighbor_min_temperature = temperature;
 	  var neighbor_max_temperature = temperature;
 
+	  if (params.bins_enabled == 1u && params.bin_capacity > 0u) {
+	    // Neighbor-bin scan: the shared per-substep bins hold every massive
+	    // particle; the scan radius covers the conduction support even when
+	    // the cell size was chosen for the (smaller) separation rest distance.
+	    let inv_cell = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
+	    let scan_r = i32(clamp(u32(ceil(support * inv_cell)), 1u, 3u));
+	    let cx = i32(clamp(u32(max(position.x, 0.0) * inv_cell), 0u, params.bin_nx - 1u));
+	    let cy = i32(clamp(u32(max(position.y, 0.0) * inv_cell), 0u, params.bin_ny - 1u));
+	    let cz = i32(clamp(u32(max(position.z, 0.0) * inv_cell), 0u, params.bin_nz - 1u));
+	    for (var oz = -scan_r; oz <= scan_r; oz = oz + 1) {
+	      let nz = cz + oz;
+	      if (nz < 0 || nz >= i32(params.bin_nz)) { continue; }
+	      for (var oy = -scan_r; oy <= scan_r; oy = oy + 1) {
+	        let ny = cy + oy;
+	        if (ny < 0 || ny >= i32(params.bin_ny)) { continue; }
+	        for (var ox = -scan_r; ox <= scan_r; ox = ox + 1) {
+	          let nx = cx + ox;
+	          if (nx < 0 || nx >= i32(params.bin_nx)) { continue; }
+	          let cell = (u32(nz) * params.bin_ny + u32(ny)) * params.bin_nx + u32(nx);
+	          let total_cells = params.bin_nx * params.bin_ny * params.bin_nz;
+	          let cell_count = min(thermal_bins[cell], params.bin_capacity);
+	          for (var entry = 0u; entry < cell_count; entry = entry + 1u) {
+	            let other = thermal_bins[total_cells + cell * params.bin_capacity + entry];
+	            if (other == particle_index) { continue; }
+	            let other_pos_mass = state_pos_mass(other);
+	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
+	            let distance = length(delta);
+	            if (distance < support) {
+	              let weight = 1.0 - distance / support;
+	              let other_row0 = thermo_row0(other);
+	              let other_vel_u = state_vel_u(other);
+	              let other_temperature = other_row0.z;
+	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
+	              neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
+	              let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	              let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
+	              let dE = clamp_pair_conduction_energy(
+	                raw_dE,
+	                temperature,
+	                other_temperature,
+	                temperature_slope,
+	                other_temperature_slope,
+	                mass,
+	                other_pos_mass.w
+	              );
+	              conduction_du = conduction_du + dE / mass;
+	            }
+	          }
+	        }
+	      }
+	    }
+	  } else {
 	  for (var other = 0u; other < params.particle_count; other = other + 1u) {
 	    if (other == particle_index) {
       continue;
@@ -876,6 +937,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      );
 	      conduction_du = conduction_du + dE / mass;
 	    }
+	  }
 	  }
 	  du = du + clamp_du_to_temperature_range(
 	    conduction_du,
@@ -6880,21 +6942,11 @@ struct SeparationParams {
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> bin_counts: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read_write> bin_entries: array<u32>;
-@group(0) @binding(4) var<uniform> params: SeparationParams;
-
-fn bin_fill_phase_class(index: u32) -> u32 {
-  let row5 = in_mechanics[index * 8u + 5u];
-  let row6 = in_mechanics[index * 8u + 6u];
-  if (row5.x > 0.5) {
-    return 2u;
-  }
-  if (row6.z > 0.5 && row6.z < 1.5) {
-    return 1u;
-  }
-  return 0u;
-}
+// Combined bins: [0, cell_count) = per-cell counts, then cell_count +
+// cell * capacity + slot = entry indices. One buffer keeps consumers within
+// the default 10-storage-buffer per-stage limit.
+@group(0) @binding(2) var<storage, read_write> bins: array<atomic<u32>>;
+@group(0) @binding(3) var<uniform> params: SeparationParams;
 
 fn bin_fill_cell_index(position: vec3<f32>) -> u32 {
   let inv = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
@@ -6917,16 +6969,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (pos_mass.w <= 0.0) {
     return;
   }
-  if (bin_fill_phase_class(particle_index) == 0u) {
-    return;
-  }
-  if (max(in_mechanics[particle_index * 8u + 4u].w, 0.0) <= 0.0) {
-    return;
-  }
+  // Every massive particle is binned (gas included): the bins are shared
+  // with thermal pair conduction, and the separation consumer already
+  // filters phases per pair.
   let cell = bin_fill_cell_index(pos_mass.xyz);
-  let slot = atomicAdd(&bin_counts[cell], 1u);
+  let cell_count = params.bin_nx * params.bin_ny * params.bin_nz;
+  let slot = atomicAdd(&bins[cell], 1u);
   if (slot < params.bin_capacity) {
-    bin_entries[cell * params.bin_capacity + slot] = particle_index;
+    atomicStore(&bins[cell_count + cell * params.bin_capacity + slot], particle_index);
   }
 }
 `;
@@ -6951,8 +7001,8 @@ struct SeparationParams {
 @group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> corrections: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SeparationParams;
-@group(0) @binding(4) var<storage, read> bin_counts: array<u32>;
-@group(0) @binding(5) var<storage, read> bin_entries: array<u32>;
+// Combined bins layout: counts prefix then entry slots (see bin-fill).
+@group(0) @binding(4) var<storage, read> bins: array<u32>;
 
 fn separation_cbrt(volume_m3: f32) -> f32 {
   return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
@@ -7021,9 +7071,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         let cell = (u32(nz) * params.bin_ny + u32(ny)) * params.bin_nx + u32(nx);
-        let cell_count = min(bin_counts[cell], params.bin_capacity);
+        let total_cells = params.bin_nx * params.bin_ny * params.bin_nz;
+        let cell_count = min(bins[cell], params.bin_capacity);
         for (var entry = 0u; entry < cell_count; entry = entry + 1u) {
-          let other = bin_entries[cell * params.bin_capacity + entry];
+          let other = bins[total_cells + cell * params.bin_capacity + entry];
           if (other == particle_index) {
             continue;
           }

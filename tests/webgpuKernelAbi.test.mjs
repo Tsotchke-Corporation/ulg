@@ -134,7 +134,9 @@ const CONTRACTS = [
     label: 'ulg-sph-thermal-params',
     factory: 'createParamsArray',
     wgslStruct: 'ThermalParams',
-    bytes: 80
+    // 80 -> 96: shared neighbor-bin fields (bins_enabled, capacity, dims,
+    // cell size) for binned pair conduction.
+    bytes: 96
   },
   {
     file: 'src/runtime/sph/sphReactionGpuKernel.js',

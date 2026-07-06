@@ -1418,9 +1418,10 @@ function createParamsArray({
   wallLayerM,
   boxDimsM,
   wallTemperaturesK,
-  materialBankWarmInputRowCount = 0
+  materialBankWarmInputRowCount = 0,
+  neighborBins = null
 }) {
-  const buffer = new ArrayBuffer(80);
+  const buffer = new ArrayBuffer(96);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, materialCount, true);
@@ -1440,8 +1441,20 @@ function createParamsArray({
   view.setFloat32(60, wallTemp(wallTemperaturesK, 'yMax'), true);
   view.setFloat32(64, wallTemp(wallTemperaturesK, 'zMin'), true);
   view.setFloat32(68, wallTemp(wallTemperaturesK, 'zMax'), true);
-  view.setFloat32(72, 0, true);
-  view.setFloat32(76, 0, true);
+  const binsEnabled = Boolean(
+    neighborBins?.binsBuffer
+    && Number(neighborBins?.capacity) > 0
+    && Number(neighborBins?.nx) > 0
+    && Number(neighborBins?.ny) > 0
+    && Number(neighborBins?.nz) > 0
+    && Number(neighborBins?.cellSizeM) > 0
+  );
+  view.setUint32(72, binsEnabled ? 1 : 0, true);
+  view.setUint32(76, binsEnabled ? Math.round(neighborBins.capacity) : 0, true);
+  view.setUint32(80, binsEnabled ? Math.round(neighborBins.nx) : 0, true);
+  view.setUint32(84, binsEnabled ? Math.round(neighborBins.ny) : 0, true);
+  view.setUint32(88, binsEnabled ? Math.round(neighborBins.nz) : 0, true);
+  view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
   return buffer;
 }
 
@@ -1479,7 +1492,11 @@ export function createSphThermalStepWebGpuEncoderStage({
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  // Shared per-substep neighbor bins (from the separation bin-fill pass):
+  // { countsBuffer, entriesBuffer, capacity, nx, ny, nz, cellSizeM }.
+  // Absent bins fall back to the exhaustive pair scan.
+  neighborBins = null
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
@@ -1541,7 +1558,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   );
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-thermal-params',
-    size: 80,
+    size: 96,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
@@ -1555,11 +1572,22 @@ export function createSphThermalStepWebGpuEncoderStage({
     wallLayerM: layer,
     boxDimsM: dims,
     wallTemperaturesK,
-    materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
+    materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
+    neighborBins
   }));
+  const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
+  // Binding 10 must always be present in the layout; a tiny placeholder
+  // satisfies it when the exhaustive fallback runs (bins_enabled=0).
+  const binPlaceholderBuffer = neighborBinsBound
+    ? null
+    : device.createBuffer({
+      label: 'ulg-sph-thermal-bin-placeholder',
+      size: 4,
+      usage: GPU_BUFFER_USAGE.STORAGE
+    });
 
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v2',
+    cacheKey: 'ulg-sph-thermal-step.v3',
     label: 'ulg-sph-thermal-step',
     code: sphThermalStepWgsl,
     entryPoint: 'main',
@@ -1573,7 +1601,8 @@ export function createSphThermalStepWebGpuEncoderStage({
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'storage'),
       computeBufferBinding(8, 'uniform'),
-      computeBufferBinding(9, 'read-only-storage')
+      computeBufferBinding(9, 'read-only-storage'),
+      computeBufferBinding(10, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1588,7 +1617,8 @@ export function createSphThermalStepWebGpuEncoderStage({
       { binding: 6, resource: { buffer: outStateBuffer } },
       { binding: 7, resource: { buffer: outThermoBuffer } },
       { binding: 8, resource: { buffer: paramsBuffer } },
-      { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } }
+      { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } },
+      { binding: 10, resource: { buffer: neighborBinsBound ? neighborBins.binsBuffer : binPlaceholderBuffer } }
     ]
   });
   const state = new Float32Array();
@@ -1599,6 +1629,7 @@ export function createSphThermalStepWebGpuEncoderStage({
     if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
     if (!materialBankWarmInputBinding.borrowed) materialBankWarmInputBinding.destroy();
     paramsBuffer.destroy?.();
+    binPlaceholderBuffer?.destroy?.();
     if (!retainOutputParticleBuffers) {
       outStateBuffer.destroy?.();
       outThermoBuffer.destroy?.();

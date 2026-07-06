@@ -39246,3 +39246,25 @@ vertex growth appears later in the chain as seen in earlier blink-probe
 timelines. Sn/Cu cold-start also diagnosed this session (see cold-start
 plan): 15.8s Node cold dominated 79.7% by the KH atomic eigen-solver —
 cold DFT cost, not a hang.
+
+## 2026-07-06 — Thermal pair conduction on shared neighbor bins (~2x hot loop)
+
+The thermal kernel's exhaustive pair scan was the dominant remaining
+O(N^2) cost in the resident hot loop. It now scans the same per-substep
+neighbor bins the separation pass fills (bin fill includes every massive
+particle — gas included — since separation filters phases per pair; the
+thermal scan radius adapts as ceil(support/cell), clamped <= 3, and the
+shared cell size is floored at 2h/3 so the clamp always covers the 2h
+support). First wiring hit the default 10-storage-buffers-per-stage
+device limit (11 bindings) and invalidated the thermal pipeline — every
+surface went to zero verts; fixed by packing counts+entries into ONE
+combined bins buffer (counts prefix, then entry slots), which lands
+thermal at exactly 10 storage bindings and also drops a binding from
+the separation consumers. Standalone thermal paths keep the exhaustive
+fallback via bins_enabled=0 with a placeholder binding.
+
+Evidence: quench chain matches pre-change dynamics at the same
+timestamps (ice 468->732 melting, meltwater 456->672, fe|solid rising);
+8.5k-particle scene throughput 190 -> ~350-366 substeps/s (~2x) with
+zero console issues. ThermalParams 80 -> 96 bytes (bin fields), thermal
+pipeline cache key v3. Units 981/0, atomics 11/11.

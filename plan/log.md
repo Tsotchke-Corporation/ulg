@@ -39042,3 +39042,25 @@ the 373K latent plateau before the first sample, so the anti-freeze
 assertion is now "max OR min temperature moves between samples"
 (frozen thermodynamics is bit-equal on both). Units 981/0; thermal,
 reaction-chain, still-water, merged-mass gates green.
+
+## 2026-07-06 - Sequential visual verification of the quench chain + live
+   emissive publication fix (per plan/Agents.md)
+
+plan/Agents.md adopted as standing directives (general physics fixes,
+sequential screenshot verification, todo/done/moot workflow).
+
+Sequential surface-mode screenshots (8 frames over sim t 0.06->8.8 +
+two orbit views) of fe(1900K) onto ice(250K) verified: glowing molten
+dome on intact ice; ice melts and the structure slumps into a floor
+pool; live max temperature falls 1900->1811 and parks on the iron
+fusion plateau (physically right - remaining liquid iron sheds latent
+heat at constant T); glow area shrinks as iron cools.
+
+Bug found BY the visual pass: solidified iron patches rendered black -
+the live thermal summary was published from the status-panel formatter,
+which only runs with the menu open, so emissive fell back to the
+static anchors (solid=0). Publication moved to the unconditional
+resident-execution-complete path; verified live: fe liquid AND solid
+surfaces carry the live 1834K emissive (tracking the cooling), ice/
+water/steam stay dark (per-material plausibility bands). Post-fix
+sequence shows zero near-black iron patches. Units 981/0.

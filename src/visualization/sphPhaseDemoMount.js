@@ -6438,6 +6438,23 @@ export async function mountSphPhaseDemoOverlay({
       recordResidentFrame(completedResidentSteps);
       if (!driver && activeViewState) recordPhysicsFrame(completedResidentSteps);
       overlay.__mlsMpmResidentSteps = execution;
+      {
+        // Live thermal summary for the render side: the surface shader's
+        // blackbody emission tracks the hottest live temperature instead of
+        // static phase-transition anchors (hot SOLID iron must still glow).
+        // Published here (every completed execution), NOT in the status
+        // panel formatter, which only runs with the menu open.
+        const liveDiagnostics = execution?.finalStep?.diagnostics || null;
+        const liveMaxK = Number(liveDiagnostics?.maxTemperatureK);
+        if (Number.isFinite(liveMaxK) && scene.scene?.userData) {
+          scene.scene.userData.sphLiveThermalSummary = {
+            maxTemperatureK: liveMaxK,
+            minTemperatureK: Number(liveDiagnostics?.minTemperatureK) || null,
+            meanTemperatureK: Number(liveDiagnostics?.temperatureMassWeightedMeanK) || null,
+            updatedAtMs: performance.now()
+          };
+        }
+      }
       overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
       overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.finalStep?.p2gGridProjection || null;
       overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.finalStep?.gridUpdate || null;
@@ -7758,17 +7775,6 @@ export async function mountSphPhaseDemoOverlay({
     const thermalMeanK = compactDiagnostics?.temperatureMassWeightedMeanK;
     const thermalMinK = compactDiagnostics?.minTemperatureK;
     const thermalMaxK = compactDiagnostics?.maxTemperatureK;
-    if (Number.isFinite(Number(thermalMaxK)) && scene.scene?.userData) {
-      // Live thermal summary for the render side: the surface shader's
-      // blackbody emission tracks the hottest live temperature instead of
-      // static phase-transition anchors (hot SOLID iron must still glow).
-      scene.scene.userData.sphLiveThermalSummary = {
-        maxTemperatureK: Number(thermalMaxK),
-        minTemperatureK: Number(thermalMinK) || null,
-        meanTemperatureK: Number(thermalMeanK) || null,
-        updatedAtMs: performance.now()
-      };
-    }
     const thermalProblemCount = compactDiagnostics?.thermalProblemCount;
     const residentThermalStatus = residentStep?.stageStatus?.thermal
       || residentStep?.thermalStep?.status

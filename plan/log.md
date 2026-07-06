@@ -38720,3 +38720,36 @@ Two causes, two fixes:
 
 Post-fix burst: 8-17k changed pixels (legitimate sim motion at ~25
 refreshes/s), streaks gone, smooth rounded blobs. Units 981/0.
+
+## 2026-07-05 - Fix particle-sphere mode after the native default (user
+   report) + consistent background across backends
+
+Cold-start sphere mode (surfaceDraw=three-render-row-spheres in the
+URL) was fine and pixel-identical to the pre-native-default build
+(verified against a worktree at 4710a86). The regression was LIVE
+SWITCHING: with the default now mounting the native-webgpu renderer
+backend, choosing a three-* render mode from the menu built the sphere
+instanced meshes (133 instances present in the scene) but nothing
+rasterized them - the renderer backend is fixed at mount time and the
+native backend does not draw three scene meshes (bridge frameCount
+stayed 0 while the native consumer kept presenting surfaces).
+
+Fix (sphPhaseDemoMount.js): the render-mode menu handler now derives
+the required backend for the selected mode (native consumer ->
+native-webgpu, everything else -> webgl); on a cross-backend change it
+syncs the URL - where the renderer param now follows the explicit
+render mode instead of pinning the mounted backend - and reloads into
+the working configuration. Same-backend switches keep the in-place
+refresh. Tradeoff: a cross-backend switch restarts the sim (the mode
+lives in the URL either way).
+
+Consistency: sphere/points modes cleared to the legacy sky-blue
+(#87ceeb) control default while the native consumer hardcoded dark
+navy, so mode switches looked broken even when working.
+SPH_SCENE_BACKGROUND_COLOR_DEFAULT is now #18222b (the native clear),
+and the native bridge clear color now follows the background control
+(residentSurfaceDrawBackgroundClearValue parses the display-space hex;
+bridge clear value refreshes with every bridge update) instead of
+being hardcoded. Verified: menu switch native->spheres reloads into
+webgl and renders pills on the dark background; native default
+unchanged (477 fps). Units 981/0.

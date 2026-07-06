@@ -303,9 +303,11 @@ function createFakeSchroederProxyRenderDevice() {
   return { device, calls };
 }
 
-test('SPH scene background color defaults to sky blue and normalizes URL hex values', () => {
-  assert.equal(SPH_SCENE_BACKGROUND_COLOR_DEFAULT, '#87ceeb');
-  assert.equal(normalizeSphSceneBackgroundColorHex(null), '#87ceeb');
+test('SPH scene background color defaults to dark navy and normalizes URL hex values', () => {
+  // Matches the native WebGPU surface consumer clear so the default look is
+  // consistent across renderer backends (was sky blue in the CPU/webgl era).
+  assert.equal(SPH_SCENE_BACKGROUND_COLOR_DEFAULT, '#18222b');
+  assert.equal(normalizeSphSceneBackgroundColorHex(null), '#18222b');
   assert.equal(normalizeSphSceneBackgroundColorHex('87CEEB'), '#87ceeb');
   assert.equal(normalizeSphSceneBackgroundColorHex('#8ce'), '#88ccee');
   assert.equal(normalizeSphSceneBackgroundColorHex('not-a-color', '#123456'), '#123456');

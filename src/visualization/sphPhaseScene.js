@@ -156,7 +156,10 @@ import {
   createUlgWorkerOffscreenPresentationBridge
 } from './offscreenPresentationBridge.js';
 
-export const SPH_SCENE_BACKGROUND_COLOR_DEFAULT = '#87ceeb';
+// Matches the native WebGPU surface consumer's historical clear color so the
+// default look is consistent across the webgl and native renderer backends
+// (it was '#87ceeb' sky blue when the CPU/webgl path was the flagship view).
+export const SPH_SCENE_BACKGROUND_COLOR_DEFAULT = '#18222b';
 export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_SCHEMA =
   'peercompute.ulg.presentation-worker-retained-state-promotion-candidate.v0';
 export const ULG_PRESENTATION_WORKER_RETAINED_STATE_PROMOTION_CANDIDATE_READY_STATUS =
@@ -9164,6 +9167,17 @@ export function createSphPhaseScene(container, {
     return host || sceneResidentAuthorityHost || globalThis.__ulgResidentAuthorityHost || null;
   }
   let sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(backgroundColor);
+  function residentSurfaceDrawBackgroundClearValue() {
+    // Parse the display-space hex directly (Three.Color may convert managed
+    // colors to linear; the native canvas clear wants raw display channels).
+    const hex = String(sceneBackgroundColorHex || SPH_SCENE_BACKGROUND_COLOR_DEFAULT).replace('#', '');
+    return {
+      r: parseInt(hex.slice(0, 2), 16) / 255 || 0,
+      g: parseInt(hex.slice(2, 4), 16) / 255 || 0,
+      b: parseInt(hex.slice(4, 6), 16) / 255 || 0,
+      a: 1
+    };
+  }
   scene.background = new Three.Color(sceneBackgroundColorHex);
   scene.userData.sphSceneBackgroundColor = {
     schema: 'peercompute.ulg.sph-scene-background-color.v0',
@@ -17071,7 +17085,7 @@ export function createSphPhaseScene(container, {
             nativeConsumer?.offscreenValidationNonzeroPixelCount ?? previousBridge.offscreenValidationNonzeroPixelCount ?? null,
           offscreenValidationPixelCount:
             nativeConsumer?.offscreenValidationPixelCount ?? previousBridge.offscreenValidationPixelCount ?? null,
-          backgroundClearValue: { r: 0.094, g: 0.133, b: 0.169, a: 1 },
+          backgroundClearValue: residentSurfaceDrawBackgroundClearValue(),
           drawState,
           surfaceInputLayout,
           surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
@@ -17394,7 +17408,7 @@ export function createSphPhaseScene(container, {
         offscreenValidationPixelCount: nativeConsumer?.offscreenValidationPixelCount ?? null,
         offscreenValidationAttemptCount: 0,
         backgroundClearValue: useNativeConsumer
-          ? { r: 0.094, g: 0.133, b: 0.169, a: 1 }
+          ? residentSurfaceDrawBackgroundClearValue()
           : { r: 0, g: 0, b: 0, a: 0 },
         pipeline: transparentPipeline,
         opaquePipeline,
@@ -17694,7 +17708,7 @@ export function createSphPhaseScene(container, {
         const pass = encoder.beginRenderPass({
           colorAttachments: [{
             view: bridge.context.getCurrentTexture().createView(),
-            clearValue: { r: 0.094, g: 0.133, b: 0.169, a: 1 },
+            clearValue: bridge.backgroundClearValue || { r: 0.094, g: 0.133, b: 0.169, a: 1 },
             loadOp: 'clear',
             storeOp: 'store'
           }]

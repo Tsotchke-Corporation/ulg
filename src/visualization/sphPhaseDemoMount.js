@@ -2703,6 +2703,11 @@ export async function mountSphPhaseDemoOverlay({
     residentSurfaceDrawDiagnosticMode = mode;
     return mode;
   }
+  function sphRendererBackendRequiredForRenderMode(mode) {
+    return String(mode || '').trim().toLowerCase() === 'native-webgpu-surface-consumer'
+      ? 'native-webgpu'
+      : 'webgl';
+  }
   publishRenderModeSelection('render-mode-initialized');
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {
@@ -2711,7 +2716,14 @@ export async function mountSphPhaseDemoOverlay({
     if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
     if (initialResidentStageWorkersEnabled) q.set('residentStageWorkers', '1');
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
-    if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
+    // The renderer backend must follow an explicitly selected render mode
+    // (the native surface consumer presents on the native-webgpu backend;
+    // three-* modes need the WebGL renderer to rasterize scene meshes), so a
+    // cross-backend mode change can reload into a working configuration.
+    const urlRendererBackend = residentSurfaceDrawDiagnosticModeExplicit
+      ? sphRendererBackendRequiredForRenderMode(currentResidentSurfaceDrawDiagnosticMode())
+      : initialSphRendererBackend;
+    if (urlRendererBackend !== 'webgl') q.set('renderer', urlRendererBackend);
     if (initialThreeWebGpuRendererPresentationEnabled) q.set('rendererPresentation', '1');
     if (initialThreeWebGpuRendererResidentDeviceEnabled) q.set('rendererResidentDevice', '1');
     if (initialThreeWebGpuRendererPresentationUnsafe) q.set('rendererPresentationUnsafe', '1');
@@ -6847,8 +6859,21 @@ export async function mountSphPhaseDemoOverlay({
   });
   renderModeSelect.addEventListener('change', () => {
     residentSurfaceDrawDiagnosticModeExplicit = true;
-    currentResidentSurfaceDrawDiagnosticMode();
+    const selectedMode = currentResidentSurfaceDrawDiagnosticMode();
     syncUrlFromControls();
+    const requiredBackend = sphRendererBackendRequiredForRenderMode(selectedMode);
+    if (requiredBackend !== initialSphRendererBackend) {
+      // The renderer backend is fixed at mount time; a cross-backend mode
+      // change (e.g. native surface -> three-render-row spheres) would leave
+      // the new bridge unrendered. The URL was just synced with the mode and
+      // its required backend, so reload into the working configuration.
+      publishRenderModeSelection('render-mode-renderer-backend-reload', {
+        requiredRendererBackend: requiredBackend,
+        mountedRendererBackend: initialSphRendererBackend
+      });
+      globalThis.location?.reload?.();
+      return;
+    }
     refreshResidentRenderForCurrentMode('render-mode-control-change');
   });
 

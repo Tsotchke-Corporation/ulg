@@ -39268,3 +39268,18 @@ timestamps (ice 468->732 melting, meltwater 456->672, fe|solid rising);
 8.5k-particle scene throughput 190 -> ~350-366 substeps/s (~2x) with
 zero console issues. ThermalParams 80 -> 96 bytes (bin fields), thermal
 pipeline cache key v3. Units 981/0, atomics 11/11.
+
+## 2026-07-06 — Open: SS storage adoption gate times out in isolation (bisect queued)
+
+After the thermal-bin commit chain, the mounted SS storage gate
+(demo.e2e.mjs:9389) times out: the stage worker lane publishes but
+schroederParticleStorageAdoptionStatus never reaches
+schroeder-particle-storage-adopted. Ruled out via live A/B probes:
+separation/bins (sep=0 identical), restored damping defaults
+(explicit zeros identical), numericUrlOption change (only the four
+intended callers). The gate was ALREADY retry-flaky in the earlier
+full-suite run (passed on retry at ~72cd374); it may be
+order/suite-context dependent rather than regressed. Bisect plan
+recorded in the task list: baseline the single gate on a 72cd374
+worktree server first. This blocks starting the worker-lane
+rematerialization slice (design committed in the SS plan today).

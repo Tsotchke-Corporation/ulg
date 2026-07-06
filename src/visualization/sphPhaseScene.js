@@ -10903,6 +10903,36 @@ export function createSphPhaseScene(container, {
   let sphResidentSurfaceDrawRenderBridge = null;
   let sphResidentRenderSurfaceState = null;
   let sphResidentRenderFieldRowsBufferPool = null;
+  // Double-buffered snapshots of the render-field scalars for the native
+  // draw's gradient normals. The pooled field buffer is rewritten by every
+  // render-field pass (~25/s) while frames draw at 60fps; binding it live
+  // made normals flicker mid-generation. Two slots alternate so the copy for
+  // generation N+1 never lands in the buffer generation N still binds.
+  const sphResidentFieldGradientSnapshotRing = { slots: [null, null], next: 0 };
+  function snapshotResidentFieldGradientBuffer({ device, sourceBuffer, copyByteLength }) {
+    const bytes = Math.max(0, Math.round(Number(copyByteLength) || 0));
+    if (!device?.createBuffer || !sourceBuffer || bytes <= 0) return null;
+    const slotIndex = sphResidentFieldGradientSnapshotRing.next;
+    sphResidentFieldGradientSnapshotRing.next = (slotIndex + 1) % 2;
+    let slot = sphResidentFieldGradientSnapshotRing.slots[slotIndex];
+    if (!slot || slot.device !== device || slot.byteLength < bytes) {
+      slot?.buffer?.destroy?.();
+      slot = {
+        device,
+        byteLength: bytes,
+        buffer: device.createBuffer({
+          label: `ulg-sph-field-gradient-snapshot-${slotIndex}`,
+          size: bytes,
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+        })
+      };
+      sphResidentFieldGradientSnapshotRing.slots[slotIndex] = slot;
+    }
+    const encoder = device.createCommandEncoder({ label: 'ulg-sph-field-gradient-snapshot-copy' });
+    encoder.copyBufferToBuffer(sourceBuffer, 0, slot.buffer, 0, bytes);
+    device.queue.submit([encoder.finish()]);
+    return slot.buffer;
+  }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
   const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
   const sphNativeMarchingCubesAdapterCaches = new Set();
@@ -17149,7 +17179,11 @@ export function createSphPhaseScene(container, {
         },
         primitive: {
           topology: 'triangle-list',
-          cullMode: 'none'
+          // The marching-cubes kernel enforces outward winding
+          // (sv_emit_triangle outward_hint), so back faces are interior
+          // walls; drawing them through the transmissive OIT average showed
+          // as bright streaks that flickered with every field re-extraction.
+          cullMode: 'back'
         },
         depthStencil: {
           format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
@@ -24828,19 +24862,28 @@ export function createSphPhaseScene(container, {
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
       if (renderFieldGradientVolume?.buffer) {
-        // Retained render-field scalar view for smooth gradient normals in
-        // the native draw; the bind group is rebuilt with each refresh, so
-        // the buffer only needs to outlive this surface-draw generation.
-        surfaceDrawExecution.renderFieldGradientVolume = {
-          buffer: renderFieldGradientVolume.buffer,
-          dims: Array.isArray(renderFieldGradientVolume.dims)
-            ? [...renderFieldGradientVolume.dims]
-            : [0, 0, 0],
-          scalarStrides: Array.isArray(renderFieldGradientVolume.scalarStrides)
-            ? [...renderFieldGradientVolume.scalarStrides]
-            : [0, 0, 0],
-          scalarOffset: Math.max(0, Math.round(Number(renderFieldGradientVolume.scalarOffset) || 0))
-        };
+        // Snapshot the render-field scalars for smooth gradient normals in
+        // the native draw. The live pooled buffer is rewritten every field
+        // pass, so the draw binds a copy that stays consistent with the
+        // vertices extracted this refresh (queue-ordered after the field
+        // compute and before any frame that binds it).
+        const snapshotBuffer = snapshotResidentFieldGradientBuffer({
+          device: resolvedDeviceResult.device,
+          sourceBuffer: renderFieldGradientVolume.buffer,
+          copyByteLength: renderFieldGradientVolume.byteLength
+        });
+        if (snapshotBuffer) {
+          surfaceDrawExecution.renderFieldGradientVolume = {
+            buffer: snapshotBuffer,
+            dims: Array.isArray(renderFieldGradientVolume.dims)
+              ? [...renderFieldGradientVolume.dims]
+              : [0, 0, 0],
+            scalarStrides: Array.isArray(renderFieldGradientVolume.scalarStrides)
+              ? [...renderFieldGradientVolume.scalarStrides]
+              : [0, 0, 0],
+            scalarOffset: Math.max(0, Math.round(Number(renderFieldGradientVolume.scalarOffset) || 0))
+          };
+        }
       }
       const renderBridgeBuildStartedMs = nowMs();
       const renderBridge = renderBridgePlan.useThreeCompactBridge
@@ -27021,7 +27064,10 @@ export function createSphPhaseScene(container, {
                       buffer: nativeDescriptor.scalarBuffer ?? null,
                       dims: nativeDescriptor.dims ?? null,
                       scalarStrides: nativeDescriptor.scalarStrides ?? null,
-                      scalarOffset: nativeDescriptor.scalarOffset ?? 0
+                      scalarOffset: nativeDescriptor.scalarOffset ?? 0,
+                      byteLength: nativeDescriptor.scalarRequiredByteLength
+                        ?? nativeDescriptor.scalarBufferByteLength
+                        ?? 0
                     }
                   });
                   nextResidentSurfaceDraw = {

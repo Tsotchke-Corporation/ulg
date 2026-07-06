@@ -38695,3 +38695,28 @@ Visual: rounded liquid blobs with smooth shading gradients replace the
 pyramid facets; fps 479 (no cost - ~48 extra field reads per vertex).
 Unit expectations updated (uniform byte length + new WGSL matchers).
 Units 981/0.
+
+## 2026-07-05 - Fix striping + flicker on the native water surface
+   (user report)
+
+Reproduced with a 150ms burst on the settled pool: 40-55k pixels
+changed per frame pair across the whole water body, plus bright
+elongated triangular streaks.
+
+Two causes, two fixes:
+1. Flicker: the gradient-normal path bound the LIVE pooled render-field
+   buffer, which every field pass rewrites (~25/s) while frames draw at
+   60fps - normals shifted mid-generation (vertices from refresh N lit
+   by field N+1). The draw now binds a per-refresh SNAPSHOT of the
+   scalar sub-volume (double-buffered ring, copyBufferToBuffer encoded
+   queue-ordered after the field compute; slot alternation keeps the
+   copy for generation N+1 out of the buffer generation N still binds).
+2. Striping: the surface pipelines drew with cullMode 'none', so
+   interior/back walls contributed bright streaks through the
+   transmissive OIT average, re-randomized by every re-extraction. The
+   MC kernel enforces outward winding (sv_emit_triangle outward_hint),
+   so the surface pipelines now cull back faces (OIT composite
+   fullscreen pass untouched).
+
+Post-fix burst: 8-17k changed pixels (legitimate sim motion at ~25
+refreshes/s), streaks gone, smooth rounded blobs. Units 981/0.

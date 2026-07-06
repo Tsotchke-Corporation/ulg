@@ -1491,3 +1491,20 @@ Interim status, 2026-06-18 AKDT:
 4. Add a benchmark comparing resident scatter vs tiled/local-accumulator P2G.
 5. Keep the current resident pipeline as fallback until the new backend passes
    parity and performance gates.
+
+Reconciliation, 2026-07-06:
+
+- Landed since the last tactical status (this branch): excluded-volume
+  particle separation as two fused post-G2P kernels with grid-binned
+  neighbor search (fixed-capacity cell bins, scratch reuse across fused
+  substeps) — throughput-neutral at 8.5k particles (~190 substeps/s) and
+  the first particle-level pair law in the resident hot loop. The bin
+  structure is a reusable step toward Phase 3 (resident neighbor
+  structures); the thermal pair-conduction kernel still scans all
+  particles and should adopt the same bins next.
+- Still open from this plan: the Ocean-tiled P2G backend behind
+  `mls-mpm-p2g-backend-policy` (fails closed to resident scatter),
+  poor scaling at 48k particles (580 ms/step measured earlier), and
+  moving surface-table/material-interface work fully GPU-local.
+- The plan remains the performance backlog; treat the binned-neighbor
+  infrastructure and the separation pass as its newest landed slices.

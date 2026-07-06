@@ -72,6 +72,9 @@ const AVOGADRO_COUNT = 6.02214076e23;
 const AVOGADRO_R = 8.314462618;
 const TAIT_EXPONENT = 7;
 const DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT = 64;
+// The default base edge that defines one particle "quantum" of matter from
+// the scenario's reference base block (spacing = baseSizeM / 5).
+const DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE = 5;
 const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
 const PHASE_VOLUME_EXPANSIVE_PHASE_NAMES = new Set(['gas', 'vapor', 'vapour', 'plasma']);
 const DEFAULT_MLS_MPM_LIQUID_FREE_SURFACE_RELAXATION_ALPHA = 2e-3;
@@ -377,12 +380,17 @@ function resolveInitialParticleSpacingPlan({
   const referenceTargetParticleMassKg = referenceTotalMassKg / Math.max(1, requestedParticleBudget);
   const referenceTargetDensity = referenceTotalMassKg / Math.max(dropVolumeM3 + baseVolumeM3, 1e-9);
   const referenceTargetSpacingM = Math.cbrt(referenceTargetParticleMassKg / Math.max(referenceTargetDensity, 1e-9));
-  const requestedReferenceSpacingsM = [
-    dropSizeM / Math.max(1, dropRequested),
-    baseSizeM / Math.max(1, baseRequested)
-  ].filter((value) => Number.isFinite(value) && value > 0);
-  const globalParticleSpacingM = requestedReferenceSpacingsM.length > 0
-    ? Math.min(...requestedReferenceSpacingsM)
+  // A particle is a fixed quantum of matter: the spacing derives from the
+  // scenario's reference base block sampled at the DEFAULT base edge and is
+  // COUNT-INDEPENDENT. Initial block volume therefore scales with the
+  // requested particle counts (blockEdge = N x quantum spacing), instead of
+  // squeezing more particles into a fixed reference block - raising an edge
+  // count adds matter rather than shrinking particles.
+  const referenceQuantumSpacingM = baseSizeM > 0
+    ? baseSizeM / DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE
+    : referenceTargetSpacingM;
+  const globalParticleSpacingM = referenceQuantumSpacingM > 0
+    ? referenceQuantumSpacingM
     : referenceTargetSpacingM;
   const globalParticleVolumeM3 = globalParticleSpacingM ** 3;
   const globalParticleRadiusM = 0.5 * globalParticleSpacingM;

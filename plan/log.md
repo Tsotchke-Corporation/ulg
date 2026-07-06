@@ -39089,3 +39089,21 @@ the interface meltwater needs a longer horizon still.
 
 Spot checks re-run post-change: Na+H2O still detonates (2530K, mass
 conserved, both render modes clean).
+
+## 2026-07-06 - Initial block volume now tied to particle counts
+   (user contract correction)
+
+Superseding the morning's 1/8-fraction fix: the user's intended
+contract is that a particle is a fixed QUANTUM of matter, so initial
+block volume scales with the requested counts - raising an edge count
+adds matter instead of shrinking particles. The spacing resolver's
+global spacing was min(dropSize/dropN, baseSize/baseN) (reference-
+block-pinned, count-coupled); it is now the count-independent quantum
+baseSizeM / DEFAULT_REFERENCE_BASE_PARTICLES_PER_EDGE(5) = 0.2m for
+the default scenario. Measured: h2o blocks 0.4/0.8/1.6m at dropn
+2/4/8; fe 0.6/1.2m at 3/6 - edge doubling doubles the block edge.
+Particle mass per material is constant across counts. All 46 demo
+unit tests pass unchanged; full units 981/0; mounted drop-edge,
+settle, and mass gates green. Box-capacity clamping for very large
+counts is a noted follow-up (blocks above ~edge 20 would exceed the
+default box).

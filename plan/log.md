@@ -38909,3 +38909,36 @@ dropouts); solidified iron renders as a persistent dark metallic slab
 in the splash crater at t=5.4 (previously invisible). Units 981/0.
 Debug tracing left in destroyBufferOnce (console.debug, tagged
 [ext-surface-destroy]).
+
+## 2026-07-05 - Blackbody emission + real lighting rig for the native
+   surface (user: "molten iron isn't glowing... everything looks flat")
+
+Both complaints were real:
+- The shading used ONE fixed directional light and a CONSTANT view
+  vector (not the camera's), so there was no view-dependent fresnel or
+  specular parallax - everything read as ambient. New rig: warm key +
+  cool fill + hemispheric sky, lower diffuse wrap, real per-fragment
+  view direction from the camera world position (new uniform fields),
+  fresnel environment reflection, two-light specular.
+- No emission term existed. Added closure-derived blackbody emission:
+  a liquid is by definition at >= its melting point and a gas at >= its
+  boiling point, so surfaces glow at their transition temperature
+  (fe liquid 1811K -> ember orange; Cu 1358K; water 273K/steam 373K sit
+  below the ~800K visible-glow threshold and stay dark). Solids don't
+  glow (no live temperature source - a cold iron base must not glow);
+  live per-surface temperatures can refine this later.
+
+Plumbing gotchas found on the way:
+- buildSphRenderFieldSurfaceTable NORMALIZES metadata rows (no
+  descriptor spread) - emissiveTemperatureK needed explicit
+  passthrough; verified end-to-end with a node repro.
+- The camera uniform is now read by the FRAGMENT stage (view dir +
+  emissive), so the bind group layout binding 1 visibility had to be
+  VERTEX|FRAGMENT - the initial miss produced an invalid pipeline and
+  a fully black canvas (diagnosed via console pipeline errors).
+- Camera uniform 240 -> 256 bytes (camera position + temperature).
+
+Validation: molten iron drop glows bright ember with white-hot
+specular streak at t=0.46 (hot-orange pixel count 0 -> 7-11k across
+the molten window); water scene shows directional shape and fresnel
+edges; solidified iron correctly stops glowing. Units 981/0.

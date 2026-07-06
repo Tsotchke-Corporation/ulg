@@ -5694,7 +5694,39 @@ struct VertexOut {
   @location(1) @interpolate(flat) material_id: f32,
   @location(2) @interpolate(flat) phase_id: f32,
   @location(3) @interpolate(flat) optical_state_id: f32,
+  @location(4) world_position: vec3<f32>,
 };
+
+// View direction for shading. The compact-position variant replaces this with
+// the real camera-relative direction; the legacy vertex-row variant keeps a
+// fixed plausible direction (its camera uniform is only a matrix).
+fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
+  return normalize(vec3<f32>(0.15, 0.25, 1.0));
+}
+
+// Thermal emission for hot materials (blackbody-ish ramp). The compact
+// variant supplies the surface's closure-derived emission temperature; the
+// legacy variant has no temperature input and stays dark.
+fn resident_surface_emissive() -> vec3<f32> {
+  return vec3<f32>(0.0);
+}
+
+fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
+  // Visible glow starts ~800K (draper point), saturating toward white heat.
+  let t = clamp((temperature_k - 800.0) / 1400.0, 0.0, 1.4);
+  if (t <= 0.0) {
+    return vec3<f32>(0.0);
+  }
+  let ember = vec3<f32>(1.0, 0.18, 0.02);
+  let orange = vec3<f32>(1.0, 0.55, 0.16);
+  let white_hot = vec3<f32>(1.0, 0.88, 0.66);
+  let color = select(
+    mix(ember, orange, clamp(t / 0.55, 0.0, 1.0)),
+    mix(orange, white_hot, clamp((t - 0.55) / 0.85, 0.0, 1.0)),
+    t > 0.55
+  );
+  return color * min(t * t + 0.15, 1.6);
+}
 
 @group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;
 @group(0) @binding(1) var<uniform> camera_data: CameraUniform;
@@ -5893,6 +5925,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
   }
   out.position = clip;
+  out.world_position = position_m;
   out.normal = normalize(row2.xyz + vec3<f32>(0.0001, 0.0002, 0.0003));
   out.material_id = row0.y;
   out.phase_id = row0.z;
@@ -5913,24 +5946,44 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   );
   let base_color = select(attenuated_base, vec3<f32>(0.55, 0.05, 0.18), blocked);
   let normal = normalize(in.normal);
-  let light_dir = normalize(vec3<f32>(0.35, 0.7, 0.55));
-  let view_dir = normalize(vec3<f32>(0.15, 0.25, 1.0));
-  let half_dir = normalize(light_dir + view_dir);
-  let ndotl = clamp(dot(normal, light_dir), 0.0, 1.0);
-  let ndoth = clamp(dot(normal, half_dir), 0.0, 1.0);
+  let view_dir = resident_view_direction(in.world_position);
   let roughness = clamp(optical.roughness, 0.04, 1.0);
   let metalness = clamp(optical.metalness, 0.0, 1.0);
-  let diffuse = base_color * (1.0 - metalness) * (0.34 + 0.66 * ndotl);
   let ior = max(optical.ior, 1.0);
   let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  let fresnel = dielectric_f0 + (1.0 - dielectric_f0) * pow(1.0 - clamp(dot(normal, view_dir), 0.0, 1.0), 5.0);
   let f0 = mix(vec3<f32>(dielectric_f0), base_color, metalness);
-  let specular_power = max(2.0, (1.0 - roughness) * (1.0 - roughness) * 128.0);
-  let specular = (f0 + vec3<f32>(fresnel * (1.0 - metalness))) * pow(ndoth, specular_power) * (0.35 + 0.65 * ndotl);
+  let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
+  let fresnel = dielectric_f0 + (1.0 - dielectric_f0) * pow(1.0 - ndotv, 5.0);
+  let specular_power = max(2.0, (1.0 - roughness) * (1.0 - roughness) * 160.0);
+  // Two-light rig: warm key from upper front-left, cool dim fill from the
+  // opposite side, plus a hemispheric sky term. Low diffuse wrap keeps
+  // directional shape (the old single fixed light + fixed view direction
+  // read as flat ambient).
+  let key_dir = normalize(vec3<f32>(0.42, 0.78, 0.45));
+  let key_color = vec3<f32>(1.0, 0.97, 0.9);
+  let fill_dir = normalize(vec3<f32>(-0.55, 0.2, -0.62));
+  let fill_color = vec3<f32>(0.45, 0.56, 0.68);
+  let key_ndotl = clamp(dot(normal, key_dir), 0.0, 1.0);
+  let fill_ndotl = clamp(dot(normal, fill_dir), 0.0, 1.0);
+  let diffuse = base_color * (1.0 - metalness)
+    * (key_color * (0.14 + 0.86 * key_ndotl) + fill_color * fill_ndotl * 0.5);
+  let key_half = normalize(key_dir + view_dir);
+  let key_spec = pow(clamp(dot(normal, key_half), 0.0, 1.0), specular_power) * key_ndotl;
+  let fill_half = normalize(fill_dir + view_dir);
+  let fill_spec = pow(clamp(dot(normal, fill_half), 0.0, 1.0), specular_power) * fill_ndotl * 0.35;
+  let specular = (f0 + vec3<f32>(fresnel * (1.0 - metalness)))
+    * (key_spec * key_color + fill_spec * fill_color) * 1.4;
+  // Fresnel environment: liquids and metals pick up a sky-toned reflection at
+  // grazing angles - the strongest cue that a surface is glossy, not chalky.
+  let horizon_color = mix(vec3<f32>(0.16, 0.22, 0.28), vec3<f32>(0.5, 0.62, 0.72),
+    clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+  let env_reflection = horizon_color * fresnel * (1.0 - roughness)
+    * mix(vec3<f32>(1.0), base_color, metalness);
   let scatter_haze = clamp(log2(1.0 + optical.scattering_coefficient_per_m) * 0.018, 0.0, 0.35);
-  let rim = pow(1.0 - clamp(dot(normal, view_dir), 0.0, 1.0), 3.0) * (0.08 + scatter_haze) * (1.0 - roughness);
-  let sky_fill = base_color * (1.0 - metalness) * (0.05 + 0.11 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
-  let lit = diffuse + sky_fill + specular + base_color * rim;
+  let rim = pow(1.0 - ndotv, 3.0) * (0.08 + scatter_haze) * (1.0 - roughness);
+  let sky_fill = base_color * (1.0 - metalness) * (0.04 + 0.09 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+  let emissive = resident_surface_emissive();
+  let lit = diffuse + sky_fill + specular + env_reflection + base_color * rim + emissive;
   let is_vapor = round(in.phase_id) == 3.0;
   let transmissive_surface_alpha = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
   let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
@@ -5962,7 +6015,7 @@ fn fs_oit_main(in: VertexOut) -> OitFragmentOut {
 `;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH =
-  16 * Float32Array.BYTES_PER_ELEMENT + 176;
+  16 * Float32Array.BYTES_PER_ELEMENT + 192;
 
 export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
@@ -6016,7 +6069,36 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
   field_stride_z: u32,
   field_offset: u32,
   field_gradient_enabled: f32,
+  camera_position_x_m: f32,
+  camera_position_y_m: f32,
+  camera_position_z_m: f32,
+  emissive_temperature_k: f32,
 };`
+    )
+    .replace(
+      `fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
+  return normalize(vec3<f32>(0.15, 0.25, 1.0));
+}`,
+      `fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
+  let camera_position = vec3<f32>(
+    camera_data.camera_position_x_m,
+    camera_data.camera_position_y_m,
+    camera_data.camera_position_z_m
+  );
+  let to_camera = camera_position - world_position;
+  if (dot(to_camera, to_camera) <= 0.000001) {
+    return normalize(vec3<f32>(0.15, 0.25, 1.0));
+  }
+  return normalize(to_camera);
+}`
+    )
+    .replace(
+      `fn resident_surface_emissive() -> vec3<f32> {
+  return vec3<f32>(0.0);
+}`,
+      `fn resident_surface_emissive() -> vec3<f32> {
+  return blackbody_emission_rgb(camera_data.emissive_temperature_k);
+}`
     )
     .replace(
       '@group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;',
@@ -6130,6 +6212,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
   }
   out.position = clip;
+  out.world_position = position_m;
   var normal = compact_normal(vertex_index);
   if (camera_data.field_gradient_enabled > 0.5) {
     let smooth_normal = field_gradient_normal(compact_position(vertex_index));
@@ -16798,13 +16881,18 @@ export function createSphPhaseScene(container, {
       fieldGradientOffset: Math.max(0, Math.round(Number(
         surfaceDrawExecution?.renderFieldGradientVolume?.scalarOffset
       ) || 0)),
-      fieldGradientEnabled: surfaceDrawExecution?.renderFieldGradientVolume?.buffer ? 1 : 0
+      fieldGradientEnabled: surfaceDrawExecution?.renderFieldGradientVolume?.buffer ? 1 : 0,
+      emissiveTemperatureK: Math.max(0, Number(
+        surface.emissiveTemperatureK
+          ?? surfaceDrawExecution?.emissiveTemperatureK
+      ) || 0)
     };
   }
 
   function compactPositionCameraUniformPayload({
     viewProjection,
-    compactPositionDrawState
+    compactPositionDrawState,
+    cameraPosition = null
   } = {}) {
     const payload = new ArrayBuffer(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH);
     const matrix = new Float32Array(payload, 0, 16);
@@ -16877,6 +16965,11 @@ export function createSphPhaseScene(container, {
     u32(164, fieldStrides[2]);
     u32(168, state.fieldGradientOffset);
     f32(172, state.fieldGradientEnabled ? 1 : 0);
+    const cameraPositionM = finiteVector3(cameraPosition, [0, 0, 0]);
+    f32(176, cameraPositionM[0]);
+    f32(180, cameraPositionM[1]);
+    f32(184, cameraPositionM[2]);
+    f32(188, state.emissiveTemperatureK);
     return payload;
   }
 
@@ -17265,7 +17358,9 @@ export function createSphPhaseScene(container, {
           },
           {
             binding: 1,
-            visibility: GPU_SHADER_STAGE.VERTEX,
+            // The fragment stage reads the camera uniform too (view
+            // direction and emissive temperature), not just the transform.
+            visibility: GPU_SHADER_STAGE.VERTEX | GPU_SHADER_STAGE.FRAGMENT,
             buffer: { type: 'uniform' }
           },
           {
@@ -17948,7 +18043,8 @@ export function createSphPhaseScene(container, {
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
-            compactPositionDrawState: drawState.compactPositionDrawState
+            compactPositionDrawState: drawState.compactPositionDrawState,
+            cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
         );
       } else {
@@ -17963,7 +18059,8 @@ export function createSphPhaseScene(container, {
           0,
           compactPositionCameraUniformPayload({
             viewProjection,
-            compactPositionDrawState: additionalDraw.compactPositionDrawState
+            compactPositionDrawState: additionalDraw.compactPositionDrawState,
+            cameraPosition: [camera.position.x, camera.position.y, camera.position.z]
           })
         );
       }
@@ -22466,6 +22563,19 @@ export function createSphPhaseScene(container, {
           : 0
       );
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, currentMaterialProperties);
+      // Closure-derived emission temperature: a liquid glows at (at least)
+      // its melting point, a gas at its boiling point. Water/steam transition
+      // temps sit below the shader's visible-glow threshold (~800K), so only
+      // hot materials (molten/vaporized metals) actually emit.
+      const meltTransitionK = properties?.transitions
+        ?.find((transition) => transition.from === 'solid' && transition.to === 'liquid')
+        ?.temperatureK ?? 0;
+      const boilTransitionK = properties?.transitions
+        ?.find((transition) => transition.from === 'liquid' && transition.to === 'gas')
+        ?.temperatureK ?? 0;
+      const emissiveTemperatureK = batch.phase === 'liquid'
+        ? meltTransitionK
+        : (batch.phase === 'gas' ? boilTransitionK : 0);
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);
@@ -22480,6 +22590,7 @@ export function createSphPhaseScene(container, {
         surfaceKey: batch.surfaceKey,
         material: batch.material,
         phase: batch.phase,
+        emissiveTemperatureK,
         opticalState: batch.descriptor?.opticalState || null,
         opticalStateKey: batch.descriptor?.opticalStateKey || 'default',
         renderDomainId: normalizeRenderDomainId(batch.descriptor?.renderDomainId ?? batch.renderDomainId),
@@ -24941,7 +25052,8 @@ export function createSphPhaseScene(container, {
     materialProperties = currentMaterialProperties,
     waitForQueueCompletion = true,
     rendererOwnedDevice = false,
-    renderFieldGradientVolume = null
+    renderFieldGradientVolume = null,
+    emissiveTemperatureK = 0
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
@@ -25047,6 +25159,7 @@ export function createSphPhaseScene(container, {
       const extensionSurfaceTranslationElapsedMs = Math.max(0, nowMs() - translationStartedMs);
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
+      surfaceDrawExecution.emissiveTemperatureK = Math.max(0, Number(emissiveTemperatureK) || 0);
       if (renderFieldGradientVolume?.buffer) {
         // Snapshot the render-field scalars for smooth gradient normals in
         // the native draw. The live pooled buffer is rewritten every field
@@ -27254,7 +27367,8 @@ export function createSphPhaseScene(container, {
                       byteLength: nativeDescriptor.scalarRequiredByteLength
                         ?? nativeDescriptor.scalarBufferByteLength
                         ?? 0
-                    }
+                    },
+                    emissiveTemperatureK: nativeSurfaceRecord.emissiveTemperatureK ?? 0
                   });
                   nextResidentSurfaceDraw = {
                     ...nativeSurfaceDraw,
@@ -27402,6 +27516,8 @@ export function createSphPhaseScene(container, {
                             waitForQueueCompletion: false
                           });
                         if (!additionalTranslation?.surfaceDraw) continue;
+                        additionalTranslation.surfaceDraw.emissiveTemperatureK =
+                          Math.max(0, Number(additionalRecord.emissiveTemperatureK) || 0);
                         const additionalSnapshotBuffer = snapshotResidentFieldGradientBuffer({
                           device: resolvedDeviceResult.device,
                           sourceBuffer: additionalDescriptor.scalarBuffer ?? null,

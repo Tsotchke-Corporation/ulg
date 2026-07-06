@@ -1479,6 +1479,10 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       renderOrder: renderPolicy.renderOrder,
       transparencyClassId: renderPolicy.transparencyClassId,
       depthWriteFlag: renderPolicy.depthWriteFlag,
+      // Closure-derived thermal emission temperature (liquids glow at their
+      // melting point, gases at their boiling point); consumed by the native
+      // surface shader's blackbody term.
+      emissiveTemperatureK: Math.max(0, finiteNumber(descriptor.emissiveTemperatureK, 0)),
       materialId,
       phaseId,
       fieldOffset,

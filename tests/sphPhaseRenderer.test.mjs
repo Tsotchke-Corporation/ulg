@@ -2507,7 +2507,9 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
 test('SPH resident compact-position native shader keeps PBR optics and derives triangle normals', () => {
   // 208 -> 240: eight field-gradient sampling fields (dims, strides, offset,
   // enable flag) for smooth normals from the retained render field.
-  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 240);
+  // 240 -> 256: camera world position (real view direction for fresnel and
+  // specular) and the closure-derived emissive temperature (blackbody glow).
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH, 256);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /compact_position_rows: array<f32>/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_world_position/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL, /fn compact_normal/);

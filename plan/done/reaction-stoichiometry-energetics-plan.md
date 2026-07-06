@@ -546,3 +546,19 @@ Files likely touched:
   water candidate family.
 - Do not accept a heuristic energy sign as a valid strict-mode closure.
 - Do not reintroduce main-thread long-running closure derivation.
+
+## Closure - 2026-07-06
+
+All seven implementation sections are landed and validated by later plan
+gates: balanced multi-product reaction ABI and term tables (2 Na + 2 H2O ->
+2 NaOH + H2, 4 Al + 3 O2 -> 2 Al2O3, 2 Na + Cl2 -> 2 NaCl browser gates in
+the variable-scale plan); strict-mode rejection of provisional energetics
+(reactionDiscovery strictEnergetics blockers); reaction closure caching
+(cold-start cache plan, persistent-cache-hit / memory-cache-hit); CPU and
+WebGPU multi-product runtimes with product-event rows carrying momentum,
+support volume, and EOS metadata; gas byproducts feeding the spatial gas
+ledger -> gas-cell EOS -> admitted import chain; and the once-remaining
+resident product-event append/compaction across reaction generations
+(product-event-compaction-performed status in sphMlsMpmGpuStep). The
+sealed-box Na/H2O H2 partial-pressure acceptance ran through the mounted
+gates recorded in the physics-behavior-regression plan. Moving to done.

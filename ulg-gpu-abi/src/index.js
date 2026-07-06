@@ -468,7 +468,14 @@ export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
   'currentVolumeM3:f32',
   'particleRadiusM:f32',
   'volumeRatioJ:f32',
-  'pressurePa:f32'
+  'pressurePa:f32',
+  // Tri-phase split for smooth phase-transition rendering: together with
+  // phaseFractionGas this yields liquid = 1 - gas - solid. Pads keep the row
+  // vec4-aligned (stride 5).
+  'phaseFractionSolid:f32',
+  'renderRowPad0:f32',
+  'renderRowPad1:f32',
+  'renderRowPad2:f32'
 ]);
 export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

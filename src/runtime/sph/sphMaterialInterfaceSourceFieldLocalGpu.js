@@ -55,7 +55,7 @@ struct SourceFieldParams {
 @group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> source_index_accum: array<atomic<u32>>;
 
-const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const PRODUCT_EVENT_VEC4_STRIDE: u32 = 8u;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {

@@ -3450,7 +3450,7 @@ struct RenderRowsParams {
 @group(0) @binding(4) var<storage, read> mls_mpm_mechanics: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> material_bank_particle_size_rows: array<vec4<f32>>;
 
-const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+const RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 const MATERIAL_BANK_PARTICLE_SIZE_ROW_VEC4_STRIDE: u32 = 4u;
 const MATERIAL_BANK_GPU_ROW_STATUS_READY: u32 = 1u;
 const RENDER_ROW_MAX_PARTICLE_RADIUS_GROWTH_RATIO: f32 = 4.0;
@@ -3581,6 +3581,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   render_rows[render_row_base + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
   render_rows[render_row_base + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
   render_rows[render_row_base + 3u] = vec4<f32>(current_volume_m3, particle_radius_m, effective_volume_ratio_j, pressure_pa);
+  // Tri-phase split (thermo row1 = solid/liquid/gas/plasma fractions): the
+  // render field weights each particle's contribution per phase surface so
+  // transition-boundary particles morph between surfaces instead of popping.
+  render_rows[render_row_base + 4u] = vec4<f32>(thermo1.x, 0.0, 0.0, 0.0);
 }
 `;
 
@@ -3602,7 +3606,7 @@ struct RenderFieldParams {
 	@group(0) @binding(3) var<uniform> params: RenderFieldParams;
 	@group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
 
-const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE];
@@ -3614,6 +3618,25 @@ fn render_row1(particle_index: u32) -> vec4<f32> {
 
 fn render_row2(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 2u];
+}
+
+fn render_row4(particle_index: u32) -> vec4<f32> {
+  return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 4u];
+}
+
+// Phase weight of a particle for a phase-keyed surface: solid/liquid/gas
+// surfaces take the particle's phase FRACTION (transition-boundary particles
+// contribute partially to both sides, which keeps apparent volume persistent
+// and stops surfaces blinking as hard phase flags flip); other phase ids fall
+// back to the exact phase-id match.
+fn render_phase_weight(surface_phase_id: f32, row_phase_id: f32, gas_fraction: f32, solid_fraction: f32) -> f32 {
+  let gas = clamp(gas_fraction, 0.0, 1.0);
+  let solid = clamp(solid_fraction, 0.0, 1.0);
+  let liquid = clamp(1.0 - gas - solid, 0.0, 1.0);
+  if (surface_phase_id == 1.0) { return solid; }
+  if (surface_phase_id == 2.0) { return liquid; }
+  if (surface_phase_id == 3.0) { return gas; }
+  return select(0.0, 1.0, row_phase_id == surface_phase_id);
 }
 
 fn surface_row0(surface_index: u32) -> vec4<f32> {
@@ -3706,9 +3729,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row2 = render_row2(particle_index);
     if (
       row1.x != material_id
-      || row1.y != phase_id
       || (render_domain_id > 0.0 && row2.w != render_domain_id)
     ) {
+      continue;
+    }
+    let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x);
+    if (phase_weight <= 0.003) {
       continue;
     }
     let particle = vec3<f32>(
@@ -3718,11 +3744,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     let delta = cell - particle;
     let dist2 = dot(delta, delta);
-    let value = strength / (0.000001 + dist2) - subtract;
+    let value = (strength * phase_weight) / (0.000001 + dist2) - subtract;
 	    if (value > 0.0) {
 	      density = density + value;
 	      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
-	      palette = palette + color * smooth_palette_weight(ratio);
+	      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
 	    }
 	  }
 

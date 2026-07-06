@@ -700,7 +700,9 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
     'peercompute.ulg.sph-gpu-render-rows-execution.v0'
   );
-  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length, 16);
+  // 16 -> 20: phaseFractionSolid + vec4-alignment pads (tri-phase render
+  // weighting so transition-boundary particles morph between phase surfaces).
+  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length, 20);
   assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(SPH_GPU_RENDER_ROW_LAYOUT.slice(0, 8), [
     'positionXM:f32',
@@ -720,7 +722,11 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     'currentVolumeM3:f32',
     'particleRadiusM:f32',
     'volumeRatioJ:f32',
-    'pressurePa:f32'
+    'pressurePa:f32',
+    'phaseFractionSolid:f32',
+    'renderRowPad0:f32',
+    'renderRowPad1:f32',
+    'renderRowPad2:f32'
   ]);
   assert.match(sphRenderRowsWgsl, /struct RenderRowsParams/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(0\) var<storage, read> sph_state/);

@@ -39107,3 +39107,31 @@ unit tests pass unchanged; full units 981/0; mounted drop-edge,
 settle, and mass gates green. Box-capacity clamping for very large
 counts is a noted follow-up (blocks above ~edge 20 would exceed the
 default box).
+
+## 2026-07-06 - Tri-phase fraction weighting kills surface blinking
+   (user: "things blink in and out of existence")
+
+Diagnosis (close-spaced per-surface GPU draw-count timeline on the
+quench scene): surfaces popped because a transition-boundary particle's
+ENTIRE metaball jumped between phase surfaces when its hard phase flag
+flipped (melt<->freeze oscillation at the plateau; steam appearing at
+84 verts then vanishing to 0; meltwater pulsing 648->312->708).
+
+General physics-derived fix: the render field now weights each
+particle's contribution to a phase-keyed surface by the particle's
+PHASE FRACTION (thermo already carries solid/liquid/gas/plasma
+fractions from the equilibrium solver). A half-melted particle feeds
+half its field to the solid surface and half to the liquid surface, so
+apparent volume persists across transitions and surfaces morph instead
+of blinking. Ball strength scales by the fraction (support scales
+sqrt(w)), which is the volume-share of that phase.
+
+Mechanics: SPH_GPU_RENDER_ROW_LAYOUT 16 -> 20 floats
+(phaseFractionSolid + vec4 pads; gas fraction already present);
+render-row writer (WGSL + CPU extractor) packs thermo solid fraction;
+render-field kernels (WGSL + CPU parity) match material+domain and
+weight by render_phase_weight(); strides bumped in the three hardcoded
+sites. Post-fix timeline: fe|solid ramps 0->84->276->420->552 (was a
+0->420 pop), no zero-collapses, no phantom steam; remaining frame
+deltas are real motion (the molten mass sliding off the melting ice).
+Units 981/0 (ABI layout tests updated 16->20).

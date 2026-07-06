@@ -712,7 +712,11 @@ export function extractSphRenderRowsCpu({
       volumeState.currentVolumeM3,
       volumeState.particleRadiusM,
       volumeState.volumeRatioJ,
-      volumeState.pressurePa
+      volumeState.pressurePa,
+      sphParticleState.thermo[thermoOffset + 4],
+      0,
+      0,
+      0
     ], renderOffset);
   }
   return {
@@ -1546,6 +1550,20 @@ function renderDomainMatchesSurface(particleRenderDomainId, surfaceRenderDomainI
   return Math.round(finiteNumber(particleRenderDomainId, 0)) === surfaceDomain;
 }
 
+// Phase weight of a particle for a phase-keyed surface (WGSL parity):
+// solid/liquid/gas surfaces take the particle's phase FRACTION so particles
+// on a transition plateau contribute partially to both sides - apparent
+// volume persists and surfaces morph instead of blinking on hard phase flips.
+function renderPhaseWeightForSurface(surfacePhaseId, rowPhaseId, gasFraction, solidFraction) {
+  const gas = clamp(finiteNumber(gasFraction, 0), 0, 1);
+  const solid = clamp(finiteNumber(solidFraction, 0), 0, 1);
+  const liquid = clamp(1 - gas - solid, 0, 1);
+  if (surfacePhaseId === 1) return solid;
+  if (surfacePhaseId === 2) return liquid;
+  if (surfacePhaseId === 3) return gas;
+  return rowPhaseId === surfacePhaseId ? 1 : 0;
+}
+
 function accumulateMetaballSample({
   cell,
   position,
@@ -1616,14 +1634,20 @@ export function buildSphRenderFieldCpu({
         const renderDomainId = renderRows[renderOffset + 11];
         if (
           materialId !== surface.materialId
-          || phaseId !== surface.phaseId
           || !renderDomainMatchesSurface(renderDomainId, surface.renderDomainId)
         ) continue;
+        const phaseWeight = renderPhaseWeightForSurface(
+          surface.phaseId,
+          phaseId,
+          renderRows[renderOffset + 9],
+          renderRows[renderOffset + 16]
+        );
+        if (phaseWeight <= 0.003) continue;
         const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
         const accumulated = accumulateMetaballSample({
           cell,
           position: particle,
-          strength: surface.strength,
+          strength: surface.strength * phaseWeight,
           subtract: surface.subtract,
           supportNorm,
           color: surface.colorLinear,

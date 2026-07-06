@@ -404,7 +404,8 @@ test('SPH render rows CPU extraction compacts position, thermo, and phase state'
   assert.equal(result.schema, ULG_SPH_GPU_RENDER_ROWS_SCHEMA);
   assert.equal(result.backend, 'cpu-reference');
   assert.equal(result.particleCount, 3);
-  assert.equal(result.rowStrideFloats, 16);
+  // 16 -> 20: phaseFractionSolid + alignment pads for tri-phase weighting.
+  assert.equal(result.rowStrideFloats, 20);
   assert.equal(result.renderRows.length, 3 * SPH_GPU_RENDER_ROW_FLOATS);
   assert.deepEqual(Array.from(result.renderRows.slice(0, 12)), [
     1,

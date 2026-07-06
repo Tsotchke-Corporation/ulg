@@ -719,3 +719,46 @@ rematerializer**:
 3. Add an automatic mounted `residentStageWorkers=1` proof showing the scheduled
    stage-worker lane consumes real SS adopted storage after materialization,
    not a manually invoked stage chain.
+
+## Worker-Lane Rematerialization Design - 2026-07-06
+
+Scoping for slice item 3 (stage-worker lane consumes real SS adopted
+storage). Anchors and decisions from code audit:
+
+- Fail-close anchor: `sphMlsMpmGpuStep.js` ~12232
+  (`schroederAdoptedParticleStorageWorkerLaneBlocked`) blocks when a
+  same-device continuation schedule meets `gpuHubResidentStageWorkerRunner`,
+  with status
+  `blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs`.
+- Data-path decision: the worker lane request ALREADY carries packed CPU
+  `sphParticleState`/`mlsMpmParticleState` typed arrays across the boundary
+  every schedule (mount ~5804). Worker-owned rematerialization therefore
+  needs NO raw GPUBuffer transfer and NO mapAsync export: the
+  rematerialization seed = the descriptor-only portable seed
+  (`...portable-materialization-seed.v0`, resident host ~3998 already names
+  `peer-local-gpu-rematerialization-from-descriptor-seed`) + the packed rows
+  the request already ships.
+- Implementation steps:
+  1. In `sphMlsMpmGpuStep.js`, when the worker-lane block would trigger,
+     route to a new consumer mode `worker-rematerialize` instead of hard
+     fail-close: attach
+     `schroederAdoptedParticleStorageWorkerRematerializationSeed`
+     (descriptor seed + authoritative counts; rows come from the packed
+     state in the same payload) to the lane stage plan, and keep
+     fail-closed only when `require...Continuation === true` and the seed
+     cannot be built.
+  2. In `src/services/ulgMechanicsResidentStage.worker.js` (currently zero
+     Schroeder support, 1919 lines): on first seed receipt, run the
+     particle-storage materialization chain on the WORKER device
+     (allocator/free-list/slot-assignment/materialization kernels used by
+     `runSchroederSameLevelMechanicsWebGpu`), retain worker-local refs
+     keyed by the adopted-storage hot-buffer key, and reuse them across
+     schedules (worker-local continuation; drop re-upload of packed rows
+     once worker-retained refs are live).
+  3. Publish `worker-rematerialized-adopted-storage` telemetry through the
+     existing worker output publisher; extend the mounted e2e (demo.e2e.mjs
+     ~9389) so the lane consumes adopted storage instead of asserting the
+     fail-close, keeping raw-transfer=false assertions.
+- Ban preserved: no GPUBuffer structured clone, no worker mapAsync export;
+  cross-peer portable replay still routes through the validated compact
+  buffer snapshot path.

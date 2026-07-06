@@ -179,3 +179,20 @@ Status, 2026-06-12 08:12 AKDT:
 - Do not make all gas-phase H2O cloudy by default.
 - Do not reuse one material-level optical closure when phase and microstructure
   differ.
+
+Status, 2026-07-06:
+
+- The explicit pure-vapor vs condensed-steam UI readout is implemented: the
+  mounted status panel now shows `steam optics : <key>=<mode>(tau=.. sigma=../m
+  shown|hidden)` where mode is condensed-steam / optically-thick-vapor /
+  pure-vapor-thin, derived by resolveOpticalSurfaceVisibility. It reads Three
+  mesh userData on the MarchingCubes lanes and the retained
+  drawState.surfaces metadata on the native WebGPU consumer lane, and reports
+  `no-gas-surfaces` when no gas-phase surface exists.
+- Live checks: 430K water base and the Fe(1900K)->ice quench both report
+  no-gas-surfaces at short horizons (steam appears later in the quench chain);
+  the readout mechanics are covered by mount tests. A longer-horizon browser
+  check that catches condensed-steam mode live is still worth one run.
+- Remaining runtime work is unchanged: move microphysics state into resident
+  per-cell/per-particle GPU data so the vapor gate reads GPU-resident state
+  under no-full-readback instead of CPU descriptors.

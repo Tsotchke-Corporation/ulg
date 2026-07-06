@@ -9,7 +9,8 @@ import {
   createSphPhaseScene,
   normalizeSphSceneBackgroundColorHex,
   normalizeResidentSurfaceDrawOverlayMode,
-  normalizeSphRendererBackend
+  normalizeSphRendererBackend,
+  resolveOpticalSurfaceVisibility
 } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
@@ -7595,6 +7596,53 @@ export async function mountSphPhaseDemoOverlay({
       .join(' ');
   }
 
+  // Explicit pure-vapor vs condensed-steam readout: summarizes the derived
+  // optical visibility gates on gas/vapor surfaces (phase-resolved steam
+  // optics plan). Reads mesh userData written by the visibility resolver.
+  function vaporOpticalModeStatusText() {
+    const rows = [];
+    const describeVisibility = (key, visibility) => {
+      const mode = visibility.reason === 'derived-droplet-scattering-visible'
+        ? 'condensed-steam'
+        : visibility.reason === 'derived-vapor-optical-depth-visible'
+        ? 'optically-thick-vapor'
+        : 'pure-vapor-thin';
+      const tau = Number.isFinite(visibility.opticalDepth) ? visibility.opticalDepth.toFixed(3) : 'n/a';
+      const sigma = Number.isFinite(visibility.scatteringCoefficientPerM)
+        ? visibility.scatteringCoefficientPerM.toFixed(3)
+        : 'n/a';
+      rows.push(`${key}=${mode}(tau=${tau} sigma=${sigma}/m ${visibility.visible ? 'shown' : 'hidden'})`);
+    };
+    scene?.scene?.traverse?.((obj) => {
+      const visibility = obj?.userData?.opticalSurfaceVisibility;
+      const descriptor = obj?.userData?.renderDescriptor || obj?.userData?.descriptor || null;
+      const phase = String(descriptor?.phase ?? obj?.userData?.phase ?? '').toLowerCase();
+      if (!visibility || (phase !== 'gas' && phase !== 'vapor')) return;
+      describeVisibility(descriptor?.renderKey || descriptor?.material || 'gas', visibility);
+    });
+    // Native WebGPU consumer surfaces never become Three meshes; report their
+    // gas-phase entries from the retained drawState metadata instead.
+    const nativeSurfaces = scene?.scene?.userData?.sphResidentSurfaceDrawRenderBridge?.drawState?.surfaces;
+    if (Array.isArray(nativeSurfaces)) {
+      for (const surface of nativeSurfaces) {
+        const phase = String(surface?.phase ?? surface?.descriptor?.phase ?? '').toLowerCase();
+        if (phase !== 'gas' && phase !== 'vapor') continue;
+        const key = surface?.renderKey || surface?.material || surface?.surfaceKey || 'gas';
+        const optics = surface?.optical || surface?.optics || surface?.descriptor?.optical || null;
+        if (optics) {
+          describeVisibility(`${key}[native]`, resolveOpticalSurfaceVisibility({
+            optics,
+            descriptorOrRow: surface?.descriptor || surface,
+            wasVisible: true
+          }));
+        } else {
+          rows.push(`${key}[native]=drawn(optics-metadata-unavailable)`);
+        }
+      }
+    }
+    return rows.length ? rows.join(' ') : 'no-gas-surfaces';
+  }
+
   function renderModeStatusText(residentSurfaceDraw = null, residentRenderState = null) {
     const selection = overlay.__sphRenderModeSelection || null;
     const requestedMode = currentResidentSurfaceDrawDiagnosticMode();
@@ -7710,6 +7758,7 @@ export async function mountSphPhaseDemoOverlay({
         `render error     : ${residentRenderError || 'none'}`,
         `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} policy=${residentSurfaceDraw?.overlayPolicyStatus || residentRenderState?.surfaceDrawOverlayPolicyStatus || residentSurfaceOverlayPolicy?.status || 'pending'} mode=${residentSurfaceDraw?.overlayPolicyMode || residentRenderState?.surfaceDrawOverlayPolicyMode || residentSurfaceOverlayPolicy?.mode || 'pending'} active=${residentSurfaceDraw?.activeSurfaceCount ?? residentRenderState?.surfaceDrawActiveSurfaceCount ?? 0} vertices=${residentSurfaceDraw?.vertexCount ?? residentRenderState?.surfaceDrawVertexCount ?? 0} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
         `render pressure  : source=${renderPressureSource} optical-state=${Boolean(renderPressureOpticalState)}`,
+        `steam optics     : ${vaporOpticalModeStatusText()}`,
         `render cadence   : every=${renderCadence?.cadence ?? RESIDENT_RENDER_READBACK_CADENCE} effective=${renderCadence?.effectiveCadence ?? residentPerfSummary?.effectiveRenderReadbackCadence ?? RESIDENT_RENDER_READBACK_CADENCE} forced=${Boolean(renderCadence?.forced ?? residentPerfSummary?.playbackVisualRefreshForced)} reason=${renderCadence?.reason || 'pending'} sequence=${renderCadence?.sequence ?? 0} skipped=${renderCadence?.skippedCount ?? 0} last-skipped=${Boolean(renderCadence?.skipped)}`,
         `resident profile : submissions=${residentPerfSummary?.residentSubmissions ?? 0} stale=${residentPerfSummary?.staleResidentSubmissions ?? 0} substeps=${residentPerfSummary?.residentStepsPerSchedule ?? currentResidentStepsPerSchedule()} target=${currentResidentTargetSubsteps()} step-ms=${fmt(residentPerfSummary?.lastResidentMs, 1)} render-ms=${fmt(residentPerfSummary?.lastRenderReadbackMs, 1)}`,
         `resident stages  : ${residentStageTimingStatusText(residentStageTiming)}`,
@@ -7949,6 +7998,7 @@ export async function mountSphPhaseDemoOverlay({
       `render error     : ${residentRenderError || 'none'}`,
       `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} policy=${residentSurfaceDraw?.overlayPolicyStatus || residentRenderState?.surfaceDrawOverlayPolicyStatus || residentSurfaceOverlayPolicy?.status || 'pending'} mode=${residentSurfaceDraw?.overlayPolicyMode || residentRenderState?.surfaceDrawOverlayPolicyMode || residentSurfaceOverlayPolicy?.mode || 'pending'} active=${residentSurfaceDraw?.activeSurfaceCount ?? residentRenderState?.surfaceDrawActiveSurfaceCount ?? 0} vertices=${residentSurfaceDraw?.vertexCount ?? residentRenderState?.surfaceDrawVertexCount ?? 0} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
       `render pressure  : source=${renderPressureSource} optical-state=${Boolean(renderPressureOpticalState)}`,
+      `steam optics     : ${vaporOpticalModeStatusText()}`,
       `render cadence   : every=${renderCadence?.cadence ?? RESIDENT_RENDER_READBACK_CADENCE} effective=${renderCadence?.effectiveCadence ?? residentPerfSummary?.effectiveRenderReadbackCadence ?? RESIDENT_RENDER_READBACK_CADENCE} forced=${Boolean(renderCadence?.forced ?? residentPerfSummary?.playbackVisualRefreshForced)} reason=${renderCadence?.reason || 'pending'} sequence=${renderCadence?.sequence ?? 0} skipped=${renderCadence?.skippedCount ?? 0} last-skipped=${Boolean(renderCadence?.skipped)}`,
       `resident profile : submissions=${residentPerfSummary?.residentSubmissions ?? 0} stale=${residentPerfSummary?.staleResidentSubmissions ?? 0} substeps=${residentPerfSummary?.residentStepsPerSchedule ?? currentResidentStepsPerSchedule()} target=${currentResidentTargetSubsteps()} step-ms=${fmt(residentPerfSummary?.lastResidentMs, 1)} render-ms=${fmt(residentPerfSummary?.lastRenderReadbackMs, 1)}`,
       `resident stages  : ${residentStageTimingStatusText(residentStageTiming)}`,

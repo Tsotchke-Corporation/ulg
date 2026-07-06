@@ -104,7 +104,9 @@ const CONTRACTS = [
     label: 'ulg-mls-mpm-p2g-params',
     factory: 'createProjectionParamsArray',
     wgslStruct: 'P2gProjectionParams',
-    bytes: 64
+    // 64 -> 80: grid_density_pressure_enabled + pads (spatial-density EOS
+    // term sampled from the previous substep's finalized grid).
+    bytes: 80
   },
   {
     file: 'src/runtime/sph/sphGridUpdateGpuKernel.js',

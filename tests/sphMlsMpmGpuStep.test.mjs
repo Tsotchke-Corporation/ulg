@@ -7346,7 +7346,9 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
   assert.equal(device.dispatches.length, 7);
   assert.equal(device.indirectDispatches.length, 6);
-  assert.equal(device.copies.length, 0);
+  // One finalized-grid -> previous-grid copy per substep feeds the
+  // spatial-density EOS term.
+  assert.equal(device.copies.length, 2);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
@@ -7504,7 +7506,8 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-active-nodes'
     && buffer.destroyed
   )));
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 10);
+  // 10 -> 11: the previous-grid EOS buffer is destroyed right after submit.
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 11);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });

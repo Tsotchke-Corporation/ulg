@@ -2502,9 +2502,9 @@ function replaceRequiredWgsl(source, search, replacement, label) {
 function createActiveGridP2gProjectionWgsl() {
   const withParams = replaceRequiredWgsl(
     mlsMpmP2gGridProjectionWgsl,
-    `  schroeder_active_node_stride_floats: u32,
+    `  p2g_params_pad2: u32,
 };`,
-    `  schroeder_active_node_stride_floats: u32,
+    `  p2g_params_pad2: u32,
   active_start_i: u32,
   active_start_j: u32,
   active_start_k: u32,
@@ -2631,11 +2631,12 @@ function createFusedP2gParamsArray(
   dt,
   internalPressureScale = 1,
   schroederLevelFilter = null,
-  schroederActiveNodeFilter = null
+  schroederActiveNodeFilter = null,
+  gridDensityPressureEnabled = false
 ) {
   const filterEnabled = schroederLevelFilter?.enabled === true;
   const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
-  const buffer = new ArrayBuffer(64);
+  const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridSpec.gridNodeCount, true);
@@ -2659,6 +2660,7 @@ function createFusedP2gParamsArray(
     schroederActiveNodeFilter?.activeNodeStrideFloats,
     SCHROEDER_ACTIVE_NODE_FLOATS
   ))), true);
+  view.setUint32(64, gridDensityPressureEnabled ? 1 : 0, true);
   return buffer;
 }
 
@@ -2669,26 +2671,28 @@ function createFusedActiveP2gParamsArray(
   internalPressureScale,
   activeGridDispatch,
   schroederLevelFilter = null,
-  schroederActiveNodeFilter = null
+  schroederActiveNodeFilter = null,
+  gridDensityPressureEnabled = false
 ) {
-  const buffer = new ArrayBuffer(96);
+  const buffer = new ArrayBuffer(112);
   new Uint8Array(buffer).set(new Uint8Array(createFusedP2gParamsArray(
     gridSpec,
     particleCount,
     dt,
     internalPressureScale,
     schroederLevelFilter,
-    schroederActiveNodeFilter
+    schroederActiveNodeFilter,
+    gridDensityPressureEnabled
   )));
   const view = new DataView(buffer);
-  view.setUint32(64, activeGridDispatch.activeStart[0], true);
-  view.setUint32(68, activeGridDispatch.activeStart[1], true);
-  view.setUint32(72, activeGridDispatch.activeStart[2], true);
-  view.setUint32(76, activeGridDispatch.activeCount[0], true);
-  view.setUint32(80, activeGridDispatch.activeCount[1], true);
-  view.setUint32(84, activeGridDispatch.activeCount[2], true);
-  view.setUint32(88, activeGridDispatch.activeNodeCount, true);
-  view.setUint32(92, 0, true);
+  view.setUint32(80, activeGridDispatch.activeStart[0], true);
+  view.setUint32(84, activeGridDispatch.activeStart[1], true);
+  view.setUint32(88, activeGridDispatch.activeStart[2], true);
+  view.setUint32(92, activeGridDispatch.activeCount[0], true);
+  view.setUint32(96, activeGridDispatch.activeCount[1], true);
+  view.setUint32(100, activeGridDispatch.activeCount[2], true);
+  view.setUint32(104, activeGridDispatch.activeNodeCount, true);
+  view.setUint32(108, 0, true);
   return buffer;
 }
 
@@ -3339,6 +3343,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     size: Math.max(4, gridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
+  const previousGridNodesBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-fused-p2g-previous-grid',
+    size: Math.max(4, gridByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
   const p2gAccumulatorBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
@@ -3370,7 +3379,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           internalPressureScale,
           activeGridDispatch,
           schroederLevelFilter,
-          schroederActiveNodeFilter
+          schroederActiveNodeFilter,
+          true
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3378,7 +3388,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           dtSeconds,
           internalPressureScale,
           schroederLevelFilter,
-          schroederActiveNodeFilter
+          schroederActiveNodeFilter,
+          true
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -3433,6 +3444,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
   const tempBuffers = [
+    previousGridNodesBuffer,
     p2gAccumulatorBuffer,
     p2gParamsBuffer,
     gridUpdateParamsBuffer,
@@ -3454,12 +3466,13 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'read-only-storage'),
-      computeBufferBinding(8, 'read-only-storage')
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v3'
-        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v3',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v4'
+        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v4',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
         : 'ulg-mls-mpm-p2g-grid-projection',
@@ -3471,8 +3484,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v3'
-        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v3',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v4'
+        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v4',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
         : 'ulg-mls-mpm-p2g-grid-finalize',
@@ -3484,7 +3497,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     });
     const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v3',
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v4',
         label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
         code: mlsMpmP2gGridProjectionActiveGridWgsl,
         entryPoint: 'clear_accumulators',
@@ -3500,7 +3513,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         { binding: 5, resource: { buffer: productEventBuffer } },
         { binding: 6, resource: { buffer: gridBuffer } },
         { binding: 7, resource: { buffer: schroederLevelFilter.assignmentBuffer } },
-        { binding: 8, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } }
+        { binding: 8, resource: { buffer: schroederActiveNodeFilter.activeNodeBuffer } },
+        { binding: 9, resource: { buffer: previousGridNodesBuffer } }
       ];
     const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
     const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
@@ -3905,6 +3919,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     size: Math.max(4, gridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
+  // Previous-substep finalized grid ([mass, momentum] rows): the spatial
+  // density source for the liquid EOS. Zeroed at sequence start, refreshed by
+  // a copy after every substep's finalize pass.
+  const previousGridNodesBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-fused-sequence-p2g-previous-grid',
+    size: Math.max(4, gridByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
   const p2gAccumulatorBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
@@ -3950,7 +3972,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           internalPressureScale,
           activeGridDispatch,
           schroederLevelFilter,
-          schroederActiveNodeFilter
+          schroederActiveNodeFilter,
+          true
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3958,7 +3981,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           dtSeconds,
           internalPressureScale,
           schroederLevelFilter,
-          schroederActiveNodeFilter
+          schroederActiveNodeFilter,
+          true
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -4016,6 +4040,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   );
   const allCreatedBuffers = [
     gridBuffer,
+    previousGridNodesBuffer,
     p2gAccumulatorBuffer,
     updatedGridBuffer,
     ...statePingBuffers,
@@ -4050,12 +4075,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'read-only-storage'),
-      computeBufferBinding(8, 'read-only-storage')
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'read-only-storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v3'
-        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v3',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v4'
+        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v4',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
         : 'ulg-mls-mpm-p2g-grid-projection',
@@ -4067,8 +4093,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v3'
-        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v3',
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v4'
+        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v4',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
         : 'ulg-mls-mpm-p2g-grid-finalize',
@@ -4080,7 +4106,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     });
     const activeAccumulatorClearPipelineInfo = activeGridDispatch.useActiveGrid
       ? createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v3',
+        cacheKey: 'ulg-mls-mpm-p2g-grid-projection.active-grid.clear-accumulators.v4',
         label: 'ulg-mls-mpm-p2g-grid-accumulator-clear-active-grid',
         code: mlsMpmP2gGridProjectionActiveGridWgsl,
         entryPoint: 'clear_accumulators',
@@ -4148,7 +4174,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 5, resource: { buffer: productEventBuffer } },
           { binding: 6, resource: { buffer: gridBuffer } },
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
+          { binding: 9, resource: { buffer: previousGridNodesBuffer } }
         ]
       });
       const p2gFinalizeBindGroup = device.createBindGroup({
@@ -4162,7 +4189,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 5, resource: { buffer: productEventBuffer } },
           { binding: 6, resource: { buffer: gridBuffer } },
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+          { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
+          { binding: 9, resource: { buffer: previousGridNodesBuffer } }
         ]
       });
       const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
@@ -4177,7 +4205,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
             { binding: 5, resource: { buffer: productEventBuffer } },
             { binding: 6, resource: { buffer: gridBuffer } },
             { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-            { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+            { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
+            { binding: 9, resource: { buffer: previousGridNodesBuffer } }
           ]
         })
         : null;
@@ -4208,6 +4237,10 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         activeGridIndirectDispatchArgs
       );
       p2gFinalizePass.end();
+      // Retain this substep's finalized [mass, momentum] grid for the next
+      // substep's spatial-density EOS sampling (grid update overwrites
+      // grid_nodes with velocities next).
+      encoder.copyBufferToBuffer(gridBuffer, 0, previousGridNodesBuffer, 0, Math.max(4, gridByteLength));
 
       const gridUpdateBindGroup = device.createBindGroup({
         layout: gridUpdateBindGroupLayout,
@@ -4300,6 +4333,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       }
     }
     device.queue.submit([encoder.finish()]);
+    // The previous-grid EOS buffer is only read within this submitted
+    // sequence; WebGPU defers the actual release until the GPU work drains.
+    previousGridNodesBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);

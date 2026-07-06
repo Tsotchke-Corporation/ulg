@@ -38942,3 +38942,38 @@ Validation: molten iron drop glows bright ember with white-hot
 specular streak at t=0.46 (hot-orange pixel count 0 -> 7-11k across
 the molten window); water scene shows directional shape and fresnel
 edges; solidified iron correctly stops glowing. Units 981/0.
+
+## 2026-07-05 - Grid-density (spatial) EOS term landed; sub-cell pairing
+   needs a separation pass (task #8 outcome, honest scope)
+
+Landed (user-approved): the liquid EOS now takes
+max(J-density, grid-measured spatial density) when
+grid_density_pressure_enabled=1. Mechanics: P2gProjectionParams grew
+64->80B (flag + pads); binding 9 previous_grid_nodes (read-only) added
+to the P2G kernels (base + active-grid transform anchor updated);
+p2g_previous_grid_spatial_density() samples the previous substep's
+finalized [mass,momentum] grid with the same quadratic weights /
+cell volume; the fused sequence copies gridBuffer->previousGridNodes
+after every finalize pass (grid update overwrites grid_nodes next)
+and destroys the buffer right after submit; the standalone runner and
+single-step fused path bind zero-filled buffers (flag off / harmless).
+Pipeline cache keys bumped v3->v4. ABI/unit expectations updated
+(params contract 64->80, dispatch/copy/destroy counts). Units 981/0;
+still-water settle + merged-mass gates PASS.
+
+MEASURED OUTCOME on the pearl-chain repro: unchanged (nn min 1.2mm,
+clusters=initial column depth). Analysis: with ~0.25m cells and a
+1-particle-deep settled monolayer, the grid density estimator is
+BOUNDED BELOW rest density at clusters - bulk rest packing reads
+exactly rho0 (mass conservation), while an isolated cluster smeared
+over mostly-empty neighbor cells reads UNDER rho0 (double-weighted
+kernel attenuation, sum(w^2)~0.2). Sub-cell pairing is invisible to
+ANY grid-density scheme at this cell size; WebGPU-Ocean avoids it by
+running pools many particles deep at ~8 particles/cell. The spatial
+term still matters wherever crowding exceeds cell scale (deep pools,
+mixed flows), so it stays on.
+
+Follow-up for the pairing artifact itself: short-range pairwise
+separation (excluded-volume repulsion below ~0.5x rest spacing) as a
+post-G2P pass - tracked as the successor task with #9 (corner
+climbing) as a likely co-beneficiary.

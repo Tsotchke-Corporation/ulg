@@ -856,7 +856,7 @@ function createProjectionParamsArray(
   internalPressureScale = 1,
   schroederLevelFilter = null
 ) {
-  const buffer = new ArrayBuffer(64);
+  const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridSpec.gridNodeCount, true);
@@ -877,6 +877,10 @@ function createProjectionParamsArray(
   ))), true);
   view.setUint32(56, 0, true);
   view.setUint32(60, SCHROEDER_ACTIVE_NODE_FLOATS, true);
+  // grid_density_pressure_enabled + pads: the standalone runner keeps the
+  // spatial-density EOS term off (no previous-substep grid available); the
+  // fused resident sequence enables it.
+  view.setUint32(64, 0, true);
   return buffer;
 }
 
@@ -964,6 +968,11 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     'ulg-mls-mpm-p2g-schroeder-active-nodes-dummy',
     new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
   );
+  const previousGridNodesDummyBuffer = writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-p2g-previous-grid-nodes-dummy',
+    new Float32Array(8)
+  );
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
@@ -976,7 +985,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-params',
-    size: 64,
+    size: 80,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
@@ -1007,24 +1016,25 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'read-only-storage'),
-      computeBufferBinding(8, 'read-only-storage')
+      computeBufferBinding(8, 'read-only-storage'),
+      computeBufferBinding(9, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v3',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v4',
       label: 'ulg-mls-mpm-p2g-grid-projection',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v3',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v4',
       label: 'ulg-mls-mpm-p2g-product-event-scatter',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'scatter_product_events',
       bindings: p2gBindings
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v3',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v4',
       label: 'ulg-mls-mpm-p2g-grid-finalize',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'finalize_grid',
@@ -1039,7 +1049,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         { binding: 5, resource: { buffer: productEventBuffer } },
         { binding: 6, resource: { buffer: gridBuffer } },
         { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
+        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
+        { binding: 9, resource: { buffer: previousGridNodesDummyBuffer } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
     const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });

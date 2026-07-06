@@ -5016,6 +5016,10 @@ struct P2gProjectionParams {
   schroeder_assignment_stride_floats: u32,
   schroeder_active_node_filter_enabled: u32,
   schroeder_active_node_stride_floats: u32,
+  grid_density_pressure_enabled: u32,
+  p2g_params_pad0: u32,
+  p2g_params_pad1: u32,
+  p2g_params_pad2: u32,
 };
 
 struct StressRows {
@@ -5033,6 +5037,10 @@ struct StressRows {
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> schroeder_level_assignments: array<f32>;
 @group(0) @binding(8) var<storage, read> schroeder_active_nodes: array<f32>;
+// Previous-substep finalized grid nodes ([mass, momentum.xyz] per row pair):
+// spatial density source for the liquid EOS. Zero-filled on the first
+// substep, which falls back to the Lagrangian J density via max().
+@group(0) @binding(9) var<storage, read> previous_grid_nodes: array<vec4<f32>>;
 
 const P2G_ATOMIC_SCALE: f32 = 65536.0;
 const P2G_ATOMIC_INV_SCALE: f32 = 1.0 / P2G_ATOMIC_SCALE;
@@ -5158,6 +5166,36 @@ fn det3(
   return f00 * (f11 * f22 - f12 * f21)
     - f01 * (f10 * f22 - f12 * f20)
     + f02 * (f10 * f21 - f11 * f20);
+}
+
+fn p2g_previous_grid_spatial_density(
+  base_x: i32, base_y: i32, base_z: i32,
+  wx: vec3<f32>, wy: vec3<f32>, wz: vec3<f32>
+) -> f32 {
+  // Grid-measured density at the particle: quadratic-weighted node masses
+  // over the previous substep's finalized grid, per node volume. This is the
+  // spatial term the Lagrangian J density cannot see - statically overlapping
+  // particles read a crowded grid and repel (WebGPU-Ocean parity).
+  var weighted_mass = 0.0;
+  for (var ox = 0i; ox < 3i; ox = ox + 1i) {
+    for (var oy = 0i; oy < 3i; oy = oy + 1i) {
+      for (var oz = 0i; oz < 3i; oz = oz + 1i) {
+        let node_index = p2g_try_storage_index(base_x + ox, base_y + oy, base_z + oz);
+        if (node_index >= params.grid_node_count) {
+          continue;
+        }
+        let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
+        if (weight == 0.0) {
+          continue;
+        }
+        if (node_index * 2u < arrayLength(&previous_grid_nodes)) {
+          weighted_mass = weighted_mass + weight * max(previous_grid_nodes[node_index * 2u].x, 0.0);
+        }
+      }
+    }
+  }
+  let cell_volume = params.grid_spacing_m * params.grid_spacing_m * params.grid_spacing_m;
+  return weighted_mass / max(cell_volume, 1.0e-12);
 }
 
 fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_speed_m_per_s: f32, eos_model_id: f32) -> f32 {
@@ -5291,7 +5329,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         row6.x
       );
     } else {
-      let density = pos_mass.w / max(volume, 1.0e-30);
+      var density = pos_mass.w / max(volume, 1.0e-30);
+      if (params.grid_density_pressure_enabled == 1u) {
+        // Crowding repulsion: take the harder of the Lagrangian J density and
+        // the grid-measured spatial density, so static overlap pressurizes
+        // while expanded blobs keep their volume-restoring (clamped) tension.
+        density = max(density, p2g_previous_grid_spatial_density(base_x, base_y, base_z, wx, wy, wz));
+      }
       // Pressure comes from the EOS via the tracked volume ratio J only. The
       // per-particle static hydrostatic prestress (row7.x) is intentionally
       // NOT added: a depth-frozen pressure field becomes unbalanced as soon

@@ -1964,6 +1964,17 @@ export const SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES = 27;
 export const SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN = 64;
 export const SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN = 32;
 export const SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS = 0.5;
+// GPU render-field radius floor, in grid cells. The metaball field only
+// exceeds the isovalue within radiusNorm of a particle; grid corners sit up
+// to ~0.87 cells away (half a cell diagonal), so a radius under ~1 cell makes
+// an isolated particle's surface a sampling coin-flip - small clusters
+// (drops, solidified lumps) flickered per refresh or vanished entirely once
+// dispersed. 1.5 cells guarantees corners inside the ball with margin.
+// Scoped to SPARSE batches only: dense pools cross the isovalue by summing
+// many overlapping particle fields, and flooring them inflates the liquid
+// into a blob that swallows (occludes) everything inside it.
+export const SPH_RENDER_FIELD_RADIUS_FLOOR_CELLS = 1.5;
+export const SPH_RENDER_FIELD_RADIUS_FLOOR_MAX_PARTICLES = 64;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_SHOW = 1e-2;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_HIDE = 5e-3;
 export const SPH_VAPOR_SURFACE_SCATTER_SHOW_PER_M = 1e-6;
@@ -10958,16 +10969,42 @@ export function createSphPhaseScene(container, {
   // bind group, and indirect draw. Attached to the primary bridge's drawState
   // so the ONE native render pass draws all materials - no overlay.
   let sphResidentAdditionalNativeSurfaceTranslations = [];
-  function releaseAdditionalNativeSurfaceTranslations(reason = 'additional-native-surface-draw-swapped') {
-    for (const previous of sphResidentAdditionalNativeSurfaceTranslations) {
-      previous?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
-      previous?.surfaceDraw?.destroySurfaceDrawBuffers?.({ releaseLeases: true, reason });
-      previous?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({ status: reason });
-      previous?.surfaceVertices?.destroySurfaceVertexBuffers?.({ releaseLeases: true, reason });
+  let sphResidentAdditionalNativeSurfaceGenerationCounter = 0;
+  let sphResidentAdditionalNativeSurfaceAttachedGeneration = 0;
+  function nextAdditionalNativeSurfaceGeneration() {
+    sphResidentAdditionalNativeSurfaceGenerationCounter += 1;
+    return sphResidentAdditionalNativeSurfaceGenerationCounter;
+  }
+  function destroyAdditionalNativeSurfaceTranslationList(list, reason) {
+    for (const translation of list) {
+      translation?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
+      translation?.surfaceDraw?.destroySurfaceDrawBuffers?.({ releaseLeases: true, reason });
+      translation?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({ status: reason });
+      translation?.surfaceVertices?.destroySurfaceVertexBuffers?.({ releaseLeases: true, reason });
     }
+  }
+  function releaseAdditionalNativeSurfaceTranslations(reason = 'additional-native-surface-draw-swapped') {
+    destroyAdditionalNativeSurfaceTranslationList(sphResidentAdditionalNativeSurfaceTranslations, reason);
     sphResidentAdditionalNativeSurfaceTranslations = [];
   }
-  function attachAdditionalNativeSurfaceDraws({ device, bridge, entries = [] }) {
+  function attachAdditionalNativeSurfaceDraws({ device, bridge, entries = [], generation = null }) {
+    // Render refreshes overlap (each awaits per-surface extractions while the
+    // next refresh starts); a stale refresh attaching late must not destroy
+    // the buffers a newer attach just installed. Late attaches discard their
+    // own translations and leave the newer state in place.
+    if (
+      Number.isFinite(generation)
+      && generation < sphResidentAdditionalNativeSurfaceAttachedGeneration
+    ) {
+      destroyAdditionalNativeSurfaceTranslationList(
+        entries.map((entry) => entry?.translation).filter(Boolean),
+        'additional-native-surface-draw-stale-generation-discarded'
+      );
+      return bridge?.drawState?.additionalSurfaceDraws || [];
+    }
+    if (Number.isFinite(generation)) {
+      sphResidentAdditionalNativeSurfaceAttachedGeneration = generation;
+    }
     releaseAdditionalNativeSurfaceTranslations();
     if (!bridge?.drawState) return [];
     if (!device?.createBindGroup || !bridge.bindGroupLayout || !bridge.opticalGpuBuffers?.recordsBuffer) {
@@ -17073,6 +17110,14 @@ export function createSphPhaseScene(container, {
         const updateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
         const drawState = {
           bindGroup,
+          // Carry the additional (multi-material) surface draws across the
+          // per-refresh drawState swap; their translations are only destroyed
+          // when the next attach atomically replaces them. Without the carry,
+          // every refresh had an additional-surface absence window while the
+          // extra extractions ran - visible as per-refresh flicker.
+          additionalSurfaceDraws: Array.isArray(previousBridge.drawState?.additionalSurfaceDraws)
+            ? previousBridge.drawState.additionalSurfaceDraws
+            : [],
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
           surfaceCount: surfaceDrawExecution.surfaceCount,
           sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
@@ -17511,6 +17556,11 @@ export function createSphPhaseScene(container, {
         surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
           bindGroup,
+          // Fresh bridge: old bind groups reference the replaced bridge's
+          // optical buffers, so nothing safe to carry - the attach at the end
+          // of this refresh repopulates. (The hot path is the reuse branch,
+          // which does carry entries across the per-refresh swap.)
+          additionalSurfaceDraws: [],
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
           surfaceCount: surfaceDrawExecution.surfaceCount,
           sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
@@ -22401,8 +22451,20 @@ export function createSphPhaseScene(container, {
           : baseConfig.resolution,
         resolvedMinResolution
       );
+      const effectiveResolution = Math.min(
+        renderFieldResolution,
+        RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+        resolvedMaxResolution
+      );
       const radiusM = surfaceRadiusMForBatch(batch);
-      const radiusNorm = normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM);
+      const sparseRadiusFloorApplies = batch.count > 0
+        && batch.count <= SPH_RENDER_FIELD_RADIUS_FLOOR_MAX_PARTICLES;
+      const radiusNorm = Math.max(
+        normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM),
+        sparseRadiusFloorApplies
+          ? SPH_RENDER_FIELD_RADIUS_FLOOR_CELLS / Math.max(effectiveResolution, 2)
+          : 0
+      );
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, currentMaterialProperties);
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
@@ -22427,7 +22489,7 @@ export function createSphPhaseScene(container, {
         depthWriteFlag,
         transparencyClassId,
         renderKey: batch.renderKey,
-        resolution: Math.min(renderFieldResolution, RESIDENT_RENDER_FIELD_MAX_RESOLUTION, resolvedMaxResolution),
+        resolution: effectiveResolution,
         isolation: config.isolation,
         subtract: config.subtract,
         radiusNorm,
@@ -27272,6 +27334,7 @@ export function createSphPhaseScene(container, {
                   // own material/phase/optical ids so per-material PBR
                   // records resolve in the shared surface shader.
                   if (shouldUseNativeWebGpuSurfaceConsumerBridge) {
+                    const additionalGeneration = nextAdditionalNativeSurfaceGeneration();
                     const additionalDescriptors = renderFieldBufferVolumeDescriptors
                       .filter((additionalDescriptor) =>
                         additionalDescriptor?.ok && additionalDescriptor !== nativeDescriptor);
@@ -27385,7 +27448,8 @@ export function createSphPhaseScene(container, {
                     const attachedAdditionalDraws = attachAdditionalNativeSurfaceDraws({
                       device: resolvedDeviceResult.device,
                       bridge: sphResidentSurfaceDrawRenderBridge,
-                      entries: additionalEntries
+                      entries: additionalEntries,
+                      generation: additionalGeneration
                     });
                     nextResidentSurfaceDraw.additionalNativeSurfaceDrawCount =
                       attachedAdditionalDraws.length;

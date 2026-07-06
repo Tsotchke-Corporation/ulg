@@ -38871,3 +38871,41 @@ FINDINGS (new work items):
    the known layer-3 resurrection issue.
 Pearl-chain clumping reconfirmed at 1,064 particles (task #8 remains
 the structural fix).
+
+## 2026-07-05 - Fix: most materials invisible/flickering in surface mode
+   (user report; verified with timesteps + GPU indirect-count timeline)
+
+User was right - single-screenshot audits missed it. A per-second
+timeline reading each surface's GPU-written indirect vertex count on
+the fe-drop scene showed: fe|liquid 372 verts at t=0.2, then 0 forever;
+fe|solid oscillating 216/0 per refresh. Three stacked causes, all
+fixed:
+
+1. Sub-cell visibility radius: the metaball field only exceeds the
+   isovalue within radiusNorm of a particle, and at the new budgeted
+   resolutions (40-52^3) the per-particle radius was under one grid
+   cell - an isolated particle's surface became a sampling coin-flip
+   (flicker) and a dispersed 27-particle drop vanished entirely. Fix:
+   SPH_RENDER_FIELD_RADIUS_FLOOR_CELLS = 1.5 grid cells, scoped to
+   sparse batches (count <= 64) - flooring dense pools inflated the
+   liquid into a blob that swallowed everything inside it (first
+   attempt, reverted to scoped).
+2. Refresh interleaving race: refreshes overlap (each awaits
+   per-surface extractions while the next starts); a stale attach
+   could destroy the buffers a newer attach just installed.
+   Generation-counted attach: late attaches discard their own
+   translations and never touch newer state.
+3. Per-refresh absence window: each drawState swap dropped the
+   additional surfaces until that refresh's attach landed. The bridge
+   REUSE path now carries additionalSurfaceDraws across the swap
+   (translations destroyed only on atomic replacement); the rare
+   full-recreate path attaches fresh (old bind groups reference
+   destroyed optical buffers).
+
+Validation (fe drop 1900K into water): additional-surface duty cycle
+100% over 120-frame rAF sampling; per-timestep indirect counts stable
+(liquid 2676 while molten -> solid 4368..2412 after solidifying, zero
+dropouts); solidified iron renders as a persistent dark metallic slab
+in the splash crater at t=5.4 (previously invisible). Units 981/0.
+Debug tracing left in destroyBufferOnce (console.debug, tagged
+[ext-surface-destroy]).

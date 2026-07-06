@@ -2390,9 +2390,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     return result.residentBufferLeaseSummary;
   };
   const destroyedResourceKeys = new Set();
+  let destroyReasonForTrace = null;
   const destroyBufferOnce = (resourceKey, buffer) => {
     if (destroyedResourceKeys.has(resourceKey)) return;
     destroyedResourceKeys.add(resourceKey);
+    console.debug?.(
+      `[ext-surface-destroy] surface=${resolvedSurfaceIndex} key=${resourceKey} reason=${destroyReasonForTrace}`
+    );
     buffer?.destroy?.();
   };
   result.releaseExtensionSurfaceBufferLeases = ({ status = 'released' } = {}) => {
@@ -2406,6 +2410,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     releaseLeases = false,
     reason = 'extension-surface-buffer-cleanup'
   } = {}) => {
+    destroyReasonForTrace = reason;
     if (releaseLeases) result.releaseExtensionSurfaceBufferLeases();
     if (keepVertexRowsBuffer) {
       destroyResidentBufferWithLease(leaseLedger, vertexRowsResourceKey, () => {

@@ -2623,6 +2623,12 @@ function createActiveGridUpdateWgsl() {
 }
 
 const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl();
+// Spatial (grid-measured) density term for the liquid EOS. DISABLED: with
+// particle lattices coarser than the grid, the estimator aliases above rest
+// density inside perfectly packed blocks and the Tait ^7 stiffness turns the
+// overshoot into an explosion at spawn (verified: both blocks blasted apart
+// by t=0.14). The plumbing stays for a stabilized estimator to re-enable.
+const MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED = false;
 const mlsMpmGridUpdateActiveGridWgsl = createActiveGridUpdateWgsl();
 
 function createFusedP2gParamsArray(
@@ -3380,7 +3386,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          true
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3389,7 +3395,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          true
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -3973,7 +3979,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           activeGridDispatch,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          true
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
         )
       : createFusedP2gParamsArray(
           gridSpec,
@@ -3982,7 +3988,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           internalPressureScale,
           schroederLevelFilter,
           schroederActiveNodeFilter,
-          true
+          MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
@@ -4240,7 +4246,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       // Retain this substep's finalized [mass, momentum] grid for the next
       // substep's spatial-density EOS sampling (grid update overwrites
       // grid_nodes with velocities next).
-      encoder.copyBufferToBuffer(gridBuffer, 0, previousGridNodesBuffer, 0, Math.max(4, gridByteLength));
+      if (MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED) {
+        encoder.copyBufferToBuffer(gridBuffer, 0, previousGridNodesBuffer, 0, Math.max(4, gridByteLength));
+      }
 
       const gridUpdateBindGroup = device.createBindGroup({
         layout: gridUpdateBindGroupLayout,

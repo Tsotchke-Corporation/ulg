@@ -38977,3 +38977,33 @@ Follow-up for the pairing artifact itself: short-range pairwise
 separation (excluded-volume repulsion below ~0.5x rest spacing) as a
 post-G2P pass - tracked as the successor task with #9 (corner
 climbing) as a likely co-beneficiary.
+
+## 2026-07-05 - Drop block size fix + spatial-density EOS disabled after
+   explosion evidence (user: "drop block size appears to be way off")
+
+Size: the sparse-visibility radius floor (1.5 cells) dominated small
+blocks - at the sparse-min resolution 64 it padded every particle by
+0.167m, ballooning the 27-particle iron drop (~0.33m physical) to
+~2.5x its size. The corner-in-ball guarantee only needs ~0.87 cells,
+so the floor is now 1.0 cell: drop reads ~1.7x (visible-size padding
+is inherent to metaballs at one-cell radii; further tightening trades
+back into sampling flicker). Flicker re-verified clean at 1.0 (fe
+indirect counts continuous, duty 100%).
+
+CORRECTION on the spatial-density EOS (2caa049): sphere-mode ground
+truth at t=0.14 showed BOTH blocks blasted apart across the whole box
+- the estimator aliases ABOVE rest density inside perfectly packed
+lattices (spacing 0.19m vs 0.25m cells -> some cells read ~1.5x rho0)
+and the Tait ^7 stiffness turns that into an explosion at spawn. The
+still-water gate had "passed" because everything eventually settles -
+deceptive; the earlier "identical clump stats" run must have raced the
+reload. MLS_MPM_GRID_DENSITY_PRESSURE_ENABLED=false now (plumbing
+kept: params flag, binding 9, sampler, per-substep copy gated off);
+re-enabling requires a stabilized estimator (clamped/blended, or
+Ocean-style deep pools at ~8 particles/cell). Task #12 (short-range
+separation) remains the pairing fix.
+
+Post-fix: compact iron block falls onto intact water block (sphere
+truth), glowing surface block proportional, units 981/0, still-water
+settle + merged-mass gates pass (one settle failure in-batch was a
+loaded-box page-load flake; solo re-run green).

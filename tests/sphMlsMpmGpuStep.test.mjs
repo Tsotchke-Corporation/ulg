@@ -7346,9 +7346,9 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
   assert.equal(device.dispatches.length, 7);
   assert.equal(device.indirectDispatches.length, 6);
-  // One finalized-grid -> previous-grid copy per substep feeds the
-  // spatial-density EOS term.
-  assert.equal(device.copies.length, 2);
+  // Spatial-density EOS copies are gated off while the estimator is
+  // disabled (aliasing instability); no grid->previous copies are encoded.
+  assert.equal(device.copies.length, 0);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

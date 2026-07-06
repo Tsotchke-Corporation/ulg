@@ -1969,11 +1969,14 @@ export const SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS = 0.5;
 // to ~0.87 cells away (half a cell diagonal), so a radius under ~1 cell makes
 // an isolated particle's surface a sampling coin-flip - small clusters
 // (drops, solidified lumps) flickered per refresh or vanished entirely once
-// dispersed. 1.5 cells guarantees corners inside the ball with margin.
+// dispersed. The nearest grid corner sits at most ~0.87 cells away, so 1.0
+// cell is the tightest floor that guarantees a corner inside the ball; going
+// higher visibly inflates small blocks (a 3^3 iron drop ballooned ~2.5x its
+// physical size at 1.5 cells - user-reported).
 // Scoped to SPARSE batches only: dense pools cross the isovalue by summing
 // many overlapping particle fields, and flooring them inflates the liquid
 // into a blob that swallows (occludes) everything inside it.
-export const SPH_RENDER_FIELD_RADIUS_FLOOR_CELLS = 1.5;
+export const SPH_RENDER_FIELD_RADIUS_FLOOR_CELLS = 1.0;
 export const SPH_RENDER_FIELD_RADIUS_FLOOR_MAX_PARTICLES = 64;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_SHOW = 1e-2;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_HIDE = 5e-3;

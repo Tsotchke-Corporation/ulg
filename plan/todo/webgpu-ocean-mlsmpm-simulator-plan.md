@@ -1500,8 +1500,10 @@ Reconciliation, 2026-07-06:
   substeps) — throughput-neutral at 8.5k particles (~190 substeps/s) and
   the first particle-level pair law in the resident hot loop. The bin
   structure is a reusable step toward Phase 3 (resident neighbor
-  structures); the thermal pair-conduction kernel still scans all
-  particles and should adopt the same bins next.
+  structures). Follow-up landed same day: thermal pair conduction now
+  consumes the same bins (combined counts+entries buffer to stay within
+  the default 10-storage-buffer limit), taking the 8.5k scene from ~190
+  to ~350-366 substeps/s (~2x) with the quench chain unchanged.
 - Still open from this plan: the Ocean-tiled P2G backend behind
   `mls-mpm-p2g-backend-policy` (fails closed to resident scatter),
   poor scaling at 48k particles (580 ms/step measured earlier), and

@@ -2838,13 +2838,17 @@ test('SPH render-row sphere bridge preserves transparent air particle PBR withou
   });
 
   assert.equal(material.userData.renderRowSphereMetallicVisibilityProxy, undefined);
-  assert.equal(material.userData.renderRowSphereFallbackReason, undefined);
+  // Gas parcels keep closure PBR but get the labeled sphere-bridge display
+  // opacity floor so the explicit particle diagnostic view stays visible.
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'gas-display-opacity-floor');
+  assert.equal(material.userData.renderRowSphereGasDisplayOpacityFloor, true);
+  assert.equal(material.userData.renderRowSphereOriginalOpacity, 0.0006);
   assert.equal(material.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(material.metalness, 0);
   assert.equal(material.transmission, 0.9995);
   assert.ok(material.thickness > 0);
   assert.equal(material.transparent, true);
-  assert.equal(material.opacity, 0.0006);
+  assert.equal(material.opacity, 0.18);
   assert.equal(material.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(material.color.r + material.color.g + material.color.b > 2.4);
 });
@@ -3071,12 +3075,15 @@ test('SPH Three WebGPU render-row sphere proxy preserves transparent air closure
 
   assert.equal(proxy.type, 'MeshBasicMaterial');
   assert.equal(proxy.transparent, true);
-  assert.equal(proxy.opacity, 0.0006);
+  // The sphere-bridge gas display opacity floor is applied before the Three
+  // WebGPU proxy clones the material, so the proxy inherits the floored
+  // opacity and its labeled diagnostic instead of the physical near-zero.
+  assert.equal(proxy.opacity, 0.18);
   assert.equal(proxy.userData.renderRowSphereMaterialRendererProxy, true);
   assert.equal(proxy.userData.renderRowSpherePbrMaterialSource, 'closure-derived-pbr-proxied-for-renderer');
   assert.equal(proxy.userData.optical.renderModel, 'gas-rayleigh-transparent-pbr');
   assert.equal(proxy.userData.renderRowSphereMetallicVisibilityProxy, undefined);
-  assert.equal(proxy.userData.renderRowSphereFallbackReason, undefined);
+  assert.equal(proxy.userData.renderRowSphereFallbackReason, 'gas-display-opacity-floor');
   assert.equal(proxy.userData.renderRowSpherePreservedTransmission, true);
   assert.ok(proxy.color.r + proxy.color.g + proxy.color.b > 2.4);
 });

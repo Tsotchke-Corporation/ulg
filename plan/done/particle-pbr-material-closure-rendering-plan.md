@@ -143,3 +143,25 @@ the material-bank and renderer proxy work:
 Keep mounted air-particle browser coverage blocked until there is a cheap valid
 gas-particle scenario or the mounted readiness path is fixed for all-air
 material selections.
+
+## Completion - 2026-07-06, Mounted Air Scenario Unblocked
+
+The mounted air/air readiness hang was not a closure or renderer failure:
+`air` was missing from `MATERIAL_OPTIONS`, so URL `drop=air` collapsed the
+material `<select>` to an empty string and the worker rebuild silently hung
+deriving material `''`. Two general fixes:
+
+- `air` is now a formula material option (it is already a runtime reference
+  material derived for the ambient atmosphere in every scenario).
+- `applyUrlValueToControl()` keeps a select's default when a URL value has no
+  matching option instead of collapsing to `''` (guards every select control,
+  not just materials).
+
+The air/air mounted scenario now boots in both render modes (spheres
+~148 substeps/s, native surface ~444 substeps/s, no console issues). Air
+spheres were then invisible at their physically-correct opacity (~3e-6), so
+the sphere bridge adds a labeled gas display opacity floor
+(`gas-display-opacity-floor`, 0.18) that keeps the closure-derived color and
+transmission metadata while making the explicit particle diagnostic view
+readable. Renderer guards updated to assert the labeled floor; browser
+screenshot shows ghost-visible air parcels dispersing. Full units 981/0.

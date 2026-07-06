@@ -145,7 +145,11 @@ export const FORMULA_MATERIAL_OPTIONS = Object.freeze([
   { key: 'h2o', label: 'Water (H2O) - derived compound', kind: 'compound', formula: 'H2O' },
   { key: 'h2', label: 'Hydrogen gas (H2) - first-principles gas', kind: 'compound', formula: 'H2' },
   { key: 'o2', label: 'Oxygen gas (O2) - first-principles gas', kind: 'compound', formula: 'O2' },
-  { key: 'cl2', label: 'Chlorine gas (Cl2) - derived compound', kind: 'compound', formula: 'Cl2' }
+  { key: 'cl2', label: 'Chlorine gas (Cl2) - derived compound', kind: 'compound', formula: 'Cl2' },
+  // Air is a runtime reference material (always derived for the ambient
+  // atmosphere), so exposing it as a block material costs nothing extra and
+  // gives particle/gas render paths a valid all-gas scenario.
+  { key: 'air', label: 'Air (dry mixture) - reference gas', kind: 'compound', formula: 'air' }
 ]);
 
 export const MATERIAL_OPTIONS = Object.freeze([

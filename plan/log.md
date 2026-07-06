@@ -39215,3 +39215,17 @@ O(N^2) pass at t=12 (interior mean 0.228 / p90 0.45, edge 0.289 / 0.53).
 CPU mirror stays exact O(N^2) as the reference; bin capacity overflow
 only drops pair candidates for that substep. Units 981/0, atomics 11/11,
 SPH e2e gate 21 passed / 2 skipped (35.4m).
+
+## 2026-07-06 — Particle-PBR closure plan closed: air scenario unblocked + gas sphere visibility
+
+Root cause of the long-standing mounted air/air hang: 'air' was not in
+MATERIAL_OPTIONS, so drop=air collapsed the select to '' and the worker
+rebuild hung deriving an empty material. Fixes: air is now a formula
+material option (runtime already derives it for every scenario's
+atmosphere), and applyUrlValueToControl keeps the select default when a
+URL value has no matching option (general guard for all selects).
+Sphere-bridge gas parcels also get a labeled display opacity floor
+(gas-display-opacity-floor, 0.18) — physically air is invisible
+(Rayleigh optical depth ~1e-6) but the sphere lane is an explicit
+diagnostic view. Air/air now boots in both render modes; screenshots
+show ghost-visible dispersing air. Plan moved to done. Units 981/0.

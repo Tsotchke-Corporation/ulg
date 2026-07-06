@@ -7958,6 +7958,10 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
 }
 
 const RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY = 0.66;
+// Gas parcels are physically near-invisible (Rayleigh optical depth ~1e-6 at
+// particle scale), but the sphere bridge is an explicit particle diagnostic
+// view, so gas keeps its closure-derived color at a ghost-visibility floor.
+const RENDER_ROW_SPHERE_BRIDGE_GAS_DISPLAY_MIN_OPACITY = 0.18;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_MIN_METALNESS = 0.72;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_LOW_LUMINANCE = 0.08;
 const RENDER_ROW_SPHERE_BRIDGE_METALLIC_VISIBILITY_PROXY_MIN_IOR = 1.0;
@@ -8310,6 +8314,19 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       : needsTransmissiveDisplayTint
       ? 'transmissive-proxy-display-tint'
       : 'low-luminance-material';
+    changed = true;
+  }
+
+  const currentOpacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
+  if (gasLikeTransmissiveMaterial && currentOpacity < RENDER_ROW_SPHERE_BRIDGE_GAS_DISPLAY_MIN_OPACITY) {
+    material.userData.renderRowSphereGasDisplayOpacityFloor = true;
+    if (!Number.isFinite(Number(material.userData.renderRowSphereOriginalOpacity))) {
+      material.userData.renderRowSphereOriginalOpacity = currentOpacity;
+    }
+    material.opacity = RENDER_ROW_SPHERE_BRIDGE_GAS_DISPLAY_MIN_OPACITY;
+    material.transparent = true;
+    material.userData.renderRowSphereFallbackReason =
+      material.userData.renderRowSphereFallbackReason || 'gas-display-opacity-floor';
     changed = true;
   }
 

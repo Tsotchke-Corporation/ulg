@@ -1979,7 +1979,14 @@ export async function mountSphPhaseDemoOverlay({
       el.checked = !['0', 'false', 'off', 'no'].includes(String(value).toLowerCase());
       return;
     }
+    const previous = el.value;
     el.value = normalizeUrlControlValue(key, value);
+    // A select with no matching option collapses to '', which downstream
+    // consumers treat as a real (empty) material/mode and hang or fail
+    // silently. Unknown URL values keep the control's default instead.
+    if (el.tagName === 'SELECT' && el.value === '' && previous !== '') {
+      el.value = previous;
+    }
   }
   function applyUrlToControls() {
     const query = new URLSearchParams(window.location.search);

@@ -412,3 +412,10 @@ model, and element records have passed acceptance gates.
   unsuitable for checked-in JSON.
 - A large top-1000 compound file can slow cold parse if it is not chunked,
   indexed, or loaded through worker/PeerCompute cache paths.
+
+Reconciliation, 2026-07-06: the Phase 1 element bank is complete —
+`data/material-properties/elements.json` carries 111 element records (the
+"nine rows" status above is stale). Crystal structures hold 7 active solid
+rows and `compounds.json` is a 3-record seed (H2O, Al2O3, NaCl). The open
+work is Phase 3 compound expansion (deliberate formula selection, not bulk
+generation) and consuming crystal packing hints beyond diagnostics.

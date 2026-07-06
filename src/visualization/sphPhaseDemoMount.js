@@ -7621,8 +7621,19 @@ export async function mountSphPhaseDemoOverlay({
       describeVisibility(descriptor?.renderKey || descriptor?.material || 'gas', visibility);
     });
     // Native WebGPU consumer surfaces never become Three meshes; report their
-    // gas-phase entries from the retained drawState metadata instead.
-    const nativeSurfaces = scene?.scene?.userData?.sphResidentSurfaceDrawRenderBridge?.drawState?.surfaces;
+    // gas-phase entries from the retained drawState metadata instead. Steam
+    // and other multi-material secondaries live in additionalSurfaceDraws
+    // (surfaceKey embeds material|phase), not the primary surfaces list.
+    const nativeDrawState = scene?.scene?.userData?.sphResidentSurfaceDrawRenderBridge?.drawState || null;
+    const additionalDraws = Array.isArray(nativeDrawState?.additionalSurfaceDraws)
+      ? nativeDrawState.additionalSurfaceDraws
+      : [];
+    for (const draw of additionalDraws) {
+      const key = String(draw?.surfaceKey || '');
+      if (!/\|gas\b|\bsteam\b|\|vapor\b/i.test(key)) continue;
+      rows.push(`${key}[native-additional]=attached(vertex-count-gpu-resident)`);
+    }
+    const nativeSurfaces = nativeDrawState?.surfaces;
     if (Array.isArray(nativeSurfaces)) {
       for (const surface of nativeSurfaces) {
         const phase = String(surface?.phase ?? surface?.descriptor?.phase ?? '').toLowerCase();

@@ -39229,3 +39229,20 @@ Sphere-bridge gas parcels also get a labeled display opacity floor
 (Rayleigh optical depth ~1e-6) but the sphere lane is an explicit
 diagnostic view. Air/air now boots in both render modes; screenshots
 show ghost-visible dispersing air. Plan moved to done. Units 981/0.
+
+## 2026-07-06 — Steam-optics readout covers native additional surfaces; quench chain verified live
+
+The steam-optics status line initially reported no-gas-surfaces on the
+native consumer because steam (a multi-material secondary) attaches via
+drawState.additionalSurfaceDraws, not the primary surfaces list. The
+readout now lists those attachments (surfaceKey embeds material|phase)
+as `attached(vertex-count-gpu-resident)` — honest labeling since the
+indirect vertex count lives GPU-side. Live GPU indirect-count probe on
+the Fe(1900K)->ice quench confirms the full chain: ice 564->168 verts
+(melting), meltwater 288->744 (growing), fe|liquid declining as
+fe|solid rises (solidifying), steam|h2o|gas and fe|fe|gas at 0 verts at
+t=2-6s (physical: nothing at boil yet, iron far below 3134K). Steam
+vertex growth appears later in the chain as seen in earlier blink-probe
+timelines. Sn/Cu cold-start also diagnosed this session (see cold-start
+plan): 15.8s Node cold dominated 79.7% by the KH atomic eigen-solver —
+cold DFT cost, not a hang.

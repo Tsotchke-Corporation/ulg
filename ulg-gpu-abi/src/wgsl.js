@@ -6850,6 +6850,194 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+// Excluded-volume particle separation. MLS-MPM volume tracking (J from the
+// grid velocity gradient) is blind to sub-grid-cell interpenetration: two
+// particles inside one cell sample the same velocity field, so their relative
+// divergence is zero and J never registers the overlap. The pair rest
+// distance is derived from each particle's own rest volume (d = cbrt(V0)),
+// making the law material-agnostic. Solid-solid pairs are skipped because the
+// elastic constitutive law already models interatomic repulsion for a
+// connected lattice; gas is skipped because gas compressibility is owned by
+// the gas EOS. The projection is symmetric and inverse-mass weighted, so it
+// conserves pair momentum and center of mass exactly.
+export const mlsMpmParticleSeparationComputeWgsl = `
+struct SeparationParams {
+  particle_count: u32,
+  relaxation: f32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  enabled: u32,
+  separation_pad0: f32,
+  separation_pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> corrections: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: SeparationParams;
+
+fn separation_cbrt(volume_m3: f32) -> f32 {
+  return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
+}
+
+// 0 = excluded (gas/plasma/unknown), 1 = liquid, 2 = solid.
+fn separation_phase_class(index: u32) -> u32 {
+  let row5 = in_mechanics[index * 8u + 5u];
+  let row6 = in_mechanics[index * 8u + 6u];
+  if (row5.x > 0.5) {
+    return 2u;
+  }
+  if (row6.z > 0.5 && row6.z < 1.5) {
+    return 1u;
+  }
+  return 0u;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  corrections[particle_index * 2u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  corrections[particle_index * 2u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (params.enabled == 0u || params.relaxation <= 0.0) {
+    return;
+  }
+  let phase_class = separation_phase_class(particle_index);
+  if (phase_class == 0u) {
+    return;
+  }
+  let pos_mass = in_state[particle_index * 2u];
+  if (pos_mass.w <= 0.0) {
+    return;
+  }
+  let rest_volume = max(in_mechanics[particle_index * 8u + 4u].w, 0.0);
+  if (rest_volume <= 0.0) {
+    return;
+  }
+  let velocity = in_state[particle_index * 2u + 1u].xyz;
+  let d_self = separation_cbrt(rest_volume);
+  let w_self = 1.0 / max(pos_mass.w, 1.0e-30);
+  var dx = vec3<f32>(0.0, 0.0, 0.0);
+  var dv = vec3<f32>(0.0, 0.0, 0.0);
+  for (var other = 0u; other < params.particle_count; other = other + 1u) {
+    if (other == particle_index) {
+      continue;
+    }
+    let other_pos_mass = in_state[other * 2u];
+    if (other_pos_mass.w <= 0.0) {
+      continue;
+    }
+    let other_class = separation_phase_class(other);
+    if (other_class == 0u) {
+      continue;
+    }
+    if (phase_class == 2u && other_class == 2u) {
+      continue;
+    }
+    let other_rest_volume = max(in_mechanics[other * 8u + 4u].w, 0.0);
+    if (other_rest_volume <= 0.0) {
+      continue;
+    }
+    let pair_rest_distance = 0.5 * (d_self + separation_cbrt(other_rest_volume));
+    let delta = pos_mass.xyz - other_pos_mass.xyz;
+    var dist = length(delta);
+    if (dist >= pair_rest_distance) {
+      continue;
+    }
+    var normal = vec3<f32>(0.0, 1.0, 0.0);
+    if (dist > 1.0e-9) {
+      normal = delta / dist;
+    } else {
+      // Deterministic antisymmetric fallback for coincident particles.
+      normal = vec3<f32>(0.0, select(-1.0, 1.0, particle_index > other), 0.0);
+      dist = 0.0;
+    }
+    let w_other = 1.0 / max(other_pos_mass.w, 1.0e-30);
+    let share = w_self / (w_self + w_other);
+    dx = dx + params.relaxation * share * (pair_rest_distance - dist) * normal;
+    let approach = dot(velocity - in_state[other * 2u + 1u].xyz, normal);
+    if (approach < 0.0) {
+      dv = dv - share * approach * normal;
+    }
+  }
+  // Bound the aggregate correction so deeply overlapped states relax over
+  // several substeps instead of teleporting.
+  let max_step = 0.5 * d_self;
+  let dx_len = length(dx);
+  if (dx_len > max_step) {
+    dx = dx * (max_step / dx_len);
+  }
+  corrections[particle_index * 2u] = vec4<f32>(dx, 0.0);
+  corrections[particle_index * 2u + 1u] = vec4<f32>(dv, 0.0);
+}
+`;
+
+export const mlsMpmParticleSeparationApplyWgsl = `
+struct SeparationParams {
+  particle_count: u32,
+  relaxation: f32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  enabled: u32,
+  separation_pad0: f32,
+  separation_pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> corrections: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> out_state: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: SeparationParams;
+
+fn separation_apply_cbrt(volume_m3: f32) -> f32 {
+  return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  if (params.enabled == 0u || params.relaxation <= 0.0) {
+    return;
+  }
+  let dx = corrections[particle_index * 2u].xyz;
+  let dv = corrections[particle_index * 2u + 1u].xyz;
+  if (dot(dx, dx) == 0.0 && dot(dv, dv) == 0.0) {
+    return;
+  }
+  let pos_mass = out_state[particle_index * 2u];
+  let vel_u = out_state[particle_index * 2u + 1u];
+  var position = pos_mass.xyz + dx;
+  var velocity = vel_u.xyz + dv;
+  // Same finite-volume wall clearance contract as G2P.
+  let rest_volume = max(in_mechanics[particle_index * 8u + 4u].w, 0.0);
+  var wall_clearance = 0.0;
+  if (rest_volume > 0.0) {
+    wall_clearance = 0.5 * separation_apply_cbrt(rest_volume);
+    let min_dim = min(params.box_x, min(params.box_y, params.box_z));
+    if (min_dim > 0.0) {
+      wall_clearance = min(wall_clearance, 0.49 * min_dim);
+    }
+  }
+  let upper_x = max(wall_clearance, params.box_x - wall_clearance);
+  let upper_y = max(wall_clearance, params.box_y - wall_clearance);
+  let upper_z = max(wall_clearance, params.box_z - wall_clearance);
+  if (position.x < wall_clearance) { position.x = wall_clearance; if (velocity.x < 0.0) { velocity.x = 0.0; } }
+  if (position.x > upper_x) { position.x = upper_x; if (velocity.x > 0.0) { velocity.x = 0.0; } }
+  if (position.y < wall_clearance) { position.y = wall_clearance; if (velocity.y < 0.0) { velocity.y = 0.0; } }
+  if (position.y > upper_y) { position.y = upper_y; if (velocity.y > 0.0) { velocity.y = 0.0; } }
+  if (position.z < wall_clearance) { position.z = wall_clearance; if (velocity.z < 0.0) { velocity.z = 0.0; } }
+  if (position.z > upper_z) { position.z = upper_z; if (velocity.z > 0.0) { velocity.z = 0.0; } }
+  out_state[particle_index * 2u] = vec4<f32>(position, pos_mass.w);
+  out_state[particle_index * 2u + 1u] = vec4<f32>(velocity, vel_u.w);
+}
+`;
+
 export const mlsMpmMechanicsRefreshWgsl = `
 struct MechanicsRefreshParams {
   particle_count: u32,

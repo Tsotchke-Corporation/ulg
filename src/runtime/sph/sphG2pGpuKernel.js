@@ -8,14 +8,21 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { mlsMpmG2pReconstructWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  mlsMpmG2pReconstructWgsl,
+  mlsMpmParticleSeparationApplyWgsl,
+  mlsMpmParticleSeparationComputeWgsl
+} from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+
+export { MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT };
 import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from './sphGridUpdateGpuKernel.js';
 
 export {
@@ -56,6 +63,7 @@ export const MLS_MPM_G2P_MAX_VOLUME_RATIO_J = MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATI
 export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
+const SEPARATION_PARAMS_BYTES = 32;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -165,6 +173,142 @@ function isCondensedMechanicsRow(mechanics, mechanicsOffset) {
   const solidFlag = mechanics[mechanicsOffset + 20];
   const eosModelId = Math.round(mechanics[mechanicsOffset + 26]);
   return solidFlag > 0.5 || eosModelId === EOS_MODEL_IDS.taitCondensed;
+}
+
+// 0 = excluded (gas/EOS-disabled), 1 = liquid, 2 = solid. Mirrors
+// separation_phase_class in mlsMpmParticleSeparationComputeWgsl.
+function separationPhaseClass(mechanics, mechanicsOffset) {
+  if (mechanics[mechanicsOffset + 20] > 0.5) return 2;
+  const eosModelId = mechanics[mechanicsOffset + 26];
+  if (eosModelId > 0.5 && eosModelId < 1.5) return 1;
+  return 0;
+}
+
+/**
+ * Excluded-volume particle separation (CPU mirror of the WGSL pass).
+ * MLS-MPM J is reconstructed from the grid velocity gradient, so two
+ * particles inside one grid cell sample the same velocity field and their
+ * overlap never registers as compression. This pass projects pair overlap
+ * out at the particle level: pair rest distance derives from each particle's
+ * rest volume (cbrt(V0)), corrections are inverse-mass weighted and
+ * symmetric (momentum/COM conserving), and approaching normal velocity is
+ * removed inelastically. Solid-solid pairs are skipped (the elastic
+ * constitutive law owns intra-lattice repulsion); gas is skipped (gas EOS
+ * owns compressibility). Mutates state in place.
+ */
+export function applyMlsMpmParticleSeparationCpu({
+  state,
+  mechanics,
+  particleCount,
+  boxDimsM = DEFAULT_BOX_DIMS_M,
+  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+} = {}) {
+  const alpha = finiteNumber(relaxation, 0);
+  if (!(alpha > 0) || !(particleCount > 1)) return { correctedCount: 0 };
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const corrections = new Float64Array(particleCount * 6);
+  const stateStride = SPH_GPU_PARTICLE_STATE_FLOATS;
+  const mechanicsStride = MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  let correctedCount = 0;
+  for (let i = 0; i < particleCount; i += 1) {
+    const iState = i * stateStride;
+    const iMech = i * mechanicsStride;
+    const phaseClass = separationPhaseClass(mechanics, iMech);
+    if (phaseClass === 0) continue;
+    const massI = state[iState + 3];
+    if (!(massI > 0)) continue;
+    const restVolumeI = Math.max(mechanics[iMech + 19], 0);
+    if (!(restVolumeI > 0)) continue;
+    const dSelf = Math.cbrt(Math.max(restVolumeI, 1e-18));
+    const wSelf = 1 / Math.max(massI, 1e-30);
+    let dxX = 0; let dxY = 0; let dxZ = 0;
+    let dvX = 0; let dvY = 0; let dvZ = 0;
+    for (let other = 0; other < particleCount; other += 1) {
+      if (other === i) continue;
+      const oState = other * stateStride;
+      const massOther = state[oState + 3];
+      if (!(massOther > 0)) continue;
+      const oMech = other * mechanicsStride;
+      const otherClass = separationPhaseClass(mechanics, oMech);
+      if (otherClass === 0) continue;
+      if (phaseClass === 2 && otherClass === 2) continue;
+      const restVolumeOther = Math.max(mechanics[oMech + 19], 0);
+      if (!(restVolumeOther > 0)) continue;
+      const pairRestDistance = 0.5 * (dSelf + Math.cbrt(Math.max(restVolumeOther, 1e-18)));
+      const deltaX = state[iState] - state[oState];
+      const deltaY = state[iState + 1] - state[oState + 1];
+      const deltaZ = state[iState + 2] - state[oState + 2];
+      let dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+      if (dist >= pairRestDistance) continue;
+      let nX = 0; let nY = 1; let nZ = 0;
+      if (dist > 1e-9) {
+        nX = deltaX / dist; nY = deltaY / dist; nZ = deltaZ / dist;
+      } else {
+        nY = i > other ? 1 : -1;
+        dist = 0;
+      }
+      const wOther = 1 / Math.max(massOther, 1e-30);
+      const share = wSelf / (wSelf + wOther);
+      const push = alpha * share * (pairRestDistance - dist);
+      dxX += push * nX; dxY += push * nY; dxZ += push * nZ;
+      const approach = (state[iState + 4] - state[oState + 4]) * nX
+        + (state[iState + 5] - state[oState + 5]) * nY
+        + (state[iState + 6] - state[oState + 6]) * nZ;
+      if (approach < 0) {
+        const impulse = -share * approach;
+        dvX += impulse * nX; dvY += impulse * nY; dvZ += impulse * nZ;
+      }
+    }
+    const dxLen = Math.sqrt(dxX * dxX + dxY * dxY + dxZ * dxZ);
+    const maxStep = 0.5 * dSelf;
+    if (dxLen > maxStep) {
+      const scale = maxStep / dxLen;
+      dxX *= scale; dxY *= scale; dxZ *= scale;
+    }
+    if (dxLen > 0 || dvX !== 0 || dvY !== 0 || dvZ !== 0) {
+      const base = i * 6;
+      corrections[base] = dxX; corrections[base + 1] = dxY; corrections[base + 2] = dxZ;
+      corrections[base + 3] = dvX; corrections[base + 4] = dvY; corrections[base + 5] = dvZ;
+      correctedCount += 1;
+    }
+  }
+  if (correctedCount === 0) return { correctedCount };
+  for (let i = 0; i < particleCount; i += 1) {
+    const base = i * 6;
+    if (corrections[base] === 0 && corrections[base + 1] === 0 && corrections[base + 2] === 0
+      && corrections[base + 3] === 0 && corrections[base + 4] === 0 && corrections[base + 5] === 0) continue;
+    const iState = i * stateStride;
+    const iMech = i * mechanicsStride;
+    const position = [
+      state[iState] + corrections[base],
+      state[iState + 1] + corrections[base + 1],
+      state[iState + 2] + corrections[base + 2]
+    ];
+    const velocity = [
+      state[iState + 4] + corrections[base + 3],
+      state[iState + 5] + corrections[base + 4],
+      state[iState + 6] + corrections[base + 5]
+    ];
+    const wallClearance = particleWallClearanceM(mechanics[iMech + 19], dims);
+    for (let axis = 0; axis < 3; axis += 1) {
+      const lower = wallClearance;
+      const upper = Math.max(lower, dims[axis] - wallClearance);
+      if (position[axis] < lower) {
+        position[axis] = lower;
+        if (velocity[axis] < 0) velocity[axis] = 0;
+      } else if (position[axis] > upper) {
+        position[axis] = upper;
+        if (velocity[axis] > 0) velocity[axis] = 0;
+      }
+    }
+    state[iState] = position[0];
+    state[iState + 1] = position[1];
+    state[iState + 2] = position[2];
+    state[iState + 4] = velocity[0];
+    state[iState + 5] = velocity[1];
+    state[iState + 6] = velocity[2];
+  }
+  return { correctedCount };
 }
 
 function stabilizeCondensedF(nextF, rawNextJ, previousJ, solid) {
@@ -392,7 +536,9 @@ export function reconstructMlsMpmG2pCpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   internalPressureScale = 1,
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
-  liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0
+  liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
+  particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
+    ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
 } = {}) {
   assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
   const dtSeconds = finiteNumber(dt, 0);
@@ -543,6 +689,14 @@ export function reconstructMlsMpmG2pCpu({
     mechanics[mechanicsOffset + 18] = nextJ;
   }
 
+  applyMlsMpmParticleSeparationCpu({
+    state,
+    mechanics,
+    particleCount: sphParticleState.particleCount,
+    boxDimsM: dims,
+    relaxation: particleSeparationRelaxation
+  });
+
   return outputEnvelope({
     backend: 'cpu-reference',
     sphParticleState,
@@ -613,6 +767,101 @@ function createParamsArray({
   return buffer;
 }
 
+/**
+ * Encode the excluded-volume separation passes onto an existing command
+ * encoder, after G2P has written post-integration particle state. Pass 1
+ * scans pairs from the frozen state and writes per-particle corrections
+ * (race-free: each thread writes only its own rows). Pass 2 applies the
+ * corrections to the state buffer in place and re-clamps to the sealed box.
+ * Returns transient buffers the caller must destroy after submission.
+ */
+export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
+  stateBuffer,
+  mechanicsBuffer,
+  particleCount,
+  boxDimsM = DEFAULT_BOX_DIMS_M,
+  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+} = {}) {
+  const alpha = finiteNumber(relaxation, 0);
+  if (!(alpha > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
+    return { enabled: false, transientBuffers: [] };
+  }
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-separation-params',
+    size: SEPARATION_PARAMS_BYTES,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
+  const view = new DataView(paramsData);
+  view.setUint32(0, particleCount >>> 0, true);
+  view.setFloat32(4, alpha, true);
+  view.setFloat32(8, dims[0], true);
+  view.setFloat32(12, dims[1], true);
+  view.setFloat32(16, dims[2], true);
+  view.setUint32(20, 1, true);
+  device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+  const correctionsBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-separation-corrections',
+    size: Math.max(4, particleCount * 32),
+    usage: GPU_BUFFER_USAGE.STORAGE
+  });
+  const computePipelineInfo = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v1',
+    label: 'ulg-mls-mpm-particle-separation-compute',
+    code: mlsMpmParticleSeparationComputeWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v1',
+    label: 'ulg-mls-mpm-particle-separation-apply',
+    code: mlsMpmParticleSeparationApplyWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const computeBindGroup = device.createBindGroup({
+    layout: computePipelineInfo.bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: mechanicsBuffer } },
+      { binding: 2, resource: { buffer: correctionsBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const applyBindGroup = device.createBindGroup({
+    layout: applyPipelineInfo.bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: correctionsBuffer } },
+      { binding: 1, resource: { buffer: mechanicsBuffer } },
+      { binding: 2, resource: { buffer: stateBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const workgroups = Math.max(1, Math.ceil(particleCount / 64));
+  const computePass = encoder.beginComputePass();
+  computePass.setPipeline(computePipelineInfo.pipeline);
+  computePass.setBindGroup(0, computeBindGroup);
+  computePass.dispatchWorkgroups(workgroups);
+  computePass.end();
+  const applyPass = encoder.beginComputePass();
+  applyPass.setPipeline(applyPipelineInfo.pipeline);
+  applyPass.setBindGroup(0, applyBindGroup);
+  applyPass.dispatchWorkgroups(workgroups);
+  applyPass.end();
+  return { enabled: true, transientBuffers: [correctionsBuffer, paramsBuffer] };
+}
+
 export async function runMlsMpmG2pWebGpu({
   device,
   sphParticleState,
@@ -626,6 +875,8 @@ export async function runMlsMpmG2pWebGpu({
   internalPressureScale = 1,
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
+  particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
+    ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   schroederLevelAssignment = null,
   schroederActiveNodeList = null,
   schroederSelectedLevel = null,
@@ -703,6 +954,7 @@ export async function runMlsMpmG2pWebGpu({
     ? null
     : device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
   let returnedRetainedOutputBuffers = false;
+  let separationTransientBuffers = [];
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
@@ -754,6 +1006,14 @@ export async function runMlsMpmG2pWebGpu({
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
     pass.end();
+    const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+      stateBuffer: outStateBuffer,
+      mechanicsBuffer: outMechanicsBuffer,
+      particleCount: sphParticleState.particleCount,
+      boxDimsM: dims,
+      relaxation: particleSeparationRelaxation
+    });
+    separationTransientBuffers = separation.transientBuffers;
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
@@ -806,6 +1066,7 @@ export async function runMlsMpmG2pWebGpu({
       }
       if (!borrowedAssignmentBuffer) schroederActiveNodeBuffer.destroy?.();
       paramsBuffer.destroy?.();
+      for (const transientBuffer of separationTransientBuffers) transientBuffer.destroy?.();
       stateReadBuffer?.destroy?.();
       mechanicsReadBuffer?.destroy?.();
     };
@@ -931,6 +1192,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   internalPressureScale = 1,
   liquidWallDampingAlpha = mlsMpmParticleState?.liquidWallDampingAlpha ?? 0,
   liquidWallDampingDistanceM = mlsMpmParticleState?.liquidWallDampingDistanceM ?? 0,
+  particleSeparationRelaxation = mlsMpmParticleState?.particleSeparationRelaxation
+    ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -953,7 +1216,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
         boxDimsM,
         internalPressureScale,
         liquidWallDampingAlpha,
-        liquidWallDampingDistanceM
+        liquidWallDampingDistanceM,
+        particleSeparationRelaxation
       });
     }
     return cpuReference;
@@ -1000,6 +1264,7 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       internalPressureScale,
       liquidWallDampingAlpha,
       liquidWallDampingDistanceM,
+      particleSeparationRelaxation,
       retainOutputParticleBuffers,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

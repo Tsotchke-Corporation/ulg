@@ -39135,3 +39135,56 @@ sites. Post-fix timeline: fe|solid ramps 0->84->276->420->552 (was a
 0->420 pop), no zero-collapses, no phantom steam; remaining frame
 deltas are real motion (the molten mass sliding off the melting ice).
 Units 981/0 (ABI layout tests updated 16->20).
+
+## 2026-07-06 — Excluded-volume particle separation pass (task #12) + URL-option zero bug
+
+Diagnosis: the corner-climbing artifact (#9) does NOT reproduce on the
+current tree (wide and tight boxes settle without edge stacking; splash
+transients decay). What the probes exposed instead was much worse: a
+same-material H2O pool collapsed to a ONE-PARTICLE-THICK monolayer at
+floor clearance (all 280 particles at y=0.1, in-plane spacing 0.13m vs
+0.2m rest spacing — ~78% volume loss). Root cause is discretization
+blindness: MLS-MPM J comes from the grid velocity gradient, so two
+particles inside one grid cell sample the same field, their relative
+divergence is zero, and interpenetration never registers as
+compression.
+
+General physics-derived fix: an excluded-volume pair separation
+projection after G2P. Pair rest distance derives from each particle's
+own rest volume (d = cbrt(V0), material-agnostic); corrections are
+inverse-mass weighted and symmetric (pair momentum and COM conserved
+exactly); approaching normal velocity is removed inelastically;
+aggregate correction capped at 0.5*d per substep so legacy deep
+overlaps relax instead of teleporting. Solid-solid pairs are skipped
+(the elastic constitutive law IS the excluded-volume law for a
+connected lattice — double-counting would fight elasticity);
+gas is skipped (gas EOS owns compressibility); EOS-disabled law
+isolation naturally disables the pass (phase class reads the EOS model
+id). Implemented as two tiny kernels (pair scan -> per-particle
+corrections buffer; apply + wall clamp) so no buffer identity churn:
+mlsMpmParticleSeparationComputeWgsl / ...ApplyWgsl, encoded via
+encodeMlsMpmParticleSeparationPasses() in the stage G2P runner and both
+fused resident sites. CPU mirror applyMlsMpmParticleSeparationCpu()
+runs in reconstructMlsMpmG2pCpu for parity. URL control sep= (0
+disables, default 0.5 relaxation).
+
+Debugging found a real pre-existing mount bug: numericUrlOption did
+Number(null)=0 for ABSENT params, so every mounted scene silently
+forced avAlpha=0, diffAlpha=0, wallAlpha=0 (and sep=0), overriding the
+tuned defaults (0.04/0.1/0.2). Fixed: absent params return null. This
+restores designed damping behavior in ALL mounted runs.
+
+Evidence: tight 2.2x2.2 box, 280 particles — before: monolayer y=0.1
+by t=4.7; after: interior stats match the ideal 0.46m-deep uniform
+pool (mean 0.228 vs ideal 0.23, p90 0.449, max 0.45 at t=12), edge
+region ~30% high and draining. Wide 4x4 box: mound spreads
+monotonically, no wall climbing, no spawn explosion (lattices spawn at
+exactly d0 since mass = density*step^3). Spheres mode: dense 3D
+packing, no chains/monolayer. Solid Fe on solid Fe: static stack
+(solid-solid skip verified). Fe(1900K)->ice quench: chain intact,
+glowing rounded molten blob on ice. Units 981/0, physics atomics 11/11.
+
+Follow-ups: pair scan is O(N^2) per particle like thermal conduction —
+reuse the reaction particle-bin structure for large counts; consider
+hoisting the per-substep corrections/params buffers in the fused loop;
+CPU mlsMpmCarrier (monolithic oracle) does not yet apply the pass.

@@ -2072,7 +2072,11 @@ export async function mountSphPhaseDemoOverlay({
     return Number.isFinite(value) && value > 0 && value <= 0.01 ? value : null;
   })();
   const numericUrlOption = (key, { min = 0, max = 10 } = {}) => {
-    const value = Number(initialHash.get(key) ?? initialQuery.get(key));
+    const raw = initialHash.get(key) ?? initialQuery.get(key);
+    // Absent params must stay null: Number(null) is 0, which silently
+    // overrode tuned defaults (avAlpha/diffAlpha/wallAlpha) with 0.
+    if (raw == null || raw === '') return null;
+    const value = Number(raw);
     return Number.isFinite(value) && value >= min && value <= max ? value : null;
   };
   const initialArtificialViscosityAlpha = numericUrlOption('avAlpha');
@@ -2083,6 +2087,7 @@ export async function mountSphPhaseDemoOverlay({
   })();
   const initialLiquidVelocityDiffusionAlpha = numericUrlOption('diffAlpha');
   const initialLiquidWallDampingAlpha = numericUrlOption('wallAlpha');
+  const initialParticleSeparationRelaxation = numericUrlOption('sep');
   const peerSchroederSimulationPolicy =
     currentResidentAuthorityHostForScene()?.schroederSimulationPolicy
     || runtime?.peercomputeSchroederSimulationPolicy
@@ -2864,6 +2869,9 @@ export async function mountSphPhaseDemoOverlay({
         : {}),
       ...(initialLiquidWallDampingAlpha != null
         ? { mlsMpmLiquidWallDampingAlpha: initialLiquidWallDampingAlpha }
+        : {}),
+      ...(initialParticleSeparationRelaxation != null
+        ? { mlsMpmParticleSeparationRelaxation: initialParticleSeparationRelaxation }
         : {}),
       ...(initialHydrostaticInitialization != null
         ? { hydrostaticInitialization: initialHydrostaticInitialization }

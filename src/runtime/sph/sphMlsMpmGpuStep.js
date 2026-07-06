@@ -64,7 +64,9 @@ import {
 import {
   MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
   MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
+  MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+  encodeMlsMpmParticleSeparationPasses,
   runMlsMpmG2pWithOptionalWebGpu
 } from './sphG2pGpuKernel.js';
 import {
@@ -3633,7 +3635,17 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     g2pPass.setBindGroup(0, g2pBindGroup);
     g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
     g2pPass.end();
+    const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+      stateBuffer: outStateBuffer,
+      mechanicsBuffer: outMechanicsBuffer,
+      particleCount,
+      boxDimsM: dims,
+      relaxation: mlsMpmParticleState?.particleSeparationRelaxation
+        ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+    });
     device.queue.submit([encoder.finish()]);
+    // Only read within this submitted sequence; WebGPU defers actual release.
+    for (const transientBuffer of separation.transientBuffers) transientBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     retained = true;
@@ -4160,6 +4172,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     let currentStateBuffer = sphParticleUpload.stateBuffer;
     let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
+    const separationTransientBuffers = [];
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
@@ -4289,6 +4302,15 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       g2pPass.setBindGroup(0, g2pBindGroup);
       g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
       g2pPass.end();
+      const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
+        stateBuffer: outStateBuffer,
+        mechanicsBuffer: outMechanicsBuffer,
+        particleCount,
+        boxDimsM: dims,
+        relaxation: mlsMpmParticleState?.particleSeparationRelaxation
+          ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+      });
+      separationTransientBuffers.push(...separation.transientBuffers);
       currentStateBuffer = outStateBuffer;
       currentMechanicsBuffer = outMechanicsBuffer;
       finalStateBuffer = outStateBuffer;
@@ -4344,6 +4366,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     // The previous-grid EOS buffer is only read within this submitted
     // sequence; WebGPU defers the actual release until the GPU work drains.
     previousGridNodesBuffer.destroy?.();
+    for (const transientBuffer of separationTransientBuffers) transientBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);

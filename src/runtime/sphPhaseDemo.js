@@ -3651,6 +3651,9 @@ export function createSphPhaseDemo(options = {}) {
   const mlsMpmLiquidVelocityDiffusionStartS = options.mlsMpmLiquidVelocityDiffusionStartS ?? (20 * mechanicalSubsteps * carrierDt);
   const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
+  // Excluded-volume pair separation relaxation; undefined defers to the GPU
+  // buffer default (sphGpuBuffers). Explicit 0 disables for A/B isolation.
+  const mlsMpmParticleSeparationRelaxation = options.mlsMpmParticleSeparationRelaxation;
   const mlsMpmLiquidFreeSurfaceRelaxationAlpha = mechanics === 'mlsmpm'
     && physicalLawGroups.gravity
     && physicalLawGroups.pressure
@@ -3724,6 +3727,7 @@ export function createSphPhaseDemo(options = {}) {
     mlsMpmLiquidVelocityDiffusionStartS,
     mlsMpmLiquidWallDampingAlpha,
     mlsMpmLiquidWallDampingDistanceM,
+    mlsMpmParticleSeparationRelaxation,
     mlsMpmLiquidFreeSurfaceRelaxationAlpha,
     mlsMpmLiquidFreeSurfaceTargetDepthM,
     mlsMpmLiquidFreeSurfaceContactDepthM,

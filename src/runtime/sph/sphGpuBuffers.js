@@ -32,6 +32,9 @@ export {
 export const SPH_GPU_PARTICLE_STATE_FLOATS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
 export const SPH_GPU_PARTICLE_THERMO_FLOATS = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
 export const MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
+// PBD-style relaxation for the excluded-volume pair separation projection in
+// G2P post-processing; 0 disables the pass.
+export const MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT = 0.5;
 export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
@@ -174,6 +177,10 @@ function mechanicsScaleOptions(state, {
     liquidWallDampingDistanceM: finiteNumber(
       liquidWallDampingDistanceM ?? stateParams.mlsMpmLiquidWallDampingDistanceM,
       0
+    ),
+    particleSeparationRelaxation: finiteNumber(
+      stateParams.mlsMpmParticleSeparationRelaxation,
+      MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
     )
   };
 }
@@ -547,6 +554,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     viscosityLengthM: scaleOptions.viscosityLengthM,
     liquidWallDampingAlpha: scaleOptions.liquidWallDampingAlpha,
     liquidWallDampingDistanceM: scaleOptions.liquidWallDampingDistanceM,
+    particleSeparationRelaxation: scaleOptions.particleSeparationRelaxation,
     mechanicsDtS: finiteNumber(state.gpuMechanics?.dt, 0),
     mechanicalSubsteps: Math.max(1, Math.round(finiteNumber(state.gpuMechanics?.mechanicalSubsteps, 1))),
     gridCflFactor: finiteNumber(state.gpuMechanics?.gridCflFactor, 0),

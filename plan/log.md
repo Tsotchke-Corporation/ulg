@@ -39188,3 +39188,14 @@ Follow-ups: pair scan is O(N^2) per particle like thermal conduction —
 reuse the reaction particle-bin structure for large counts; consider
 hoisting the per-substep corrections/params buffers in the fused loop;
 CPU mlsMpmCarrier (monolithic oracle) does not yet apply the pass.
+
+## 2026-07-06 — Task #4: retire three-webgpu-surface-buffers as a user-facing render mode
+
+The mode's render plan always coerces to the non-presenting resident
+surface-buffer handoff (THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
+is false), so the render-mode menu offered a permanently blank canvas.
+The menu entry is removed and a URL surfaceDraw=three-webgpu-surface-buffers
+request now aliases to the native WebGPU surface consumer (verified in a
+browser probe: native bridge active, visible surface, menu shows four
+modes). The internal handoff/plan machinery and its tests are retained for
+engine direct consumers.

@@ -272,9 +272,13 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'webgpu-spheres',
   'webgpu-render-row-spheres'
 ]);
+// three-webgpu-surface-buffers is intentionally absent: its render plan
+// always coerces to the non-presenting resident handoff, so offering it as a
+// render mode showed users a blank canvas. URL requests for it alias to the
+// native consumer; the internal handoff machinery remains for direct
+// engine consumers.
 const RESIDENT_SURFACE_RENDER_MODE_OPTIONS = Object.freeze([
   ['native-webgpu-surface-consumer', 'Surface - native WebGPU'],
-  ['three-webgpu-surface-buffers', 'Surface - GPU buffers'],
   ['three-render-row-spheres', 'Particles - variable-size PBR spheres'],
   ['three-render-row-points', 'Particles - points'],
   ['auto', 'Auto']
@@ -2388,6 +2392,12 @@ export async function mountSphPhaseDemoOverlay({
   const resolvedResidentSurfaceDrawDiagnosticMode = (() => {
     const normalized = String(rawResidentSurfaceDrawDiagnosticMode ?? '').trim().toLowerCase();
     if (surfaceDrawNativeAutoResolve && (normalized === '' || normalized === 'auto')) {
+      return 'native-webgpu-surface-consumer';
+    }
+    // three-webgpu-surface-buffers never presents (its render plan coerces to
+    // the no-overlay resident handoff), so a user request for a visible
+    // surface routes to the native consumer instead of a blank canvas.
+    if (surfaceDrawNativeAutoResolve && normalized === 'three-webgpu-surface-buffers') {
       return 'native-webgpu-surface-consumer';
     }
     return rawResidentSurfaceDrawDiagnosticMode;

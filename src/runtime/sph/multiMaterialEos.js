@@ -71,11 +71,16 @@ export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, c
     // saturation scale so the mixture inflates gradually (GPU P2G parity).
     const eqForFractions = cachedParticleEquilibriumFromSpecificEnergy(props, particle, specificInternalEnergyJPerKg);
     const gasFraction = Math.min(Math.max(eqForFractions?.phaseFractions?.gas ?? 0, 0), 1);
-    const pressurePa = bulk * (ratio ** TAIT_EXPONENT - 1) + gasFraction * 101325;
     // Condensed phases need the signed side of the Tait law so the reduced carrier has a restoring
-    // stress on both sides of the rest density. Cavitation/surface tension are still separate laws,
-    // but clamping this to zero removes the liquid's basic volume correction and lets blobs drift
-    // through expanded, underconstrained states.
+    // stress on both sides of the rest density - but only within a cavitation-scale band. A liquid
+    // cannot sustain bulk-scale tension: it cavitates. The unbounded tensile branch acted as huge
+    // artificial cohesion and drove the MLS-MPM pairing instability (particles collapsing to mm
+    // separation and beading into pearl-string clumps at decimeter scale, where gravity should
+    // dominate surface tension by ~3 orders of magnitude). Clamping to exactly zero is also wrong:
+    // it removes the liquid's basic volume correction and lets blobs drift through expanded,
+    // underconstrained states. Floor the Tait term at a small fraction of the stiffness instead.
+    const pressurePa = Math.max(bulk * (ratio ** TAIT_EXPONENT - 1), -0.05 * bulk)
+      + gasFraction * 101325;
     return { pressurePa, soundSpeedMPerS: c };
   };
 }

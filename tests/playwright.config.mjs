@@ -25,8 +25,14 @@ export default defineConfig({
       name: 'chromium',
       use: {
         browserName: 'chromium',
+        // When WebGPU is enabled for tests it must run on the Vulkan ANGLE
+        // backend: headless GL-ANGLE WebGPU is unstable (canvas presentation
+        // is invisible and engaging it tears the shared instance, e.g.
+        // compact-summary mapAsync fails with "A valid external Instance
+        // reference no longer exists"). With surfaceDraw=auto now resolving
+        // to the native WebGPU surface consumer, gates exercise that path.
         launchOptions: enableUnsafeWebGpu
-          ? { args: ['--enable-unsafe-webgpu'] }
+          ? { args: ['--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer'] }
           : undefined
       }
     }

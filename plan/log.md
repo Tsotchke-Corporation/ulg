@@ -38753,3 +38753,57 @@ bridge clear value refreshes with every bridge update) instead of
 being hardcoded. Verified: menu switch native->spheres reloads into
 webgl and renders pills on the dark background; native default
 unchanged (477 fps). Units 981/0.
+
+## 2026-07-05 - Physics verdict: sphere-mode clumping is REAL (tensile
+   pairing + J-blind EOS), cavitation clamp landed, grid-density EOS tasked
+
+User asked to verify the clumping. Verified - it is a physics artifact,
+and my earlier "film beading is plausible" reading (4710a86 entry) is
+RETRACTED at these scales:
+
+Measurements (sphere-lane instance positions, settled ~t=2.7s):
+- basen=5 (default-ish): all 133 particles in a y-slab 1.6cm thick;
+  nearest-neighbor min 1.2mm, median 3.4cm; twelve clusters of EXACTLY
+  5 = the initial 5-deep lattice columns collapsed into pearl strings.
+- basen=8: same picture; clusters of EXACTLY 8, nn min 0.9mm.
+  Resolution-independent -> not a sparse-sampling quirk.
+- Scale argument: at decimeter particle spacing the Bond number is
+  ~1e3 - gravity crushes surface tension; real water spreads flat and
+  NEVER beads into strings. Pairs at ~1mm imply ~30x local overdensity
+  that real water would repel violently.
+
+Root causes:
+1. Unbounded signed Tait tension (packed_pressure, taitCondensed):
+   tension up to ~0.8-0.99x the Tait stiffness = bulk-scale artificial
+   cohesion. FIXED: cavitation clamp - tension floored at 5% of the
+   Tait stiffness (liquids cavitate; keeps the small restoring band
+   that prevents drifting expanded blobs, kills bulk-scale cohesion).
+   Applied at all three parity sites (wgsl packed_pressure,
+   sphGridGpuKernel pressureFromPackedParticle, multiMaterialEos).
+   Unit expectations updated.
+2. STILL OPEN (task #8): the EOS density is Lagrangian-only
+   (mass / (restVolume x J), wgsl ~5288). Static spatial crowding
+   generates ZERO repulsion - two coincident particles each see J~1,
+   p=0, and stay parked. This is why the clamp alone does not dissolve
+   the strings (verified: settled stats unchanged post-clamp). Fix is
+   WebGPU-Ocean parity: two-pass P2G with pressure from grid-measured
+   density (or previous-substep grid mass in the single pass).
+
+Also verified (user request): PBR optics ARE live in the native WebGPU
+surface mode - the compact draw uniform ids (materialId 3061144,
+phaseId 2, opticalStateId 0) exactly match the closure-derived optical
+GPU table record for h2o/liquid, whose contents are physical (base
+color 0.165/0.535/0.798, metalness 0, roughness 0.08, transmission
+0.977, IOR 1.333, 9 spectral samples per phase); solid/gas records
+present alongside. The blocked-red debug path stays silent (0 blocked
+fragments after the flat-interpolation fix).
+
+Gate config note: with surfaceDraw=auto now defaulting to the native
+consumer, WebGPU-enabled gates must run on Vulkan ANGLE -
+tests/playwright.config.mjs adds --use-angle=vulkan
+--enable-features=Vulkan,UseSkiaRenderer under
+PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 (GL-ANGLE presentation tears the
+WebGPU instance and mapAsync readbacks die: compact-summary-unavailable
+nulled maxSpeedMPerS in the still-water gate). With that: still-water
+settle PASSES (maxSpeed 0.094 m/s at t=13 - the clamp settles cleanly)
+and merged-scene mass conservation PASSES.

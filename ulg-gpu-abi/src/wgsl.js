@@ -5173,9 +5173,15 @@ fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_sp
   }
   if (eos_model_id > 0.5 && eos_model_id < 1.5) {
     let ratio = density_kg_per_m3 / max(rest_density_kg_per_m3, 1.0e-9);
-    let pressure = (rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0)
-      * (pow(ratio, 7.0) - 1.0);
-    return pressure;
+    let stiffness = rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0;
+    let pressure = stiffness * (pow(ratio, 7.0) - 1.0);
+    // Cavitation clamp: a liquid cannot sustain bulk-scale tension - it
+    // cavitates. The unbounded signed Tait tension acted as huge artificial
+    // cohesion and drove the MLS-MPM tensile pairing instability (particles
+    // collapsing to mm separation and beading into pearl-string clumps).
+    // Keep a small restoring band below rest density for volume correction,
+    // floored at a cavitation-scale fraction of the Tait stiffness.
+    return max(pressure, -0.05 * stiffness);
   }
   return 0.0;
 }

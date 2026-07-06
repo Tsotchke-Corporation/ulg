@@ -316,8 +316,14 @@ function pressureFromPackedParticle({
   }
   if (Math.round(eosModelId) === EOS_MODEL_IDS.taitCondensed) {
     const ratio = densityKgPerM3 / Math.max(restDensityKgPerM3, 1e-9);
-    const pressurePa = (restDensityKgPerM3 * soundSpeedMPerS * soundSpeedMPerS / TAIT_EXPONENT)
-      * (ratio ** TAIT_EXPONENT - 1);
+    const stiffnessPa = restDensityKgPerM3 * soundSpeedMPerS * soundSpeedMPerS / TAIT_EXPONENT;
+    // Cavitation clamp (WGSL packed_pressure parity): unbounded signed Tait
+    // tension is bulk-scale artificial cohesion and drives the MLS-MPM
+    // tensile pairing instability (mm-separation pairs, pearl-string clumps).
+    const pressurePa = Math.max(
+      stiffnessPa * (ratio ** TAIT_EXPONENT - 1),
+      -0.05 * stiffnessPa
+    );
     return pressureScale * pressurePa;
   }
   return 0;

@@ -6860,6 +6860,77 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // connected lattice; gas is skipped because gas compressibility is owned by
 // the gas EOS. The projection is symmetric and inverse-mass weighted, so it
 // conserves pair momentum and center of mass exactly.
+export const SEPARATION_BIN_CAPACITY = 64;
+
+export const mlsMpmParticleSeparationBinFillWgsl = `
+struct SeparationParams {
+  particle_count: u32,
+  relaxation: f32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  enabled: u32,
+  bin_nx: u32,
+  bin_ny: u32,
+  bin_nz: u32,
+  bin_capacity: u32,
+  bin_cell_size_m: f32,
+  separation_pad0: f32,
+};
+
+@group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> bin_counts: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> bin_entries: array<u32>;
+@group(0) @binding(4) var<uniform> params: SeparationParams;
+
+fn bin_fill_phase_class(index: u32) -> u32 {
+  let row5 = in_mechanics[index * 8u + 5u];
+  let row6 = in_mechanics[index * 8u + 6u];
+  if (row5.x > 0.5) {
+    return 2u;
+  }
+  if (row6.z > 0.5 && row6.z < 1.5) {
+    return 1u;
+  }
+  return 0u;
+}
+
+fn bin_fill_cell_index(position: vec3<f32>) -> u32 {
+  let inv = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
+  let cx = clamp(u32(max(position.x, 0.0) * inv), 0u, params.bin_nx - 1u);
+  let cy = clamp(u32(max(position.y, 0.0) * inv), 0u, params.bin_ny - 1u);
+  let cz = clamp(u32(max(position.z, 0.0) * inv), 0u, params.bin_nz - 1u);
+  return (cz * params.bin_ny + cy) * params.bin_nx + cx;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  if (params.enabled == 0u || params.relaxation <= 0.0) {
+    return;
+  }
+  let pos_mass = in_state[particle_index * 2u];
+  if (pos_mass.w <= 0.0) {
+    return;
+  }
+  if (bin_fill_phase_class(particle_index) == 0u) {
+    return;
+  }
+  if (max(in_mechanics[particle_index * 8u + 4u].w, 0.0) <= 0.0) {
+    return;
+  }
+  let cell = bin_fill_cell_index(pos_mass.xyz);
+  let slot = atomicAdd(&bin_counts[cell], 1u);
+  if (slot < params.bin_capacity) {
+    bin_entries[cell * params.bin_capacity + slot] = particle_index;
+  }
+}
+`;
+
 export const mlsMpmParticleSeparationComputeWgsl = `
 struct SeparationParams {
   particle_count: u32,
@@ -6868,14 +6939,20 @@ struct SeparationParams {
   box_y: f32,
   box_z: f32,
   enabled: u32,
+  bin_nx: u32,
+  bin_ny: u32,
+  bin_nz: u32,
+  bin_capacity: u32,
+  bin_cell_size_m: f32,
   separation_pad0: f32,
-  separation_pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> in_mechanics: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> corrections: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SeparationParams;
+@group(0) @binding(4) var<storage, read> bin_counts: array<u32>;
+@group(0) @binding(5) var<storage, read> bin_entries: array<u32>;
 
 fn separation_cbrt(volume_m3: f32) -> f32 {
   return pow(max(volume_m3, 1.0e-18), 1.0 / 3.0);
@@ -6922,45 +6999,72 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let w_self = 1.0 / max(pos_mass.w, 1.0e-30);
   var dx = vec3<f32>(0.0, 0.0, 0.0);
   var dv = vec3<f32>(0.0, 0.0, 0.0);
-  for (var other = 0u; other < params.particle_count; other = other + 1u) {
-    if (other == particle_index) {
+  // The bin cell size is >= every pair rest distance, so scanning the
+  // 3x3x3 cell neighborhood covers all interacting pairs.
+  let inv_cell = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
+  let cx = i32(clamp(u32(max(pos_mass.x, 0.0) * inv_cell), 0u, params.bin_nx - 1u));
+  let cy = i32(clamp(u32(max(pos_mass.y, 0.0) * inv_cell), 0u, params.bin_ny - 1u));
+  let cz = i32(clamp(u32(max(pos_mass.z, 0.0) * inv_cell), 0u, params.bin_nz - 1u));
+  for (var oz = -1; oz <= 1; oz = oz + 1) {
+    let nz = cz + oz;
+    if (nz < 0 || nz >= i32(params.bin_nz)) {
       continue;
     }
-    let other_pos_mass = in_state[other * 2u];
-    if (other_pos_mass.w <= 0.0) {
-      continue;
-    }
-    let other_class = separation_phase_class(other);
-    if (other_class == 0u) {
-      continue;
-    }
-    if (phase_class == 2u && other_class == 2u) {
-      continue;
-    }
-    let other_rest_volume = max(in_mechanics[other * 8u + 4u].w, 0.0);
-    if (other_rest_volume <= 0.0) {
-      continue;
-    }
-    let pair_rest_distance = 0.5 * (d_self + separation_cbrt(other_rest_volume));
-    let delta = pos_mass.xyz - other_pos_mass.xyz;
-    var dist = length(delta);
-    if (dist >= pair_rest_distance) {
-      continue;
-    }
-    var normal = vec3<f32>(0.0, 1.0, 0.0);
-    if (dist > 1.0e-9) {
-      normal = delta / dist;
-    } else {
-      // Deterministic antisymmetric fallback for coincident particles.
-      normal = vec3<f32>(0.0, select(-1.0, 1.0, particle_index > other), 0.0);
-      dist = 0.0;
-    }
-    let w_other = 1.0 / max(other_pos_mass.w, 1.0e-30);
-    let share = w_self / (w_self + w_other);
-    dx = dx + params.relaxation * share * (pair_rest_distance - dist) * normal;
-    let approach = dot(velocity - in_state[other * 2u + 1u].xyz, normal);
-    if (approach < 0.0) {
-      dv = dv - share * approach * normal;
+    for (var oy = -1; oy <= 1; oy = oy + 1) {
+      let ny = cy + oy;
+      if (ny < 0 || ny >= i32(params.bin_ny)) {
+        continue;
+      }
+      for (var ox = -1; ox <= 1; ox = ox + 1) {
+        let nx = cx + ox;
+        if (nx < 0 || nx >= i32(params.bin_nx)) {
+          continue;
+        }
+        let cell = (u32(nz) * params.bin_ny + u32(ny)) * params.bin_nx + u32(nx);
+        let cell_count = min(bin_counts[cell], params.bin_capacity);
+        for (var entry = 0u; entry < cell_count; entry = entry + 1u) {
+          let other = bin_entries[cell * params.bin_capacity + entry];
+          if (other == particle_index) {
+            continue;
+          }
+          let other_pos_mass = in_state[other * 2u];
+          if (other_pos_mass.w <= 0.0) {
+            continue;
+          }
+          let other_class = separation_phase_class(other);
+          if (other_class == 0u) {
+            continue;
+          }
+          if (phase_class == 2u && other_class == 2u) {
+            continue;
+          }
+          let other_rest_volume = max(in_mechanics[other * 8u + 4u].w, 0.0);
+          if (other_rest_volume <= 0.0) {
+            continue;
+          }
+          let pair_rest_distance = 0.5 * (d_self + separation_cbrt(other_rest_volume));
+          let delta = pos_mass.xyz - other_pos_mass.xyz;
+          var dist = length(delta);
+          if (dist >= pair_rest_distance) {
+            continue;
+          }
+          var normal = vec3<f32>(0.0, 1.0, 0.0);
+          if (dist > 1.0e-9) {
+            normal = delta / dist;
+          } else {
+            // Deterministic antisymmetric fallback for coincident particles.
+            normal = vec3<f32>(0.0, select(-1.0, 1.0, particle_index > other), 0.0);
+            dist = 0.0;
+          }
+          let w_other = 1.0 / max(other_pos_mass.w, 1.0e-30);
+          let share = w_self / (w_self + w_other);
+          dx = dx + params.relaxation * share * (pair_rest_distance - dist) * normal;
+          let approach = dot(velocity - in_state[other * 2u + 1u].xyz, normal);
+          if (approach < 0.0) {
+            dv = dv - share * approach * normal;
+          }
+        }
+      }
     }
   }
   // Bound the aggregate correction so deeply overlapped states relax over
@@ -6983,8 +7087,12 @@ struct SeparationParams {
   box_y: f32,
   box_z: f32,
   enabled: u32,
+  bin_nx: u32,
+  bin_ny: u32,
+  bin_nz: u32,
+  bin_capacity: u32,
+  bin_cell_size_m: f32,
   separation_pad0: f32,
-  separation_pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> corrections: array<vec4<f32>>;

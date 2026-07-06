@@ -9,8 +9,10 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  SEPARATION_BIN_CAPACITY,
   mlsMpmG2pReconstructWgsl,
   mlsMpmParticleSeparationApplyWgsl,
+  mlsMpmParticleSeparationBinFillWgsl,
   mlsMpmParticleSeparationComputeWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
@@ -63,7 +65,8 @@ export const MLS_MPM_G2P_MAX_VOLUME_RATIO_J = MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATI
 export const ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA =
   'peercompute.ulg.mls-mpm-g2p-particle-scale-stability.v0';
 const G2P_PARAMS_BYTES = 80;
-const SEPARATION_PARAMS_BYTES = 32;
+const SEPARATION_PARAMS_BYTES = 48;
+const SEPARATION_BIN_MAX_CELLS = 262144;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -768,11 +771,53 @@ function createParamsArray({
 }
 
 /**
+ * Largest pair rest distance in the current mechanics rows (cbrt of the
+ * per-particle rest volume). Used to size the separation neighbor-bin cells
+ * so a 3x3x3 cell scan covers every interacting pair. Cached on the
+ * mechanics array since rest volumes only drift on phase change (the 1.25
+ * sizing margin in the caller absorbs that drift).
+ */
+export function maxSeparationRestDistanceM(mechanics, particleCount) {
+  if (!(mechanics instanceof Float32Array) || mechanics.length === 0) return 0;
+  let maxVolume = 0;
+  const count = Math.min(
+    Math.max(0, Math.floor(particleCount)),
+    Math.floor(mechanics.length / MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS)
+  );
+  for (let index = 0; index < count; index += 1) {
+    const volume = mechanics[index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19];
+    if (volume > maxVolume) maxVolume = volume;
+  }
+  return maxVolume > 0 ? Math.cbrt(maxVolume) : 0;
+}
+
+function separationBinPlan({ boxDimsM, maxPairRestDistanceM }) {
+  const restDistance = finiteNumber(maxPairRestDistanceM, 0);
+  if (!(restDistance > 0)) return null;
+  // 1.25 margin over the largest rest distance absorbs phase-change rest
+  // volume drift while keeping the 3x3x3 scan complete.
+  let cellSizeM = 1.25 * restDistance;
+  const dims = boxDimsM;
+  const cellsFor = (size) => [0, 1, 2].map((axis) => Math.max(1, Math.ceil(dims[axis] / size)));
+  let counts = cellsFor(cellSizeM);
+  let total = counts[0] * counts[1] * counts[2];
+  while (total > SEPARATION_BIN_MAX_CELLS) {
+    cellSizeM *= 2;
+    counts = cellsFor(cellSizeM);
+    total = counts[0] * counts[1] * counts[2];
+  }
+  return { cellSizeM, nx: counts[0], ny: counts[1], nz: counts[2], cellCount: total };
+}
+
+/**
  * Encode the excluded-volume separation passes onto an existing command
  * encoder, after G2P has written post-integration particle state. Pass 1
- * scans pairs from the frozen state and writes per-particle corrections
- * (race-free: each thread writes only its own rows). Pass 2 applies the
+ * fills fixed-capacity grid-cell bins, pass 2 scans the 3x3x3 cell
+ * neighborhood from the frozen state and writes per-particle corrections
+ * (race-free: each thread writes only its own rows), pass 3 applies the
  * corrections to the state buffer in place and re-clamps to the sealed box.
+ * Pass `scratch` (from a previous call on the same encoder sequence) to
+ * reuse the bin/corrections/params buffers across fused substeps.
  * Returns transient buffers the caller must destroy after submission.
  */
 export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
@@ -780,34 +825,82 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   mechanicsBuffer,
   particleCount,
   boxDimsM = DEFAULT_BOX_DIMS_M,
-  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  maxPairRestDistanceM = 0,
+  scratch = null
 } = {}) {
   const alpha = finiteNumber(relaxation, 0);
   if (!(alpha > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
-    return { enabled: false, transientBuffers: [] };
+    return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
   }
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-separation-params',
-    size: SEPARATION_PARAMS_BYTES,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
-  const view = new DataView(paramsData);
-  view.setUint32(0, particleCount >>> 0, true);
-  view.setFloat32(4, alpha, true);
-  view.setFloat32(8, dims[0], true);
-  view.setFloat32(12, dims[1], true);
-  view.setFloat32(16, dims[2], true);
-  view.setUint32(20, 1, true);
-  device.queue.writeBuffer(paramsBuffer, 0, paramsData);
-  const correctionsBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-separation-corrections',
-    size: Math.max(4, particleCount * 32),
-    usage: GPU_BUFFER_USAGE.STORAGE
+  const binPlan = separationBinPlan({ boxDimsM: dims, maxPairRestDistanceM });
+  if (!binPlan) {
+    return { enabled: false, transientBuffers: scratch?.transientBuffers || [], scratch };
+  }
+  let activeScratch = scratch;
+  if (!activeScratch
+    || activeScratch.particleCount !== particleCount
+    || activeScratch.cellCount !== binPlan.cellCount) {
+    const paramsBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-separation-params',
+      size: SEPARATION_PARAMS_BYTES,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
+    const view = new DataView(paramsData);
+    view.setUint32(0, particleCount >>> 0, true);
+    view.setFloat32(4, alpha, true);
+    view.setFloat32(8, dims[0], true);
+    view.setFloat32(12, dims[1], true);
+    view.setFloat32(16, dims[2], true);
+    view.setUint32(20, 1, true);
+    view.setUint32(24, binPlan.nx >>> 0, true);
+    view.setUint32(28, binPlan.ny >>> 0, true);
+    view.setUint32(32, binPlan.nz >>> 0, true);
+    view.setUint32(36, SEPARATION_BIN_CAPACITY >>> 0, true);
+    view.setFloat32(40, binPlan.cellSizeM, true);
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    const correctionsBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-separation-corrections',
+      size: Math.max(4, particleCount * 32),
+      usage: GPU_BUFFER_USAGE.STORAGE
+    });
+    const binCountsBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-separation-bin-counts',
+      size: Math.max(4, binPlan.cellCount * 4),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const binEntriesBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-separation-bin-entries',
+      size: Math.max(4, binPlan.cellCount * SEPARATION_BIN_CAPACITY * 4),
+      usage: GPU_BUFFER_USAGE.STORAGE
+    });
+    activeScratch = {
+      particleCount,
+      cellCount: binPlan.cellCount,
+      paramsBuffer,
+      correctionsBuffer,
+      binCountsBuffer,
+      binEntriesBuffer,
+      transientBuffers: [paramsBuffer, correctionsBuffer, binCountsBuffer, binEntriesBuffer]
+    };
+  }
+  const binFillPipelineInfo = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-mls-mpm-particle-separation-bin-fill.v1',
+    label: 'ulg-mls-mpm-particle-separation-bin-fill',
+    code: mlsMpmParticleSeparationBinFillWgsl,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform')
+    ]
   });
   const computePipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v1',
+    cacheKey: 'ulg-mls-mpm-particle-separation-compute.v2',
     label: 'ulg-mls-mpm-particle-separation-compute',
     code: mlsMpmParticleSeparationComputeWgsl,
     entryPoint: 'main',
@@ -815,11 +908,13 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'read-only-storage')
     ]
   });
   const applyPipelineInfo = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v1',
+    cacheKey: 'ulg-mls-mpm-particle-separation-apply.v2',
     label: 'ulg-mls-mpm-particle-separation-apply',
     code: mlsMpmParticleSeparationApplyWgsl,
     entryPoint: 'main',
@@ -830,25 +925,43 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       computeBufferBinding(3, 'uniform')
     ]
   });
+  const binFillBindGroup = device.createBindGroup({
+    layout: binFillPipelineInfo.bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: mechanicsBuffer } },
+      { binding: 2, resource: { buffer: activeScratch.binCountsBuffer } },
+      { binding: 3, resource: { buffer: activeScratch.binEntriesBuffer } },
+      { binding: 4, resource: { buffer: activeScratch.paramsBuffer } }
+    ]
+  });
   const computeBindGroup = device.createBindGroup({
     layout: computePipelineInfo.bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
-      { binding: 2, resource: { buffer: correctionsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 2, resource: { buffer: activeScratch.correctionsBuffer } },
+      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } },
+      { binding: 4, resource: { buffer: activeScratch.binCountsBuffer } },
+      { binding: 5, resource: { buffer: activeScratch.binEntriesBuffer } }
     ]
   });
   const applyBindGroup = device.createBindGroup({
     layout: applyPipelineInfo.bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: correctionsBuffer } },
+      { binding: 0, resource: { buffer: activeScratch.correctionsBuffer } },
       { binding: 1, resource: { buffer: mechanicsBuffer } },
       { binding: 2, resource: { buffer: stateBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 3, resource: { buffer: activeScratch.paramsBuffer } }
     ]
   });
+  encoder.clearBuffer(activeScratch.binCountsBuffer, 0, Math.max(4, activeScratch.cellCount * 4));
   const workgroups = Math.max(1, Math.ceil(particleCount / 64));
+  const binFillPass = encoder.beginComputePass();
+  binFillPass.setPipeline(binFillPipelineInfo.pipeline);
+  binFillPass.setBindGroup(0, binFillBindGroup);
+  binFillPass.dispatchWorkgroups(workgroups);
+  binFillPass.end();
   const computePass = encoder.beginComputePass();
   computePass.setPipeline(computePipelineInfo.pipeline);
   computePass.setBindGroup(0, computeBindGroup);
@@ -859,7 +972,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   applyPass.setBindGroup(0, applyBindGroup);
   applyPass.dispatchWorkgroups(workgroups);
   applyPass.end();
-  return { enabled: true, transientBuffers: [correctionsBuffer, paramsBuffer] };
+  return { enabled: true, transientBuffers: activeScratch.transientBuffers, scratch: activeScratch };
 }
 
 export async function runMlsMpmG2pWebGpu({
@@ -1011,7 +1124,11 @@ export async function runMlsMpmG2pWebGpu({
       mechanicsBuffer: outMechanicsBuffer,
       particleCount: sphParticleState.particleCount,
       boxDimsM: dims,
-      relaxation: particleSeparationRelaxation
+      relaxation: particleSeparationRelaxation,
+      maxPairRestDistanceM: maxSeparationRestDistanceM(
+        mlsMpmParticleState.mechanics,
+        sphParticleState.particleCount
+      )
     });
     separationTransientBuffers = separation.transientBuffers;
     if (!noFullReadback) {

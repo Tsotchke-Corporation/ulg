@@ -39199,3 +39199,19 @@ request now aliases to the native WebGPU surface consumer (verified in a
 browser probe: native bridge active, visible surface, menu shows four
 modes). The internal handoff/plan machinery and its tests are retained for
 engine direct consumers.
+
+## 2026-07-06 — Grid-binned neighbor search for the separation pass (scaling directive)
+
+The O(N^2) pair scan cost ~42% of resident throughput at ~8.5k particles
+(185 -> 107 substeps/s). The separation compute kernel now scans a 3x3x3
+neighborhood of fixed-capacity grid-cell bins (capacity 64, atomicAdd
+fill kernel, cell size 1.25x the largest pair rest distance so the scan
+covers every interacting pair; cell count capped at 256k by doubling the
+cell size). Bin/corrections/params buffers are created once per fused
+sequence and reused across substeps (bin counts cleared per substep via
+clearBuffer). Throughput restored to ~190 substeps/s at 8.5k particles
+with separation on; tight-box settle statistics are identical to the
+O(N^2) pass at t=12 (interior mean 0.228 / p90 0.45, edge 0.289 / 0.53).
+CPU mirror stays exact O(N^2) as the reference; bin capacity overflow
+only drops pair candidates for that substep. Units 981/0, atomics 11/11,
+SPH e2e gate 21 passed / 2 skipped (35.4m).

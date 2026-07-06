@@ -38807,3 +38807,31 @@ WebGPU instance and mapAsync readbacks die: compact-summary-unavailable
 nulled maxSpeedMPerS in the still-water gate). With that: still-water
 settle PASSES (maxSpeed 0.094 m/s at t=13 - the clamp settles cleanly)
 and merged-scene mass conservation PASSES.
+
+## 2026-07-05 - Multi-material native surfaces with per-material PBR
+   (user: "pbr should work for ALL materials in surface mode")
+
+Ground truth on drop=fe/base=h2o: 6 render-field descriptors ready
+(h2o + fe, each liquid/solid/gas) and the optical GPU table carried all
+6 closure-derived PBR records - but the native path extracted only the
+FIRST ok descriptor, so molten iron (and steam/ice on any scene) never
+drew.
+
+Now every additional ok descriptor gets its own extraction +
+compact-position translation (run BEFORE the render-field buffers are
+destroyed), its own per-surface camera uniform (material/phase/optical
+ids drive the per-material optical-record lookup in the shared
+shader), per-surface bind group (positions + per-surface field-gradient
+snapshot slot for smooth normals), and indirect draw appended to the
+SAME native render pass (opaque or transparent by depthWriteFlag - no
+overlay, one painter). Per-surface uniform buffers are cached by
+surfaceKey on the bridge; previous translations are released through
+the standard destroySurfaceDrawBuffers/destroySurfaceVertexBuffers
+lease contract; gradient snapshot rings are now keyed per surface.
+
+Verified live: fe drop scene renders dark metallic iron blobs (record
+materialId 26: metalness, warm specular) falling through translucent
+blue water (3061144), additionalNativeSurfaceDrawCount=5, zero console
+errors, 487 fps. Single-material default scene regression-free
+(478 fps, additional count 0). Units 981/0; still-water settle and
+merged-scene mass gates pass.

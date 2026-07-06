@@ -10922,30 +10922,114 @@ export function createSphPhaseScene(container, {
   // render-field pass (~25/s) while frames draw at 60fps; binding it live
   // made normals flicker mid-generation. Two slots alternate so the copy for
   // generation N+1 never lands in the buffer generation N still binds.
-  const sphResidentFieldGradientSnapshotRing = { slots: [null, null], next: 0 };
-  function snapshotResidentFieldGradientBuffer({ device, sourceBuffer, copyByteLength }) {
+  const sphResidentFieldGradientSnapshotRings = new Map();
+  function snapshotResidentFieldGradientBuffer({ device, sourceBuffer, copyByteLength, slotKey = 'primary' }) {
     const bytes = Math.max(0, Math.round(Number(copyByteLength) || 0));
     if (!device?.createBuffer || !sourceBuffer || bytes <= 0) return null;
-    const slotIndex = sphResidentFieldGradientSnapshotRing.next;
-    sphResidentFieldGradientSnapshotRing.next = (slotIndex + 1) % 2;
-    let slot = sphResidentFieldGradientSnapshotRing.slots[slotIndex];
+    let ring = sphResidentFieldGradientSnapshotRings.get(slotKey);
+    if (!ring) {
+      ring = { slots: [null, null], next: 0 };
+      sphResidentFieldGradientSnapshotRings.set(slotKey, ring);
+    }
+    const slotIndex = ring.next;
+    ring.next = (slotIndex + 1) % 2;
+    let slot = ring.slots[slotIndex];
     if (!slot || slot.device !== device || slot.byteLength < bytes) {
       slot?.buffer?.destroy?.();
       slot = {
         device,
         byteLength: bytes,
         buffer: device.createBuffer({
-          label: `ulg-sph-field-gradient-snapshot-${slotIndex}`,
+          label: `ulg-sph-field-gradient-snapshot-${slotKey}-${slotIndex}`,
           size: bytes,
           usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
         })
       };
-      sphResidentFieldGradientSnapshotRing.slots[slotIndex] = slot;
+      ring.slots[slotIndex] = slot;
     }
     const encoder = device.createCommandEncoder({ label: 'ulg-sph-field-gradient-snapshot-copy' });
     encoder.copyBufferToBuffer(sourceBuffer, 0, slot.buffer, 0, bytes);
     device.queue.submit([encoder.finish()]);
     return slot.buffer;
+  }
+  // Secondary native surfaces (every ok render-field descriptor beyond the
+  // primary): each carries its own compact-position translation, per-surface
+  // camera uniform (material/phase/optical ids -> per-material PBR lookup),
+  // bind group, and indirect draw. Attached to the primary bridge's drawState
+  // so the ONE native render pass draws all materials - no overlay.
+  let sphResidentAdditionalNativeSurfaceTranslations = [];
+  function releaseAdditionalNativeSurfaceTranslations(reason = 'additional-native-surface-draw-swapped') {
+    for (const previous of sphResidentAdditionalNativeSurfaceTranslations) {
+      previous?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
+      previous?.surfaceDraw?.destroySurfaceDrawBuffers?.({ releaseLeases: true, reason });
+      previous?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({ status: reason });
+      previous?.surfaceVertices?.destroySurfaceVertexBuffers?.({ releaseLeases: true, reason });
+    }
+    sphResidentAdditionalNativeSurfaceTranslations = [];
+  }
+  function attachAdditionalNativeSurfaceDraws({ device, bridge, entries = [] }) {
+    releaseAdditionalNativeSurfaceTranslations();
+    if (!bridge?.drawState) return [];
+    if (!device?.createBindGroup || !bridge.bindGroupLayout || !bridge.opticalGpuBuffers?.recordsBuffer) {
+      bridge.drawState.additionalSurfaceDraws = [];
+      return [];
+    }
+    bridge.additionalSurfaceCameraBuffers = bridge.additionalSurfaceCameraBuffers || new Map();
+    const draws = [];
+    for (const entry of entries) {
+      const execution = entry?.translation?.surfaceDraw || null;
+      if (!execution?.drawIndirectRowsBuffer) continue;
+      const nativeDrawInput = resolveNativeSurfaceDrawInput(execution);
+      if (
+        nativeDrawInput.layout !== 'webgpu-marching-cubes-compact-position-rows'
+        || !nativeDrawInput.buffer
+        || !nativeDrawInput.compactPositionDrawState
+      ) {
+        continue;
+      }
+      const surfaceKey = String(entry.surfaceKey || `surface:${entry.surfaceIndex ?? draws.length}`);
+      let cameraBuffer = bridge.additionalSurfaceCameraBuffers.get(surfaceKey);
+      if (!cameraBuffer) {
+        cameraBuffer = device.createBuffer({
+          label: `ulg-sph-additional-surface-camera-${surfaceKey}`,
+          size: SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
+          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        });
+        bridge.additionalSurfaceCameraBuffers.set(surfaceKey, cameraBuffer);
+      }
+      const bindGroup = device.createBindGroup({
+        label: `ulg-sph-additional-surface-bind-group-${surfaceKey}`,
+        layout: bridge.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: nativeDrawInput.buffer } },
+          { binding: 1, resource: { buffer: cameraBuffer } },
+          { binding: 2, resource: { buffer: bridge.opticalGpuBuffers.recordsBuffer } },
+          { binding: 3, resource: { buffer: bridge.opticalGpuBuffers.spectralSamplesBuffer } },
+          {
+            binding: 4,
+            resource: {
+              buffer: execution.renderFieldGradientVolume?.buffer
+                || bridge.fieldGradientDummyBuffer
+            }
+          }
+        ]
+      });
+      const surface = (Array.isArray(execution.surfaces) ? execution.surfaces[0] : null) || {};
+      draws.push({
+        surfaceKey,
+        bindGroup,
+        cameraBuffer,
+        drawIndirectRowsBuffer: execution.drawIndirectRowsBuffer,
+        compactPositionDrawState: nativeDrawInput.compactPositionDrawState,
+        depthWriteFlag: Number(surface.depthWriteFlag ?? entry.depthWriteFlag ?? 1),
+        transparencyClassId: Number(surface.transparencyClassId ?? entry.transparencyClassId ?? 0),
+        renderOrder: Number(surface.renderOrder ?? entry.renderOrder ?? 0)
+      });
+      sphResidentAdditionalNativeSurfaceTranslations.push(entry.translation);
+    }
+    draws.sort((a, b) => a.renderOrder - b.renderOrder);
+    bridge.drawState.additionalSurfaceDraws = draws;
+    return draws;
   }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
   const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
@@ -17820,6 +17904,23 @@ export function createSphPhaseScene(container, {
       } else {
         bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
       }
+      const additionalSurfaceDraws = Array.isArray(drawState.additionalSurfaceDraws)
+        ? drawState.additionalSurfaceDraws
+        : [];
+      for (const additionalDraw of additionalSurfaceDraws) {
+        bridge.device.queue.writeBuffer(
+          additionalDraw.cameraBuffer,
+          0,
+          compactPositionCameraUniformPayload({
+            viewProjection,
+            compactPositionDrawState: additionalDraw.compactPositionDrawState
+          })
+        );
+      }
+      const additionalOpaqueDraws = additionalSurfaceDraws
+        .filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
+      const additionalTransparentDraws = additionalSurfaceDraws
+        .filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
       const drawOrder = Array.isArray(drawState.drawOrder) && drawState.drawOrder.length
         ? drawState.drawOrder
         : residentSurfaceDrawOrder(
@@ -17871,7 +17972,8 @@ export function createSphPhaseScene(container, {
       }
         const submittedDrawCount = nativeSurfaceClearOnly
         ? 0
-        : opaqueDraws.length + transparentDraws.length + schroederProxyDrawCommandCount;
+        : opaqueDraws.length + transparentDraws.length
+          + additionalSurfaceDraws.length + schroederProxyDrawCommandCount;
         const nativeSurfaceValidationCadence =
           resolveSphNativeWebGpuSurfaceValidationCadence({
             bridge,
@@ -17918,6 +18020,10 @@ export function createSphPhaseScene(container, {
         if (!nativeSurfaceClearOnly) {
           for (const draw of opaqueDraws) {
             opaquePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+          }
+          for (const additionalDraw of additionalOpaqueDraws) {
+            opaquePass.setBindGroup(0, additionalDraw.bindGroup);
+            opaquePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
           }
         }
       let schroederProxySubmit = null;
@@ -18001,7 +18107,7 @@ export function createSphPhaseScene(container, {
           compositePass.end();
           transparentCompositeSubmitted = true;
         }
-        } else if (transparentDraws.length > 0 && !nativeSurfaceClearOnly) {
+        } else if ((transparentDraws.length > 0 || additionalTransparentDraws.length > 0) && !nativeSurfaceClearOnly) {
           const transparentPass = encoder.beginRenderPass({
           colorAttachments: [{
             view: canvasView,
@@ -18020,6 +18126,10 @@ export function createSphPhaseScene(container, {
         transparentPass.setBindGroup(0, drawState.bindGroup);
         for (const draw of transparentDraws) {
           transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+        }
+        for (const additionalDraw of additionalTransparentDraws) {
+          transparentPass.setBindGroup(0, additionalDraw.bindGroup);
+          transparentPass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
         }
         transparentPass.end();
       }
@@ -27156,6 +27266,135 @@ export function createSphPhaseScene(container, {
                     nativeMarchingCubesAdapterCacheSummary: nativeExtraction.adapterCacheSummary ?? null
                   };
                   nativeMarchingCubesSurfaceDrawReady = true;
+                  // Extract every other ok descriptor (steam, ice, iron, any
+                  // second material/phase) BEFORE the render-field buffers
+                  // are destroyed, and attach each as its own draw with its
+                  // own material/phase/optical ids so per-material PBR
+                  // records resolve in the shared surface shader.
+                  if (shouldUseNativeWebGpuSurfaceConsumerBridge) {
+                    const additionalDescriptors = renderFieldBufferVolumeDescriptors
+                      .filter((additionalDescriptor) =>
+                        additionalDescriptor?.ok && additionalDescriptor !== nativeDescriptor);
+                    const additionalEntries = [];
+                    for (const additionalDescriptor of additionalDescriptors) {
+                      const additionalRecord =
+                        renderFieldExecution?.surfaceTable?.metadata?.[additionalDescriptor.surfaceIndex];
+                      if (!additionalRecord) continue;
+                      try {
+                        const additionalExtraction =
+                          await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
+                            device: resolvedDeviceResult.device,
+                            descriptor: additionalDescriptor,
+                            isovalue: additionalDescriptor.isovalue,
+                            materialPayload: {
+                              material: additionalRecord.material ?? null,
+                              phase: additionalRecord.phase ?? null,
+                              renderKey: additionalRecord.renderKey ?? null,
+                              surfaceKey: additionalRecord.surfaceKey ?? null
+                            },
+                            pbrPayload: additionalRecord.opticalState || null
+                          });
+                        const additionalWrapped = additionalExtraction?.extensionExecution;
+                        if (additionalWrapped?.extensionExecution?.ok !== true) continue;
+                        const additionalTranslation =
+                          await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+                            device: resolvedDeviceResult.device,
+                            extensionExecution: additionalWrapped.extensionExecution,
+                            surfaceIndex: additionalRecord.index ?? additionalDescriptor.surfaceIndex,
+                            materialId: additionalRecord.materialId ?? 0,
+                            phaseId: additionalRecord.phaseId ?? 0,
+                            opticalStateId: additionalRecord.opticalStateId ?? 0,
+                            material: additionalRecord.material ?? null,
+                            phase: additionalRecord.phase ?? null,
+                            renderKey: additionalRecord.renderKey ?? null,
+                            surfaceKey: additionalRecord.surfaceKey
+                              ?? additionalDescriptor.surfaceKey
+                              ?? null,
+                            density: additionalRecord.strength ?? 0,
+                            isolation: additionalDescriptor.isovalue
+                              ?? additionalRecord.isolation
+                              ?? null,
+                            sourceVoxelLinearIndex: additionalDescriptor.fieldOffset ?? 0,
+                            transparencyClassId: additionalRecord.transparencyClassId ?? 0,
+                            depthWriteFlag: additionalRecord.depthWriteFlag ?? 1,
+                            renderOrder: additionalRecord.renderOrder ?? null,
+                            positionTransform: additionalDescriptor.positionTransform ?? null,
+                            positionTransformResolution:
+                              additionalDescriptor.dims?.[0] ?? additionalRecord.resolution ?? null,
+                            fieldPadding: additionalDescriptor.fieldPadding
+                              ?? renderFieldExecution.fieldPadding
+                              ?? null,
+                            refEdgeM: additionalDescriptor.refEdgeM
+                              ?? renderFieldExecution.refEdgeM
+                              ?? null,
+                            positionGridBias: additionalDescriptor.positionTransformGridBias ?? -0.5,
+                            positionClampMinM: [0, 0, 0],
+                            positionClampMaxM: [...dims],
+                            readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
+                            compactSummaryReadback: false,
+                            translateVertexRows: false,
+                            retainVertexRowsBuffer: true,
+                            retainDrawRowsBuffer: true,
+                            retainDrawIndirectRowsBuffer: true,
+                            waitForQueueCompletion: false
+                          });
+                        if (!additionalTranslation?.surfaceDraw) continue;
+                        const additionalSnapshotBuffer = snapshotResidentFieldGradientBuffer({
+                          device: resolvedDeviceResult.device,
+                          sourceBuffer: additionalDescriptor.scalarBuffer ?? null,
+                          copyByteLength: additionalDescriptor.scalarRequiredByteLength
+                            ?? additionalDescriptor.scalarBufferByteLength
+                            ?? 0,
+                          slotKey: additionalRecord.surfaceKey
+                            ?? `surface:${additionalDescriptor.surfaceIndex}`
+                        });
+                        if (additionalSnapshotBuffer) {
+                          additionalTranslation.surfaceDraw.renderFieldGradientVolume = {
+                            buffer: additionalSnapshotBuffer,
+                            dims: Array.isArray(additionalDescriptor.dims)
+                              ? [...additionalDescriptor.dims]
+                              : [0, 0, 0],
+                            scalarStrides: Array.isArray(additionalDescriptor.scalarStrides)
+                              ? [...additionalDescriptor.scalarStrides]
+                              : [0, 0, 0],
+                            scalarOffset: Math.max(
+                              0,
+                              Math.round(Number(additionalDescriptor.scalarOffset) || 0)
+                            )
+                          };
+                        }
+                        additionalEntries.push({
+                          translation: additionalTranslation,
+                          surfaceKey: additionalRecord.surfaceKey
+                            ?? additionalDescriptor.surfaceKey
+                            ?? null,
+                          surfaceIndex: additionalDescriptor.surfaceIndex,
+                          renderOrder: additionalRecord.renderOrder ?? 0,
+                          transparencyClassId: additionalRecord.transparencyClassId ?? 0,
+                          depthWriteFlag: additionalRecord.depthWriteFlag ?? 1
+                        });
+                      } catch (additionalError) {
+                        markSphResidentRenderProgress('additional-native-surface-extraction-failed', {
+                          stage: 'native-marching-cubes',
+                          surfaceIndex: additionalDescriptor.surfaceIndex,
+                          surfaceKey: additionalDescriptor.surfaceKey ?? null,
+                          reason: String(additionalError?.message || additionalError).slice(0, 200)
+                        });
+                      }
+                    }
+                    const attachedAdditionalDraws = attachAdditionalNativeSurfaceDraws({
+                      device: resolvedDeviceResult.device,
+                      bridge: sphResidentSurfaceDrawRenderBridge,
+                      entries: additionalEntries
+                    });
+                    nextResidentSurfaceDraw.additionalNativeSurfaceDrawCount =
+                      attachedAdditionalDraws.length;
+                    markSphResidentRenderProgress('additional-native-surface-draws-attached', {
+                      stage: 'native-marching-cubes',
+                      surfaceCount: attachedAdditionalDraws.length,
+                      requestedCount: additionalDescriptors.length
+                    });
+                  }
                   renderFieldExecution?.releaseRenderFieldBufferLeases?.({
                     status: 'released-after-native-marching-cubes-buffer-volume-extraction'
                   });

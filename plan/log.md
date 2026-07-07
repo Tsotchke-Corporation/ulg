@@ -39587,3 +39587,22 @@ pre-first-execution or for CPU-only mechanics. Gate 11097: 150s timeout
 982/0). Remaining in this family: 11315's injected global manager
 saturates the main thread from boot (inline full executions in
 submitTask) before the overlay mounts - needs its own pass.
+
+## 2026-07-07 — Sealed-box gas evidence restored in the no-full hot loop (Na+H2O H2)
+
+Two-layer fix: (1) the no-full reaction summary defaults disabled the
+gas-species ledger readback wholesale; it now stays on when the
+reaction table has gas products (fixed-size readback, same budget
+class as the compact particle summary). (2) The resident no-full
+shortcut in runSphReactionSummaryWebGpu returned hard-zeroed gas
+fields even though the gas-species dispatch and copy were already
+submitted; it now maps and decodes the tiny readback. Verified live:
+gasSpeciesLedgerCount 1 (32 bytes), sealed-box total pressure rises
+101325 -> 121916 Pa on the Na+H2O scene - the H2 that has no particle
+slot to place into is no longer silently lost. Gate 6107 progresses
+past all gas-content assertions and now fails only on the
+spatial-promotion contract: refreshSphResidentPressureInterfaceState
+reports resident-pressure-interface-blocked in this scenario so the
+summary stays 'gpu-resident-reaction-pressure-summary' instead of the
+promoted spatial-gas-ledger source - the material-interface chain that
+feeds the spatial ledger is the remaining trail.

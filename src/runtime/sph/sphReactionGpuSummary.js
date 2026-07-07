@@ -1238,6 +1238,21 @@ export async function runSphReactionSummaryWebGpu({
     };
     if (!shouldReadCompactSummary) {
       deferLocalBufferCleanup = true;
+      // The gas-species ledger is a fixed-size readback (same budget class
+      // as the compact particle summary) and the ONLY carrier of sealed-box
+      // gas moles for products without particle slots; the resident no-full
+      // shortcut must still surface it. Its dispatch and copy were already
+      // submitted above, so this maps a tiny buffer that is ready.
+      let residentGasSpeciesLedger = emptyGasSpeciesLedger;
+      let residentGasSpeciesFloatCount = 0;
+      if (shouldRunGasSpecies && gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
+        await gasSpeciesReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+        const residentGasValues = new Float32Array(gasSpeciesReadBuffer.getMappedRange())
+          .slice(0, gasSpeciesCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS);
+        gasSpeciesReadBuffer.unmap();
+        residentGasSpeciesLedger = decodeSphReactionGasSpeciesSummaryValues(residentGasValues, reactionTable);
+        residentGasSpeciesFloatCount = residentGasValues.length;
+      }
       return {
         schema: ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
         executionSchema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -1291,11 +1306,11 @@ export async function runSphReactionSummaryWebGpu({
         rowLayout: [...SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT],
         summaryStrideFloats: SPH_GPU_REACTION_SUMMARY_FLOATS,
         summaryStrideBytes: SPH_GPU_REACTION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
-        gasSpeciesLedger: emptyGasSpeciesLedger,
+        gasSpeciesLedger: residentGasSpeciesLedger,
         gasSpeciesLedgerSchema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
-        gasSpeciesLedgerCount: 0,
-        gasSpeciesReadbackFloatCount: 0,
-        gasSpeciesReadbackByteLength: 0,
+        gasSpeciesLedgerCount: residentGasSpeciesLedger?.recordCount ?? 0,
+        gasSpeciesReadbackFloatCount: residentGasSpeciesFloatCount,
+        gasSpeciesReadbackByteLength: residentGasSpeciesFloatCount * Float32Array.BYTES_PER_ELEMENT,
         productInventory: emptyProductInventory,
         productInventorySchema: ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
         productInventoryCount: 0,

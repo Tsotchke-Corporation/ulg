@@ -16257,7 +16257,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       const noFullReactionSummaryDefaults = requestedReadbackMode === NO_FULL_READBACK_MODE
         ? {
           readCompactReactionSummary: false,
-          readReactionGasSpeciesSummary: false,
+          // The gas-species ledger is a fixed-size readback (same budget
+          // class as the compact particle summary, which no-full mode keeps
+          // as final-only) and is the ONLY carrier of sealed-box gas moles
+          // when a gas product has no particle slot to place into. Disabling
+          // it silently discarded reaction gas pressure evidence (H2 from
+          // Na+H2O never reached the pressure summary).
+          readReactionGasSpeciesSummary: (reactionTable?.gasProductCount ?? 0) > 0,
           readReactionProductInventory: false,
           readReactionAtomResidual: false
         }

@@ -11184,6 +11184,10 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerDeviceCached: result?.workerResidentStage?.workerDeviceCached === true,
     workerRetainedContinuationInputStatus: result?.workerResidentStage?.workerRetainedContinuationInputStatus || null,
     workerRetainedContinuationInput: result?.workerResidentStage?.workerRetainedContinuationInput || null,
+    workerAdoptedStorageRematerializationStatus:
+      result?.workerResidentStage?.workerAdoptedStorageRematerializationStatus || null,
+    workerAdoptedStorageRematerializationApplied:
+      result?.workerResidentStage?.workerAdoptedStorageRematerializationApplied === true,
     workerRetainedThermoInputStatus: result?.workerResidentStage?.workerRetainedThermoInputStatus || null,
     workerRetainedThermoInput: result?.workerResidentStage?.workerRetainedThermoInput || null,
     workerRetainedThermoOutputStatus: result?.workerResidentStage?.workerRetainedThermoOutputStatus || null,
@@ -12234,15 +12238,37 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && baseSchroederAdoptedParticleStorageContinuationSchedule.consumerMode === 'same-device'
     && gpuHubResidentStageWorkerRunner
   );
+  // Worker-owned rematerialization: instead of hard fail-closing the lane,
+  // ship the descriptor-only seed (built by the continuation planner) so the
+  // stage worker rebuilds the adopted storage on ITS device from the packed
+  // rows the lane request already carries. Raw refs stay withheld either way;
+  // fail-closed remains only for a required continuation with no usable seed.
+  const schroederAdoptedParticleStorageWorkerRematerializationSeed =
+    schroederAdoptedParticleStorageWorkerLaneBlocked
+    && resolvedSchroederAdoptedParticleStorageContinuationPlan?.workerRematerializationSeed?.ready === true
+      ? resolvedSchroederAdoptedParticleStorageContinuationPlan.workerRematerializationSeed
+      : null;
   const schroederAdoptedParticleStorageContinuationSchedule =
     schroederAdoptedParticleStorageWorkerLaneBlocked
       ? {
           ...baseSchroederAdoptedParticleStorageContinuationSchedule,
-          status: 'blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs',
+          ...(schroederAdoptedParticleStorageWorkerRematerializationSeed
+            ? {
+                status: 'schroeder-adopted-particle-storage-worker-rematerialization-scheduled',
+                consumerMode: 'worker-rematerialize',
+                failClosed: false,
+                workerRematerializationScheduled: true,
+                workerRematerializationSeed:
+                  schroederAdoptedParticleStorageWorkerRematerializationSeed,
+                reason: 'stage-worker-lane-rematerializes-adopted-storage-from-descriptor-seed'
+              }
+            : {
+                status: 'blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs',
+                failClosed: requireSchroederAdoptedParticleStorageContinuation === true,
+                reason: 'stage-worker-lane-cannot-consume-main-thread-retained-gpubuffer-refs'
+              }),
           scheduled: false,
-          failClosed: requireSchroederAdoptedParticleStorageContinuation === true,
           workerLaneBlocked: true,
-          reason: 'stage-worker-lane-cannot-consume-main-thread-retained-gpubuffer-refs',
           sameDevicePrivateLaneRefs: [],
           retainedBufferRefs: [],
           retainedBufferRefCount: 0
@@ -13181,6 +13207,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             workerRetainedContinuationPlan,
             useSchroederAdoptedParticleStorageContinuationInput:
               schroederAdoptedParticleStorageContinuationSchedule.scheduled === true,
+            useSchroederAdoptedParticleStorageWorkerRematerialization:
+              schroederAdoptedParticleStorageContinuationSchedule.workerRematerializationScheduled === true,
             schroederAdoptedParticleStorageContinuationSchedule,
             schroederAdoptedParticleStorageContinuationPlan:
               resolvedSchroederAdoptedParticleStorageContinuationPlan,
@@ -13191,6 +13219,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
               mlsMpmParticleState,
               sphParticleUpload: schroederAdoptedParticleStorageSphParticleUpload,
               mlsMpmParticleUpload: schroederAdoptedParticleStorageMlsMpmParticleUpload,
+              ...(schroederAdoptedParticleStorageContinuationSchedule.workerRematerializationScheduled === true
+                ? {
+                    useSchroederAdoptedParticleStorageWorkerRematerialization: true,
+                    schroederAdoptedParticleStorageWorkerRematerializationSeed:
+                      schroederAdoptedParticleStorageContinuationSchedule.workerRematerializationSeed || null
+                  }
+                : {}),
               gridSpacingM: stepOptions.gridSpacingM ?? sphParticleState?.smoothingLengthM,
               boxDimsM: dims,
               dt: dtSeconds,
@@ -13773,6 +13808,16 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       schroederAdoptedParticleStorageContinuationSchedule.reason || null,
     schroederAdoptedParticleStorageContinuationConsumerMode:
       schroederAdoptedParticleStorageContinuationSchedule.consumerMode,
+    schroederAdoptedParticleStorageWorkerRematerializationScheduled:
+      schroederAdoptedParticleStorageContinuationSchedule.workerRematerializationScheduled === true,
+    schroederAdoptedParticleStorageWorkerRematerializationStatus:
+      Object.values(stageLaneSummaries || {}).find(
+        (summary) => summary?.workerAdoptedStorageRematerializationStatus
+      )?.workerAdoptedStorageRematerializationStatus ?? null,
+    schroederAdoptedParticleStorageWorkerRematerializationApplied:
+      Object.values(stageLaneSummaries || {}).some(
+        (summary) => summary?.workerAdoptedStorageRematerializationApplied === true
+      ),
     schroederAdoptedParticleStorageContinuationSourceHotBufferKey:
       schroederAdoptedParticleStorageContinuationSchedule.sourceHotBufferKey || null,
     schroederAdoptedParticleStorageContinuationRetainedBufferRefs:

@@ -5612,6 +5612,12 @@ export async function mountSphPhaseDemoOverlay({
       continuationRequested: Boolean(hotBufferKey && localResolverReady),
       continuationScheduleStatus:
         chain?.schroederAdoptedParticleStorageContinuationScheduleStatus || null,
+      workerRematerializationScheduled:
+        chain?.schroederAdoptedParticleStorageWorkerRematerializationScheduled === true,
+      workerRematerializationStatus:
+        chain?.schroederAdoptedParticleStorageWorkerRematerializationStatus || null,
+      workerRematerializationApplied:
+        chain?.schroederAdoptedParticleStorageWorkerRematerializationApplied === true,
       continuationSourceHotBufferKey:
         chain?.schroederAdoptedParticleStorageContinuationSourceHotBufferKey || null,
       stageLocalResolverStatus:
@@ -5963,6 +5969,12 @@ export async function mountSphPhaseDemoOverlay({
               adoptedStorageAfterStage.continuationRequested,
             schroederAdoptedParticleStorageContinuationScheduleStatus:
               adoptedStorageAfterStage.continuationScheduleStatus,
+            schroederAdoptedParticleStorageWorkerRematerializationScheduled:
+              adoptedStorageAfterStage.workerRematerializationScheduled,
+            schroederAdoptedParticleStorageWorkerRematerializationStatus:
+              adoptedStorageAfterStage.workerRematerializationStatus,
+            schroederAdoptedParticleStorageWorkerRematerializationApplied:
+              adoptedStorageAfterStage.workerRematerializationApplied,
             schroederAdoptedParticleStorageContinuationSourceHotBufferKey:
               adoptedStorageAfterStage.continuationSourceHotBufferKey,
             schroederAdoptedParticleStorageStageLocalResolverStatus:

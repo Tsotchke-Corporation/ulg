@@ -930,3 +930,89 @@ test('ULG resident stage worker exports compact snapshots from export-owned G2P 
   assert.deepEqual([...exported.compactBufferSnapshot.mlsMpmMechanics], [...g2pMechanicsRows]);
   assert.deepEqual([...exported.compactBufferSnapshot.sphThermo], [...buffers.sphParticleState.thermo]);
 });
+
+test('ULG resident stage worker rematerializes adopted storage from a descriptor seed and reuses it across schedules', async () => {
+  const buffers = manualBuffers();
+  const device = createFakeGpuDevice();
+  const seed = {
+    schema: 'peercompute.ulg.schroeder-adopted-particle-storage-portable-materialization-seed.v0',
+    status: 'schroeder-adopted-particle-storage-portable-materialization-seed-ready',
+    ready: true,
+    hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:test-seed',
+    authoritativeParticleCount: buffers.sphParticleState.particleCount,
+    materializationMode: 'peer-local-gpu-rematerialization-from-descriptor-seed'
+  };
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:adopted-storage-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      ...buffers,
+      deviceResult: { device },
+      useSchroederAdoptedParticleStorageWorkerRematerialization: true,
+      schroederAdoptedParticleStorageWorkerRematerializationSeed: seed,
+      gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+      boxDimsM: [5, 5, 5],
+      dt: buffers.mlsMpmParticleState.mechanicsDtS,
+      gravityMPerS2: [0, 0, 0],
+      cflFactor: 10
+    }
+  };
+  const laneOptions = {
+    laneId: 'ulg:test:adopted-storage-worker-lane',
+    stateKey: 'ulg:test:adopted-storage-worker-state'
+  };
+  const p2gStage = stage('p2g', ['sph-particle-state', 'mls-mpm-mechanics'], ['mls-mpm-grid']);
+
+  const first = await runUlgMechanicsResidentStageWorkerPayload(
+    payload(p2gStage, context, null, laneOptions)
+  );
+  const firstRemat = first.value.workerResidentStage.workerAdoptedStorageRematerialization;
+  assert.equal(
+    first.value.workerResidentStage.workerAdoptedStorageRematerializationStatus,
+    'worker-rematerialized-adopted-storage'
+  );
+  assert.equal(first.value.workerResidentStage.workerAdoptedStorageRematerializationApplied, true);
+  assert.equal(firstRemat.reusedRetainedBuffers, false);
+  assert.equal(firstRemat.hotBufferKey, seed.hotBufferKey);
+  assert.equal(firstRemat.rawGpuBufferPeerComputeTransfer, false);
+  assert.equal(firstRemat.stateBufferByteLength, buffers.sphParticleState.state.byteLength);
+  assert.equal(
+    first.value.workerResidentStage.workerRetainedContinuationInputStatus,
+    'skipped-worker-retained-g2p-input-superseded-by-adopted-storage'
+  );
+
+  const second = await runUlgMechanicsResidentStageWorkerPayload(
+    payload(p2gStage, context, null, laneOptions)
+  );
+  assert.equal(
+    second.value.workerResidentStage.workerAdoptedStorageRematerialization.reusedRetainedBuffers,
+    true
+  );
+
+  // A seed whose authoritative count does not match the packed rows must
+  // fail honest instead of rematerializing a stale particle set.
+  const mismatchContext = {
+    ...context,
+    common: {
+      ...context.common,
+      schroederAdoptedParticleStorageWorkerRematerializationSeed: {
+        ...seed,
+        hotBufferKey: 'ulg:sph-resident-schroeder-adopted-storage:test-seed-grown',
+        authoritativeParticleCount: buffers.sphParticleState.particleCount + 4
+      }
+    }
+  };
+  const blocked = await runUlgMechanicsResidentStageWorkerPayload(
+    payload(p2gStage, mismatchContext, null, {
+      laneId: 'ulg:test:adopted-storage-worker-lane-mismatch',
+      stateKey: 'ulg:test:adopted-storage-worker-state-mismatch'
+    })
+  );
+  assert.equal(
+    blocked.value.workerResidentStage.workerAdoptedStorageRematerializationStatus,
+    'blocked-worker-adopted-storage-rematerialization-row-count-mismatch'
+  );
+  assert.equal(blocked.value.workerResidentStage.workerAdoptedStorageRematerializationApplied, false);
+});

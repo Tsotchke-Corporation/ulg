@@ -9421,13 +9421,19 @@ test('SPH phase mounted SS storage policy materializes adopted storage and fail-
     const execution = overlay?.__mlsMpmResidentSteps || null;
     const lane = overlay?.__sphMountedMechanicsStageWorkerLane || null;
     const adoptionStatus = execution?.finalStep?.schroederParticleStorageAdoptionStatus || null;
+    // In the adopted branch, wait until the stage worker has actually
+    // rematerialized the adopted storage on its own device - the schedule
+    // publishes one lane tick ahead of the applied rematerialization.
+    const adoptedAndConsumed = adoptionStatus === 'schroeder-particle-storage-adopted'
+      && lane?.schroederAdoptedParticleStorageWorkerRematerializationApplied === true;
     const ready = Boolean(
-      (adoptionStatus === 'schroeder-particle-storage-adopted'
+      (adoptedAndConsumed
         || adoptionStatus === 'schroeder-particle-storage-adoption-skipped-no-topology-change')
       && lane?.status === 'worker-stage-lane-published'
     );
     if (ready && !globalThis.__ssStoragePolicyPublishedLane) {
       globalThis.__ssStoragePolicyPublishedLane = lane;
+      globalThis.__ssStoragePolicyReadyAdoptionStatus = adoptionStatus;
     }
     return ready;
   }, null, { timeout: 160_000 });
@@ -9479,6 +9485,13 @@ test('SPH phase mounted SS storage policy materializes adopted storage and fail-
         lane?.schroederAdoptedParticleStorageLocalResolverReady === true,
       laneAdoptedScheduleStatus:
         lane?.schroederAdoptedParticleStorageContinuationScheduleStatus ?? null,
+      laneAdoptedWorkerRematerializationScheduled:
+        lane?.schroederAdoptedParticleStorageWorkerRematerializationScheduled === true,
+      laneAdoptedWorkerRematerializationStatus:
+        lane?.schroederAdoptedParticleStorageWorkerRematerializationStatus ?? null,
+      laneAdoptedWorkerRematerializationApplied:
+        lane?.schroederAdoptedParticleStorageWorkerRematerializationApplied === true,
+      readyAdoptionStatus: globalThis.__ssStoragePolicyReadyAdoptionStatus ?? null,
       laneAdoptedStageLocalResolverReady:
         lane?.schroederAdoptedParticleStorageStageLocalResolverReady === true,
       laneAdoptedRawGpuBufferTransfer:
@@ -9501,21 +9514,29 @@ test('SPH phase mounted SS storage policy materializes adopted storage and fail-
   expect(result.materializationPublicationStatus)
     .toBe('schroeder-particle-storage-materialization-admission-published');
   expect(result.freeListStatus).toBe('schroeder-particle-storage-free-list-ready');
-  if (result.adoptionStatus === 'schroeder-particle-storage-adopted') {
+  if (result.readyAdoptionStatus === 'schroeder-particle-storage-adopted') {
     // Topology-change branch: a materialization epoch with a real count
     // delta (split/merge appended or freed slots) adopted, published the
-    // descriptor, and the host-local resolver is ready.
-    expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
-    expect(result.adopted).toBe(true);
-    expect(result.publicationStatus).toBe('schroeder-adopted-particle-storage-descriptor-published');
-    expect(result.publicationAccepted).toBe(true);
-    expect(result.publicationLocalResolverReady).toBe(true);
-    expect(result.hotRecordCopyMode).toBe('descriptor-only-no-raw-gpubuffer-transfer');
+    // descriptor, and the stage worker rematerialized the adopted storage
+    // on its own device from the descriptor-only seed (raw GPUBuffer refs
+    // never cross the worker boundary).
     expect(result.laneAdoptedPublicationStatus)
       .toBe('schroeder-adopted-particle-storage-descriptor-published');
     expect(result.laneAdoptedLocalResolverReady).toBe(true);
     expect(result.laneAdoptedScheduleStatus)
-      .toBe('blocked-schroeder-adopted-particle-storage-worker-lane-main-thread-refs');
+      .toBe('schroeder-adopted-particle-storage-worker-rematerialization-scheduled');
+    expect(result.laneAdoptedWorkerRematerializationScheduled).toBe(true);
+    expect(result.laneAdoptedWorkerRematerializationStatus)
+      .toBe('worker-rematerialized-adopted-storage');
+    expect(result.laneAdoptedWorkerRematerializationApplied).toBe(true);
+    if (result.adoptionStatus === 'schroeder-particle-storage-adopted') {
+      expect(result.materializationStatus).toBe('schroeder-particle-storage-materialization-submitted');
+      expect(result.adopted).toBe(true);
+      expect(result.publicationStatus).toBe('schroeder-adopted-particle-storage-descriptor-published');
+      expect(result.publicationAccepted).toBe(true);
+      expect(result.publicationLocalResolverReady).toBe(true);
+      expect(result.hotRecordCopyMode).toBe('descriptor-only-no-raw-gpubuffer-transfer');
+    }
   } else {
     // Guard-skip branch: every epoch so far was a pure copy, so the no-op
     // adoption guard (steady-state protection) discarded it before adoption

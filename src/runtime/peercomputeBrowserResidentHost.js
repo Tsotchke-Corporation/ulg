@@ -4424,6 +4424,21 @@ export function planSchroederAdoptedParticleStorageContinuation({
     )
   );
   const ready = sameDeviceContinuationReady || crossPeerContinuationReady;
+  // Descriptor-only seed for a stage-worker lane that cannot receive the
+  // main-thread retained GPUBuffer refs: the worker rematerializes the
+  // adopted storage locally (peer-local-gpu-rematerialization-from-
+  // descriptor-seed) from this seed plus the packed rows its request
+  // already carries. Pure JSON; safe to structured-clone across the worker
+  // boundary.
+  const workerRematerializationSeed = validation.accepted && !rawGpuBufferTransferDetected
+    ? createSchroederAdoptedParticleStoragePortableMaterializationSeed({
+        descriptor: source.descriptor,
+        hotBufferKey: source.hotBufferKey,
+        cacheKey: source.source?.cacheKey || source.descriptor?.cacheKey || null,
+        stateKey: source.source?.stateKey || source.descriptor?.stateKey || null,
+        source: 'continuation-plan-worker-lane-rematerialization-seed'
+      })
+    : null;
   const blocker = validation.reason
     || (rawGpuBufferTransferDetected ? 'schroeder-adopted-particle-storage-raw-gpubuffer-transfer-detected' : null)
     || (crossPeerRequested && !portableReplayAvailable && source.descriptor?.crossPeerReplayReady !== true
@@ -4485,6 +4500,8 @@ export function planSchroederAdoptedParticleStorageContinuation({
         ? []
         : [...portableMaterializationSeedValidation.issues],
     portableReplayAvailable,
+    workerRematerializationSeed,
+    workerRematerializationSeedReady: workerRematerializationSeed?.ready === true,
     rawGpuBufferTransferAllowed: false,
     rawGpuBufferTransferDetected,
     descriptorOnlyPeerComputeHandoff: true,

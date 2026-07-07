@@ -1339,6 +1339,130 @@ function recordWorkerRetainedThermoOutput({ stageId, rawResult, record }) {
   };
 }
 
+// Worker-owned rematerialization of SS adopted particle storage: the
+// main-thread retained GPUBuffer refs cannot cross the worker boundary, so
+// the lane ships a descriptor-only seed and the worker rebuilds the adopted
+// storage on ITS device from the packed rows the request already carries
+// (peer-local-gpu-rematerialization-from-descriptor-seed). Buffers are
+// retained on the lane record keyed by the adopted-storage hot-buffer key
+// and reused across schedules; no raw GPUBuffer clone, no mapAsync export.
+function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, workerDeviceResult }) {
+  const seed = data?.schroederAdoptedParticleStorageWorkerRematerializationSeed || null;
+  const requested = data?.useSchroederAdoptedParticleStorageWorkerRematerialization === true;
+  if (!requested || stageId !== 'p2g') return null;
+  const hotBufferKey = normalizeString(seed?.hotBufferKey, null);
+  if (!seed || seed.ready !== true || !hotBufferKey) {
+    return {
+      status: 'blocked-worker-adopted-storage-rematerialization-seed-not-ready',
+      requested: true,
+      applied: false,
+      hotBufferKey
+    };
+  }
+  const device = workerDeviceResult?.device || data?.deviceResult?.device || null;
+  if (!device) {
+    return {
+      status: 'blocked-worker-adopted-storage-rematerialization-device-missing',
+      requested: true,
+      applied: false,
+      hotBufferKey
+    };
+  }
+  let retained = record.adoptedStorageRematerialization || null;
+  let reused = false;
+  if (retained && retained.hotBufferKey === hotBufferKey) {
+    reused = true;
+  } else {
+    const state = data?.sphParticleState?.state;
+    const thermo = data?.sphParticleState?.thermo;
+    const mechanics = data?.mlsMpmParticleState?.mechanics;
+    if (!ArrayBuffer.isView(state) || !ArrayBuffer.isView(thermo) || !ArrayBuffer.isView(mechanics)) {
+      return {
+        status: 'blocked-worker-adopted-storage-rematerialization-packed-rows-missing',
+        requested: true,
+        applied: false,
+        hotBufferKey
+      };
+    }
+    const packedParticleCount = Math.max(0, Math.floor(Number(data?.sphParticleState?.particleCount) || 0));
+    const authoritativeParticleCount = Math.max(0, Math.floor(Number(seed.authoritativeParticleCount) || 0));
+    // The packed rows are the seed's row payload; a count mismatch means the
+    // shipped rows do not represent the adopted storage - fail honest rather
+    // than rematerialize a stale particle set as authoritative.
+    if (authoritativeParticleCount > 0 && packedParticleCount !== authoritativeParticleCount) {
+      return {
+        status: 'blocked-worker-adopted-storage-rematerialization-row-count-mismatch',
+        requested: true,
+        applied: false,
+        hotBufferKey,
+        packedParticleCount,
+        authoritativeParticleCount
+      };
+    }
+    if (retained) {
+      retained.stateBuffer?.destroy?.();
+      retained.thermoBuffer?.destroy?.();
+      retained.mechanicsBuffer?.destroy?.();
+    }
+    retained = {
+      hotBufferKey,
+      seedSchema: seed.schema || null,
+      materializationMode: seed.materializationMode || 'peer-local-gpu-rematerialization-from-descriptor-seed',
+      particleCount: packedParticleCount,
+      authoritativeParticleCount: authoritativeParticleCount || packedParticleCount,
+      stateBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-state', state),
+      thermoBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-thermo', thermo),
+      mechanicsBuffer: writeWorkerStorageBuffer(device, 'ulg-worker-adopted-storage-mechanics', mechanics),
+      stateBufferByteLength: state.byteLength,
+      thermoBufferByteLength: thermo.byteLength,
+      mechanicsBufferByteLength: mechanics.byteLength
+    };
+    if (!retained.stateBuffer || !retained.thermoBuffer || !retained.mechanicsBuffer) {
+      retained.stateBuffer?.destroy?.();
+      retained.thermoBuffer?.destroy?.();
+      retained.mechanicsBuffer?.destroy?.();
+      return {
+        status: 'blocked-worker-adopted-storage-rematerialization-buffer-create-failed',
+        requested: true,
+        applied: false,
+        hotBufferKey
+      };
+    }
+    record.adoptedStorageRematerialization = retained;
+  }
+  data.sphParticleUpload = {
+    schema: 'peercompute.ulg.worker-rematerialized-adopted-storage-sph-particle-upload.v0',
+    status: 'webgpu-uploaded',
+    workerRetained: true,
+    sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
+    particleCount: retained.particleCount,
+    stateBuffer: retained.stateBuffer,
+    thermoBuffer: retained.thermoBuffer
+  };
+  data.mlsMpmParticleUpload = {
+    schema: 'peercompute.ulg.worker-rematerialized-adopted-storage-mls-mpm-particle-upload.v0',
+    status: 'webgpu-uploaded',
+    workerRetained: true,
+    sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
+    particleCount: retained.particleCount,
+    mechanicsBuffer: retained.mechanicsBuffer
+  };
+  return {
+    status: 'worker-rematerialized-adopted-storage',
+    requested: true,
+    applied: true,
+    reusedRetainedBuffers: reused,
+    hotBufferKey,
+    materializationMode: retained.materializationMode,
+    particleCount: retained.particleCount,
+    authoritativeParticleCount: retained.authoritativeParticleCount,
+    stateBufferByteLength: retained.stateBufferByteLength,
+    thermoBufferByteLength: retained.thermoBufferByteLength,
+    mechanicsBufferByteLength: retained.mechanicsBufferByteLength,
+    rawGpuBufferPeerComputeTransfer: false
+  };
+}
+
 function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDeviceResult }) {
   const requested = data?.useWorkerRetainedG2pInput === true;
   if (!requested || stageId !== 'p2g') return null;
@@ -1756,12 +1880,27 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     data.deviceResult = workerDeviceResult;
     data.navigatorRef = globalThis.navigator;
   }
-  const workerRetainedContinuationInput = applyWorkerRetainedContinuationInput({
+  const workerAdoptedStorageRematerialization = applyWorkerAdoptedStorageRematerialization({
     stageId,
     data,
     record,
     workerDeviceResult
   });
+  // Rematerialized adopted storage is the authoritative topology swap; when
+  // it supplied the particle inputs, the retained-g2p continuation must not
+  // overwrite them.
+  const workerRetainedContinuationInput = workerAdoptedStorageRematerialization?.applied === true
+    ? {
+        status: 'skipped-worker-retained-g2p-input-superseded-by-adopted-storage',
+        requested: data?.useWorkerRetainedG2pInput === true,
+        sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization'
+      }
+    : applyWorkerRetainedContinuationInput({
+        stageId,
+        data,
+        record,
+        workerDeviceResult
+      });
   const workerRetainedThermoInput = applyWorkerRetainedThermoInput({
     stageId,
     data,
@@ -1856,6 +1995,11 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerQueueFenceSatisfied: workerQueueFence?.fenceSatisfied === true,
     workerRetainedContinuationInput,
     workerRetainedContinuationInputStatus: workerRetainedContinuationInput?.status || null,
+    workerAdoptedStorageRematerialization,
+    workerAdoptedStorageRematerializationStatus:
+      workerAdoptedStorageRematerialization?.status || null,
+    workerAdoptedStorageRematerializationApplied:
+      workerAdoptedStorageRematerialization?.applied === true,
     workerRetainedThermoInput,
     workerRetainedThermoInputStatus: workerRetainedThermoInput?.status || null,
     workerRetainedGasCellFieldImportInput,
@@ -1882,6 +2026,10 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
       workerWebGpuStatus: cloneableResult.workerResidentStage.workerWebGpuStatus,
       workerQueueFenceSatisfied: cloneableResult.workerResidentStage.workerQueueFenceSatisfied,
       workerRetainedContinuationInputStatus: cloneableResult.workerResidentStage.workerRetainedContinuationInputStatus,
+      workerAdoptedStorageRematerializationStatus:
+        cloneableResult.workerResidentStage.workerAdoptedStorageRematerializationStatus,
+      workerAdoptedStorageRematerializationApplied:
+        cloneableResult.workerResidentStage.workerAdoptedStorageRematerializationApplied,
       workerRetainedThermoInputStatus: cloneableResult.workerResidentStage.workerRetainedThermoInputStatus,
       workerRetainedThermoOutputStatus: cloneableResult.workerResidentStage.workerRetainedThermoOutputStatus,
       compactSnapshotExportSourceStatus: cloneableResult.workerResidentStage.compactSnapshotExportSourceStatus,

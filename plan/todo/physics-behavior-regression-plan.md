@@ -1570,3 +1570,36 @@ reproduce identically, so all are pre-existing and previously untracked
 
 Order of attack: F first (conservation is the core physics contract),
 then A, then D/B/C which may partially clear once F lands.
+
+## Remaining-failure detail - 2026-07-07 (post P2G-limit fix)
+
+Conservation cluster F is green (P2G 8-buffer fix + merge-centroid and
+settle-wait gate reconciliations). Remaining 10 + reaction trio, with
+failure signatures from isolated/cluster reruns:
+
+1. 7879 native Schroeder render LOD: backendSelectionStatus stays
+   'blocked-schroeder-render-proxy-backend-renderer-capability' (gate
+   wants native-webgpu submit/visible ready). The mounted panels show
+   the same blocked status, so the schroeder render proxy backend never
+   activates in this environment - find the capability probe and why.
+2. 7109 no-full render refresh (skip compact surface summary):
+   expected >0 at demo.e2e.mjs:7442 got 0.
+3. 8023 phase-volume feedback next tick: boolean false at 8191.
+4. 8307 URL schroeder config -> native schedule: 180s waitForFunction
+   timeout at 8319.
+5. 8728 ComputeManager-shaped GPU lane: >0 got 0 at 8806.
+6. 8988 worker-retained mechanics stage lane:
+   'state-manager-committed-inline-execution-returned' vs null at 9027.
+7. 9684 real browser PeerCompute host: array deep-equality +1 extra
+   element at 10620.
+8. 11094 / 11315 resident auto scheduler (default host / injected lane
+   host): 150s/120s waits time out.
+9. 11396 CPU-SPH visibility resume: 'viewport-refresh-rendered' vs
+   undefined at 11451.
+10. Reaction trio (from 2026-07-06 triage): 6092 H2 gas
+    placement/ledger, 6866 product-event buffer bounds, 6930 cohort
+    buoyancy.
+Note: vite dev-server re-optimize can 504 dynamic imports mid-suite
+(seen once on schroederHierarchyGpu.js) - tests already retry imports
+in some proofs; treat isolated 'Failed to fetch dynamically imported
+module' failures as environment noise and rerun.

@@ -1144,6 +1144,11 @@ export function buildSphPhaseDemoState({
   scenario = createSphPhaseScenario(),
   closures = null,
   allowFixtureMaterialProperties = false,
+  // Interactive runs may seed closures from a cache/view-state that contains
+  // reaction PRODUCTS derived through the reduced product closure (an
+  // admitted interactive tier); with this flag the validation admits that
+  // source instead of rejecting the reused cache outright.
+  allowReducedProductProperties = false,
   dropMaterial = 'fe',
   baseMaterial = 'h2o',
   dropTemperatureK,
@@ -1203,7 +1208,10 @@ export function buildSphPhaseDemoState({
       requireFirstPrinciplesMaterialProperties(closure.properties, {
         material: key,
         context: 'buildSphPhaseDemoState',
-        allowedFallbackSources: ['material-property-reference-bank']
+        allowedFallbackSources: [
+          'material-property-reference-bank',
+          ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
+        ]
       });
     }
   }
@@ -3600,7 +3608,13 @@ function computeDerivedDemoPreflight(demo) {
 export function createSphPhaseDemo(options = {}) {
   const demo = buildSphPhaseDemoState(options);
   if (!demo.allowFixtureMaterialProperties) {
-    requireFirstPrinciplesMaterialMap(demo.materialProperties, { context: 'createSphPhaseDemo.initial-materials', allowedFallbackSources: ['material-property-reference-bank'] });
+    requireFirstPrinciplesMaterialMap(demo.materialProperties, {
+      context: 'createSphPhaseDemo.initial-materials',
+      allowedFallbackSources: [
+        'material-property-reference-bank',
+        ...(options.allowReducedProductProperties === true ? ['reactant-packed-product-closure'] : [])
+      ]
+    });
   }
   const physicalLawGroups = normalizeSphPhysicalLawGroups(options.physicalLawGroups);
   const pendingPhysicalLawGroups = pendingSphPhysicalLawGroups(physicalLawGroups);

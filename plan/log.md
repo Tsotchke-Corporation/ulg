@@ -39402,3 +39402,28 @@ asserts SPH_GPU_RENDER_ROW_LAYOUT.length instead of literal 16 (grew to
 interface-refresh cadence skips the pressure-interface refresh on
 visual frames (pressure-interface-refresh-skipped) leaving the whole
 coupling/preview/solver block null - the gate now branches on that.
+
+## 2026-07-06 — Na+H2O gates: interactive driver guard fixed (5992 green); 6020 root traced to uncollected gas ledger
+
+demo.e2e.mjs:5992 passes (39.7s): the mounted interactive step driver
+rebuilds the demo from the worker view-state cache whose NaOH product
+legitimately carries the reduced product closure
+(allowReducedProductProperties: true is the mount policy), but
+buildSphPhaseDemoState re-validated seeded closures with only the
+reference-bank allowance and threw, leaving __sphStep blocked with
+"naoh material properties are not first-principles-derived". The
+first-principles guards now admit the reactant-packed-product-closure
+source exactly when the run policy allows reduced products; strict
+mode unchanged.
+
+demo.e2e.mjs:6020 is deeper: on the direct resident-refresh path
+(mech=sph, residentAuto=0, no-full-readback, particle-visual scope)
+the Na+H2O reaction executes (144 product event rows retained
+GPU-side, naoh|liquid rows placed and visible) but H2 never appears:
+no *|gas decoded rows, gas species ledger count 0, compact reaction
+ledger "not-collected-for-this-backend", sealed-box moles null, total
+pressure pinned at exactly 101325 Pa. So the gas product neither
+places as particles nor accumulates ledger moles in this collection
+mode. Needs a focused pass through the reaction product placement /
+gas-species-ledger collection policy for that backend/scope combo
+(reaction-stoichiometry machinery landed this week).

@@ -39385,3 +39385,20 @@ Isolated reruns on a fresh server at HEAD:
 All reproduce on pre-session 3d303a3 (verified for 4116; others
 assumed by the same suite context). Tracked in
 physics-behavior-regression-plan; working them in order 1, 2, 3+4, 5.
+
+## 2026-07-06 — Failure class 1 fixed: derived-props gate reconciled with current runtime contracts
+
+demo.e2e.mjs:4116 passes isolated (13.5s) after reconciling four stale
+expectations, each verified against live probes: (1) bridge modes assert
+scheduling integrity (stepCount <= mechanicalSubsteps) instead of
+full-target batches - the interactive presentation playback cap
+(residentStepsPerScheduleMax default 4, 8138d73) deliberately runs
+quarter batches; (2) fused no-full sequences publish placeholder
+intermediate summaries cloned from the final step (status
+resident-step-fused-sequence-intermediate), so per-substep ping-pong
+continuity only applies to the discrete path; (3) render-row stride
+asserts SPH_GPU_RENDER_ROW_LAYOUT.length instead of literal 16 (grew to
+20 in 8edc3de phase-fraction render weighting); (4) the pipelined
+interface-refresh cadence skips the pressure-interface refresh on
+visual frames (pressure-interface-refresh-skipped) leaving the whole
+coupling/preview/solver block null - the gate now branches on that.

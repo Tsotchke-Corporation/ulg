@@ -4,6 +4,7 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { SPH_PHASE_RENDER_ORDER } from '../src/visualization/sphPhaseScene.js';
 import { MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
+import { SPH_GPU_RENDER_ROW_LAYOUT } from '../ulg-gpu-abi/src/index.js';
 
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
 const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
@@ -5318,7 +5319,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(residentTargetStepCount).toBeGreaterThanOrEqual(1);
   expect(expectedResidentStepCount).toBeGreaterThanOrEqual(1);
   if (usesThreeRenderRowBridge) {
-    expect(expectedResidentStepCount).toBeGreaterThanOrEqual(residentTargetStepCount);
+    // Interactive presentation playback (three-render-row bridge) caps the
+    // steps per schedule (residentStepsPerScheduleMax defaults to 4) so the
+    // UI stays responsive; physics accumulates across schedules in
+    // continuation mode. The scheduling contract is integrity, not
+    // full-target batches: at least one step, never more than the
+    // mechanical substep target per schedule.
+    expect(expectedResidentStepCount).toBeLessThanOrEqual(residentTargetStepCount);
   } else {
     expect(expectedResidentStepCount).toBe(residentTargetStepCount);
   }
@@ -5342,7 +5349,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect([0, 1]).toContain(firstResidentPingPong.sourceSlot);
   expect([0, 1]).toContain(firstResidentPingPong.nextSlot);
   expect(firstResidentPingPong.nextSlot).toBe(1 - firstResidentPingPong.sourceSlot);
-  if (expectedResidentStepCount > 1) {
+  const fusedSequenceIntermediates = derivedSummary.mlsMpmResidentSteps.stepSummaries
+    .slice(0, -1)
+    .every((summary) => summary.status === 'resident-step-fused-sequence-intermediate');
+  if (expectedResidentStepCount > 1 && fusedSequenceIntermediates) {
+    // Fused no-full sequences chain substep buffers inside one submission
+    // and publish placeholder intermediate summaries cloned from the final
+    // step; per-substep ping-pong continuity only exists on the discrete
+    // path. The fused contract is that every summary reports the same
+    // final-step ping-pong.
+    const finalResidentPingPong = derivedSummary.mlsMpmResidentSteps
+      .stepSummaries[expectedResidentStepCount - 1].particlePingPong;
+    expect(firstResidentPingPong.sourceSlot).toBe(finalResidentPingPong.sourceSlot);
+    expect(firstResidentPingPong.nextSlot).toBe(finalResidentPingPong.nextSlot);
+  } else if (expectedResidentStepCount > 1) {
     const secondResidentPingPong = derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong;
     expect(secondResidentPingPong.sourceSlot).toBe(firstResidentPingPong.nextSlot);
     expect(secondResidentPingPong.nextSlot).toBe(firstResidentPingPong.sourceSlot);
@@ -5520,7 +5540,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     } else {
       expect(derivedSummary.sphResidentRenderState.surfaceCount).toBeGreaterThan(0);
     }
-    expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(16);
+    expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(SPH_GPU_RENDER_ROW_LAYOUT.length);
     expect(derivedSummary.sphResidentRenderState.renderRowByteLength).toBeGreaterThan(0);
     if (usesThreeRenderRowBridge) {
       expect(derivedSummary.sphResidentRenderState.renderFieldReadback).toBe(false);
@@ -5746,6 +5766,24 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBe(0);
       expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBe(0);
     }
+    // Pipelined interface-refresh cadence can skip the pressure-interface
+    // refresh entirely on visual-render frames (residentPressureInterfaceState
+    // status 'pressure-interface-refresh-skipped'); every coupling/preview/
+    // solver field is then legitimately unpopulated.
+    const pressureInterfaceSkipped = derivedSummary.sphResidentRenderState
+      .residentPressureInterfaceStateStatus === 'pressure-interface-refresh-skipped';
+    if (pressureInterfaceSkipped) {
+      expect(pressureInterfaceReady).toBe(false);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceCouplingStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceCouplingStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForcePreviewStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceApplicationStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfacePreviewedElementCount).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceTotalAbsForceN).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceSolverStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverApplicationStatus).toBeNull();
+    } else {
     if (pressureInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBe(
         'pressure-force-solver-ready-not-applied'
@@ -5789,6 +5827,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverApplicationStatus).toBe(
       pressureInterfaceReady ? 'solver-ready-not-applied' : 'not-applied-solver-blocked'
     );
+    }
     if (pressureInterfaceReady) {
       expect(derivedSummary.sphResidentRenderState.residentPressureInterfaceStateStatus).toBe(
         'resident-pressure-interface-force-rows-admission-required'
@@ -5829,11 +5868,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceGridForceAdmissionApproved).toBe(false);
     } else {
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBe(0);
-      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
-        'not-evaluated'
+      // 'not-evaluated' when the interface refresh ran but stayed blocked;
+      // null when the pipelined cadence skipped the refresh entirely.
+      expect([null, 'not-evaluated']).toContain(
+        derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus
       );
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationResidualMagnitudeN).toBe(0);
-      expect([null, 'resident-pressure-interface-blocked']).toContain(
+      expect([null, 'resident-pressure-interface-blocked', 'pressure-interface-refresh-skipped']).toContain(
         derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadStatus
       );
       expect([null, 'blocked-material-surface-normals-not-resolved']).toContain(

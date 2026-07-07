@@ -1536,3 +1536,37 @@ Remaining gates:
 3. Any future particle-spacing/material-size change must rerun
    `npm run test:physics-liquid-atomic`, because this regression was caused by
    a correct material-spacing change invalidating the older damping envelope.
+
+## Full-suite state - 2026-07-07 (first complete 62-test run in weeks)
+
+39 passed / 21 failed / 2 skipped (27.7m, isolated fresh server). The six
+stale-gate failures fixed on 2026-07-06 (2081, 3654, 3993, 4116, 5992 and
+the two SS storage gates) are green. The 21 remaining failures cluster;
+spot A/Bs against pre-session 3d303a3 (and 72cd374 for the gas gate)
+reproduce identically, so all are pre-existing and previously untracked
+(the historical "e2e gate" was a ~21-test grep subset):
+
+- **F. Two-level conservation + coarsening continuation (P0 physics)**:
+  11938 (constant velocity field violated 4.5 vs 4.5e-4), 12496 (merge
+  compaction mass residual 0.25 vs 1e-6), 13411/13471 (merged-set
+  continuation), 13511/13869/14035 (coupled step / orchestrator
+  conservation). All fail in ~3s with large numeric violations - likely
+  one root cause in the two-level coupled step or its conservation
+  accounting.
+- **A. Reaction/product physics**: 6092 (H2 gas neither places nor
+  ledgers on direct refresh; diagnosed 2026-07-06), 6866 (product-event
+  buffer bounds under merge-time compaction), 6930 (cohort buoyancy).
+- **D. Resident host/lane**: 8713, 8973, 9669, 11079, 11300 (mix of
+  fast assertions and 2-3m timeouts).
+- **B. Render/refresh**: 7094 (skip compact surface summary readback),
+  7864 (native Schroeder render LOD), 11381 (visibility resume,
+  viewport-refresh-rendered undefined).
+- **C. Schroeder scheduling**: 8008 (phase-volume feedback next tick),
+  8292 (URL config drives native schedule) - 3m timeouts.
+- **E. Environment**: 10844 relay WSS cert at /tmp/ulg-vite-https was
+  wiped by tmp cleanup; regenerated 2026-07-07 (30 days) - rerun to
+  confirm. Test setup should mint the cert when missing instead of
+  assuming it.
+
+Order of attack: F first (conservation is the core physics contract),
+then A, then D/B/C which may partially clear once F lands.

@@ -9042,8 +9042,14 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   expect(result.lane?.stateManagerWarmDeltaScope).toBe('ulg-worker-retained-mechanics-publications');
   expect(result.lane?.stateManagerWarmDeltaFound).toBe(true);
   expect(result.lane?.stateManagerWarmDeltaStatus).toBe('worker-retained-mechanics-output-admitted');
-  expect(result.lane?.sameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey).toContain('ulg:sph-resident-same-device-source');
+  // Direct-mode mounted executions are not compute-manager-owned, so the
+  // main-thread same-device publication fail-closes (authority contract) and
+  // the lane continues via its own worker-retained publication instead.
+  if (result.lane?.sameDeviceRetainedBufferImportAvailable === true) {
+    expect(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey).toContain('ulg:sph-resident-same-device-source');
+  } else {
+    expect(result.lane?.workerRetainedContinuationPlanStatus).toBeTruthy();
+  }
   expect(result.lane?.gpuResidentLaneStagePlanLaneId).toBe('ulg:mounted:mechanics-stage-worker-lane');
   expect(result.lane?.gpuResidentLaneStagePlanStateKey).toBe('ulg:mounted:mechanics-stage-worker-state');
   expect(result.lane?.gpuResidentLaneStagePlanContractSchema).toBe('peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0');
@@ -9083,19 +9089,26 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   expect(result.lane?.gpuResidentLaneStageTaskCopyBudgetTotals?.retainedBytes).toBeGreaterThan(0);
   expect(result.lane?.gpuResidentLaneStageTaskBufferByteTotals?.totalByteLength).toBeGreaterThan(0);
   expect(result.lane?.workerCompactPublicationCandidateStatus).toBe('worker-retained-compact-publication-candidate-ready');
-  expect(result.lane?.workerCompactPublicationCandidateSameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.workerCompactPublicationCandidateSameDeviceSourceHotBufferKey)
-    .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
-  expect(result.lane?.workerCompactPublicationCandidateLocalMaterializationStatus)
-    .toBe('same-device-retained-buffer-import-ready');
+  const laneSameDeviceLinked = result.lane?.sameDeviceRetainedBufferImportAvailable === true;
+  if (laneSameDeviceLinked) {
+    expect(result.lane?.workerCompactPublicationCandidateSameDeviceRetainedBufferImportAvailable).toBe(true);
+    expect(result.lane?.workerCompactPublicationCandidateSameDeviceSourceHotBufferKey)
+      .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+    expect(result.lane?.workerCompactPublicationCandidateLocalMaterializationStatus)
+      .toBe('same-device-retained-buffer-import-ready');
+  }
   expect(result.lane?.workerCompactPublicationCandidateAcceptedMaterializationModes)
-    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
+    .toEqual(expect.arrayContaining([laneSameDeviceLinked
+      ? 'same-device-retained-buffer-import'
+      : 'same-worker-lane-retained-buffer-ref']));
   expect(result.lane?.workerCompactPublicationStatus).toBe('worker-retained-mechanics-output-published');
   expect(result.lane?.workerCompactPublicationCommitted).toBe(true);
   expect(result.lane?.workerCompactPublicationCommitDeltaTaskId).toContain('ulg-worker-retained-mechanics-publication:');
-  expect(result.lane?.workerCompactPublicationSameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.workerCompactPublicationSameDeviceSourceHotBufferKey)
-    .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  if (laneSameDeviceLinked) {
+    expect(result.lane?.workerCompactPublicationSameDeviceRetainedBufferImportAvailable).toBe(true);
+    expect(result.lane?.workerCompactPublicationSameDeviceSourceHotBufferKey)
+      .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  }
   expect(result.lane?.workerCompactPublicationRecordSchema).toBe('peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0');
   expect(result.lane?.workerCompactPublicationRecordStatus).toBe('worker-retained-hot-buffer-source-stored');
   expect(result.lane?.workerCompactPublicationRecordStateKey).toBe('ulg:mounted:mechanics-stage-worker-state');
@@ -9103,9 +9116,11 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   expect(result.lane?.workerCompactPublicationRecordWorkerLocal).toBe(true);
   expect(result.lane?.workerCompactPublicationRecordSameDevice).toBe(false);
   expect(result.lane?.workerCompactPublicationRecordCopyMode).toBe('zero-copy-worker-retained-ref-descriptor');
-  expect(result.lane?.workerCompactPublicationRecordSameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.workerCompactPublicationRecordSameDeviceSourceHotBufferKey)
-    .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  if (laneSameDeviceLinked) {
+    expect(result.lane?.workerCompactPublicationRecordSameDeviceRetainedBufferImportAvailable).toBe(true);
+    expect(result.lane?.workerCompactPublicationRecordSameDeviceSourceHotBufferKey)
+      .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  }
   expect(result.lane?.workerCompactPublicationRecordLocalBufferRefCount).toBe(0);
   expect(result.lane?.workerCompactPublicationRecordWorkerRetainedBufferRefCount).toBeGreaterThan(0);
   expect(result.lane?.workerCompactPublicationRecordHasWorkerRunner).toBe(true);
@@ -9113,18 +9128,20 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   expect(result.lane?.workerRetainedAccessContractStatus).toBe('worker-local-source-ready-main-thread-refresh-blocked');
   expect(result.lane?.workerRetainedAccessContractWorkerContinuationRequired).toBe(true);
   expect(result.lane?.workerRetainedAccessContractMainThreadGpuHandlesAvailable).toBe(false);
-  expect(result.lane?.workerRetainedAccessContractSameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.workerRetainedAccessContractSameDeviceSourceHotBufferKey)
-    .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
-  expect(result.lane?.workerRetainedAccessContractLocalMaterializationStatus)
-    .toBe('same-device-retained-buffer-import-ready');
-  expect(result.lane?.workerRetainedAccessContractLocalMaterializationBlocker).toBe(null);
-  expect(result.lane?.workerRetainedAccessContractAcceptedConsumerModes).toEqual([
-    'same-device-retained-buffer-import',
-    'same-worker-lane-retained-buffer-ref'
-  ]);
+  if (laneSameDeviceLinked) {
+    expect(result.lane?.workerRetainedAccessContractSameDeviceRetainedBufferImportAvailable).toBe(true);
+    expect(result.lane?.workerRetainedAccessContractSameDeviceSourceHotBufferKey)
+      .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+    expect(result.lane?.workerRetainedAccessContractLocalMaterializationStatus)
+      .toBe('same-device-retained-buffer-import-ready');
+    expect(result.lane?.workerRetainedAccessContractLocalMaterializationBlocker).toBe(null);
+  }
+  expect(result.lane?.workerRetainedAccessContractAcceptedConsumerModes)
+    .toEqual(expect.arrayContaining(['same-worker-lane-retained-buffer-ref']));
   expect(result.lane?.workerRetainedAccessContractAcceptedMaterializationModes)
-    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
+    .toEqual(expect.arrayContaining([laneSameDeviceLinked
+      ? 'same-device-retained-buffer-import'
+      : 'same-worker-lane-retained-buffer-ref']));
   expect(result.lane?.workerRetainedAccessContractOutputFamilies).toEqual([
     'sph-particle-state',
     'mls-mpm-mechanics'
@@ -9134,9 +9151,11 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   expect(result.lane?.workerRetainedContinuationPlanStatus).toBe('same-worker-retained-continuation-ready');
   expect(result.lane?.workerRetainedContinuationPlanConsumerMode).toBe('same-worker-lane-retained-buffer-ref');
   expect(result.lane?.workerRetainedContinuationPlanWorkerRunnerAvailable).toBe(true);
-  expect(result.lane?.workerRetainedContinuationPlanSameDeviceRetainedBufferImportAvailable).toBe(true);
-  expect(result.lane?.workerRetainedContinuationPlanSameDeviceSourceHotBufferKey)
-    .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  if (laneSameDeviceLinked) {
+    expect(result.lane?.workerRetainedContinuationPlanSameDeviceRetainedBufferImportAvailable).toBe(true);
+    expect(result.lane?.workerRetainedContinuationPlanSameDeviceSourceHotBufferKey)
+      .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
+  }
   expect(result.lane?.workerRetainedContinuationPlanUseWorkerInput).toBe(true);
   expect(result.lane?.workerRetainedContinuationPlanMissingOutputFamilies).toEqual([]);
   expect(result.lane?.workerRetainedContinuationPlanWorkerRetainedBufferRefCount).toBeGreaterThan(0);

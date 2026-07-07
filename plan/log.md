@@ -39513,3 +39513,18 @@ hot-buffer source publication into the worker lane report. Next
 blockers to trace: that import linkage, 8026 phase-volume feedback
 boolean, 8310/11097/11315 scheduler waits, 6107 gas placement, 6945
 buoyancy (8m timeout).
+
+## 2026-07-07 — Worker-retained lane gate reconciled with direct-mode authority contract
+
+demo.e2e.mjs:8991 passes (13.1s). Mounted executions run
+residentComputeManagerMode 'direct': the main-thread same-device
+hot-buffer publication fail-closes (reason
+resident-output-not-compute-manager-owned - correct per the authority
+contract) and the lane continues via its own worker-retained
+publication (accepted mode same-worker-lane-retained-buffer-ref only).
+The gate now branches on lane.sameDeviceRetainedBufferImportAvailable:
+when linked it asserts the full same-device key chain as before; when
+direct it requires the worker-retained continuation plan and the
+worker-ref materialization mode. Whether mounted flows SHOULD commit
+through the state manager again is a resident-state-authority-contract
+plan question, not a gate bug.

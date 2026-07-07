@@ -11123,7 +11123,10 @@ test('SPH phase browser PeerCompute remote placement gate configures hooks witho
 
 test('SPH phase resident auto scheduler can use the default PeerCompute resident authority host', async ({ page }) => {
   test.setTimeout(180_000);
-  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=1&visualCapture=1');
+  // Interactive presentation playback defaults residentComputeManagerMode to
+  // 'direct'; this proof exercises the ComputeManager commit path, so it
+  // requests that mode explicitly.
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=1&visualCapture=1&residentComputeManagerMode=compute-manager');
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
   }

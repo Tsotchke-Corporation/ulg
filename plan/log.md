@@ -39528,3 +39528,24 @@ direct it requires the worker-retained continuation plan and the
 worker-ref materialization mode. Whether mounted flows SHOULD commit
 through the state manager again is a resident-state-authority-contract
 plan question, not a gate bug.
+
+## 2026-07-07 — Proxy-selection race fixed suite-wide; ComputeManager resident path found broken
+
+The metadata-pass selection race is gone: both
+createResidentRenderSourceMetadata call sites feed the previous tick's
+bound-bridge capability and the overlay-policy preference, so the SS
+proxy backend no longer flip-flops to blocked between surface-draw
+reselects. Gates 8310 (URL schroeder config, was a 3m timeout - now
+10s with the overlay opt-in it asserts) and 7879 stay green; 8026
+passes with the new __sphRenderStatus diagnostic hook (panel truth for
+scene-driven proofs). Units 982/0.
+
+Deeper find: 11097/11315 (resident auto scheduler via ComputeManager)
+do not merely assert a retired default -
+interactiveWorkerPresentationPlayback defaults the mode to 'direct'
+(the same policy pairing as the 4-step cap), but requesting
+residentComputeManagerMode=compute-manager explicitly HANGS: resident
+steps never execute at all under the ComputeManager path. That is a
+real broken flow (submission or commit never completes), tracked as
+the next runtime fix alongside the reaction physics pair (6107 H2
+placement/ledger, 6945 buoyancy).

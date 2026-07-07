@@ -39549,3 +39549,24 @@ steps never execute at all under the ComputeManager path. That is a
 real broken flow (submission or commit never completes), tracked as
 the next runtime fix alongside the reaction physics pair (6107 H2
 placement/ledger, 6945 buoyancy).
+
+## 2026-07-07 — CM livelock broken (CPU tick-hold); residual CM hang is pre-refresh
+
+Root cause #1 fixed: with an interactive CPU driver present, every
+playback tick stepped CPU physics and bumped particleSyncGeneration
+(~13/s), so any resident backend slower than one tick landed stale and
+was discarded forever - the ComputeManager commit path (~500ms) lost
+the race every time while direct (~50ms at 35 particles) won it. tick()
+now holds CPU stepping while a resident refresh is pending (resident
+owns the next state; the pending watchdog still clears wedged
+refreshes). Verified: stale-discard gallop gone, the 11097 gate's 150s
+wait now passes in ~12s when the first execution lands, and the
+CPU-SPH + mounted SS storage gates show no regression. Residual
+flakiness: in some runs NO execution ever lands - no scene progress
+markers at all (the CM branch is never entered), no rejection recorded,
+pending watchdog reschedules forever. The scheduled refresh awaits
+Promise.allSettled(prereqs) = scheduleSphGpuParticleUpload/
+scheduleMlsMpmGpuParticleUpload/scheduleSphThermalResponseGraphUpload
+before invoking scene.refreshMlsMpmResidentSteps: next step is to trace
+which upload promise never settles in CM mode (direct manual CM
+refreshes complete reliably, so the scene path itself is healthy).

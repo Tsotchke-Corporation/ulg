@@ -8117,6 +8117,19 @@ export async function mountSphPhaseDemoOverlay({
       }
       return;
     }
+    // A resident refresh in flight owns the next particle state; stepping the
+    // CPU driver during it bumps particleSyncGeneration every tick, so any
+    // resident backend slower than one playback tick lands stale and is
+    // discarded forever (measured livelock on the ComputeManager commit
+    // path: generations advanced ~13/s while each ~500ms execution came back
+    // ~5 generations behind). Hold CPU stepping until the refresh resolves;
+    // the pending watchdog still clears wedged refreshes.
+    if (initialResidentAutoEnabled && overlay.__mlsMpmResidentStepsPending) {
+      renderStatus();
+      updateWarningBanner();
+      requestPlaybackTick();
+      return;
+    }
     driver.step();
     recordPhysicsFrame(1);
     syncParticles();

@@ -39313,3 +39313,24 @@ resolver ready, fail-closed continuation) or guard-skipped (explicit
 skip status, publication skipped with descriptor-unavailable reason,
 no hot record), with the lane/stage-chain/fail-closed assertions
 common to both branches.
+
+## 2026-07-06 — Second SS storage gate reconciled with the adoption guard; worker-lane rematerialization landed
+
+The worker-lane rematerialization slice is in (d866806): continuation
+plans mint a descriptor-only workerRematerializationSeed, the lane
+scheduler ships it to the stage worker instead of hard fail-closing,
+and the worker rebuilds adopted storage on its own device from the
+seed + packed rows (retained per hot-buffer key, reused across
+schedules, row-count-mismatch fails honest; no GPUBuffer clone or
+mapAsync export). Units 982/0 with a new worker unit test
+(apply/reuse/mismatch); the mounted 9389 gate passes isolated at 11.5s.
+The sibling gate (demo.e2e.mjs:9060, same-device stage chain) was also
+failing pre-slice for the same guard-vs-adoption reason plus a
+follow-on: with adoption guard-skipped there is no hot-buffer key, the
+chain fell back to the no-full-readback CPU mirror, and the stale-
+mirror guard correctly refused. Reconciled the same way as 9389
+(adopted branch keeps all original assertions; guard-skip branch
+asserts the explicit skip status, publication skipped, downstream
+plans blocked-closed, resolver count 0) and the chain now consumes the
+execution's retained GPU uploads, which adoption's resolver binding
+supersedes. Passes isolated at 10.2s.

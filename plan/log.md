@@ -39570,3 +39570,20 @@ scheduleMlsMpmGpuParticleUpload/scheduleSphThermalResponseGraphUpload
 before invoking scene.refreshMlsMpmResidentSteps: next step is to trace
 which upload promise never settles in CM mode (direct manual CM
 refreshes complete reliably, so the scene path itself is healthy).
+
+## 2026-07-07 — ComputeManager resident path fixed (livelock + authority handoff)
+
+Two mount playback-loop defects starved the ComputeManager commit path:
+CPU ticks bumped particleSyncGeneration ~13/s so ~500ms CM executions
+always landed stale (livelock), and after the tick-hold fix each
+successful commit was immediately invalidated by the next CPU step
+(scene.setParticles clears resident artifacts; the sync then overwrote
+the overlay execution with the null scene getter - publish/null every
+~1.5s, traced via the new __sphResidentScheduleTrace). tick() now holds
+during pending refreshes AND hands authority to resident continuation
+once residentGpuContinuationReady(), stepping the CPU driver only
+pre-first-execution or for CPU-only mechanics. Gate 11097: 150s timeout
+-> 10.2s pass; no regressions (SS storage, CPU-SPH visibility, units
+982/0). Remaining in this family: 11315's injected global manager
+saturates the main thread from boot (inline full executions in
+submitTask) before the overlay mounts - needs its own pass.

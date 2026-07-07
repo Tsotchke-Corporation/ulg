@@ -7621,6 +7621,10 @@ export async function mountSphPhaseDemoOverlay({
     return result;
   }
   overlay.__sphStep = stepDemoForVisualTest;
+  // Diagnostic hook: proofs that drive scene.refresh* directly (bypassing
+  // the mount scheduler) re-render the status panel from the live scene
+  // getters before asserting panel truth.
+  overlay.__sphRenderStatus = renderStatus;
 
   function lawGroupStatusText() {
     return Object.entries(physicalLawGroupsFromControls())

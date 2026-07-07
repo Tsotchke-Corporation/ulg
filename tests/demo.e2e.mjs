@@ -8081,6 +8081,10 @@ test('SPH phase Schroeder phase-volume feedback feeds following resident tick', 
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const secondFeedback = scene.getSchroederPhaseVolumeAssignmentOverlayFeedback?.();
     const secondDiagnostics = scene.getSchroederPhaseVolumeDiagnostics?.();
+    // This proof drives the scene directly (no mount scheduler tick), so the
+    // status panel must be re-rendered from the live getters before asserting
+    // its text.
+    overlay.__sphRenderStatus?.();
     const statusText = overlay.querySelector('#sph-status')?.textContent || '';
     return {
       firstStatus: first?.status ?? null,

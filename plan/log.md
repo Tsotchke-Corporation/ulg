@@ -39357,3 +39357,31 @@ vite server (fingerprint changes invalidate warm caches mid-suite);
 and self-note - Bash background tasks are killed at their 10-minute
 timeout, so long suites must run detached (setsid nohup) with a
 Monitor watching the log.
+
+## 2026-07-06 — Full-suite failure triage (5 distinct pre-existing classes)
+
+Isolated reruns on a fresh server at HEAD:
+1. demo.e2e.mjs:4116 (derived-props default): resident stepCount 4 vs
+   target 16 at 5321. ROOT-CAUSED: three-render-row bridge selects the
+   interactive presentation playback use case whose
+   residentStepsPerScheduleMax DEFAULTS TO 4
+   (peercomputeRenderOwnershipPolicy.js ~493, landed 8138d73 Jun 30,
+   deliberate responsiveness cap; physics accumulates across schedules
+   in continuation mode). The gate's ">= mechanicalSubsteps with the
+   bridge" expectation predates the cap. Fix: assert scheduling
+   integrity (completed==stepCount, 1<=stepCount<=target) for bridge
+   modes instead of full-target batches.
+2. demo.e2e.mjs:3993 (same-material explicit edges): toBeCloseTo 2 vs
+   2.199999 at 4090 - deterministic drop-edge dimension drift.
+3. demo.e2e.mjs:5992 (Na+H2O derived closure): expect(...).not.toBe(true)
+   at 6013 - an unexpectedly-true flag.
+4. demo.e2e.mjs:6020 (active-metal gas pressure):
+   expectResidentReactionRefresh false at 6360.
+5. demo.e2e.mjs:2080 (supervised service smoke): waitForFunction 30s
+   timeout at 2087; and 3654 (drop-edge spheres) locator.click 120s
+   timeout at 3670 - boot/UI-responsiveness class. Note 3855 (same
+   scenario, points diagnostics) PASSES in 15.5s, so the spheres
+   variant specifically wedges the UI thread.
+All reproduce on pre-session 3d303a3 (verified for 4116; others
+assumed by the same suite context). Tracked in
+physics-behavior-regression-plan; working them in order 1, 2, 3+4, 5.

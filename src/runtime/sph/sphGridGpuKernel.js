@@ -968,11 +968,6 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     'ulg-mls-mpm-p2g-schroeder-active-nodes-dummy',
     new Float32Array(SCHROEDER_ACTIVE_NODE_FLOATS)
   );
-  const previousGridNodesDummyBuffer = writeStorageBuffer(
-    device,
-    'ulg-mls-mpm-p2g-previous-grid-nodes-dummy',
-    new Float32Array(8)
-  );
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
@@ -1016,25 +1011,24 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       computeBufferBinding(5, 'read-only-storage'),
       computeBufferBinding(6, 'storage'),
       computeBufferBinding(7, 'read-only-storage'),
-      computeBufferBinding(8, 'read-only-storage'),
-      computeBufferBinding(9, 'read-only-storage')
+      computeBufferBinding(8, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v4',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v5',
       label: 'ulg-mls-mpm-p2g-grid-projection',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v4',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v5',
       label: 'ulg-mls-mpm-p2g-product-event-scatter',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'scatter_product_events',
       bindings: p2gBindings
     });
     const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v4',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v5',
       label: 'ulg-mls-mpm-p2g-grid-finalize',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'finalize_grid',
@@ -1049,8 +1043,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         { binding: 5, resource: { buffer: productEventBuffer } },
         { binding: 6, resource: { buffer: gridBuffer } },
         { binding: 7, resource: { buffer: schroederAssignmentBuffer } },
-        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } },
-        { binding: 9, resource: { buffer: previousGridNodesDummyBuffer } }
+        { binding: 8, resource: { buffer: schroederActiveNodeBuffer } }
       ];
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
     const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });

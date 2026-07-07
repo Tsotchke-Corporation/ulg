@@ -7506,8 +7506,10 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
     buffer.label === 'ulg-mls-mpm-fused-sequence-empty-schroeder-active-nodes'
     && buffer.destroyed
   )));
-  // 10 -> 11: the previous-grid EOS buffer is destroyed right after submit.
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 11);
+  // 11 -> 10: the previous-grid EOS buffer is gone - its binding 9 pushed
+  // P2G past the DEFAULT 8-storage-buffer per-stage limit and invalidated
+  // every P2G pipeline on default-limit devices.
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 10);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });

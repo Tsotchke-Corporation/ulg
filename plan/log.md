@@ -39442,3 +39442,29 @@ ulg-runtime alongside moonlab/eshkol; the gate now requires the two
 probed services by id (passes 10.2s). Remaining known failure: 6020
 gas-product placement/ledger collection (fails at 72cd374 too; fully
 diagnosed in the earlier entry).
+
+## 2026-07-07 — P0 fixed: P2G exceeded default storage-buffer limit, silently zeroing grids
+
+Root cause of the two-level conservation cluster (bisected to 2caa049,
+parent 32d7ba2 passes): the spatial-density EOS added binding 9 to the
+P2G pipelines, putting 9 storage buffers in one compute stage - one
+over the DEFAULT maxStorageBuffersPerShaderStage of 8. The mounted
+scene requests elevated limits so the demo worked, but every consumer
+on a default requestDevice() (the direct-kernel physics proofs, the
+resident-host tests) got invalid P2G pipelines and silently EMPTY
+grids: probe showed zero mass/momentum/active nodes on both levels.
+The feature was already disabled as unstable (81da2f2) and superseded
+by the separation pass, so the fix removes binding 9, the
+previous-grid buffers and per-substep snapshot plumbing entirely, and
+bumps the P2G cache keys to v5, restoring the 8-buffer layout that
+runs on default limits (repo precedent: the separation pass combined
+its bins for exactly this reason). Probe now shows exact conservation
+(fine 4.5 kg, combined 20.5 kg, momentum = sum(mv) on all axes).
+Cluster rerun: constant-velocity, admitted split, coupled-step,
+both orchestrator conservation gates, merged-set motion proof, and the
+four authoritative two-level mounted gates all pass. Still failing
+(separate causes): merge compaction (pre-existing 0.25 mass residual,
+predates 2caa049), continuation-after-coarsening, and the resident
+host/render cluster. Lesson recorded: WGSL kernels must fit DEFAULT
+WebGPU per-stage limits; a binding added for a flag-gated feature
+still costs its storage slot when disabled.

@@ -35,9 +35,10 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   atomization + vibrational thermo into the closures for molecular materials (water, air gases).
 
 ## Demo (sphPhaseDemo) — the immediate work
-- **Timescale decoupled ~67×**: mechanics dt = 3e-4 s/step, thermal dtThermalS = 0.02 s/step, so the
-  thermodynamics outruns the motion. FIX: one shared clock — advance mechanics (CFL-substepped) and
-  thermal by the same sim-dt per frame.
+- ~~Timescale decoupled ~67×~~ DONE (2026-07-06 audit): one shared simulation clock — each
+  driver.step advances mechanics by `mechanicalSubsteps * carrierDt` and the thermal step by the
+  SAME `dtStepS` (sphPhaseDemo.js ~3616/3884/3975); conduction/wall coefficients remain
+  elevated-but-labelled for a watchable demo.
 - **Gas heat capacity uses equipartition** (constant Cv). Upgrade: derive Cp(T) of N2/O2/CO2/water
   vapour from molecularThermochemistry (geometry + vibrations) — validated exact at 298 K.
 - **Performance**: the SPH carrier + thermal conduction are O(N²) with per-pair array allocations

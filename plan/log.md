@@ -39334,3 +39334,26 @@ asserts the explicit skip status, publication skipped, downstream
 plans blocked-closed, resolver count 0) and the chain now consumes the
 execution's retained GPU uploads, which adoption's resolver binding
 supersedes. Passes isolated at 10.2s.
+
+## 2026-07-06 — Full 62-test e2e suite has ~6 pre-existing failures (session exonerated)
+
+First full-suite run in a while (previous gates were the ~21-test
+filtered subset). Failures at demo.e2e.mjs 2080 (supervised service
+smoke), 3654/3993 (drop-edge reset preservation), 4116 (derived
+material properties by default), 5992/6020 (Na+H2O reaction chain);
+suite was stopped at test ~17 once the pattern was clear. A/B on a
+fresh server against pre-session 3d303a3 reproduces the 4116 failure
+byte-identically (expect stepCount>=mechanicalSubsteps: 4 vs 16 at
+demo.e2e.mjs:5321), so none of today's commits caused it. The failing
+assertion is resident scheduling, not particles: the captured
+mlsMpmResidentSteps.stepCount is 4 while mechanicalSubsteps is 16;
+currentResidentStepsPerSchedule cannot produce 4 from its constants
+(fallback 2, throughput ceil((1/30)/5e-4)=67, max 16/128), so the
+4-step execution likely comes from another scheduling path (first
+visual-refresh batch?). Under investigation in the
+physics-behavior-regression plan. NOTE for future suite runs: do not
+commit bank/source changes while a suite is mid-run against a live
+vite server (fingerprint changes invalidate warm caches mid-suite);
+and self-note - Bash background tasks are killed at their 10-minute
+timeout, so long suites must run detached (setsid nohup) with a
+Monitor watching the log.

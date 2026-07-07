@@ -18599,6 +18599,23 @@ export function createSphPhaseScene(container, {
       stepSignature: signature,
       renderOwnershipPolicy:
         scene.userData.sphPeerComputeRenderOwnershipPolicy || sceneRenderOwnershipPolicy || null,
+      // Same live proxy-backend inputs as the render-refresh metadata pass
+      // (see that call site): a null capability here flip-flops the
+      // selection back to blocked every publication.
+      schroederRenderProxyRendererCapability: (
+        sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+            bridge: sphResidentSurfaceDrawRenderBridge,
+            surfaceDraw: sphResidentSurfaceDraw
+          })
+          : null
+      ),
+      schroederRenderProxyRenderBridgeMode: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
+      schroederRenderProxyRenderBridgeStatus: sphResidentSurfaceDraw?.renderBridgeStatus ?? null,
+      schroederRenderProxyPixelValidationStatus:
+        sphResidentSurfaceDrawRenderBridge?.pixelValidationStatus ?? 'not-run',
+      schroederRenderProxyBackendPreference:
+        scene.userData.sphSchroederRenderProxyOverlayEnabled === true ? 'auto' : 'disabled',
       source: 'resident-step-publication'
     });
     scene.userData.mlsMpmResidentPublishedRenderSource = residentRenderSource;
@@ -25700,6 +25717,24 @@ export function createSphPhaseScene(container, {
       stepsSignature: residentSteps?.signature ?? mlsMpmResidentStepsSignature,
       stepSignature: finalStep?.signature ?? mlsMpmResidentStepSignature,
       renderOwnershipPolicy: renderOwnershipPolicyForRefresh,
+      // Live proxy-backend inputs from the previous tick's bound bridge:
+      // without them the selection is computed against a null capability and
+      // flip-flops to blocked-renderer-capability every metadata pass until
+      // the surface-draw reselect runs.
+      schroederRenderProxyRendererCapability: (
+        sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+            bridge: sphResidentSurfaceDrawRenderBridge,
+            surfaceDraw: sphResidentSurfaceDraw
+          })
+          : null
+      ),
+      schroederRenderProxyRenderBridgeMode: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
+      schroederRenderProxyRenderBridgeStatus: sphResidentSurfaceDraw?.renderBridgeStatus ?? null,
+      schroederRenderProxyPixelValidationStatus:
+        sphResidentSurfaceDrawRenderBridge?.pixelValidationStatus ?? 'not-run',
+      schroederRenderProxyBackendPreference:
+        scene.userData.sphSchroederRenderProxyOverlayEnabled === true ? 'auto' : 'disabled',
       source: 'resident-render-refresh'
     });
     scene.userData.schroederRenderSource = residentRenderSource.schroederRenderSource || null;

@@ -2399,7 +2399,15 @@ export async function mountSphPhaseDemoOverlay({
   const surfaceDrawNativeAutoResolve = Boolean(globalThis?.navigator?.gpu);
   const resolvedResidentSurfaceDrawDiagnosticMode = (() => {
     const normalized = String(rawResidentSurfaceDrawDiagnosticMode ?? '').trim().toLowerCase();
-    if (surfaceDrawNativeAutoResolve && (normalized === '' || normalized === 'auto')) {
+    // The native surface consumer presents RESIDENT surface-draw buffers;
+    // the CPU reference carrier (mech=sph) never produces them, and every
+    // bridge mode skips the CPU surface geometry that carrier relies on -
+    // auto-resolving it to a bridge mode leaves the scene blank.
+    if (
+      surfaceDrawNativeAutoResolve
+      && (normalized === '' || normalized === 'auto')
+      && mechanicsModeFromControls() !== 'sph'
+    ) {
       return 'native-webgpu-surface-consumer';
     }
     // three-webgpu-surface-buffers never presents (its render plan coerces to
@@ -2683,9 +2691,16 @@ export async function mountSphPhaseDemoOverlay({
       updatedAtMs: performance.now()
     };
   }
-  const defaultThreeResidentSurfaceDrawMode = window.innerWidth < 700
-    ? 'three-render-row-spheres'
-    : 'three-render-row-points';
+  // The render-row bridge modes hand presentation to the RESIDENT render
+  // refresh and skip CPU surface geometry entirely; the CPU reference
+  // carrier (mech=sph) never runs that path, so defaulting it to a bridge
+  // mode leaves the scene blank. CPU mechanics defaults to auto (CPU
+  // surfaces); explicit surfaceDraw= URL selections still override.
+  const defaultThreeResidentSurfaceDrawMode = mechanicsModeFromControls() === 'sph'
+    ? 'auto'
+    : (window.innerWidth < 700
+      ? 'three-render-row-spheres'
+      : 'three-render-row-points');
   let residentSurfaceDrawDiagnosticMode = normalizeResidentSurfaceDrawDiagnosticMode(
     resolvedResidentSurfaceDrawDiagnosticMode,
     residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode

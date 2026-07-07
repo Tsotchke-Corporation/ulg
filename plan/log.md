@@ -39481,3 +39481,19 @@ honoring the no-overlay policy (when the opt-in schroederRenderProxy=1
 flag is absent the selection reports backend-disabled-by-policy instead
 of a misleading capability block). The render-LOD gate (7879) opts into
 the overlay it tests and passes in 10.4s. Units 982/0.
+
+## 2026-07-07 — CPU-SPH scenes rendered nothing: bridge-mode defaults gated on mechanics
+
+Pure CPU reference-carrier scenes (mech=sph) were blank: surfaceDraw
+auto-resolve and the mount default both selected resident BRIDGE modes
+(native consumer / render-row points+spheres), and every bridge mode
+skips CPU surface geometry on the assumption the resident render
+refresh owns presentation - which the CPU carrier never runs. Probe
+showed presentation-refresh-skipped-three-resident-bridge, zero CPU
+batches, zero visible surfaces. Both the auto-resolve and the default
+now stay on CPU-rendered auto when mechanicsModeFromControls() is
+'sph'; explicit surfaceDraw= URL selections still override. Verified:
+CPU-SPH probe shows viewport-refresh-rendered with a visible 152-
+particle h2o cpu-particles surface; visibility-resume gate passes
+(10.4s); mounted mlsmpm gates (drop-edge spheres, SS storage) still
+pass, so mlsmpm keeps the native consumer default.

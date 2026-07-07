@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -20,6 +21,19 @@ const PEERCOMPUTE_RELAY_SCRIPT = '/home/cos/projects/peercompute/peercompute/src
 const PEERCOMPUTE_RELAY_CWD = '/home/cos/projects/peercompute/peercompute';
 const ULG_HTTPS_CERT = process.env.ULG_HTTPS_CERT || '/tmp/ulg-vite-https/cert.pem';
 const ULG_HTTPS_KEY = process.env.ULG_HTTPS_KEY || '/tmp/ulg-vite-https/key.pem';
+// The relay needs a WSS keypair; /tmp gets cleaned between sessions, so mint
+// a self-signed pair on demand instead of failing the gate with a cryptic
+// "relay exited before advertising an address".
+function ensureUlgHttpsKeypair() {
+  if (existsSync(ULG_HTTPS_CERT) && existsSync(ULG_HTTPS_KEY)) return;
+  mkdirSync(path.dirname(ULG_HTTPS_CERT), { recursive: true });
+  spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048',
+    '-keyout', ULG_HTTPS_KEY, '-out', ULG_HTTPS_CERT,
+    '-days', '30', '-nodes', '-subj', '/CN=127.0.0.1',
+    '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'
+  ], { stdio: 'ignore' });
+}
 const SPH_THREE_RENDER_ROW_BRIDGES = ['three-render-row-points', 'three-render-row-spheres'];
 const SPH_THREE_RENDER_ROW_RENDER_SOURCES = [
   'resident-render-rows-three-points',
@@ -111,6 +125,7 @@ async function startPeerComputeRelayForPlaywright() {
   const timeout = setTimeout(() => {
     rejectReady(new Error(`Timed out waiting for PeerCompute relay address\nstdout:\n${stdoutTail.text()}\nstderr:\n${stderrTail.text()}`));
   }, 30_000);
+  ensureUlgHttpsKeypair();
   const child = spawn('node', [PEERCOMPUTE_RELAY_SCRIPT], {
     cwd: PEERCOMPUTE_RELAY_CWD,
     env: {

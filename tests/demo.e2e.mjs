@@ -11370,7 +11370,9 @@ test('SPH phase resident auto scheduler uses an injected ComputeManager lane hos
       }
     };
   });
-  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=1&visualCapture=1');
+  // Interactive playback defaults the mode to 'direct'; this proof injects a
+  // ComputeManager and must request the compute-manager mode to exercise it.
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=1&visualCapture=1&residentComputeManagerMode=compute-manager');
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
   }

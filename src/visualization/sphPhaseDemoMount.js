@@ -6187,6 +6187,18 @@ export async function mountSphPhaseDemoOverlay({
     const scheduleToken = pendingMlsMpmResidentStepsToken + 1;
     pendingMlsMpmResidentStepsToken = scheduleToken;
     pendingMlsMpmResidentStepsSignature = signature;
+    // Durable schedule trace: each stage of this schedule's lifecycle lands
+    // here so a wedged refresh is diagnosable from the page (the pending
+    // record alone cannot say WHERE a schedule stalled).
+    const traceResidentSchedule = (stage, extra = {}) => {
+      const trace = overlay.__sphResidentScheduleTrace || (overlay.__sphResidentScheduleTrace = []);
+      trace.push({ scheduleToken, stage, atMs: performance.now(), ...extra });
+      if (trace.length > 64) trace.splice(0, trace.length - 64);
+    };
+    traceResidentSchedule('scheduled', {
+      continueFromResidentState: Boolean(continueFromResidentState),
+      execPresent: Boolean(overlay.__mlsMpmResidentSteps)
+    });
     overlay.__mlsMpmResidentStepsPending = {
       schema: 'peercompute.ulg.sph-demo-resident-pending.v0',
       status: force ? 'resident-execution-force-rescheduled' : 'resident-execution-pending',
@@ -6389,7 +6401,9 @@ export async function mountSphPhaseDemoOverlay({
         return report;
       });
     }
-    remoteRefreshPreludePromise.then(() => scene.refreshMlsMpmResidentSteps?.({
+    remoteRefreshPreludePromise.then(() => {
+      traceResidentSchedule('refresh-invoked');
+      return scene.refreshMlsMpmResidentSteps?.({
       preferWebGpu: true,
       computeManager: residentComputeManagerForSchedule,
       residentStateManager: residentStateManagerForSchedule,
@@ -6414,7 +6428,12 @@ export async function mountSphPhaseDemoOverlay({
       ...residentExecutionPolicy,
       ...schroederExecutionOptions,
       force: Boolean(force || continueFromResidentState)
-    })).then(async (execution) => {
+      });
+    }).then(async (execution) => {
+      traceResidentSchedule('refresh-settled', {
+        status: execution?.status ?? null,
+        stale: Boolean(execution?.stale)
+      });
       const residentMs = performance.now() - residentStartMs;
       if (!execution?.schema) {
         overlay.__mlsMpmResidentStepsError = 'resident execution did not produce a step envelope';
@@ -6501,6 +6520,7 @@ export async function mountSphPhaseDemoOverlay({
       recordResidentFrame(completedResidentSteps);
       if (!driver && activeViewState) recordPhysicsFrame(completedResidentSteps);
       overlay.__mlsMpmResidentSteps = execution;
+      traceResidentSchedule('published', { schema: execution?.schema ?? null });
       {
         // Live thermal summary for the render side: the surface shader's
         // blackbody emission tracks the hottest live temperature instead of
@@ -8125,6 +8145,21 @@ export async function mountSphPhaseDemoOverlay({
     // ~5 generations behind). Hold CPU stepping until the refresh resolves;
     // the pending watchdog still clears wedged refreshes.
     if (initialResidentAutoEnabled && overlay.__mlsMpmResidentStepsPending) {
+      renderStatus();
+      updateWarningBanner();
+      requestPlaybackTick();
+      return;
+    }
+    // Single-authority handoff: once resident GPU continuation is ready, the
+    // resident execution owns physics and each CPU step would immediately
+    // invalidate it (scene.setParticles clears the resident artifacts and the
+    // following sync overwrites the committed execution with a null getter -
+    // measured as a publish/null cycle every ~1.5s on the ComputeManager
+    // path). Schedule resident continuation exactly like the driverless
+    // branch; the CPU driver keeps stepping only while no resident
+    // continuation exists (pre-first-execution, or CPU-only mechanics).
+    if (initialResidentAutoEnabled && residentGpuContinuationReady()) {
+      scheduleMlsMpmResidentSteps({ continueFromResidentState: true });
       renderStatus();
       updateWarningBanner();
       requestPlaybackTick();

@@ -4087,18 +4087,28 @@ test('SPH phase reset preserves same-material explicit edges while merging surfa
   expect(bounds?.drop?.finitePositionCount).toBe(expectedDropCount);
   expect(bounds?.base?.count).toBe(expectedBaseCount);
   expect(bounds?.base?.finitePositionCount).toBe(expectedBaseCount);
-  expect(bounds?.drop?.center?.[0]).toBeCloseTo(2.5, 6);
-  expect(bounds?.drop?.center?.[1]).toBeCloseTo(2, 6);
-  expect(bounds?.drop?.center?.[2]).toBeCloseTo(2.5, 6);
-  expect(bounds?.drop?.size?.[0]).toBeCloseTo(6 / 7, 6);
-  expect(bounds?.drop?.size?.[1]).toBeCloseTo(6 / 7, 6);
-  expect(bounds?.drop?.size?.[2]).toBeCloseTo(6 / 7, 6);
-  expect(bounds?.base?.center?.[0]).toBeCloseTo(2.5, 6);
-  expect(bounds?.base?.center?.[1]).toBeCloseTo(0.5, 6);
-  expect(bounds?.base?.center?.[2]).toBeCloseTo(2.5, 6);
-  expect(bounds?.base?.size?.[0]).toBeCloseTo(4 / 5, 6);
-  expect(bounds?.base?.size?.[1]).toBeCloseTo(4 / 5, 6);
-  expect(bounds?.base?.size?.[2]).toBeCloseTo(4 / 5, 6);
+  // Block geometry is physics-derived, not fixed cubes: particle size comes
+  // from the material closures, so a same-material drop and base carry EQUAL
+  // per-particle volumes and each block's edge scales with its particle
+  // count (edge = cbrt(count * perParticleVolume)). Bounds report particle
+  // CENTER spans (edge * (n-1)/n), and blocks anchor at their scenario base
+  // heights plus half a particle spacing (iceh=0 for the base, ironh=1.5
+  // for the drop). Float32 positions -> precision 5.
+  const dropEdgeM = bounds.drop.size[0] * (7 / 6);
+  const baseEdgeM = bounds.base.size[0] * (5 / 4);
+  expect(bounds?.drop?.center?.[0]).toBeCloseTo(2.5, 5);
+  expect(bounds?.drop?.center?.[2]).toBeCloseTo(2.5, 5);
+  expect(bounds?.base?.center?.[0]).toBeCloseTo(2.5, 5);
+  expect(bounds?.base?.center?.[2]).toBeCloseTo(2.5, 5);
+  expect(bounds?.drop?.size?.[1]).toBeCloseTo(bounds.drop.size[0], 5);
+  expect(bounds?.drop?.size?.[2]).toBeCloseTo(bounds.drop.size[0], 5);
+  expect(bounds?.base?.size?.[1]).toBeCloseTo(bounds.base.size[0], 5);
+  expect(bounds?.base?.size?.[2]).toBeCloseTo(bounds.base.size[0], 5);
+  const dropPerParticleVolumeM3 = (dropEdgeM ** 3) / expectedDropCount;
+  const basePerParticleVolumeM3 = (baseEdgeM ** 3) / expectedBaseCount;
+  expect(dropPerParticleVolumeM3).toBeCloseTo(basePerParticleVolumeM3, 5);
+  expect(bounds?.base?.center?.[1]).toBeCloseTo(0 + (baseEdgeM / 5) / 2 + bounds.base.size[1] / 2, 5);
+  expect(bounds?.drop?.center?.[1]).toBeCloseTo(1.5 + (dropEdgeM / 7) / 2 + bounds.drop.size[1] / 2, 5);
   const merge = summary.setParticlesTiming.sameMaterialDomainMergeDiagnostics;
   expect(merge?.schema).toBe('peercompute.ulg.sph-same-material-domain-merge-diagnostics.v0');
   expect(merge?.status).toBe('same-material-domain-surfaces-merged');

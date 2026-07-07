@@ -13940,6 +13940,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     particleStorageAdoptionOscillationDetected
     || particleStorageAdoptionNoTopologyChange
     || particleStorageAdoptionTornGroupDetected;
+  // Guard skips must stay observable downstream: without an explicit status
+  // the step envelope reports a skipped epoch identically to "storage chain
+  // never ran", which hides the (intended) guard behavior from panels/gates.
+  const particleStorageAdoptionSkipReason = particleStorageAdoptionOscillationDetected
+    ? 'schroeder-particle-storage-adoption-skipped-oscillation-guard'
+    : particleStorageAdoptionNoTopologyChange
+    ? 'schroeder-particle-storage-adoption-skipped-no-topology-change'
+    : particleStorageAdoptionTornGroupDetected
+    ? 'schroeder-particle-storage-adoption-skipped-torn-group'
+    : null;
   const resolvedParticleStorageAdoptionSource = particleStorageAdoptionSkipped
     ? null
     : candidateParticleStorageAdoptionSource;
@@ -14275,6 +14285,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         ?? resolvedTwoLevelMechanics?.nextParticleUploads
         ?? null,
       schroederParticleStorageAdoption: twoLevelParticleStorageAdoption,
+      schroederParticleStorageAdoptionStatus:
+        twoLevelParticleStorageAdoption?.status ?? particleStorageAdoptionSkipReason ?? null,
       twoLevelConservation: resolvedTwoLevelMechanics?.conservation ?? null,
       // Compact particle summary (fixed-size readback) doubles as the
       // resident-step diagnostics: residentMotionDiagnostic reads
@@ -14325,6 +14337,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederParticleStorageAllocation: resolvedParticleStorageAllocation,
     schroederParticleStorageSlotAssignment: resolvedParticleStorageSlotAssignment,
     schroederParticleStorageMaterialization: resolvedParticleStorageAdoptionSource,
+    schroederParticleStorageAdoptionSkipReason: particleStorageAdoptionSkipReason,
     schroederPhaseVolumeAssignmentOverlay: resolvedPhaseVolumeAssignmentOverlay,
     schroederPhaseVolumeAssignmentOverlayIndex: resolvedPhaseVolumeAssignmentOverlayIndex,
     schroederPhaseVolumeLevelUpdate: resolvedPhaseVolumeLevelUpdate,

@@ -39283,3 +39283,33 @@ order/suite-context dependent rather than regressed. Bisect plan
 recorded in the task list: baseline the single gate on a 72cd374
 worktree server first. This blocks starting the worker-lane
 rematerialization slice (design committed in the SS plan today).
+
+## 2026-07-06 — SS storage gate root-caused: no-op adoption guard vs gate expectation (not a regression)
+
+Baseline run on a 72cd374 worktree (fresh server, isolated gate) FAILS
+with the identical waitForFunction timeout, so the thermal-bin chain is
+exonerated and there was nothing to bisect. Live probes on the gate URL
+show the whole admission chain green (split-merge, allocator, free
+list, slot assignment, materialization all admitted+published, policy
+enabled, 32 rows) and the worker lane published at ~15s; the stopper is
+exec.schroederSameLevelMechanics.particleStorageAdoptionSkipped=true
+with particleStorageAdoptionNoTopologyChange=true. The static 16-
+particle h2o/h2o scene produces only pure-copy materialization epochs
+(zero count delta, nothing appended/freed), which the no-op adoption
+guard (983a48c, Jul 4) deliberately discards - adopting pure copies
+supersedes mechanics outputs every tick and froze a boiling scene at
+293K. The gate (a1e5378, Jul 2) predates the guard and was never
+updated; its suite-context passes were flukes where an early epoch had
+a real delta. Fixes: (1) guard skips are now observable - the schroeder
+runner passes schroederParticleStorageAdoptionSkipReason into the
+resident step envelope so finalStep.schroederParticleStorageAdoptionStatus
+reads schroeder-particle-storage-adoption-skipped-{oscillation-guard,
+no-topology-change,torn-group} instead of null (previously a guard skip
+was indistinguishable from the storage chain never running); the
+two-level path attaches the same status; the mounted panel ss-storage
+line now leads with adoption=<status>. (2) The gate accepts both policy
+outcomes with branch assertions: adopted (descriptor published,
+resolver ready, fail-closed continuation) or guard-skipped (explicit
+skip status, publication skipped with descriptor-unavailable reason,
+no hot record), with the lane/stage-chain/fail-closed assertions
+common to both branches.

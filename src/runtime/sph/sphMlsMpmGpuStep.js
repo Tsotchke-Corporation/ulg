@@ -15167,6 +15167,10 @@ async function residentStepEnvelope({
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
   schroederParticleStorageMaterialization = null,
+  // When an adoption guard (oscillation/no-topology-change/torn-group)
+  // discarded the materialized epoch upstream, the materialization arrives
+  // null but the skip must stay visible as an explicit adoption status.
+  schroederParticleStorageAdoptionSkipReason = null,
   thermalStep = null,
   reactionStep = null,
   mechanicsRefreshStep = null,
@@ -15490,7 +15494,8 @@ async function residentStepEnvelope({
     residentAuthorityParticleOwner: residentAuthoritySummary.familyOwners['particle-kinematics']?.ownerStage ?? null,
     residentAuthorityMechanicsOwner: residentAuthoritySummary.familyOwners.mechanics?.ownerStage ?? null,
     residentAuthorityThermoOwner: residentAuthoritySummary.familyOwners['thermo-phase']?.ownerStage ?? null,
-    schroederParticleStorageAdoptionStatus: schroederParticleStorageAdoption?.status ?? null,
+    schroederParticleStorageAdoptionStatus:
+      schroederParticleStorageAdoption?.status ?? schroederParticleStorageAdoptionSkipReason ?? null,
     schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
     schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
     schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
@@ -15582,7 +15587,8 @@ async function residentStepEnvelope({
     schroederFarAggregateGasCellImport,
     schroederParticleStorageMaterialization,
     schroederParticleStorageAdoption,
-    schroederParticleStorageAdoptionStatus: schroederParticleStorageAdoption?.status ?? null,
+    schroederParticleStorageAdoptionStatus:
+      schroederParticleStorageAdoption?.status ?? schroederParticleStorageAdoptionSkipReason ?? null,
     schroederParticleStorageAdopted: schroederParticleStorageAdoption?.adopted === true,
     schroederParticleStorageAdoptionMode: schroederParticleStorageAdoption?.adoptionMode ?? null,
     schroederParticleStorageAdoptionBlockers: [...(schroederParticleStorageAdoption?.blockers || [])],
@@ -15877,6 +15883,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederFarAggregateGasStateDelta = null,
   schroederFarAggregateGasCellImport = null,
   schroederParticleStorageMaterialization = null,
+  schroederParticleStorageAdoptionSkipReason = null,
   schroederFarAggregateForceApplication = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -16461,6 +16468,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
     schroederParticleStorageMaterialization,
+    schroederParticleStorageAdoptionSkipReason,
     schroederFarForceDeltaFusionStatus: schroederFarForceDeltaFusion?.status ?? null,
     schroederFarForceDeltaFusionVelocityDeltaStatus:
       schroederFarForceDeltaFusion?.velocityDeltaFusionStatus ?? null,

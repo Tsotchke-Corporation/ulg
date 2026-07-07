@@ -5595,6 +5595,11 @@ export async function mountSphPhaseDemoOverlay({
       adopted:
         publication?.adopted === true
         || publication?.schroederAdoptedParticleStorageDescriptor?.adopted === true,
+      // Adoption status straight off the executed step: distinguishes guard
+      // skips (oscillation/no-topology-change/torn-group) from a storage
+      // chain that never ran, which the publication skip reason cannot.
+      adoptionStatus:
+        sourceExecution?.finalStep?.schroederParticleStorageAdoptionStatus || null,
       localResolverStatus:
         publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolverStatus
         || publication?.schroederAdoptedParticleStorageLocalRetainedBufferResolver?.status
@@ -7756,7 +7761,7 @@ export async function mountSphPhaseDemoOverlay({
         `resident workers : ${initialResidentWorkersEnabled ? 'enabled' : 'disabled-by-url'}`,
         `resident policy  : ${residentExecutionPolicyStatus}`,
         `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
-        `ss storage      : pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
+        `ss storage      : adoption=${schroederAdoptedStorage.adoptionStatus || 'pending'} pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
         `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
@@ -7988,7 +7993,7 @@ export async function mountSphPhaseDemoOverlay({
       `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
       `resident policy  : ${residentExecutionPolicyStatus}`,
       `schroeder sim   : ${schroederSimulationStatusText({ residentSteps, residentStep, residentRenderState, residentSurfaceDraw, schroederRenderSource, schroederDrawSource, schroederBackendSelection })}`,
-      `ss storage      : pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
+      `ss storage      : adoption=${schroederAdoptedStorage.adoptionStatus || 'pending'} pub=${schroederAdoptedStorage.publicationStatus || 'pending'} resolver=${schroederAdoptedStorage.localResolverStatus || 'pending'} ready=${Boolean(schroederAdoptedStorage.localResolverReady)} stage=${schroederAdoptedStorage.continuationScheduleStatus || 'pending'} raw-transfer=${Boolean(schroederAdoptedStorage.rawGpuBufferPeerComputeTransfer)}`,
       `resident backend : ${residentBackend}`,
       `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,

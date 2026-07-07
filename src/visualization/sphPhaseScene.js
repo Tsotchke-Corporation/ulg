@@ -25016,6 +25016,30 @@ export function createSphPhaseScene(container, {
         pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
       });
       assignResidentSurfaceVisibleGpuConsumer(residentDraw, visibleGpuConsumer);
+      // The SS render-proxy backend selection is computed during the render
+      // source metadata step, BEFORE this bridge binds - so its renderer
+      // capability input was null and native selection stayed blocked
+      // forever. Re-resolve with the real bridge capability now that it
+      // exists and republish, so the native proxy backend can go
+      // submit/visible ready.
+      const proxyDrawSourceForReselect = scene.userData.schroederRenderProxyDrawSource || null;
+      if (proxyDrawSourceForReselect) {
+        const reselectedProxyBackend = resolveSchroederRenderProxyBackendSelection({
+          drawSource: proxyDrawSourceForReselect,
+          rendererCapability: visibleConsumerRendererCapability,
+          renderBridgeMode: residentDraw.visibleRendererBridge,
+          renderBridgeStatus: residentDraw.renderBridgeStatus,
+          pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run',
+          backendPreference: scene.userData.sphSchroederRenderProxyOverlayEnabled === true
+            ? 'auto'
+            : 'disabled',
+          source: 'resident-surface-draw-bridge-refresh'
+        });
+        scene.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
+        if (typeof renderer !== 'undefined' && renderer?.userData) {
+          renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
+        }
+      }
       return residentDraw;
     } catch (error) {
       markSphResidentRenderProgress('surface-draw-bridge-error', {
@@ -25532,6 +25556,28 @@ export function createSphPhaseScene(container, {
         pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
       });
       assignResidentSurfaceVisibleGpuConsumer(residentDraw, visibleGpuConsumer);
+      // Re-resolve the SS render-proxy backend selection with the real
+      // bridge capability (the metadata-step selection ran before the
+      // bridge bound, with a null capability - see the sibling reselect in
+      // the surface-draw bridge path).
+      const proxyDrawSourceForReselect = scene.userData.schroederRenderProxyDrawSource || null;
+      if (proxyDrawSourceForReselect) {
+        const reselectedProxyBackend = resolveSchroederRenderProxyBackendSelection({
+          drawSource: proxyDrawSourceForReselect,
+          rendererCapability: visibleConsumerRendererCapability,
+          renderBridgeMode: residentDraw.visibleRendererBridge,
+          renderBridgeStatus: residentDraw.renderBridgeStatus,
+          pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run',
+          backendPreference: scene.userData.sphSchroederRenderProxyOverlayEnabled === true
+            ? 'auto'
+            : 'disabled',
+          source: 'resident-extension-surface-draw-refresh'
+        });
+        scene.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
+        if (typeof renderer !== 'undefined' && renderer?.userData) {
+          renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
+        }
+      }
       sphResidentSurfaceDraw = residentDraw;
       scene.userData.sphResidentSurfaceDraw = residentDraw;
       if (!renderBridgeReady) {

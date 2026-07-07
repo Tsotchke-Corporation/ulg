@@ -39468,3 +39468,16 @@ predates 2caa049), continuation-after-coarsening, and the resident
 host/render cluster. Lesson recorded: WGSL kernels must fit DEFAULT
 WebGPU per-stage limits; a binding added for a flag-gated feature
 still costs its storage slot when disabled.
+
+## 2026-07-07 — SS render-proxy backend selection wired to the real bridge capability
+
+The proxy backend selection (4316da6) was computed during the render
+source metadata step with schroederRenderProxyRendererCapability
+permanently null - no caller ever passed it - so the native backend
+reported blocked-...-renderer-capability everywhere (panels included).
+The surface-draw and extension-surface refresh paths now re-resolve the
+selection once the real bridge capability exists and republish it,
+honoring the no-overlay policy (when the opt-in schroederRenderProxy=1
+flag is absent the selection reports backend-disabled-by-policy instead
+of a misleading capability block). The render-LOD gate (7879) opts into
+the overlay it tests and passes in 10.4s. Units 982/0.

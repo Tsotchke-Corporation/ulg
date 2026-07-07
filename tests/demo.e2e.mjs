@@ -7886,7 +7886,10 @@ test('SPH phase native surface consumer draws scene-local Schroeder render LOD',
     }
   });
 
-  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer');
+  // The Schroeder render proxy is an opt-in diagnostic overlay (no-overlay
+  // policy: disabled builds must not even create the native executor), so
+  // this proof opts in via schroederRenderProxy=1.
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&visualCapture=1&renderer=native-webgpu&surfaceDraw=native-webgpu-surface-consumer&schroederRenderProxy=1');
   await ensureSphPhaseOverlayVisible(page, { timeout: 180_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');

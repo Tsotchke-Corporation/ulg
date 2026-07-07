@@ -39497,3 +39497,19 @@ CPU-SPH probe shows viewport-refresh-rendered with a visible 152-
 particle h2o cpu-particles surface; visibility-resume gate passes
 (10.4s); mounted mlsmpm gates (drop-edge spheres, SS storage) still
 pass, so mlsmpm keeps the native consumer default.
+
+## 2026-07-07 — Resident-host cluster: three more gates green, 8991 traced to missing same-device import in direct mode
+
+7109 (no-full render refresh) and 6881 (product-event bounds) now pass
+as side effects of the P2G-limit and earlier fixes. 9687 (real browser
+PeerCompute host) passes after accepting the worker lanes' second
+materialization mode (same-worker-lane-retained-buffer-ref) via
+arrayContaining on three stale strict-array gates. 8991 modernized for
+residentComputeManagerMode 'direct' (no ComputeManager task wrapper in
+mounted flows; manager-task status asserted only when present) but
+still red: lane.sameDeviceRetainedBufferImportAvailable is false - the
+mounted direct-mode execution no longer links the same-device
+hot-buffer source publication into the worker lane report. Next
+blockers to trace: that import linkage, 8026 phase-volume feedback
+boolean, 8310/11097/11315 scheduler waits, 6107 gas placement, 6945
+buoyancy (8m timeout).

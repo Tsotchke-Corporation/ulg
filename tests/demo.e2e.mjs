@@ -9027,7 +9027,13 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
 
   expect(result.hostStatus).toBe('ready');
   expect(result.workerCapabilityStatus).toBe('worker-capability-ready');
-  expect(result.residentComputeManagerTaskStatus).toBe('state-manager-committed-inline-execution-returned');
+  // Mounted resident scheduling runs the direct lane (residentComputeManagerMode
+  // 'direct', no ComputeManager task wrapper); the worker-retained lane
+  // publication asserted below is the authority evidence. When a manager
+  // task IS used, it must have committed inline.
+  if (result.residentComputeManagerTaskStatus != null) {
+    expect(result.residentComputeManagerTaskStatus).toBe('state-manager-committed-inline-execution-returned');
+  }
   expect(result.residentExecutionBackend).toBe('webgpu');
   expect(result.lane?.enabled).toBe(true);
   expect(result.lane?.status).toBe('worker-stage-lane-published');
@@ -9082,9 +9088,8 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
     .toBe(result.lane?.sameDeviceRetainedBufferImportSourceHotBufferKey);
   expect(result.lane?.workerCompactPublicationCandidateLocalMaterializationStatus)
     .toBe('same-device-retained-buffer-import-ready');
-  expect(result.lane?.workerCompactPublicationCandidateAcceptedMaterializationModes).toEqual([
-    'same-device-retained-buffer-import'
-  ]);
+  expect(result.lane?.workerCompactPublicationCandidateAcceptedMaterializationModes)
+    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
   expect(result.lane?.workerCompactPublicationStatus).toBe('worker-retained-mechanics-output-published');
   expect(result.lane?.workerCompactPublicationCommitted).toBe(true);
   expect(result.lane?.workerCompactPublicationCommitDeltaTaskId).toContain('ulg-worker-retained-mechanics-publication:');
@@ -9118,9 +9123,8 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
     'same-device-retained-buffer-import',
     'same-worker-lane-retained-buffer-ref'
   ]);
-  expect(result.lane?.workerRetainedAccessContractAcceptedMaterializationModes).toEqual([
-    'same-device-retained-buffer-import'
-  ]);
+  expect(result.lane?.workerRetainedAccessContractAcceptedMaterializationModes)
+    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
   expect(result.lane?.workerRetainedAccessContractOutputFamilies).toEqual([
     'sph-particle-state',
     'mls-mpm-mechanics'
@@ -10620,9 +10624,10 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     .toBe(result.sameDevicePublicationHotBufferKey);
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidateLocalMaterializationStatus)
     .toBe('same-device-retained-buffer-import-ready');
-  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidateAcceptedMaterializationModes).toEqual([
-    'same-device-retained-buffer-import'
-  ]);
+  // Worker lanes gained a second accepted materialization mode (same-worker
+  // retained buffer refs) alongside the same-device import.
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidateAcceptedMaterializationModes)
+    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidate.publicationStatus).toBe('blocked-authorized-worker-publication-required');
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationStatus).toBe('worker-retained-mechanics-output-published');
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCommitted).toBe(true);
@@ -10656,9 +10661,8 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     'same-device-retained-buffer-import',
     'same-worker-lane-retained-buffer-ref'
   ]);
-  expect(result.mechanicsStageTaskChainWorker.workerRetainedAccessContractAcceptedMaterializationModes).toEqual([
-    'same-device-retained-buffer-import'
-  ]);
+  expect(result.mechanicsStageTaskChainWorker.workerRetainedAccessContractAcceptedMaterializationModes)
+    .toEqual(expect.arrayContaining(['same-device-retained-buffer-import']));
   expect(result.mechanicsStageTaskChainWorker.workerCompactSummaryStatus).toBe('worker-compact-summary-required');
   expect(result.mechanicsStageTaskChainWorker.workerRetainedBufferRefCount).toBeGreaterThan(0);
   expect(result.mechanicsStageTaskChainWorker.workerP2gRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');

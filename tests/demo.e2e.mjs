@@ -2085,7 +2085,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await expect(page.getByRole('link', { name: 'Open Multiscale' })).toHaveAttribute('href', /https:\/\/.*:5185\/\?scenario=magnetar/);
   await expect(page.getByRole('button', { name: 'Launch Magnetar' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Copy Handoff' })).toBeVisible();
-  await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.length === 2);
+  // The supervised tree registers moonlab + eshkol plus the ulg-runtime
+  // service (whose asset probe is legitimately skipped); require the two
+  // probed services rather than a fixed total count.
+  await page.waitForFunction(() => {
+    const services = window.__ulgDemo?.telemetry?.services || [];
+    return services.some((service) => service.serviceId === 'moonlab')
+      && services.some((service) => service.serviceId === 'eshkol');
+  });
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.some((service) => service.serviceId === 'moonlab' && service.assetProbe?.status));
   const moonlabAssetStatus = await page.evaluate(() => window.__ulgDemo.telemetry.services.find((service) => service.serviceId === 'moonlab').assetProbe.status);
   expect(moonlabAssetStatus).not.toBe('skipped');
@@ -3806,8 +3813,22 @@ test('SPH phase reset preserves non-H2O drop edge above six through mounted sphe
   expect(bounds?.drop?.finitePositionCount).toBe(expectedDropCount);
   expect(bounds?.base?.count).toBe(expectedBaseCount);
   expect(bounds?.base?.finitePositionCount).toBe(expectedBaseCount);
-  expect(bounds?.drop?.center?.[1]).toBeCloseTo(2, 6);
-  expect(bounds?.base?.center?.[1]).toBeCloseTo(0.5, 6);
+  // Physics-derived block geometry (see the same-material edge gate): each
+  // block's edge follows its material's closure-derived per-particle volume
+  // and particle count, anchored at the scenario base heights (iceh=0,
+  // ironh=1.5) plus half a particle spacing. Float32 positions -> precision 5.
+  const dropEdgeSpanM = bounds.drop.size[1];
+  const baseEdgeSpanM = bounds.base.size[1];
+  const dropBlockEdgeM = dropEdgeSpanM * (requestedDropEdge / (requestedDropEdge - 1));
+  const baseBlockEdgeM = baseEdgeSpanM * (expectedBaseEdge / (expectedBaseEdge - 1));
+  expect(bounds?.drop?.center?.[1]).toBeCloseTo(
+    1.5 + (dropBlockEdgeM / requestedDropEdge) / 2 + dropEdgeSpanM / 2,
+    5
+  );
+  expect(bounds?.base?.center?.[1]).toBeCloseTo(
+    0 + (baseBlockEdgeM / expectedBaseEdge) / 2 + baseEdgeSpanM / 2,
+    5
+  );
   expect(summary.sphUpload.status).toBe('webgpu-uploaded');
   expect(summary.sphUpload.particleCount).toBe(expectedTotalCount);
   expect(summary.mlsUpload.status).toBe('webgpu-uploaded');

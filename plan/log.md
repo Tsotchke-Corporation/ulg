@@ -39427,3 +39427,18 @@ places as particles nor accumulates ledger moles in this collection
 mode. Needs a focused pass through the reaction product placement /
 gas-species-ledger collection policy for that backend/scope combo
 (reaction-stoichiometry machinery landed this week).
+
+## 2026-07-06 — Failure classes 2 and 5 fixed; suite down to one real regression (6020)
+
+demo.e2e.mjs:3654 (spheres drop-edge) and 3993 (same-material edges)
+now assert physics-derived block geometry (per-material closure
+particle volumes, count-scaled edges, scenario-height anchoring plus
+half spacing) instead of fixed-cube literals; both pass ~16s and the
+points variant needed no change. The 2-minute click wedge on 3654 did
+not reproduce isolated - ordering flake, the literal was the real
+failure. demo.e2e.mjs:2081 (supervised service smoke) waited for
+services.length === 2, stale since the supervised tree registers
+ulg-runtime alongside moonlab/eshkol; the gate now requires the two
+probed services by id (passes 10.2s). Remaining known failure: 6020
+gas-product placement/ledger collection (fails at 72cd374 too; fully
+diagnosed in the earlier entry).

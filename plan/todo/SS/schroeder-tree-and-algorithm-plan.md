@@ -762,3 +762,29 @@ storage). Anchors and decisions from code audit:
 - Ban preserved: no GPUBuffer structured clone, no worker mapAsync export;
   cross-peer portable replay still routes through the validated compact
   buffer snapshot path.
+
+### Rematerialization slice status - 2026-07-06 (landed d866806, gates 8563575)
+
+Steps 1-3 above are implemented and gated:
+
+- The continuation planner mints `workerRematerializationSeed`
+  (descriptor-only, pure JSON) on every accepted plan; the lane scheduler
+  routes the former hard fail-close to consumer mode `worker-rematerialize`
+  with the seed attached (fail-closed only survives for a required
+  continuation with no usable seed; raw refs withheld in all cases).
+- `ulgMechanicsResidentStage.worker.js` rebuilds the adopted storage on the
+  worker device from seed + packed rows, retains per hot-buffer key, reuses
+  across schedules, supersedes retained-g2p input when applied, and fails
+  honest on a row-count mismatch (unit-tested: apply/reuse/mismatch).
+- Telemetry: stage summary -> chain report -> mounted lane publication
+  (`workerRematerialization{Scheduled,Status,Applied}`); the mounted panel
+  ss-storage line leads with `adoption=`.
+- Both storage gates (9389 mounted worker-lane, 9060 same-device chain)
+  assert adopt-or-guard-skip branches; each passes isolated in ~11s.
+
+Open residue for a later slice: a live e2e where adoption ACTUALLY fires
+(needs a scenario producing real split/merge topology changes - the no-op
+adoption guard correctly discards the static h2o/h2o scene's pure-copy
+epochs) so the adopted branch of both gates and the worker's applied path
+are exercised end-to-end in one run; and dropping the packed-row re-upload
+once worker-retained refs are live (step 2's tail optimization).

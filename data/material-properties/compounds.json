@@ -2,8 +2,8 @@
  "schema": "peercompute.ulg.material-property-bank.compounds.v0",
  "schemaVersion": 1,
  "bankFamily": "ulg-material-property-bank-compounds",
- "generatorFingerprint": "crc-standard-reference-seed-2026-07-04",
- "generatedAt": "2026-07-04T00:00:00Z",
+ "generatorFingerprint": "crc-standard-reference-seed-2026-07-06",
+ "generatedAt": "2026-07-06T00:00:00Z",
  "records": [
   {
    "schema": "peercompute.ulg.material-property-bank.compound.v0",
@@ -188,6 +188,192 @@
      "units": "K, J/kg, kg/m^3, J/(kg K)",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "h2",
+   "formula": "H2",
+   "name": "hydrogen",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      13.99
+     ],
+     "densityKgPerM3": 86.5,
+     "heatCapacityJPerKgK": 2600
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      13.99,
+      20.271
+     ],
+     "densityKgPerM3": 70.85,
+     "heatCapacityJPerKgK": 9690
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      20.271,
+      1000000
+     ],
+     "densityKgPerM3": 0.0838,
+     "heatCapacityJPerKgK": 14300
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 13.99,
+     "latentHeatJPerKg": 59500
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 20.271,
+     "latentHeatJPerKg": 445500
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-06"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "o2",
+   "formula": "O2",
+   "name": "oxygen",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      54.36
+     ],
+     "densityKgPerM3": 1426,
+     "heatCapacityJPerKgK": 1340
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      54.36,
+      90.188
+     ],
+     "densityKgPerM3": 1141,
+     "heatCapacityJPerKgK": 1699
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      90.188,
+      1000000
+     ],
+     "densityKgPerM3": 1.331,
+     "heatCapacityJPerKgK": 918
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 54.36,
+     "latentHeatJPerKg": 13900
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 90.188,
+     "latentHeatJPerKg": 213100
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-06"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "cl2",
+   "formula": "Cl2",
+   "name": "chlorine",
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      171.6
+     ],
+     "densityKgPerM3": 2030,
+     "heatCapacityJPerKgK": 710
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      171.6,
+      239.11
+     ],
+     "densityKgPerM3": 1562,
+     "heatCapacityJPerKgK": 926
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      239.11,
+      1000000
+     ],
+     "densityKgPerM3": 2.949,
+     "heatCapacityJPerKgK": 479
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 171.6,
+     "latentHeatJPerKg": 90300
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 239.11,
+     "latentHeatJPerKg": 287900
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-07-06"
     }
    ]
   }

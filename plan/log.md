@@ -39805,3 +39805,9 @@ floor, metal F0 Schlick, and now the container wireframe (buffer-less
 line-list pass in the native consumer's opaque pass). The dense scene
 renders teal box + silver metal + smooth water at 60 fps - parity with
 the classic three.js look. Round 11 validating.
+
+## 2026-07-08 — Round 11: 60/0/2 in 18.2m. Box wireframe validated clean.
+
+Third fully clean round (7, 9, 11). The complete surface-quality arc -
+gradient normals, continuity floor, metal F0, container wireframe - is
+landed with suite validation behind every commit.

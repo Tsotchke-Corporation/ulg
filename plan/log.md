@@ -39777,3 +39777,12 @@ context. Round 9 validating.
 
 Second fully clean round. Proceeding to surface item 3: material
 color/lighting parity in the native surface consumer.
+
+## 2026-07-08 — Metal fresnel fixed (de8c36e); surface item 3 mostly closed
+
+Iron near-black was vector-vs-scalar Schlick: env reflection used
+dielectric F0 (~0.04) instead of the metal's base-color F0 (~0.57 for
+iron). One-line physics fix; the drop renders warm silver matching the
+classic Drude path. All three "chunky yogurt" axes now addressed:
+gradient normals + continuity floor + metal F0. Remaining: box wireframe
+context (scene chrome). Round 10 validating.

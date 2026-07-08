@@ -1552,9 +1552,12 @@ Root causes located:
    isovalue 0.5-occupancy): raise the surface-extraction smoothing
    radius (e.g. 2h) and/or lift the isovalue away from the noise floor.
    Needs its own screenshot-tuning cycle across the surface e2e gates.
-3. MATERIAL/LIGHTING PARITY: native path draws iron near-black vs the
-   classic silver Drude color, no box wireframe context, flat shading.
-   Compare the native consumer's draw shader color/lighting against the
-   three.js material path.
+3. MATERIAL/LIGHTING PARITY: MOSTLY RESOLVED (de8c36e): the near-black
+   iron was a shading-math defect - environment reflection used the
+   scalar dielectric fresnel (~0.04 face-on) instead of the metal's own
+   F0 vector; Schlick with F0 = base color renders iron warm silver
+   (optical bank data was already correct). Remaining polish: box
+   wireframe context in the native path (scene chrome, not physics).
+   Flat shading was item 1 (gradient normals, done).
 
 Sequential-screenshot verification per plan/Agents.md when implemented.

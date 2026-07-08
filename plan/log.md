@@ -39786,3 +39786,13 @@ iron). One-line physics fix; the drop renders warm silver matching the
 classic Drude path. All three "chunky yogurt" axes now addressed:
 gradient normals + continuity floor + metal F0. Remaining: box wireframe
 context (scene chrome). Round 10 validating.
+
+## 2026-07-08 — Round 10: 59/1/2 in 18.6m; metal fresnel validated
+
+The single failure was the residual vite import-storm class
+(schroederHierarchyGpu 504 mid-suite on the long-lived server; green
+isolated in 6.3s). Rounds 7-10: 60/0, 59/1-churn, 60/0, 59/1-churn.
+Surface-quality arc complete: gradient normals (6c08872), continuity
+floor (c2f712b), metal F0 (de8c36e) - the reported "chunky yogurt"
+scene now renders as silver metal over smooth connected water.
+Remaining in the webgpu-ocean surface item: box wireframe chrome.

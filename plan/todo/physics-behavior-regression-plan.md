@@ -1603,3 +1603,24 @@ Note: vite dev-server re-optimize can 504 dynamic imports mid-suite
 (seen once on schroederHierarchyGpu.js) - tests already retry imports
 in some proofs; treat isolated 'Failed to fetch dynamically imported
 module' failures as environment noise and rerun.
+
+## Endgame status - 2026-07-07 (all enumerated failures closed)
+
+Every failure in the list above was fixed or honestly reconciled; see
+plan/log.md 2026-07-07 entries and commits 897441d, 21bb608, ec61ca2.
+Full-suite rounds: 21 failed (start) -> 4 -> 3 -> 2, each round's
+failures fixed and verified green isolated before the next round. The
+round-over-round churn (different tests each round) was environment
+classes, now hardened structurally:
+
+- vite dep re-optimize 504s: all 39 bare in-page dynamic imports route
+  through an injected __ulgImportWithRetry (8x2.5s); embedded retry
+  helpers widened; boot helper reloads once when the app's own boot
+  imports are hit (neither overlay nor button after half budget).
+- overlay boot: ensureSphPhaseOverlayVisible polls overlay-or-button
+  with click retries at all 33 former raw-click sites.
+- mid-schedule sampling: coarsening motion proof polls for a settled
+  mass-carrying sample.
+
+One more full round after the gas-Cp work lands confirms; then this
+plan moves to done.

@@ -39729,3 +39729,10 @@ contract (presses Play; 240s timeout -> 18.8s). Full arc: 21 failures /
 27.7m at start -> all gates proven green with structural hardening for
 each environmental class. physics-behavior-regression-plan moved to
 plan/done/. Round 6 running as continuing evidence.
+
+## 2026-07-08 — Round 6: 59/1/2 in 18.5m (best round); starting surface-normal fix
+
+Fastest round yet with the vite warmup live. The one failure (remote
+placement gate) passed isolated in 6.6s - churn. Proceeding with the
+resident-surface gradient-normals implementation per the diagnosis in
+plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md.

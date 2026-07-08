@@ -604,7 +604,7 @@ export function createDerivedMaterialClosure(materialKey, options = {}) {
     composition: properties.formula || (properties.mixture ? 'declared-mixture' : 'pure')
   };
   const inputHash = hashPayload({ material: materialKey, spec: resolveMaterialSpec(materialKey, options.materialSpecs || {}), provenance: properties.propertyProvenance });
-  const methodHash = hashPayload({ method: 'ulg.generic-first-principles-material-derivation.v1', properties });
+  const methodHash = hashPayload({ method: 'ulg.generic-first-principles-material-derivation.v2', properties });
   const base = createMaterialClosureArtifact({
     closureFamily: 'material',
     closureId: `ulg-derived-${materialKey}-material-closure`,

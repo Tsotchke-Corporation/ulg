@@ -59,6 +59,20 @@ test('banked vibrations give Cp(T) that rises from ambient toward the classical 
   }
 });
 
+test('CO2 bends are thermally active at ambient (the payoff over equipartition)', () => {
+  const co2 = closed.get('CO2');
+  assert.ok(co2, 'CO2 must be banked (Boys-precision + internal-coordinate + linear-drop fixes)');
+  assert.equal(co2.vibrationsCm1.length, 4, 'linear triatomic: 3N-5 modes with the degenerate bend pair');
+  const props = deriveFormulaMaterialProperties({ formula: 'CO2', phaseModel: 'ideal-gas' });
+  assert.equal(props.heatCapacityModel.gas, 'molecular-rrho-harmonic-vibrations-banked');
+  const cpMolar = props.phases[0].cpJPerKgK * props.molarMassKgPerMol;
+  // Equipartition gives 7/2 R = 29.1; experiment is 37.1 at 298 K. The
+  // banked ~566 cm^-1 bends must contribute several J/mol/K. (Derivation
+  // runs at STANDARD_TEMPERATURE_K = 273.15, slightly below 298.)
+  assert.ok(cpMolar > 3.5 * R + 4, `CO2 Cp ${cpMolar.toFixed(2)} J/mol/K must show bend activity`);
+  assert.ok(cpMolar < 3.5 * R + 15, `CO2 Cp ${cpMolar.toFixed(2)} J/mol/K within physical range`);
+});
+
 test('ideal-gas derivation consumes banked vibrations for H2O', () => {
   const props = deriveFormulaMaterialProperties({ formula: 'H2O', phaseModel: 'ideal-gas' });
   assert.equal(props.heatCapacityModel.gas, 'molecular-rrho-harmonic-vibrations-banked');

@@ -156,8 +156,14 @@ function deriveSpeciesRecord(formula) {
     const guess = formulaUnitGeometry(counts);
     atoms = optimizeGeometry(guess, { method: convergedEnergyHa, maxStepBohr: 0.3 }).atoms;
   }
-  const { vibrationsCm1 } = vibrationalFrequencies(atoms, { method: (a) => rhf(a).totalEnergyHa });
+  // Linear molecules have 3N-5 vibrations: only 5 zero modes (two rotations)
+  // must be dropped, or a degenerate bend is discarded with them (CO2's
+  // second 566 cm^-1 bend was eaten by the default nonlinear drop of 6).
   const linear = isLinearMolecule(atoms);
+  const { vibrationsCm1 } = vibrationalFrequencies(atoms, {
+    method: (a) => rhf(a).totalEnergyHa,
+    dropModes: atomTotal === 2 ? 5 : (linear ? 5 : 6)
+  });
   const expectedModeCount = 3 * atomTotal - (linear ? 5 : 6);
   const imaginary = vibrationsCm1.filter((nu) => nu < IMAGINARY_MODE_FLOOR_CM1);
   // A bound minimum keeps every atom within bonding range of a neighbor

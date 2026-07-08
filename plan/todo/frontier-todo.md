@@ -20,16 +20,16 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   for consistent, MP2-quality atomization energies (the number the bulk closures want).
 - **RHF fails for multiply-bonded dissociation** (N2 minimum mislocated) — single-determinant
   limitation. TODO: CASSCF / spin-projected UHF for bond breaking.
-- **SCF root instability blocks CO2 vibrations** (diagnosed 2026-07-08): the linear-CO2 PES scan
-  shows E(r) discontinuities up to 0.42 Ha between neighboring converged points (root hopping —
-  the SCF lands on different electronic solutions per geometry from the cold core guess). Any
-  derivative sees garbage curvature; internal-coordinate descent correctly locates r≈2.2 Bohr
-  (STO-3G literature 1.16 Å) but the Hessian rejects with pseudo-modes. Density-matrix warm-start
-  IMPLEMENTED (rhf initialP option) and verified NEGATIVE (2026-07-08): warm-scanned energies are
-  identical to cold at every point — the damped fixed-point iteration has geometry-dependent
-  attractors that dominate any seed (and r=2.5 Bohr exposes yet another root at -185.279 Ha,
-  below the physical minimum's basin). TODO: real SCF stabilization — DIIS and/or maximum-overlap
-  method (MOM) state-following; until then CO2 stays honestly rejected and on equipartition.
+- ~~SCF root instability blocks CO2 vibrations~~ RESOLVED (2026-07-08): the "root hopping" was
+  a **Boys-function precision hole** — the alternating series cancels catastrophically for
+  x in [16, 30] (60% error at x=29, verified against quadrature); CO2's O-O ERI arguments land
+  there while H2O's barely graze it. Asymptotic branch now takes over at x>16 (<2e-8 both sides).
+  With correct integrals the CO2 PES is smooth; internal-coordinate descent + linearity-aware
+  mode dropping close CO2 at [566, 566, 1437, 2535] cm^-1 (textbook) and Cp(298K)=38.7 vs
+  experimental 37.1 J/mol/K (equipartition was 29.1). H2O now lands the EXACT STO-3G literature
+  modes [2170, 4140, 4398]. DIIS + MOM state-following + density warm-start landed en route
+  (all standard SCF machinery, kept). Derivation method bumped to v2 (integral fix shifts all
+  molecular-derived numbers).
 - Forces/Hessian are **numerical** (finite-difference) → slow for MD/optimization of bigger systems.
   TODO: analytic gradients.
 - **No reaction-barrier / transition-state search** yet (only endpoint reaction energies). TODO:

@@ -62,7 +62,13 @@ function boys(nmax, x) {
     for (let m = 0; m <= nmax; m += 1) F[m] = 1 / (2 * m + 1);
     return F;
   }
-  if (x > 30) {
+  // The alternating series below loses precision catastrophically for
+  // x >~ 16 (0.5% at x=25, 60% at x=29 - verified against quadrature): the
+  // terms grow ~e^x before decaying, exhausting double precision. The
+  // asymptotic branch is accurate to <2e-8 from x=16 up (erf(4) ~ 1-2e-8),
+  // so cross over there. This was the root cause of the jagged CO2 PES:
+  // its O-O ERI arguments land in [16, 30] where H2O's never do.
+  if (x > 16) {
     F[0] = 0.5 * Math.sqrt(Math.PI / x);
     const ex = Math.exp(-x);
     for (let m = 1; m <= nmax; m += 1) F[m] = ((2 * m - 1) * F[m - 1] - ex) / (2 * x);
@@ -419,7 +425,98 @@ function solveFock(Fock, X, n) {
  * Restricted Hartree–Fock for a closed-shell molecule. `atoms` = [{ Z, position (Bohr) }].
  * Returns the total Born–Oppenheimer energy (electronic + nuclear repulsion) and diagnostics.
  */
-export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5, initialP = null } = {}) {
+// ---- DIIS (Pulay) SCF acceleration --------------------------------------
+// Error vector e = FPS - SPF vanishes at SCF convergence; extrapolating the
+// Fock matrix from the history that minimizes |e| stabilizes the iteration
+// path (the plain damped fixed point can hop between electronic roots as
+// geometry changes - seen on the linear-CO2 scan).
+function solveLinearSystem(A, b) {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < n; col += 1) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r += 1) {
+      if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
+    }
+    if (Math.abs(M[pivot][col]) < 1e-14) return null;
+    [M[col], M[pivot]] = [M[pivot], M[col]];
+    for (let r = 0; r < n; r += 1) {
+      if (r === col) continue;
+      const factor = M[r][col] / M[col][col];
+      for (let c = col; c <= n; c += 1) M[r][c] -= factor * M[col][c];
+    }
+  }
+  return M.map((row, i) => row[n] / M[i][i]);
+}
+
+function diisErrorMatrix(Fock, P, S, n) {
+  const FP = matMul(Fock, P, n);
+  const FPS = matMul(FP, S, n);
+  const SP = matMul(S, P, n);
+  const SPF = matMul(SP, Fock, n);
+  const error = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) error[i][j] = FPS[i][j] - SPF[i][j];
+  return error;
+}
+
+function diisExtrapolateFock(fockHistory, errorHistory, n) {
+  const m = fockHistory.length;
+  if (m < 2) return null;
+  const B = Array.from({ length: m + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 0; i < m; i += 1) {
+    for (let j = 0; j <= i; j += 1) {
+      let dot = 0;
+      const ei = errorHistory[i];
+      const ej = errorHistory[j];
+      for (let a = 0; a < n; a += 1) for (let b = 0; b < n; b += 1) dot += ei[a][b] * ej[a][b];
+      B[i][j] = dot;
+      B[j][i] = dot;
+    }
+    B[i][m] = -1;
+    B[m][i] = -1;
+  }
+  const rhs = new Array(m + 1).fill(0);
+  rhs[m] = -1;
+  const solution = solveLinearSystem(B, rhs);
+  if (!solution) return null;
+  const F = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let k = 0; k < m; k += 1) {
+    const c = solution[k];
+    const Fk = fockHistory[k];
+    for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) F[i][j] += c * Fk[i][j];
+  }
+  return F;
+}
+
+// Maximum-overlap occupied-orbital selection (MOM): occupy the nOcc new
+// orbitals with the largest projection onto a REFERENCE occupied subspace
+// instead of the lowest-eigenvalue (aufbau) set. Along a geometry scan,
+// aufbau switches electronic states whenever orbital ordering swaps -
+// the converged-yet-discontinuous CO2 PES - while MOM follows one state.
+function momOccupiedIndices(C, S, referenceOccupiedC, n, nOcc) {
+  const overlaps = new Array(n).fill(0);
+  for (let a = 0; a < n; a += 1) {
+    let total = 0;
+    for (let r = 0; r < referenceOccupiedC[0].length; r += 1) {
+      let dot = 0;
+      for (let i = 0; i < n; i += 1) {
+        let sc = 0;
+        for (let j = 0; j < n; j += 1) sc += S[i][j] * C[j][a];
+        dot += referenceOccupiedC[i][r] * sc;
+      }
+      total += dot * dot;
+    }
+    overlaps[a] = total;
+  }
+  return overlaps
+    .map((value, index) => [value, index])
+    .sort((x, y) => y[0] - x[0])
+    .slice(0, nOcc)
+    .map(([, index]) => index)
+    .sort((x, y) => x - y);
+}
+
+export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5, initialP = null, referenceOccupiedC = null } = {}) {
   const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
   if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
   const nOcc = nElectrons / 2;
@@ -437,7 +534,11 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
   let lastEnergy = Infinity;
   let finalC = null;
   let finalEps = null;
+  let finalOccupied = null;
   let finalP = P;
+  const fockHistory = [];
+  const errorHistory = [];
+  const DIIS_MAX_HISTORY = 8;
   for (let iter = 0; iter < maxIter; iter += 1) {
     const Fock = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) {
@@ -447,13 +548,27 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
         Fock[i][j] = Hcore[i][j] + g;
       }
     }
-    const { C, epsilon } = solveFock(Fock, X, n);
+    fockHistory.push(Fock.map((row) => [...row]));
+    errorHistory.push(diisErrorMatrix(Fock, P, S, n));
+    if (fockHistory.length > DIIS_MAX_HISTORY) {
+      fockHistory.shift();
+      errorHistory.shift();
+    }
+    const extrapolated = iter >= 2 ? diisExtrapolateFock(fockHistory, errorHistory, n) : null;
+    const { C, epsilon } = solveFock(extrapolated || Fock, X, n);
     finalC = C;
     finalEps = epsilon;
+    const occupied = Array.isArray(referenceOccupiedC) && referenceOccupiedC.length === n
+      ? momOccupiedIndices(C, S, referenceOccupiedC, n, nOcc)
+      : null;
+    finalOccupied = occupied;
     const Pnew = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
       let s = 0;
-      for (let a = 0; a < nOcc; a += 1) s += C[i][a] * C[j][a];
+      for (let k = 0; k < nOcc; k += 1) {
+        const a = occupied ? occupied[k] : k;
+        s += C[i][a] * C[j][a];
+      }
       Pnew[i][j] = 2 * s;
     }
     let eElec = 0;
@@ -464,7 +579,10 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) { scfConverged = true; break; }
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx, P: finalP, S, basis, scfConverged };
+  const occupiedC = finalC
+    ? Array.from({ length: n }, (_, i) => Array.from({ length: nOcc }, (_, k) => finalC[i][finalOccupied ? finalOccupied[k] : k]))
+    : null;
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx, P: finalP, S, basis, scfConverged, occupiedC };
 }
 
 /**

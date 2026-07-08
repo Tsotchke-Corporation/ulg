@@ -24,9 +24,12 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   shows E(r) discontinuities up to 0.42 Ha between neighboring converged points (root hopping —
   the SCF lands on different electronic solutions per geometry from the cold core guess). Any
   derivative sees garbage curvature; internal-coordinate descent correctly locates r≈2.2 Bohr
-  (STO-3G literature 1.16 Å) but the Hessian rejects with pseudo-modes. TODO: density-matrix
-  continuity — rhf() accepts an initial density and the optimizer/Hessian thread the previous
-  geometry's converged P through neighboring evaluations (plus DIIS/level shifting eventually).
+  (STO-3G literature 1.16 Å) but the Hessian rejects with pseudo-modes. Density-matrix warm-start
+  IMPLEMENTED (rhf initialP option) and verified NEGATIVE (2026-07-08): warm-scanned energies are
+  identical to cold at every point — the damped fixed-point iteration has geometry-dependent
+  attractors that dominate any seed (and r=2.5 Bohr exposes yet another root at -185.279 Ha,
+  below the physical minimum's basin). TODO: real SCF stabilization — DIIS and/or maximum-overlap
+  method (MOM) state-following; until then CO2 stays honestly rejected and on equipartition.
 - Forces/Hessian are **numerical** (finite-difference) → slow for MD/optimization of bigger systems.
   TODO: analytic gradients.
 - **No reaction-barrier / transition-state search** yet (only endpoint reaction energies). TODO:

@@ -419,11 +419,19 @@ function solveFock(Fock, X, n) {
  * Restricted Hartree–Fock for a closed-shell molecule. `atoms` = [{ Z, position (Bohr) }].
  * Returns the total Born–Oppenheimer energy (electronic + nuclear repulsion) and diagnostics.
  */
-export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5 } = {}) {
+export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5, initialP = null } = {}) {
   const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
   if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
   const nOcc = nElectrons / 2;
-  let P = Array.from({ length: n }, () => new Array(n).fill(0));
+  // Warm start: seeding SCF with a converged density from a NEIGHBORING
+  // geometry keeps the iteration on the same electronic root. From the cold
+  // core guess, nearby geometries can converge to different SCF solutions
+  // (0.4 Ha discontinuities seen on the linear-CO2 scan), which poisons any
+  // finite-difference derivative taken across them.
+  const warmStart = Array.isArray(initialP) && initialP.length === n;
+  let P = warmStart
+    ? initialP.map((row) => [...row])
+    : Array.from({ length: n }, () => new Array(n).fill(0));
   let energy = 0;
   let scfConverged = false;
   let lastEnergy = Infinity;

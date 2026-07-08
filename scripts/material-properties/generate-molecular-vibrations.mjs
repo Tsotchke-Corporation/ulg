@@ -19,7 +19,7 @@
 //
 // Usage: node scripts/material-properties/generate-molecular-vibrations.mjs [--write] [--species=h2o,co2]
 
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
 import {
@@ -128,11 +128,29 @@ for (const formula of species) {
   records.push(record);
 }
 
+// Subset runs (--species=...) merge into the existing bank instead of
+// clobbering records for species not derived this run.
+let mergedRecords = records;
+try {
+  const existing = JSON.parse(await readFile(bankPath, 'utf8'));
+  const derivedKeys = new Set(records.map((r) => r.key));
+  mergedRecords = [
+    ...(existing.records || []).filter((r) => !derivedKeys.has(r.key)),
+    ...records
+  ];
+} catch {
+  // No existing bank; write the fresh records.
+}
+
 const bank = {
   schema: MOLECULAR_VIBRATIONS_BANK_SCHEMA,
   method: METHOD,
-  generatorFingerprint: hashPayload({ schema: MOLECULAR_VIBRATIONS_BANK_SCHEMA, method: METHOD, species }),
-  records
+  generatorFingerprint: hashPayload({
+    schema: MOLECULAR_VIBRATIONS_BANK_SCHEMA,
+    method: METHOD,
+    species: mergedRecords.map((r) => r.formula)
+  }),
+  records: mergedRecords
 };
 
 if (write) {

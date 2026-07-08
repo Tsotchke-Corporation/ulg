@@ -6622,6 +6622,11 @@ export async function mountSphPhaseDemoOverlay({
         && execution?.backend === 'webgpu'
         && continuationBudget > 0
         && generation === particleSyncGeneration
+        // Continuation chaining is playback: a paused page runs exactly one
+        // bootstrap schedule to materialize resident render state, then
+        // holds. Without this gate the paused default page burned its
+        // continuation budget (visible fluid twitch) and froze mid-motion.
+        && playing
       );
       const renderMotion = residentMotionDiagnostic({
         residentStep: execution?.finalStep || null,

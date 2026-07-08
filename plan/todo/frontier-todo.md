@@ -39,8 +39,13 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   driver.step advances mechanics by `mechanicalSubsteps * carrierDt` and the thermal step by the
   SAME `dtStepS` (sphPhaseDemo.js ~3616/3884/3975); conduction/wall coefficients remain
   elevated-but-labelled for a watchable demo.
-- **Gas heat capacity uses equipartition** (constant Cv). Upgrade: derive Cp(T) of N2/O2/CO2/water
-  vapour from molecularThermochemistry (geometry + vibrations) — validated exact at 298 K.
+- **Gas heat capacity**: banked harmonic vibrations now feed the derivation (23c1d7d) — offline
+  generator + molecular-vibrations.json + Einstein Cp in gasHeatCapacityForFormula, honest model
+  tags, method v1 cache bump. H2O closed (Cp 33.26 vs 33.6 measured at 298 K); CO2 pending under
+  the new optimizer trust radius (its 667 cm⁻¹ bends are the real payoff: Cp 37.1 vs 29.1
+  equipartition); diatomics stay equipartition (exact at ambient; RHF multiple-bond minima are
+  the documented single-determinant failure). Remaining: runtime Cp(T) consumption in the demo
+  thermal step (gasVibrationsCm1 is exposed in the property record for exactly this).
 - ~~Performance: per-pair allocations in the O(N²) loops~~ DONE (2026-07-07 audit): the
   momentum/density loops (sphOperators.js) and thermal conduction (thermalPhase.js) are already
   inlined scalar math with no per-pair allocation. Remaining: a cell/neighbour list would take

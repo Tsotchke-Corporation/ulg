@@ -8679,9 +8679,14 @@ export function createContinuousSurfaceBatches({
   }
   return [...batches.values()].map((batch) => ({
     ...batch,
+    // A continuous surface from discrete samples needs metaball support at
+    // the SAMPLE SPACING scale: physical particle radii run ~half the
+    // spacing, and a union of barely-touching balls ripples across the
+    // isovalue into boundary flakes. The spacing estimate is a floor, not
+    // just a fallback for missing radii.
     surfaceRadiusM: Math.max(
-      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
-        ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
+      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM) ?? 0,
+      estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
       estimateSurfaceRadiusFromParticleRadiiM(batch.liquidContinuityRadiiM) ?? 0
     )
   }));
@@ -8769,9 +8774,14 @@ export function createResidentMaterialSeedSurfaceBatches({
       ...batch,
       averageColorRgb,
       colorsRgb: averageColorRgb,
-      surfaceRadiusM: batch.radiusCount > 0
-        ? batch.radiusSumM / batch.radiusCount
-        : ((Number.isFinite(smoothingLengthM) && smoothingLengthM > 0) ? smoothingLengthM : 0.25)
+      // Physical particle radii run ~half the spacing; a metaball union at
+      // that scale ripples across the isovalue into boundary flakes. The
+      // SPH smoothing length is the fluid's own interpolation support and
+      // the physically-derived surface continuity floor.
+      surfaceRadiusM: Math.max(
+        batch.radiusCount > 0 ? batch.radiusSumM / batch.radiusCount : 0,
+        (Number.isFinite(smoothingLengthM) && smoothingLengthM > 0) ? smoothingLengthM : 0.25
+      )
     };
   });
 }

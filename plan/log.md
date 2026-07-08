@@ -39746,3 +39746,10 @@ adapter+ABI node gates (two reconciled for the 7th binding and the
 scene screenshots show the smooth iron sphere. Remaining: boundary
 sliver triangles, material color/lighting parity, box context. Round 7
 running as the full-suite check on the WGSL change.
+
+## 2026-07-08 — Round 7: 60/0/2 in 17.7m. FIRST FULLY CLEAN ROUND.
+
+All 60 runnable gates green with the gradient-normals WGSL live, fastest
+round yet. Arc complete: 21 failed / 27.7m at session start ->
+60 passed / 0 failed / 17.7m. Proceeding to surface item 2 (boundary
+sliver triangles).

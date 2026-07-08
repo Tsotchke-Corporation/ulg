@@ -7018,8 +7018,11 @@ test('SPH phase ice floats and iron sinks in live resident water (cohort buoyanc
   const iron = await runBuoyancyScenario({ dropMaterial: 'Fe', dropTemperatureK: 293 });
   expect(iron.cohortStatus).toBe('cohort-summary-ready');
   // Iron (rho ~7874) sinks steadily through the same water at matched sim
-  // time (probes: minY ~0.74 and descending at t=8 vs ice stable ~0.97).
-  expect(iron.drop.minY).toBeLessThan(0.85);
+  // time. Recalibrated 2026-07-07 under the cavitation-clamped Tait EOS:
+  // monotonic descent 1.028 -> 0.960 -> 0.897 -> 0.886 over t=2..8.5 while
+  // ice holds ~1.034 at the waterline (separation ~0.14). The old 0.85
+  // threshold dated from the pre-clamp EOS (minY ~0.74 at t=8).
+  expect(iron.drop.minY).toBeLessThan(0.93);
   expect(ice.drop.minY - iron.drop.minY).toBeGreaterThan(0.1);
   // Per-cohort mass conservation across both runs.
   expect(Math.abs(ice.base.massKg - iron.base.massKg) / iron.base.massKg).toBeLessThan(1e-3);

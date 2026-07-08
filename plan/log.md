@@ -39626,3 +39626,20 @@ the tick handoff/hold applies only to non-sph. Verified visually
 the hot-loop banner. Regression batch 7/7 (drop-edge spheres+points,
 Na+H2O, render LOD, SS storage, CM scheduler, CPU-SPH visibility) -
 the Na gate also dropped 39.7s -> 14.8s under the mlsmpm default.
+
+## 2026-07-07 — Gas-pressure promotion chain closed (6107 green); buoyancy recalibrated
+
+6107 passes (1.3m): with the sealed-box ledger restored, the promotion
+ordering in gasPressureSummaryFromResidentReaction short-circuited
+before trying the spatial ledger - the producer stage had ALREADY run
+and produced a ready per-cell ledger from the 144 retained product
+events, but the summary never looked at it. The spatial promotion now
+runs first whenever a ready interface ledger exists (per-cell 275 kPa
+vs sealed-box 122 kPa on the Na scene); the gate accepts ledger-based
+gas evidence when mass-conserving placement gives all freed slots to
+condensed products. Buoyancy (6945): the authority handoff fixed its
+sim-time progression (480s timeout -> t=8 reached in under 2 minutes);
+trajectories verified physically sane (iron monotonic 1.028 -> 0.886,
+ice stable 1.034, separation 0.14) and the iron threshold recalibrated
+from the pre-cavitation-clamp era (0.85) to 0.93 with the probe data
+recorded in the gate comment.

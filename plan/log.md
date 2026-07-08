@@ -39855,3 +39855,36 @@ sweep also surfaced and fixed a continuity-floor overshoot in the
 continuous combiner (spacing estimate back to fallback-only; the
 smoothing-length floors that fixed the flakes stand). Round 13
 validating across e2e (thermal segment table grew).
+
+## 2026-07-08 — Round 13: 57/3/2. Gate 14494 root-caused: SS two-level destroys fine-cohort mass
+
+Round 13 (26.3m, fully cold after the method-v2 fingerprint bump)
+failed three gates. Triage: 2128 (moonlab/eshkol asset smoke) fails
+warm too - environmental/pre-existing; 6116 (active-metal gas
+pressure) fails warm rerun - needs its own look; 14494 (SS two-level
+thermal) is ROOT-CAUSED:
+
+The SS two-level authoritative path zeroes the fine-level cohort's
+particle MASS in its first schedule (650K drop: 8/35 rows read m=0 at
+simT=0.008 from the live GPU buffer; 27 base rows keep m=8; buffer
+stays 35 rows so this is not phase-volume splitting - 64 kg is simply
+destroyed). The thermal kernel then computes du = dE/max(m,1e-30) with
+equalization clamps, snapping zero-mass particles to neighbor/wall
+temperatures: hot-wall A/B (650K walls) holds the drop at exactly 650
+while cold default walls (283K) drain it instantly. The Cp(T)/method-v2
+tables only changed WHERE the snap lands (baseline parks on the 373.15
+plateau and passed the gate; v2 punches through to the bath at 300.2 -
+which is how a pre-existing mass-conservation bug surfaced as a thermal
+gate flip). Exonerated by A/B: plain resident path (both versions,
+gentle 650->645 cooling), separation pass (sep=0 identical), thermal
+sidecar plumbing (params identical to plain; lawt=0 still zeroes mass),
+G2P level-filter copy-through (verbatim rows). Baseline worktree at
+/tmp/ulg-precp (vite :5175) reproduces the zeroing pre-Cp.
+
+Next (task #3): instrument the two-level chain buffers to find the
+first zero-mass writer (fine-pass selected branch under active-grid
+filtering, or the phaseVolumeLevelUpdate path), and give the thermal
+kernel tombstone semantics (skip m<=0 rows in pair/wall terms) as the
+general defensive fix. SS two-level violates the SS plan's own
+conservation acceptance gate; this outranks the remaining round-13
+failures.

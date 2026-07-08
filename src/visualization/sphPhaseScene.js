@@ -5977,11 +5977,14 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let specular = (f0 + vec3<f32>(fresnel * (1.0 - metalness)))
     * (key_spec * key_color + fill_spec * fill_color) * 1.4;
   // Fresnel environment: liquids and metals pick up a sky-toned reflection at
-  // grazing angles - the strongest cue that a surface is glossy, not chalky.
+  // grazing angles. Schlick with the material's own F0 vector: a metal's
+  // F0 IS its base color (~0.5+ face-on), so iron reflects the environment
+  // across the whole surface - the scalar dielectric fresnel (~0.04 face-on)
+  // previously left metals near-black away from grazing angles.
   let horizon_color = mix(vec3<f32>(0.16, 0.22, 0.28), vec3<f32>(0.5, 0.62, 0.72),
     clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
-  let env_reflection = horizon_color * fresnel * (1.0 - roughness)
-    * mix(vec3<f32>(1.0), base_color, metalness);
+  let fresnel_v = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0);
+  let env_reflection = horizon_color * fresnel_v * (1.0 - roughness * 0.7);
   let scatter_haze = clamp(log2(1.0 + optical.scattering_coefficient_per_m) * 0.018, 0.0, 0.35);
   let rim = pow(1.0 - ndotv, 3.0) * (0.08 + scatter_haze) * (1.0 - roughness);
   let sky_fill = base_color * (1.0 - metalness) * (0.04 + 0.09 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));

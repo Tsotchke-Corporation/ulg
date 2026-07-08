@@ -4201,6 +4201,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   }, null, { timeout: 60_000 });
   await expect(page.locator('#sph-status')).toContainText('preflight        : preflight-feasible-derived-closures');
   await expect(page.locator('#sph-status')).not.toContainText('first-principles material properties are required');
+  // Paused pages hold after a single resident bootstrap schedule (no
+  // continuation chaining); the live-continuation assertions below need
+  // playback running, so press Play like a user would.
+  await page.locator('#sph-play').click();
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay?.querySelector('canvas');

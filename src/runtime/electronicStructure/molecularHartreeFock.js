@@ -731,8 +731,13 @@ export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, 
     const grad = nuclearGradient(coords, E, h);
     gradNorm = Math.max(...grad.flat().map(Math.abs));
     if (gradNorm < gradTol) break;
-    // Backtracking line search along the steepest-descent direction.
-    let alpha = 0.6;
+    // Backtracking line search along the steepest-descent direction, with a
+    // trust radius: cap the largest single-step atomic displacement at 0.3
+    // Bohr. Compressed starting geometries carry huge repulsive gradients,
+    // and an uncapped 0.6 step ejects atoms past the dissociation ridge
+    // before angular coordinates can relax (seen: CO2 -> O2 + distant C).
+    const TRUST_RADIUS_BOHR = 0.3;
+    let alpha = Math.min(0.6, TRUST_RADIUS_BOHR / gradNorm);
     let accepted = false;
     for (let bt = 0; bt < 25; bt += 1) {
       const trial = coords.map((p, i) => [p[0] - alpha * grad[i][0], p[1] - alpha * grad[i][1], p[2] - alpha * grad[i][2]]);

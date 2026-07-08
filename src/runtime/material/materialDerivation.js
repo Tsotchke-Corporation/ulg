@@ -1,9 +1,10 @@
 import { createMaterialClosureArtifact, hashPayload } from '../../../ulg-gpu-abi/src/index.js';
-import { atomicMassKg, symbolForZ, zForSymbol } from '../electronicStructure/periodicTable.js';
+import { atomicMassKg, symbolForZ, valenceElectronCount, zForSymbol } from '../electronicStructure/periodicTable.js';
 import { allElementMolecularEnergy } from '../electronicStructure/allElementMolecularSolver.js';
 import { atomizationEnergyHa, rhf } from '../electronicStructure/molecularHartreeFock.js';
 import { anchorDerivedMaterialProperties } from './referenceBankAnchoring.js';
 import { idealGasHeatCapacity } from '../electronicStructure/molecularThermochemistry.js';
+import molecularVibrationsBank from '../../../data/material-properties/molecular-vibrations.json' with { type: 'json' };
 import { PHYSICAL_CONSTANTS, idealGasDensityKgPerM3 } from '../materials/referenceMaterials.js';
 import { deriveElementProperties, elementMaterialClosure } from './elementClosures.js';
 import { latentHeatOfFusionJPerKg } from './phaseTransitions.js';
@@ -155,8 +156,19 @@ export function formulaUnitGeometry(atomCounts) {
       { Z: atoms[1], position: [0, 0, 0.5 * r] }
     ];
   }
-  const centralIndex = atoms.findIndex((Z) => Z > 1);
-  const central = centralIndex >= 0 ? atoms.splice(centralIndex, 1)[0] : atoms.shift();
+  // Central atom = highest covalent bonding capacity min(v, 8-v) from the
+  // valence electron count (C:4 > N:3 > O:2 > H/F:1). The previous
+  // "first Z > 1 after a descending sort" put O at the center of CO2, and
+  // the optimizer dissociated the molecule from that topology.
+  const bondingCapacity = (Z) => {
+    const v = valenceElectronCount(Z);
+    return Math.min(v, Math.max(1, 8 - v));
+  };
+  let centralIndex = 0;
+  for (let i = 1; i < atoms.length; i += 1) {
+    if (bondingCapacity(atoms[i]) > bondingCapacity(atoms[centralIndex])) centralIndex = i;
+  }
+  const central = atoms.splice(centralIndex, 1)[0];
   const out = [{ Z: central, position: [0, 0, 0] }];
   const shellRadius = 1.0 * A;
   atoms.forEach((Z, i) => {
@@ -249,11 +261,35 @@ function molecularCohesionJPerFormula(atomCounts, geometry, elementVolumes, opti
   };
 }
 
+// Offline-derived harmonic vibrational frequencies (RHF/STO-3G optimized
+// geometry + numerical Hessian, scripts/material-properties/
+// generate-molecular-vibrations.mjs). Only records whose derivation closed on
+// a bound harmonic minimum are trusted; everything else keeps equipartition,
+// which is the exact ambient physics for species whose modes are frozen.
+const MOLECULAR_VIBRATIONS_BY_FORMULA = new Map(
+  (molecularVibrationsBank?.records || [])
+    .filter((record) => record?.status === 'harmonic-minimum-closed'
+      && Array.isArray(record.vibrationsCm1)
+      && Array.isArray(record.optimizedAtoms))
+    .map((record) => [record.key, record])
+);
+
 function gasHeatCapacityForFormula(atomCounts, geometry, temperatureK, molarMassKgPerMol) {
+  const banked = MOLECULAR_VIBRATIONS_BY_FORMULA.get(canonicalFormula(atomCounts));
+  if (banked) {
+    const bankedAtoms = banked.optimizedAtoms.map((a) => ({ Z: a.Z, position: [...a.positionBohr] }));
+    const cp = idealGasHeatCapacity(bankedAtoms, banked.vibrationsCm1, temperatureK);
+    return {
+      cpJPerKgK: cp.cpJPerMolK / molarMassKgPerMol,
+      model: 'molecular-rrho-harmonic-vibrations-banked',
+      method: banked.method,
+      vibrationsCm1: [...banked.vibrationsCm1]
+    };
+  }
   if (allInMolecularBasis(atomCounts)) {
     try {
       const cp = idealGasHeatCapacity(geometry, [], temperatureK).cpJPerMolK;
-      return cp / molarMassKgPerMol;
+      return { cpJPerKgK: cp / molarMassKgPerMol, model: 'molecular-equipartition', vibrationsCm1: null };
     } catch {
       // Fall through to equipartition.
     }
@@ -261,7 +297,7 @@ function gasHeatCapacityForFormula(atomCounts, geometry, temperatureK, molarMass
   const n = atomCount(atomCounts);
   const rotational = n <= 1 ? 0 : (n === 2 ? 1 : 1.5);
   const cvMolar = (1.5 + rotational) * R;
-  return (cvMolar + R) / molarMassKgPerMol;
+  return { cpJPerKgK: (cvMolar + R) / molarMassKgPerMol, model: 'atom-count-equipartition', vibrationsCm1: null };
 }
 
 export function deriveFormulaMaterialProperties({
@@ -279,7 +315,8 @@ export function deriveFormulaMaterialProperties({
   const geom = geometry || formulaUnitGeometry(counts);
 
   if (phaseModel === 'ideal-gas') {
-    const gasCp = gasHeatCapacityForFormula(counts, geom, STANDARD_TEMPERATURE_K, molarMassKgPerMol);
+    const gasHeat = gasHeatCapacityForFormula(counts, geom, STANDARD_TEMPERATURE_K, molarMassKgPerMol);
+    const gasCp = gasHeat.cpJPerKgK;
     const gasDensity = idealGasDensityKgPerM3({
       pressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
       temperatureK: STANDARD_TEMPERATURE_K,
@@ -290,7 +327,8 @@ export function deriveFormulaMaterialProperties({
       atomsPerFormula,
       formula: resolvedFormula,
       idealGas: true,
-      heatCapacityModel: { gas: 'molecular-equipartition' },
+      heatCapacityModel: { gas: gasHeat.model },
+      gasVibrationsCm1: gasHeat.vibrationsCm1,
       phases: [{ name: 'gas', cpJPerKgK: gasCp, densityKgPerM3: gasDensity, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }],
       transitions: []
     }, {
@@ -306,7 +344,9 @@ export function deriveFormulaMaterialProperties({
           paths: ['idealGas', 'phases.gas.cpJPerKgK', 'phases.gas.densityKgPerM3', 'phases.gas.temperatureRange', 'phases.gas.shearModulusPa'],
           status: DS.PHYSICAL_LAW,
           source: 'molecular-statistical-mechanics+ideal-gas-law',
-          method: 'rigid-rotor/equipartition heat capacity plus rho=pM/RT'
+          method: gasHeat.vibrationsCm1
+            ? 'rigid-rotor plus banked harmonic-vibration Einstein heat capacity plus rho=pM/RT'
+            : 'rigid-rotor/equipartition heat capacity plus rho=pM/RT'
         })
       ],
       notes: [`${key || resolvedFormula} gas closure is derived from formula mass and molecular statistical mechanics.`]
@@ -336,7 +376,7 @@ export function deriveFormulaMaterialProperties({
   const latentVaporizationJPerKg = Math.max(cohesion.value * AVOGADRO / molarMassKgPerMol, latentFusion * 2);
   const entropyVaporization = R * (10 + Math.sqrt(atomsPerFormula));
   const boilingPointK = Math.max(meltingPointK * 1.15, (latentVaporizationJPerKg * molarMassKgPerMol) / entropyVaporization);
-  const gasCp = gasHeatCapacityForFormula(counts, geom, boilingPointK, molarMassKgPerMol);
+  const gasCp = gasHeatCapacityForFormula(counts, geom, boilingPointK, molarMassKgPerMol).cpJPerKgK;
   const gasDensity = idealGasDensityKgPerM3({
     pressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
     temperatureK: boilingPointK,
@@ -411,7 +451,7 @@ function deriveMixtureProperties({ key, components }) {
     const atomCounts = parseChemicalFormula(component.formula);
     const molarMass = formulaMolarMassKgPerMol(atomCounts);
     const geometry = formulaUnitGeometry(atomCounts);
-    const cp = gasHeatCapacityForFormula(atomCounts, geometry, STANDARD_TEMPERATURE_K, molarMass);
+    const cp = gasHeatCapacityForFormula(atomCounts, geometry, STANDARD_TEMPERATURE_K, molarMass).cpJPerKgK;
     const cv = cp * molarMass - R;
     molarMassKgPerMol += component.moleFraction * molarMass;
     cvMolar += component.moleFraction * cv;
@@ -561,7 +601,7 @@ export function createDerivedMaterialClosure(materialKey, options = {}) {
     composition: properties.formula || (properties.mixture ? 'declared-mixture' : 'pure')
   };
   const inputHash = hashPayload({ material: materialKey, spec: resolveMaterialSpec(materialKey, options.materialSpecs || {}), provenance: properties.propertyProvenance });
-  const methodHash = hashPayload({ method: 'ulg.generic-first-principles-material-derivation.v0', properties });
+  const methodHash = hashPayload({ method: 'ulg.generic-first-principles-material-derivation.v1', properties });
   const base = createMaterialClosureArtifact({
     closureFamily: 'material',
     closureId: `ulg-derived-${materialKey}-material-closure`,

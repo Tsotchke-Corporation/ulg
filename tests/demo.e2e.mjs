@@ -96,13 +96,22 @@ async function ensureSphPhaseOverlayVisible(page, { timeout = 60_000 } = {}) {
   const overlay = page.locator('#sph-phase-overlay');
   const runButton = page.locator('#run-sph-phase');
   const deadline = Date.now() + timeout;
+  const reloadAtMs = Date.now() + Math.min(30_000, timeout / 2);
+  let reloaded = false;
   while (await overlay.count() === 0 && Date.now() < deadline) {
     if (await runButton.count() > 0) {
       await runButton.click({ timeout: 2_000 }).catch(() => {});
+    } else if (!reloaded && Date.now() > reloadAtMs) {
+      // Neither overlay nor button after half the budget usually means the
+      // page's own boot imports hit a vite dep re-optimize 504 (which the
+      // injected import retrier cannot cover); one reload fetches the
+      // settled module graph.
+      reloaded = true;
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
     }
     await page.waitForTimeout(250);
   }
-  await expect(overlay).toBeVisible({ timeout: Math.max(1_000, deadline - Date.now()) });
+  await expect(overlay).toBeVisible({ timeout: Math.max(10_000, deadline - Date.now()) });
 }
 
 function createLineTail(limit = 80) {
@@ -13536,7 +13545,18 @@ test('SPH phase merged-set continuation proves motion numerically after live coa
   }, null, { timeout: 120_000 });
   const first = await sample();
   await page.waitForTimeout(10_000);
-  const second = await sample();
+  // A single-shot sample can land mid-schedule (summary momentarily zeroed
+  // while a continuation publishes); poll until a settled sample carries
+  // mass and displacement, then assert on it.
+  let second = await sample();
+  const secondSampleDeadline = Date.now() + 30_000;
+  while (
+    (!(second.nextMassKg > 0) || !(second.maxDisplacementM > 0))
+    && Date.now() < secondSampleDeadline
+  ) {
+    await page.waitForTimeout(1_000);
+    second = await sample();
+  }
   // The merged set must carry mass and evolve: a healthy continuation has
   // positive summary mass and nonzero per-step displacement. The center of
   // mass is finite but may be static once the pool settles to equilibrium,

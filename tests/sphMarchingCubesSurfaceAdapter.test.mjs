@@ -534,7 +534,7 @@ test('ULG consumes extension output descriptors without row metadata or legacy t
   assert.equal(translated.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(translated.surfaceVertices.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(translated.surfaceDraw.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
-  assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 144);
+  assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 160);
   assert.equal(bindGroups[0].entries[0].resource.buffer, descriptorBuffer);
 });
 
@@ -1020,7 +1020,12 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(shaderModules[0].code, webGpuMarchingCubesExtensionSurfaceRowsWgsl);
   assert.match(shaderModules[0].code, /SurfaceTranslationParams|compact_position_rows|surface_draw_indirect_rows/);
   assert.equal(bindGroups.length, 1);
-  assert.equal(bindGroups[0].entries.length, 6);
+  // Binding 6 carries the density field (or a dummy) for gradient normals.
+  assert.equal(bindGroups[0].entries.length, 7);
+  assert.equal(
+    bindGroups[0].entries[6].resource.buffer.label,
+    'ulg-sph-extension-surface-field-gradient-dummy'
+  );
   assert.equal(bindGroups[0].entries[0].resource.buffer, execution.result.buffer);
   assert.equal(bindGroups[0].entries[1].resource.buffer.label, 'ulg-sph-extension-surface-vertices');
   assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-extension-surface-draw');
@@ -1028,7 +1033,7 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(bindGroups[0].entries[5].resource.buffer.label, 'ulg-sph-extension-surface-source-vertex-count');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
-  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 144));
+  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 160));
   assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
 
   const retainedBuffers = [

@@ -94,8 +94,8 @@ struct SurfaceTranslationParams {
   position_origin_z_m: f32,
   position_grid_bias: f32,
   position_transform_enabled: f32,
-  position_transform_pad0: f32,
-  position_transform_pad1: f32,
+  field_resolution: f32,
+  field_scalar_offset: f32,
   position_clamp_min_x_m: f32,
   position_clamp_min_y_m: f32,
   position_clamp_min_z_m: f32,
@@ -103,11 +103,15 @@ struct SurfaceTranslationParams {
   position_clamp_max_y_m: f32,
   position_clamp_max_z_m: f32,
   position_clamp_enabled: f32,
-  position_clamp_pad0: f32,
+  gradient_normals_enabled: f32,
   bounds_center_x_m: f32,
   bounds_center_y_m: f32,
   bounds_center_z_m: f32,
   bounds_radius_m: f32,
+  field_row_stride: f32,
+  field_gradient_pad0: f32,
+  field_gradient_pad1: f32,
+  field_gradient_pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
@@ -116,6 +120,7 @@ struct SurfaceTranslationParams {
 @group(0) @binding(3) var<storage, read_write> surface_draw_indirect_rows: array<u32>;
 @group(0) @binding(4) var<uniform> params: SurfaceTranslationParams;
 @group(0) @binding(5) var<storage, read> source_vertex_count_rows: array<u32>;
+@group(0) @binding(6) var<storage, read> field_rows: array<f32>;
 
 fn compact_position(vertex_index: u32) -> vec3<f32> {
   let offset = vertex_index * params.source_stride_floats;
@@ -166,6 +171,49 @@ fn normalize_or_fallback(v: vec3<f32>) -> vec3<f32> {
     ));
   }
   return v / len;
+}
+
+fn field_sample(v: vec3<i32>) -> f32 {
+  let r = i32(params.field_resolution);
+  let c = clamp(v, vec3<i32>(0), vec3<i32>(r - 1));
+  // Cell rows carry [density, paletteR, paletteG, paletteB]; density is lane 0.
+  let idx = u32((c.z * r * r + c.y * r + c.x) * i32(params.field_row_stride) + i32(params.field_scalar_offset));
+  return field_rows[idx];
+}
+
+fn field_trilinear(p: vec3<f32>) -> f32 {
+  let base = floor(p);
+  let f = p - base;
+  let b = vec3<i32>(base);
+  let c00 = mix(field_sample(b), field_sample(b + vec3<i32>(1, 0, 0)), f.x);
+  let c10 = mix(field_sample(b + vec3<i32>(0, 1, 0)), field_sample(b + vec3<i32>(1, 1, 0)), f.x);
+  let c01 = mix(field_sample(b + vec3<i32>(0, 0, 1)), field_sample(b + vec3<i32>(1, 0, 1)), f.x);
+  let c11 = mix(field_sample(b + vec3<i32>(0, 1, 1)), field_sample(b + vec3<i32>(1, 1, 1)), f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+// Isosurface normal from the density-field gradient (the physical surface
+// normal), oriented coherently with the triangle winding. Falls back to the
+// face normal when the gradient degenerates or the field is not bound.
+fn field_gradient_normal(p: vec3<f32>, face_normal: vec3<f32>) -> vec3<f32> {
+  if (params.gradient_normals_enabled <= 0.5) {
+    return face_normal;
+  }
+  let h = 0.75;
+  let g = vec3<f32>(
+    field_trilinear(p + vec3<f32>(h, 0.0, 0.0)) - field_trilinear(p - vec3<f32>(h, 0.0, 0.0)),
+    field_trilinear(p + vec3<f32>(0.0, h, 0.0)) - field_trilinear(p - vec3<f32>(0.0, h, 0.0)),
+    field_trilinear(p + vec3<f32>(0.0, 0.0, h)) - field_trilinear(p - vec3<f32>(0.0, 0.0, h))
+  );
+  let len = length(g);
+  if (len <= 0.000000001) {
+    return face_normal;
+  }
+  var n = g / len;
+  if (dot(n, face_normal) < 0.0) {
+    n = -n;
+  }
+  return n;
 }
 
 fn write_vertex(vertex_index: u32, triangle_index: u32, p: vec3<f32>, normal: vec3<f32>) {
@@ -227,13 +275,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
   let vertex_base = triangle_index * 3u;
-  let p0 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 0u)));
-  let p1 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 1u)));
-  let p2 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 2u)));
-  let normal = normalize_or_fallback(cross(p1 - p0, p2 - p0));
-  write_vertex(vertex_base + 0u, triangle_index, p0, normal);
-  write_vertex(vertex_base + 1u, triangle_index, p1, normal);
-  write_vertex(vertex_base + 2u, triangle_index, p2, normal);
+  let g0 = compact_position(vertex_base + 0u);
+  let g1 = compact_position(vertex_base + 1u);
+  let g2 = compact_position(vertex_base + 2u);
+  let p0 = clamp_world_position(ulg_world_position(g0));
+  let p1 = clamp_world_position(ulg_world_position(g1));
+  let p2 = clamp_world_position(ulg_world_position(g2));
+  let face_normal = normalize_or_fallback(cross(p1 - p0, p2 - p0));
+  write_vertex(vertex_base + 0u, triangle_index, p0, field_gradient_normal(g0, face_normal));
+  write_vertex(vertex_base + 1u, triangle_index, p1, field_gradient_normal(g1, face_normal));
+  write_vertex(vertex_base + 2u, triangle_index, p2, field_gradient_normal(g2, face_normal));
   if (triangle_index == 0u) {
     write_draw_metadata(triangle_count);
   }
@@ -264,8 +315,8 @@ struct SurfaceTranslationParams {
   position_origin_z_m: f32,
   position_grid_bias: f32,
   position_transform_enabled: f32,
-  position_transform_pad0: f32,
-  position_transform_pad1: f32,
+  field_resolution: f32,
+  field_scalar_offset: f32,
   position_clamp_min_x_m: f32,
   position_clamp_min_y_m: f32,
   position_clamp_min_z_m: f32,
@@ -273,11 +324,15 @@ struct SurfaceTranslationParams {
   position_clamp_max_y_m: f32,
   position_clamp_max_z_m: f32,
   position_clamp_enabled: f32,
-  position_clamp_pad0: f32,
+  gradient_normals_enabled: f32,
   bounds_center_x_m: f32,
   bounds_center_y_m: f32,
   bounds_center_z_m: f32,
   bounds_radius_m: f32,
+  field_row_stride: f32,
+  field_gradient_pad0: f32,
+  field_gradient_pad1: f32,
+  field_gradient_pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> surface_draw_rows: array<f32>;
@@ -792,9 +847,10 @@ function createExtensionSurfaceTranslationParamsArray({
   fallbackNormal,
   positionTransform = null,
   positionClamp = null,
-  surfaceBounds = null
+  surfaceBounds = null,
+  fieldGradient = null
 }) {
-  const buffer = new ArrayBuffer(144);
+  const buffer = new ArrayBuffer(160);
   const view = new DataView(buffer);
   const resolvedTransform = positionTransform?.enabled
     ? positionTransform
@@ -831,6 +887,10 @@ function createExtensionSurfaceTranslationParamsArray({
   view.setFloat32(72, originM[1], true);
   view.setFloat32(76, originM[2], true);
   view.setFloat32(80, finiteNumber(resolvedTransform?.gridBias, 0), true);
+  view.setFloat32(88, finiteNumber(fieldGradient?.resolution, 0), true);
+  view.setFloat32(92, finiteNumber(fieldGradient?.scalarOffsetFloats, 0), true);
+  view.setFloat32(124, fieldGradient?.buffer ? 1 : 0, true);
+  view.setFloat32(144, finiteNumber(fieldGradient?.rowStrideFloats, 1), true);
   view.setFloat32(84, resolvedTransform ? 1 : 0, true);
   view.setFloat32(88, 0, true);
   view.setFloat32(92, 0, true);
@@ -1664,6 +1724,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   positionGridBias = -0.5,
   positionClampMinM = null,
   positionClampMaxM = null,
+  fieldGradient = null,
   readbackMode = NO_FULL_READBACK_MODE,
   compactSummaryReadback = false,
   translateVertexRows = true,
@@ -1856,7 +1917,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     ? null
     : device.createBuffer({
         label: 'ulg-sph-extension-surface-translation-params',
-        size: 144,
+        size: 160,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       });
   if (!sourceVertexCounterBuffer && !useExtensionDrawIndirectBuffer) {
@@ -1868,6 +1929,16 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     device.queue.writeBuffer(sourceVertexCounterBuffer, 0, new Uint32Array([sourceVertexCount]));
     ownsSourceVertexCounterBuffer = true;
   }
+  const resolvedFieldGradient = fieldGradient?.buffer
+    && Number.isFinite(fieldGradient.resolution)
+    && fieldGradient.resolution > 0
+    ? {
+        buffer: fieldGradient.buffer,
+        resolution: Math.round(fieldGradient.resolution),
+        scalarOffsetFloats: Math.max(0, Math.round(Number(fieldGradient.scalarOffsetFloats) || 0)),
+        rowStrideFloats: Math.max(1, Math.round(Number(fieldGradient.rowStrideFloats) || 1))
+      }
+    : null;
   if (!useExtensionDrawIndirectBuffer) {
     device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
       vertexCount: sourceVertexCount,
@@ -1886,7 +1957,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       fallbackNormal: resolvedFallbackNormal,
       positionTransform: resolvedPositionTransform,
       positionClamp: resolvedPositionClamp,
-      surfaceBounds: resolvedSurfaceBounds
+      surfaceBounds: resolvedSurfaceBounds,
+      fieldGradient: resolvedFieldGradient
     }));
   }
   markProgress('extension-surface-translation-buffers-ready');
@@ -1907,7 +1979,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
           ]
         })
       : createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v1',
+          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v2-gradient-normals',
           label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
           code: webGpuMarchingCubesExtensionSurfaceRowsWgsl,
           entryPoint: 'main',
@@ -1917,7 +1989,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
             computeBufferBinding(2, 'storage'),
             computeBufferBinding(3, 'storage'),
             computeBufferBinding(4, 'uniform'),
-            computeBufferBinding(5, 'read-only-storage')
+            computeBufferBinding(5, 'read-only-storage'),
+            computeBufferBinding(6, 'read-only-storage')
           ]
         }));
   const translationPipelineCacheStatus = useExtensionDrawIndirectBuffer
@@ -1926,6 +1999,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   let bindGroup = null;
   let encoder = null;
   let workgroupCountX = 0;
+  let fieldGradientDummyBuffer = null;
   if (useExtensionDrawIndirectBuffer) {
     markProgress('extension-surface-translation-command-skipped', {
       reason: 'using extension-owned drawIndirectBuffer for direct compact-position draw',
@@ -1948,7 +2022,17 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
             { binding: 2, resource: { buffer: drawRowsBuffer } },
             { binding: 3, resource: { buffer: drawIndirectRowsBuffer } },
             { binding: 4, resource: { buffer: paramsBuffer } },
-            { binding: 5, resource: { buffer: sourceVertexCounterBuffer } }
+            { binding: 5, resource: { buffer: sourceVertexCounterBuffer } },
+            {
+              binding: 6,
+              resource: {
+                buffer: resolvedFieldGradient?.buffer || (fieldGradientDummyBuffer = device.createBuffer({
+                  label: 'ulg-sph-extension-surface-field-gradient-dummy',
+                  size: 4,
+                  usage: GPU_BUFFER_USAGE.STORAGE
+                }))
+              }
+            }
           ]
     });
     encoder = device.createCommandEncoder();
@@ -2035,6 +2119,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
 
   const cleanup = () => {
     paramsBuffer?.destroy?.();
+    fieldGradientDummyBuffer?.destroy?.();
     if (ownsSourceVertexCounterBuffer) {
       sourceVertexCounterBuffer?.destroy?.();
     }

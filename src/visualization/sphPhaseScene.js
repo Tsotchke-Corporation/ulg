@@ -24351,6 +24351,15 @@ export function createSphPhaseScene(container, {
       ok: extensionExecution?.extensionExecution?.ok === true,
       status: extensionExecution?.status ?? 'native-marching-cubes-extraction-complete',
       reason: extensionExecution?.reason ?? extensionExecution?.summary?.reason ?? null,
+      // Echo the scalar field so the surface translation stage can derive
+      // per-vertex isosurface normals from the density gradient.
+      fieldVolume: {
+        scalarBuffer: descriptor.scalarBuffer ?? null,
+        scalarOffsetFloats: descriptor.scalarOffset ?? 0,
+        rowStrideFloats: descriptor.cellRowStrideFloats ?? descriptor.scalarStrides?.[0] ?? 1,
+        resolution: descriptor.resolution
+          ?? (Array.isArray(descriptor.dims) ? descriptor.dims[0] : null)
+      },
       descriptorStatus: descriptor.status,
       volumeSchema: volume.schema,
       volumeSourceType: volume.sourceType,
@@ -25250,6 +25259,14 @@ export function createSphPhaseScene(container, {
         positionGridBias,
         positionClampMinM,
         positionClampMaxM,
+        fieldGradient: extensionExecution?.fieldVolume?.scalarBuffer
+          ? {
+              buffer: extensionExecution.fieldVolume.scalarBuffer,
+              scalarOffsetFloats: extensionExecution.fieldVolume.scalarOffsetFloats,
+              rowStrideFloats: extensionExecution.fieldVolume.rowStrideFloats,
+              resolution: extensionExecution.fieldVolume.resolution
+            }
+          : null,
         readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
         translateVertexRows: !renderBridgePlan.useNativeWebGpuSurfaceConsumerBridge,

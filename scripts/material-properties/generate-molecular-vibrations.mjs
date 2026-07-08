@@ -51,6 +51,19 @@ const speciesArg = args.find((arg) => arg.startsWith('--species='));
 // Polyatomic gas species the demo's gas closures consume.
 const DEFAULT_SPECIES = ['H2O', 'CO2'];
 const IMAGINARY_MODE_FLOOR_CM1 = 50;
+// Physical harmonic vibrations top out near the H2 stretch (~4400 cm^-1;
+// HF/STO-3G overestimates ~20-30%). Anything past this ceiling means the
+// optimizer walked into an SCF-failure or collapsed geometry.
+const UNPHYSICAL_MODE_CEILING_CM1 = 8000;
+
+// Reject unconverged SCF energies outright: at pathological geometries the
+// SCF loop can exit at maxIter with a garbage-low energy, and a line search
+// that trusts it walks the molecule into collapse (seen: CO2 "modes" at
+// 74k-129k cm^-1 from a squeezed clump that never converged).
+const convergedEnergyHa = (a) => {
+  const r = rhf(a);
+  return r.scfConverged ? r.totalEnergyHa : Number.POSITIVE_INFINITY;
+};
 
 function deriveSpeciesRecord(formula) {
   const startedAtMs = Date.now();
@@ -69,7 +82,7 @@ function deriveSpeciesRecord(formula) {
     };
   }
   const guess = formulaUnitGeometry(counts);
-  const optimized = optimizeGeometry(guess, { method: (a) => rhf(a).totalEnergyHa });
+  const optimized = optimizeGeometry(guess, { method: convergedEnergyHa });
   const atoms = optimized.atoms;
   const { vibrationsCm1 } = vibrationalFrequencies(atoms, { method: (a) => rhf(a).totalEnergyHa });
   const linear = isLinearMolecule(atoms);
@@ -86,13 +99,16 @@ function deriveSpeciesRecord(formula) {
     const dz = a.position[2] - b.position[2];
     return Math.sqrt(dx * dx + dy * dy + dz * dz) < BONDING_RANGE_BOHR;
   }));
+  const unphysical = vibrationsCm1.filter((nu) => nu > UNPHYSICAL_MODE_CEILING_CM1);
   const status = fragmented
     ? 'rejected-fragmented-not-a-bound-minimum'
-    : (imaginary.length > 0
-        ? 'rejected-imaginary-or-soft-modes-not-a-minimum'
-        : (vibrationsCm1.length !== expectedModeCount
-            ? 'rejected-unexpected-mode-count'
-            : 'harmonic-minimum-closed'));
+    : (unphysical.length > 0
+        ? 'rejected-unphysical-mode-frequencies'
+        : (imaginary.length > 0
+            ? 'rejected-imaginary-or-soft-modes-not-a-minimum'
+            : (vibrationsCm1.length !== expectedModeCount
+                ? 'rejected-unexpected-mode-count'
+                : 'harmonic-minimum-closed')));
   const cp298 = status === 'harmonic-minimum-closed'
     ? idealGasHeatCapacity(atoms, vibrationsCm1, 298.15)
     : null;

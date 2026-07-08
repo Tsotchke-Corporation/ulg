@@ -359,7 +359,16 @@ export function createResidentProductMassHandle(reactionSummary = null) {
         if (destroyed || reactionSummary.productEventBufferDestroyed) return;
         destroyed = true;
         reactionSummary.productEventBufferDestroyed = true;
-        sourceDestroy();
+        // Honor active borrows the same way the merged-handle destroy does:
+        // concurrent refreshes pin the handle around their submits.
+        const attemptDestroy = () => {
+          if ((handle.__ulgActiveBorrowCount | 0) > 0) {
+            setTimeout(attemptDestroy, 50);
+            return;
+          }
+          sourceDestroy();
+        };
+        attemptDestroy();
       }
     : null;
   const unplacedProductMassKg = Number(reactionSummary.ledgerUnplacedProductMassKg)

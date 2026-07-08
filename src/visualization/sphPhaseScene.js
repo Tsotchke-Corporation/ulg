@@ -19695,7 +19695,17 @@ export function createSphPhaseScene(container, {
               requestedReactionParticleBinMetadataReadback
           }) !== signature
         ) {
-          destroyMlsMpmResidentStepBuffers(execution, { destroyInputResidentProductMass: true });
+          // Discarding a stale execution must not tear down state the LIVE
+          // published execution still owns: its input product-mass handle is
+          // the published continuation handle (and when a schedule emitted no
+          // products, the merge passes that same handle through as the stale
+          // execution's own residentProductMass). Destroying it here poisoned
+          // the next real schedule's merge submit ("used in submit while
+          // destroyed" on the merged-product-events buffer).
+          destroyMlsMpmResidentStepBuffers(execution, {
+            destroyInputResidentProductMass: false,
+            preserveBuffers: residentContinuationBuffersFromExecution(mlsMpmResidentSteps)
+          });
           return markResidentExecutionStale(execution, executionGeneration);
         }
         clearMlsMpmResidentExecutionArtifacts({
@@ -20539,6 +20549,15 @@ export function createSphPhaseScene(container, {
           || mlsMpmResidentSteps?.finalStep?.residentProductMass
           || null)
       : null;
+    // Pin the continuation product-mass handle for this refresh: a
+    // concurrent refresh (e.g. a full-parity readback requested mid
+    // playback) shares the same handle, and the first publisher's cleanup
+    // destroys it as consumed input. The borrow makes that destroy re-defer
+    // until every in-flight refresh has submitted against the buffer.
+    if (continuationResidentProductMass) {
+      continuationResidentProductMass.__ulgActiveBorrowCount =
+        (continuationResidentProductMass.__ulgActiveBorrowCount | 0) + 1;
+    }
     const sourceSphParticleState = continuationAvailable
       ? mlsMpmResidentSteps.nextSphParticleState
       : sphGpuParticleState;
@@ -21640,7 +21659,13 @@ export function createSphPhaseScene(container, {
               requestedSchroederParticleStorageRequiredCapacity
           }) !== signature
         ) {
-          destroyMlsMpmResidentStepsBuffers(execution);
+          // Same live-continuation hazard as the single-step stale discard:
+          // a no-emission schedule passes the published product-mass handle
+          // through, so tearing this execution down bare would destroy the
+          // buffer the published continuation still submits from.
+          destroyMlsMpmResidentStepsBuffers(execution, {
+            preserveBuffers: residentContinuationBuffersFromExecution(mlsMpmResidentSteps)
+          });
           return markResidentExecutionStale(execution, executionGeneration);
         }
         const sameDeviceHotBufferPublisherFn = sameDeviceHotBufferPublisher
@@ -21955,6 +21980,10 @@ export function createSphPhaseScene(container, {
         execution.residentStepsArtifactPublishMs = residentStepsStageMs.artifactPublishMs ?? null;
         return execution;
       } finally {
+        if (continuationResidentProductMass) {
+          continuationResidentProductMass.__ulgActiveBorrowCount =
+            Math.max(0, (continuationResidentProductMass.__ulgActiveBorrowCount | 0) - 1);
+        }
         pressureForceRowsBorrow?.release('released-after-mls-mpm-resident-steps-cleanup');
         destroyTemporaryPressureInterfaceForceRowsUpload({
           upload: resolvedPressureForceRowsUpload,

@@ -50,44 +50,44 @@
       "schema": "peercompute.ulg.molecular-vibrations-record.v1",
       "key": "CO2",
       "formula": "CO2",
-      "status": "rejected-fragmented-not-a-bound-minimum",
+      "status": "rejected-unphysical-mode-frequencies",
       "method": "rhf-sto3g-optimized-geometry-numerical-hessian-harmonic-frequencies",
       "linear": false,
       "optimizedAtoms": [
         {
           "Z": 6,
           "positionBohr": [
-            19.919828,
-            0.61114742,
-            0.41718688
+            0.015769783,
+            -0.038001542,
+            -0.061141567
           ]
         },
         {
           "Z": 8,
           "positionBohr": [
-            -12.010744,
-            -1.4975073,
-            3.0234022
+            2.1701515,
+            0.053039926,
+            1.2220663
           ]
         },
         {
           "Z": 8,
           "positionBohr": [
-            -12.847967,
-            0.23678522,
-            2.5453235
+            -1.633619,
+            -0.80601725,
+            -1.4457106
           ]
         }
       ],
       "vibrationsCm1": [
-        8262.71,
-        9406.15,
-        17894.1
+        74399,
+        101377,
+        128962
       ],
       "expectedModeCount": 3,
       "molarMassKgPerMol": 0.04400899998,
       "cpJPerMolKAt298K": null,
-      "derivationMs": 1478614
+      "derivationMs": 1107187
     }
   ]
 }

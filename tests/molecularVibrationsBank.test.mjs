@@ -31,6 +31,9 @@ test('closed bank records are bound, unfragmented minima with real modes', () =>
       assert.ok(nearest < 4, `${record.key}: atom ${i} nearest neighbor ${nearest.toFixed(2)} Bohr`);
     }
     assert.ok(record.vibrationsCm1.every((nu) => nu > 50), `${record.key}: no imaginary/soft modes`);
+    // Physical harmonic modes top out near the H2 stretch (~4400 cm^-1);
+    // collapsed/SCF-failed geometries produced 74k-129k cm^-1 pseudo-modes.
+    assert.ok(record.vibrationsCm1.every((nu) => nu < 8000), `${record.key}: modes within physical range`);
     assert.equal(record.vibrationsCm1.length, record.expectedModeCount);
   }
 });

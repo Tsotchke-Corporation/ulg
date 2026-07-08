@@ -8944,6 +8944,18 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       || residentProductMass?.productEventBuffer
       || stageOptions.reactionSummary?.productEventBuffer
       || null;
+    // Pin the resident handle while this async stage encodes/submits against
+    // its product-event buffer: schedule cleanup runs concurrently and its
+    // deferred destroy re-defers while a borrow is active.
+    const borrowedResidentProductMass = residentProductMass
+      && rawProductEventBuffer
+      && rawProductEventBuffer === residentProductMass.productEventBuffer
+      ? residentProductMass
+      : null;
+    if (borrowedResidentProductMass) {
+      borrowedResidentProductMass.__ulgActiveBorrowCount =
+        (borrowedResidentProductMass.__ulgActiveBorrowCount | 0) + 1;
+    }
     const productEventRowsAvailable = stageOptions.productEventRows instanceof Float32Array;
     const productEventBufferDeviceMismatch = rawProductEventBuffer && device?.createBuffer && !productEventRowsAvailable
       ? webGpuDeviceMismatchInfo({
@@ -9059,6 +9071,10 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
         reason: sourceBuffer ? 'webgpu-device-unavailable' : 'product-event-buffer-unavailable'
       };
       reason = webgpuStatus.reason;
+    }
+    if (borrowedResidentProductMass) {
+      borrowedResidentProductMass.__ulgActiveBorrowCount =
+        Math.max(0, (borrowedResidentProductMass.__ulgActiveBorrowCount | 0) - 1);
     }
   }
   if (!compactRows && stageOptions.productEventCompactRows instanceof Float32Array) {
@@ -14972,7 +14988,18 @@ async function mergeResidentProductMassBuffersWebGpu({
     destroyResidentProductMassBuffers() {
       if (destroyed) return;
       destroyed = true;
-      deferSubmittedWorkCleanup(device, () => finalBuffer.destroy?.());
+      // Asynchronous consumers (reaction/gas summary refreshes) borrow the
+      // handle around their own submits; destruction re-defers until every
+      // borrow is released so their command buffers never reference a
+      // destroyed product-event buffer.
+      const attemptDestroy = () => {
+        if ((handle.__ulgActiveBorrowCount | 0) > 0) {
+          deferSubmittedWorkCleanup(device, attemptDestroy);
+          return;
+        }
+        finalBuffer.destroy?.();
+      };
+      deferSubmittedWorkCleanup(device, attemptDestroy);
     },
     scientificValidation: false,
     chemistryValidation: false,

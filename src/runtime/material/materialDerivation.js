@@ -270,7 +270,10 @@ const MOLECULAR_VIBRATIONS_BY_FORMULA = new Map(
   (molecularVibrationsBank?.records || [])
     .filter((record) => record?.status === 'harmonic-minimum-closed'
       && Array.isArray(record.vibrationsCm1)
-      && Array.isArray(record.optimizedAtoms))
+      && Array.isArray(record.optimizedAtoms)
+      // Physical harmonic modes stay below ~4400 cm^-1 (H2 stretch); refuse
+      // stale banks carrying collapsed-geometry pseudo-modes.
+      && record.vibrationsCm1.every((nu) => nu > 50 && nu < 8000))
     .map((record) => [record.key, record])
 );
 

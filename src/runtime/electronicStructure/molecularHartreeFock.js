@@ -425,6 +425,7 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
   const nOcc = nElectrons / 2;
   let P = Array.from({ length: n }, () => new Array(n).fill(0));
   let energy = 0;
+  let scfConverged = false;
   let lastEnergy = Infinity;
   let finalC = null;
   let finalEps = null;
@@ -452,10 +453,10 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
     finalP = Pnew;
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) P[i][j] = damping * Pnew[i][j] + (1 - damping) * P[i][j];
     energy = eElec;
-    if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
+    if (Math.abs(energy - lastEnergy) < tol && iter > 2) { scfConverged = true; break; }
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx, P: finalP, S, basis };
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx, P: finalP, S, basis, scfConverged };
 }
 
 /**
@@ -489,6 +490,7 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
   let Pb = buildDensity(Cinit, nBeta);
 
   let energy = 0;
+  let scfConverged = false;
   let lastEnergy = Infinity;
   for (let iter = 0; iter < maxIter; iter += 1) {
     const Ptot = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => Pa[i][j] + Pb[i][j]));
@@ -521,10 +523,10 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
       Pb[i][j] = damping * PbNew[i][j] + (1 - damping) * Pb[i][j];
     }
     energy = eElec;
-    if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
+    if (Math.abs(energy - lastEnergy) < tol && iter > 2) { scfConverged = true; break; }
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nAlpha, nBeta };
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nAlpha, nBeta, scfConverged };
 }
 
 function contract2Eri(fa, fb, fc, fd) {

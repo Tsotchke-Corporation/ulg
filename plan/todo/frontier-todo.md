@@ -49,7 +49,10 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   driver.step advances mechanics by `mechanicalSubsteps * carrierDt` and the thermal step by the
   SAME `dtStepS` (sphPhaseDemo.js ~3616/3884/3975); conduction/wall coefficients remain
   elevated-but-labelled for a watchable demo.
-- **Gas heat capacity**: CLOSED for reference-temperature Cp (2822064): the Boys precision fix
+- ~~Gas heat capacity~~ CLOSED END-TO-END (2822064 + 498ee55): reference-temperature Cp via the
+  Boys fix, AND runtime Cp(T) via Einstein sub-segments in the energy ladder (CPU and GPU thermal
+  paths inherit identical piecewise Cp(T) through the existing segment table - zero WGSL changes).
+  Original notes: the Boys precision fix
   unblocked CO2 — banked at [566, 566, 1437, 2535] cm⁻¹ with Cp(298K) 38.7 vs measured 37.1
   J/mol/K (equipartition was 29.1); H2O at the exact STO-3G literature modes [2170, 4140, 4398].
   Diatomics stay equipartition (exact at ambient). Remaining piece: runtime Cp(T) in the demo

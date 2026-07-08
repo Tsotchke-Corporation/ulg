@@ -39843,3 +39843,15 @@ mode dropping. Method v2 bump; 22/22 node gates incl. CO2 bend gate.
 
 Frontier gas-Cp item reduced to its final piece: runtime Cp(T) via a
 piecewise enthalpy map in the demo thermal step.
+
+## 2026-07-08 — Runtime Cp(T) landed (498ee55); frontier gas-Cp item closed end-to-end
+
+Vibrational gas phases subdivide into exact Einstein-enthalpy sub-
+segments in the energy ladder; the GPU thermal kernel inherits identical
+piecewise Cp(T) through the existing segment table with zero WGSL/ABI
+changes. CO2 effective cp rises 15%+ from 250K to 950K in the gates;
+1234K round-trips through the inverse within a sub-segment. Node-suite
+sweep also surfaced and fixed a continuity-floor overshoot in the
+continuous combiner (spacing estimate back to fallback-only; the
+smoothing-length floors that fixed the flakes stand). Round 13
+validating across e2e (thermal segment table grew).

@@ -1539,8 +1539,15 @@ Root causes located:
    call site at sphPhaseScene ~25228 does not currently see the
    descriptor). Fallback to face normal when |grad| ~ 0 or field absent.
 2. SLIVER SHARDS at fluid boundary (worse at higher particle count):
-   degenerate triangles near the isovalue noise floor; consider zero-ing
-   sub-epsilon-area triangles in the same kernel pass.
+   PARTIALLY DIAGNOSED FURTHER (2026-07-08): a grid-space degenerate-area
+   cull (< 0.02 voxel^2, translation kernel v3) landed but the visible
+   flakes are UNCHANGED - they are sizable thin triangles from density
+   noise crossing the isovalue at the fluid boundary, i.e. a FIELD-level
+   artifact. The fix knob is the extraction policy in
+   algorithmMaterialRows.js (smoothingRadiusM = h, voxelSizeM = h/2,
+   isovalue 0.5-occupancy): raise the surface-extraction smoothing
+   radius (e.g. 2h) and/or lift the isovalue away from the noise floor.
+   Needs its own screenshot-tuning cycle across the surface e2e gates.
 3. MATERIAL/LIGHTING PARITY: native path draws iron near-black vs the
    classic silver Drude color, no box wireframe context, flat shading.
    Compare the native consumer's draw shader color/lighting against the

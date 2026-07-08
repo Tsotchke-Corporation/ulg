@@ -278,9 +278,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let g0 = compact_position(vertex_base + 0u);
   let g1 = compact_position(vertex_base + 1u);
   let g2 = compact_position(vertex_base + 2u);
+  // Degenerate slivers (grid-space area below any visible scale) contribute
+  // only shading noise at the fluid boundary; collapse them so the
+  // rasterizer culls the zero-area result.
+  let grid_area2 = length(cross(g1 - g0, g2 - g0));
+  let degenerate = grid_area2 < 0.02;
   let p0 = clamp_world_position(ulg_world_position(g0));
-  let p1 = clamp_world_position(ulg_world_position(g1));
-  let p2 = clamp_world_position(ulg_world_position(g2));
+  let p1r = clamp_world_position(ulg_world_position(g1));
+  let p2r = clamp_world_position(ulg_world_position(g2));
+  let p1 = select(p1r, p0, degenerate);
+  let p2 = select(p2r, p0, degenerate);
   let face_normal = normalize_or_fallback(cross(p1 - p0, p2 - p0));
   write_vertex(vertex_base + 0u, triangle_index, p0, field_gradient_normal(g0, face_normal));
   write_vertex(vertex_base + 1u, triangle_index, p1, field_gradient_normal(g1, face_normal));
@@ -1979,7 +1986,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
           ]
         })
       : createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v2-gradient-normals',
+          cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v3-degenerate-cull',
           label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
           code: webGpuMarchingCubesExtensionSurfaceRowsWgsl,
           entryPoint: 'main',

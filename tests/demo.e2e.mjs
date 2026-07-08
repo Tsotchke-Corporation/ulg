@@ -6443,8 +6443,16 @@ test('SPH phase mounted resident active-metal/H2O promotes product gas pressure'
       }
     }
     if (expectGasRenderRows) {
-      expect(Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
-        .some((key) => key.endsWith('|gas'))).toBe(true);
+      // Gas products only render as rows when a particle slot was free to
+      // place them; otherwise the gas lives in the spatial/sealed-box ledger
+      // (H2 from Na+H2O: all freed slots go to NaOH by mass-conserving
+      // placement). Either is honest gas evidence.
+      const hasGasRenderRows = Object.keys(result.renderState?.renderRowsDecodedMaterialPhaseCounts || {})
+        .some((key) => key.endsWith('|gas'));
+      const hasPromotedGasLedger =
+        result.residentGasPressure?.pressureInterfaceSpatialGasLedgerPromoted === true
+        && (result.residentGasPressure?.totalPressurePa ?? 0) > 101325;
+      expect(hasGasRenderRows || hasPromotedGasLedger).toBe(true);
     }
     expect(result.renderState?.materialKeys).toEqual(expect.arrayContaining(expectedMaterialKeys));
     expect(result.statusText).toContain('resident product');

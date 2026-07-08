@@ -3025,6 +3025,28 @@ export function gasPressureSummaryFromResidentReaction({
     ? residentProductMass.gasSpeciesLedger
     : null;
   const compactLedgerAvailable = Boolean(reactionSummary?.compactLedgerAvailable || residentProductMassGasLedger);
+  // The spatial gas ledger (per-cell positions from the producer stage) is
+  // the richer pressure authority than the sealed-box reaction totals: try
+  // the promotion FIRST whenever the interface carries a ready ledger, and
+  // only fall back to the species-total ledger when no spatial evidence
+  // exists. Ordering matters - once the reaction gas ledger became available
+  // in the no-full hot loop it short-circuited the promotion entirely.
+  {
+    const pressureInterfaceLedger = spatialGasSpeciesLedger
+      || spatialGasSpeciesLedgerFromPressureInterfaceState(pressureInterfaceState);
+    const pressureInterfaceGasCellField = gasCellField
+      || gasCellFieldFromPressureInterfaceState(pressureInterfaceState);
+    if (spatialGasSpeciesLedgerReady(pressureInterfaceLedger)) {
+      const promotedPressure = gasPressureSummaryFromSpatialGasSpeciesLedger({
+        baselineSummary,
+        residentLedger: residentProductMass || reactionSummary,
+        spatialGasSpeciesLedger: pressureInterfaceLedger,
+        gasCellField: pressureInterfaceGasCellField,
+        fallbackTemperatureK
+      });
+      if (promotedPressure) return promotedPressure;
+    }
+  }
   if (!compactLedgerAvailable) {
     const pressureInterfaceLedger = spatialGasSpeciesLedger
       || spatialGasSpeciesLedgerFromPressureInterfaceState(pressureInterfaceState);

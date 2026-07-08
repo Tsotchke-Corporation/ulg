@@ -1624,3 +1624,14 @@ classes, now hardened structurally:
 
 One more full round after the gas-Cp work lands confirms; then this
 plan moves to done.
+
+## CLOSED - 2026-07-08
+
+Graduation evidence: rounds 3/4/5 tallied 59/1, 57/3, 58/2 (round 4's
+three were the self-inflicted trust-radius tax, reverted same night).
+Every gate green in-suite across rounds; every residual failure verified
+green isolated; each environmental class structurally hardened (import
+retries + vite warmup, boot polling + reload, settled sampling, borrow
+pins for GPU buffer lifecycle). Suite runtime 20m (was 27.7m at the 21-
+failure start). Residual known churn: vite re-optimize storms and
+suite-load timing, both mitigated and documented in plan/log.md.

@@ -39606,3 +39606,23 @@ reports resident-pressure-interface-blocked in this scenario so the
 summary stays 'gpu-resident-reaction-pressure-summary' instead of the
 promoted spatial-gas-ledger source - the material-interface chain that
 feeds the spatial ledger is the remaining trail.
+
+## 2026-07-07 — MLS-MPM resident is the default integrator; sph opt-out owns single authority
+
+User report: particle overlays drawn on top of the webgpu surface -
+the mixed-source assembly the no-overlay architecture forbids. Root
+causes: (1) MECHANICS_MODE_DEFAULT was 'sph' (violating the standing
+mlsmpm-default directive) while residentAuto still scheduled mlsmpm
+resident rendering, so default pages ran BOTH CPU particle geometry
+and the native webgpu surface; (2) the init-time surface-mode gating
+read the mechanics SELECT, which only receives the URL value at
+applyUrlToControls() just before the first build - so the gating saw
+the default, not mech=. Fixes: default flipped to 'mlsmpm';
+initialMechanicsMode derived from the URL for the init-time policy
+sites; mech=sph stands the resident auto-scheduler down entirely and
+the tick handoff/hold applies only to non-sph. Verified visually
+(screenshots): default page renders one coherent resident surface with
+"MLS-MPM resident" selected; mech=sph renders pure CPU surfaces with
+the hot-loop banner. Regression batch 7/7 (drop-edge spheres+points,
+Na+H2O, render LOD, SS storage, CM scheduler, CPU-SPH visibility) -
+the Na gate also dropped 39.7s -> 14.8s under the mlsmpm default.

@@ -82,7 +82,12 @@ const MECHANICS_MODE_OPTIONS = Object.freeze([
   ['mlsmpm', 'MLS-MPM resident'],
   ['sph', 'Plain SPH CPU reference']
 ]);
-const MECHANICS_MODE_DEFAULT = 'sph';
+// MLS-MPM resident is the default integrator (standing directive): the GPU
+// resident lane owns physics and presentation; the plain SPH CPU reference
+// is an explicit opt-out (mech=sph) that owns BOTH its physics and its CPU
+// surface rendering - mixed authority draws particle overlays on top of the
+// webgpu surface.
+const MECHANICS_MODE_DEFAULT = 'mlsmpm';
 const DROP_MATERIAL_DEFAULT = 'Na';
 const BASE_MATERIAL_DEFAULT = 'h2o';
 const PEER_CLOSURE_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-derived-closure-cache.v1';
@@ -1999,6 +2004,13 @@ export async function mountSphPhaseDemoOverlay({
   }
   const initialQuery = new URLSearchParams(window.location.search);
   const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  // The mechanics select only receives the URL value at applyUrlToControls()
+  // (just before the first build) - init-time policy decisions that key on
+  // the integrator must read the URL directly or they see the default.
+  const initialMechanicsMode = (() => {
+    const raw = String(initialHash.get('mech') ?? initialQuery.get('mech') ?? '').trim().toLowerCase();
+    return MECHANICS_MODE_OPTIONS.some(([value]) => value === raw) ? raw : MECHANICS_MODE_DEFAULT;
+  })();
   const preserveDrawingBufferForCapture = ['1', 'true', 'yes'].includes(
     String(initialHash.get('visualCapture') ?? initialQuery.get('visualCapture') ?? '').toLowerCase()
   );
@@ -2406,7 +2418,7 @@ export async function mountSphPhaseDemoOverlay({
     if (
       surfaceDrawNativeAutoResolve
       && (normalized === '' || normalized === 'auto')
-      && mechanicsModeFromControls() !== 'sph'
+      && initialMechanicsMode !== 'sph'
     ) {
       return 'native-webgpu-surface-consumer';
     }
@@ -2696,7 +2708,7 @@ export async function mountSphPhaseDemoOverlay({
   // carrier (mech=sph) never runs that path, so defaulting it to a bridge
   // mode leaves the scene blank. CPU mechanics defaults to auto (CPU
   // surfaces); explicit surfaceDraw= URL selections still override.
-  const defaultThreeResidentSurfaceDrawMode = mechanicsModeFromControls() === 'sph'
+  const defaultThreeResidentSurfaceDrawMode = initialMechanicsMode === 'sph'
     ? 'auto'
     : (window.innerWidth < 700
       ? 'three-render-row-spheres'
@@ -6167,6 +6179,12 @@ export async function mountSphPhaseDemoOverlay({
     generation = particleSyncGeneration,
     force = false
   } = {}) {
+    // Single authority: the plain SPH CPU reference owns its physics AND its
+    // CPU surface rendering. Auto-scheduling resident mlsmpm steps alongside
+    // it draws native webgpu surfaces UNDER the CPU particle geometry - the
+    // mixed-source overlay the no-overlay architecture forbids. Explicit
+    // scene.refreshMlsMpmResidentSteps calls (diagnostic proofs) bypass this.
+    if (mechanicsModeFromControls() === 'sph') return;
     const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
     const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     const schroederExecutionOptions = schroederResidentExecutionOptionsFromConfig();
@@ -8144,7 +8162,7 @@ export async function mountSphPhaseDemoOverlay({
     // path: generations advanced ~13/s while each ~500ms execution came back
     // ~5 generations behind). Hold CPU stepping until the refresh resolves;
     // the pending watchdog still clears wedged refreshes.
-    if (initialResidentAutoEnabled && overlay.__mlsMpmResidentStepsPending) {
+    if (initialResidentAutoEnabled && mechanicsModeFromControls() !== 'sph' && overlay.__mlsMpmResidentStepsPending) {
       renderStatus();
       updateWarningBanner();
       requestPlaybackTick();
@@ -8158,7 +8176,7 @@ export async function mountSphPhaseDemoOverlay({
     // path). Schedule resident continuation exactly like the driverless
     // branch; the CPU driver keeps stepping only while no resident
     // continuation exists (pre-first-execution, or CPU-only mechanics).
-    if (initialResidentAutoEnabled && residentGpuContinuationReady()) {
+    if (initialResidentAutoEnabled && mechanicsModeFromControls() !== 'sph' && residentGpuContinuationReady()) {
       scheduleMlsMpmResidentSteps({ continueFromResidentState: true });
       renderStatus();
       updateWarningBanner();

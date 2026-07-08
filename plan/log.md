@@ -39677,3 +39677,33 @@ PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 or chromium boots without WebGPU and
 every resident gate red-herrings to cpu-reference fallback.
 
 Confirmation full suite running detached (confirm-suite.log).
+
+## 2026-07-07 — Gas Cp derives from banked harmonic vibrations (23c1d7d)
+
+The frontier "gas heat capacity uses equipartition" item: the derivation
+chain passed an empty vibrations array into the existing Einstein
+machinery. Offline generator now banks RHF/STO-3G harmonic frequencies
+(data/material-properties/molecular-vibrations.json); the runtime
+consumes closed records with honest model tags and a closure-cache
+method bump (v0->v1, invalidates stale derived closures).
+
+Two real solver defects surfaced en route, both general fixes:
+- formulaUnitGeometry central atom was "first Z>1 after descending
+  sort" -> oxygen-centered CO2 -> optimizer dissociated it. Now highest
+  bonding capacity min(v, 8-v) from valence electron counting.
+- optimizeGeometry uncapped steepest-descent steps ejected atoms from
+  compressed starts past the dissociation ridge; 0.3 Bohr trust radius.
+
+Validation honesty: generator rejects fragmented/imaginary/wrong-count
+records (the pre-fix CO2 "closed" as O2 + carbon 14 A away with three
+9769-15916 cm^-1 pseudo-modes); a node gate re-checks connectivity on
+every banked closed record. Diatomics excluded by the documented RHF
+multiple-bond limitation (N2 derived 24609 cm^-1 garbage) - their
+frozen stretches make equipartition exact at ambient anyway. H2O:
+textbook STO-3G geometry, Cp(298K) 33.26 vs 33.6 measured. CO2 (the
+payoff species: bends active at ambient, real Cp 37.1 vs 29.1
+equipartition) rederiving under the trust radius.
+
+Derivation costs measured (JS, this machine): H2O optimize+Hessian
+~50s; CO2 ~25-40 min; single N2 RHF 369 ms. Hessians must never run at
+cold start - offline bank only.

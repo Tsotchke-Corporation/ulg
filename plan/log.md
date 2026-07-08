@@ -39736,3 +39736,13 @@ Fastest round yet with the vite warmup live. The one failure (remote
 placement gate) passed isolated in 6.6s - churn. Proceeding with the
 resident-surface gradient-normals implementation per the diagnosis in
 plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md.
+
+## 2026-07-08 — Gradient normals landed (6c08872); surface item 1 of 3 closed
+
+The native surface path now shades with physical isosurface normals
+(-grad rho / |grad rho|) instead of flat face normals. Verified: 23/23
+adapter+ABI node gates (two reconciled for the 7th binding and the
+160-byte params struct), render-LOD + world-meters e2e green, dense
+scene screenshots show the smooth iron sphere. Remaining: boundary
+sliver triangles, material color/lighting parity, box context. Round 7
+running as the full-suite check on the WGSL change.

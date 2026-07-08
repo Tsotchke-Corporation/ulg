@@ -1520,7 +1520,11 @@ yog-mlsmpm-*/yog-sph-*/yog-dense-*.png). Physics is fine (pool spreads
 level, ball falls straight); the gap is presentation.
 
 Root causes located:
-1. FLAT FACE NORMALS: webGpuMarchingCubesExtensionSurfaceRowsWgsl main()
+1. ~~FLAT FACE NORMALS~~ DONE (6c08872): isosurface gradient normals from
+   the retained render-field buffer, stride-aware trilinear sampling,
+   winding-coherent orientation, face-normal fallback. Iron drop renders
+   as a smooth sphere (was faceted polyhedron). Items 2-3 below remain.
+   Original diagnosis: webGpuMarchingCubesExtensionSurfaceRowsWgsl main()
    writes normal = cross(p1-p0, p2-p0) to all 3 vertices of every
    triangle (sphMarchingCubesSurfaceAdapter.js ~line 233). Fix design:
    isosurface gradient normals, n = -normalize(grad rho), sampled from

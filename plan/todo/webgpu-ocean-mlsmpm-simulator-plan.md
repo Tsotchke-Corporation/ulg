@@ -1551,7 +1551,10 @@ Root causes located:
    algorithmMaterialRows.js (smoothingRadiusM = h, voxelSizeM = h/2,
    isovalue 0.5-occupancy): raise the surface-extraction smoothing
    radius (e.g. 2h) and/or lift the isovalue away from the noise floor.
-   Needs its own screenshot-tuning cycle across the surface e2e gates.
+   MOOT (2026-07-08): the continuity floor (c2f712b) resolved the flakes
+   at the surface-radius level; no extraction-policy tuning cycle is
+   needed - dense-scene screenshots show connected smooth water and
+   rounds 9/11 ran fully clean.
 3. MATERIAL/LIGHTING PARITY: MOSTLY RESOLVED (de8c36e): the near-black
    iron was a shading-math defect - environment reflection used the
    scalar dielectric fresnel (~0.04 face-on) instead of the metal's own

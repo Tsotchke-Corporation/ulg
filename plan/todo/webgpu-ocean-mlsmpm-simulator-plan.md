@@ -1556,7 +1556,7 @@ Root causes located:
    iron was a shading-math defect - environment reflection used the
    scalar dielectric fresnel (~0.04 face-on) instead of the metal's own
    F0 vector; Schlick with F0 = base color renders iron warm silver
-   (optical bank data was already correct). Remaining polish: box
+   (optical bank data was already correct). ~~Box wireframe~~ DONE (7e4c539): buffer-less line-list pass draws the container edges. Previously remaining polish was box
    wireframe context in the native path (scene chrome, not physics).
    Flat shading was item 1 (gradient normals, done).
 

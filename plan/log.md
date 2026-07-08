@@ -39796,3 +39796,12 @@ Surface-quality arc complete: gradient normals (6c08872), continuity
 floor (c2f712b), metal F0 (de8c36e) - the reported "chunky yogurt"
 scene now renders as silver metal over smooth connected water.
 Remaining in the webgpu-ocean surface item: box wireframe chrome.
+
+## 2026-07-08 — Box wireframe chrome (7e4c539); the full yogurt arc is closed
+
+All four axes of the reported resident-render regression are landed and
+screenshot-verified: gradient normals, smoothing-length continuity
+floor, metal F0 Schlick, and now the container wireframe (buffer-less
+line-list pass in the native consumer's opaque pass). The dense scene
+renders teal box + silver metal + smooth water at 60 fps - parity with
+the classic three.js look. Round 11 validating.

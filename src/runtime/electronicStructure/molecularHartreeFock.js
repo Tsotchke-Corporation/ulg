@@ -722,7 +722,7 @@ function nuclearGradient(coords, energyFn, h) {
  * angles come out of the electronic energy — molecular structure is predicted, not assumed.
  * `method` is the energy model (default closed-shell RHF total energy).
  */
-export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, maxSteps = 80, gradTol = 1.5e-3, h = 1e-3 } = {}) {
+export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, maxSteps = 80, gradTol = 1.5e-3, h = 1e-3, maxStepBohr = null } = {}) {
   const Zs = atoms.map((a) => a.Z);
   let coords = atoms.map((a) => [...a.position]);
   const E = (cs) => method(cs.map((p, i) => ({ Z: Zs[i], position: p })));
@@ -733,13 +733,16 @@ export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, 
     const grad = nuclearGradient(coords, E, h);
     gradNorm = Math.max(...grad.flat().map(Math.abs));
     if (gradNorm < gradTol) break;
-    // Backtracking line search along the steepest-descent direction, with a
-    // trust radius: cap the largest single-step atomic displacement at 0.3
-    // Bohr. Compressed starting geometries carry huge repulsive gradients,
-    // and an uncapped 0.6 step ejects atoms past the dissociation ridge
-    // before angular coordinates can relax (seen: CO2 -> O2 + distant C).
-    const TRUST_RADIUS_BOHR = 0.3;
-    let alpha = Math.min(0.6, TRUST_RADIUS_BOHR / gradNorm);
+    // Backtracking line search along the steepest-descent direction. An
+    // optional trust radius caps the largest single-step displacement:
+    // compressed starting geometries carry huge repulsive gradients, and an
+    // uncapped step can eject atoms past the dissociation ridge (seen:
+    // CO2 -> O2 + distant C in the vibrations generator). The cap is opt-in
+    // because it multiplies step counts - runtime cohesion derivations
+    // (cold-start budgets) keep the historical fast behavior.
+    let alpha = Number.isFinite(maxStepBohr) && maxStepBohr > 0
+      ? Math.min(0.6, maxStepBohr / gradNorm)
+      : 0.6;
     let accepted = false;
     for (let bt = 0; bt < 25; bt += 1) {
       const trial = coords.map((p, i) => [p[0] - alpha * grad[i][0], p[1] - alpha * grad[i][1], p[2] - alpha * grad[i][2]]);

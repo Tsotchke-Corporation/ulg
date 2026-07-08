@@ -82,7 +82,7 @@ function deriveSpeciesRecord(formula) {
     };
   }
   const guess = formulaUnitGeometry(counts);
-  const optimized = optimizeGeometry(guess, { method: convergedEnergyHa });
+  const optimized = optimizeGeometry(guess, { method: convergedEnergyHa, maxStepBohr: 0.3 });
   const atoms = optimized.atoms;
   const { vibrationsCm1 } = vibrationalFrequencies(atoms, { method: (a) => rhf(a).totalEnergyHa });
   const linear = isLinearMolecule(atoms);

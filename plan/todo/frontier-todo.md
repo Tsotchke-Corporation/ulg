@@ -20,6 +20,13 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   for consistent, MP2-quality atomization energies (the number the bulk closures want).
 - **RHF fails for multiply-bonded dissociation** (N2 minimum mislocated) — single-determinant
   limitation. TODO: CASSCF / spin-projected UHF for bond breaking.
+- **SCF root instability blocks CO2 vibrations** (diagnosed 2026-07-08): the linear-CO2 PES scan
+  shows E(r) discontinuities up to 0.42 Ha between neighboring converged points (root hopping —
+  the SCF lands on different electronic solutions per geometry from the cold core guess). Any
+  derivative sees garbage curvature; internal-coordinate descent correctly locates r≈2.2 Bohr
+  (STO-3G literature 1.16 Å) but the Hessian rejects with pseudo-modes. TODO: density-matrix
+  continuity — rhf() accepts an initial density and the optimizer/Hessian thread the previous
+  geometry's converged P through neighboring evaluations (plus DIIS/level shifting eventually).
 - Forces/Hessian are **numerical** (finite-difference) → slow for MD/optimization of bigger systems.
   TODO: analytic gradients.
 - **No reaction-barrier / transition-state search** yet (only endpoint reaction energies). TODO:

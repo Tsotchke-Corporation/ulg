@@ -65,6 +65,57 @@ const convergedEnergyHa = (a) => {
   return r.scfConverged ? r.totalEnergyHa : Number.POSITIVE_INFINITY;
 };
 
+// Internal-coordinate optimization for centrosymmetric-ish triatomics
+// (X-Y-X): parameterize by bond length r and bend angle theta and do
+// coordinate descent with golden-section line searches on the CONVERGED
+// RHF energy. Cartesian steepest descent deterministically collapses or
+// dissociates CO2 from generic seeds (see plan/log.md 2026-07-08); two
+// physical coordinates cannot wander off the bonding valley.
+function goldenMinimize(f, lo, hi, tolerance = 1e-4, maxIter = 40) {
+  const phi = (Math.sqrt(5) - 1) / 2;
+  let a = lo;
+  let b = hi;
+  let c = b - phi * (b - a);
+  let d = a + phi * (b - a);
+  let fc = f(c);
+  let fd = f(d);
+  for (let i = 0; i < maxIter && (b - a) > tolerance; i += 1) {
+    if (fc < fd) {
+      b = d; d = c; fd = fc;
+      c = b - phi * (b - a);
+      fc = f(c);
+    } else {
+      a = c; c = d; fc = fd;
+      d = a + phi * (b - a);
+      fd = f(d);
+    }
+  }
+  return fc < fd ? c : d;
+}
+
+function triatomicGeometry(centerZ, outerZ, rBohr, thetaRad) {
+  const half = thetaRad / 2;
+  return [
+    { Z: centerZ, position: [0, 0, 0] },
+    { Z: outerZ, position: [rBohr * Math.sin(half), 0, rBohr * Math.cos(half)] },
+    { Z: outerZ, position: [-rBohr * Math.sin(half), 0, rBohr * Math.cos(half)] }
+  ];
+}
+
+function optimizeSymmetricTriatomicInternal(centerZ, outerZ) {
+  const energyAt = (r, theta) => {
+    const result = rhf(triatomicGeometry(centerZ, outerZ, r, theta));
+    return result.scfConverged ? result.totalEnergyHa : Number.POSITIVE_INFINITY;
+  };
+  let r = 2.4;
+  let theta = Math.PI * 0.9;
+  for (let sweep = 0; sweep < 4; sweep += 1) {
+    r = goldenMinimize((x) => energyAt(x, theta), Math.max(1.2, r - 0.8), r + 0.8, 5e-4);
+    theta = goldenMinimize((x) => energyAt(r, x), Math.max(1.2, theta - 0.6), Math.min(Math.PI, theta + 0.6), 5e-4);
+  }
+  return { atoms: triatomicGeometry(centerZ, outerZ, r, theta), rBohr: r, thetaRad: theta, energyHa: energyAt(r, theta) };
+}
+
 function deriveSpeciesRecord(formula) {
   const startedAtMs = Date.now();
   const counts = parseChemicalFormula(formula);
@@ -81,9 +132,30 @@ function deriveSpeciesRecord(formula) {
         + 'RHF minima for multiple bonds are mislocated (single-determinant limitation)'
     };
   }
-  const guess = formulaUnitGeometry(counts);
-  const optimized = optimizeGeometry(guess, { method: convergedEnergyHa, maxStepBohr: 0.3 });
-  const atoms = optimized.atoms;
+  // Symmetric triatomics (one center atom, two identical outers) optimize
+  // in internal coordinates; everything else keeps the Cartesian path.
+  const zEntries = Object.entries(counts).map(([z, n]) => [Number(z), n]);
+  const symmetricTriatomic = atomTotal === 3
+    && zEntries.length === 2
+    && zEntries.some(([, n]) => n === 2)
+    && zEntries.some(([, n]) => n === 1);
+  let atoms;
+  let internalCoordinateSummary = null;
+  if (symmetricTriatomic) {
+    const centerZ = zEntries.find(([, n]) => n === 1)[0];
+    const outerZ = zEntries.find(([, n]) => n === 2)[0];
+    const internal = optimizeSymmetricTriatomicInternal(centerZ, outerZ);
+    atoms = internal.atoms;
+    internalCoordinateSummary = {
+      method: 'internal-coordinate-golden-section-descent',
+      bondLengthBohr: Number(internal.rBohr.toPrecision(6)),
+      bendAngleDeg: Number((internal.thetaRad * 180 / Math.PI).toPrecision(6)),
+      energyHa: Number(internal.energyHa.toPrecision(10))
+    };
+  } else {
+    const guess = formulaUnitGeometry(counts);
+    atoms = optimizeGeometry(guess, { method: convergedEnergyHa, maxStepBohr: 0.3 }).atoms;
+  }
   const { vibrationsCm1 } = vibrationalFrequencies(atoms, { method: (a) => rhf(a).totalEnergyHa });
   const linear = isLinearMolecule(atoms);
   const expectedModeCount = 3 * atomTotal - (linear ? 5 : 6);
@@ -122,6 +194,7 @@ function deriveSpeciesRecord(formula) {
     optimizedAtoms: atoms.map((a) => ({ Z: a.Z, positionBohr: a.position.map((x) => Number(x.toPrecision(8))) })),
     vibrationsCm1: vibrationsCm1.map((nu) => Number(nu.toPrecision(6))),
     expectedModeCount,
+    internalCoordinateSummary,
     molarMassKgPerMol: Number(formulaMolarMassKgPerMol(counts).toPrecision(10)),
     cpJPerMolKAt298K: cp298 ? Number(cp298.cpJPerMolK.toPrecision(6)) : null,
     derivationMs: Date.now() - startedAtMs

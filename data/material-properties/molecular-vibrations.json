@@ -1,51 +1,8 @@
 {
   "schema": "peercompute.ulg.molecular-vibrations-bank.v1",
   "method": "rhf-sto3g-optimized-geometry-numerical-hessian-harmonic-frequencies",
-  "generatorFingerprint": "ulg:55e32a93",
+  "generatorFingerprint": "ulg:cf77c5d3",
   "records": [
-    {
-      "schema": "peercompute.ulg.molecular-vibrations-record.v1",
-      "key": "H2O",
-      "formula": "H2O",
-      "status": "harmonic-minimum-closed",
-      "method": "rhf-sto3g-optimized-geometry-numerical-hessian-harmonic-frequencies",
-      "linear": false,
-      "optimizedAtoms": [
-        {
-          "Z": 8,
-          "positionBohr": [
-            -0.15297754,
-            0.37554056,
-            0.0041821488
-          ]
-        },
-        {
-          "Z": 1,
-          "positionBohr": [
-            1.4256565,
-            -0.28873449,
-            0.75317372
-          ]
-        },
-        {
-          "Z": 1,
-          "positionBohr": [
-            -0.8460643,
-            -1.1813801,
-            -0.75903028
-          ]
-        }
-      ],
-      "vibrationsCm1": [
-        3102.29,
-        4099.68,
-        5419.5
-      ],
-      "expectedModeCount": 3,
-      "molarMassKgPerMol": 0.01801499999,
-      "cpJPerMolKAt298K": 33.2584,
-      "derivationMs": 49129
-    },
     {
       "schema": "peercompute.ulg.molecular-vibrations-record.v1",
       "key": "CO2",
@@ -88,6 +45,55 @@
       "molarMassKgPerMol": 0.04400899998,
       "cpJPerMolKAt298K": null,
       "derivationMs": 1107187
+    },
+    {
+      "schema": "peercompute.ulg.molecular-vibrations-record.v1",
+      "key": "H2O",
+      "formula": "H2O",
+      "status": "harmonic-minimum-closed",
+      "method": "rhf-sto3g-optimized-geometry-numerical-hessian-harmonic-frequencies",
+      "linear": false,
+      "optimizedAtoms": [
+        {
+          "Z": 8,
+          "positionBohr": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "Z": 1,
+          "positionBohr": [
+            1.432447,
+            0,
+            1.1984737
+          ]
+        },
+        {
+          "Z": 1,
+          "positionBohr": [
+            -1.432447,
+            0,
+            1.1984737
+          ]
+        }
+      ],
+      "vibrationsCm1": [
+        2339.71,
+        4981.07,
+        5017.14
+      ],
+      "expectedModeCount": 3,
+      "internalCoordinateSummary": {
+        "method": "internal-coordinate-golden-section-descent",
+        "bondLengthBohr": 1.86768,
+        "bendAngleDeg": 100.164,
+        "energyHa": -74.96590448
+      },
+      "molarMassKgPerMol": 0.01801499999,
+      "cpJPerMolKAt298K": 33.2711,
+      "derivationMs": 26002
     }
   ]
 }

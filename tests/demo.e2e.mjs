@@ -69,17 +69,40 @@ function sanitizeArtifactLabel(label) {
   return String(label || 'artifact').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'artifact';
 }
 
+// Vite dep re-optimization mid-suite 504s dynamic imports; every page gets a
+// retrying importer so in-page module loads survive the re-optimize window.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__ulgImportWithRetry = async (path) => {
+      let lastError = null;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          return await import(path);
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+      }
+      throw lastError;
+    };
+  });
+});
+
 async function ensureSphPhaseOverlayVisible(page, { timeout = 60_000 } = {}) {
+  // Two mount families: auto-mount routes never render #run-sph-phase, and
+  // button routes may render it late under suite load. Poll for whichever
+  // appears first, clicking the button whenever it is present, and let the
+  // final toBeVisible be the authoritative gate.
   const overlay = page.locator('#sph-phase-overlay');
-  if (await overlay.count() === 0) {
-    await page.locator('#run-sph-phase').click({
-      timeout: Math.min(5_000, timeout)
-    }).catch(() => {
-      // Auto-mount routes may never render the button; the toBeVisible
-      // wait below is the authoritative gate either way.
-    });
+  const runButton = page.locator('#run-sph-phase');
+  const deadline = Date.now() + timeout;
+  while (await overlay.count() === 0 && Date.now() < deadline) {
+    if (await runButton.count() > 0) {
+      await runButton.click({ timeout: 2_000 }).catch(() => {});
+    }
+    await page.waitForTimeout(250);
   }
-  await expect(overlay).toBeVisible({ timeout });
+  await expect(overlay).toBeVisible({ timeout: Math.max(1_000, deadline - Date.now()) });
 }
 
 function createLineTail(limit = 80) {
@@ -1439,9 +1462,9 @@ test('SPH surface draw WebGPU shader compacts vertex rows in Chromium', async ({
   test.setTimeout(30_000);
   await page.goto('/');
   const result = await page.evaluate(async () => {
-    const renderModule = await import('/src/runtime/sph/sphRenderGpuKernel.js');
-    const opticalModule = await import('/src/runtime/material/opticalGpuBuffers.js');
-    const sceneModule = await import('/src/visualization/sphPhaseScene.js');
+    const renderModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphRenderGpuKernel.js');
+    const opticalModule = await window.__ulgImportWithRetry('/src/runtime/material/opticalGpuBuffers.js');
+    const sceneModule = await window.__ulgImportWithRetry('/src/visualization/sphPhaseScene.js');
     if (!navigator.gpu) {
       return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
     }
@@ -1892,7 +1915,7 @@ test('SPH resident overlay depth attachment occludes far transparent and opaque 
   test.setTimeout(30_000);
   await page.goto('/');
   const result = await page.evaluate(async () => {
-    const sceneModule = await import('/src/visualization/sphPhaseScene.js');
+    const sceneModule = await window.__ulgImportWithRetry('/src/visualization/sphPhaseScene.js');
     const { SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT } = sceneModule;
     if (!navigator.gpu) {
       return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
@@ -8436,7 +8459,7 @@ test('SPH WebGPU extension surface translation maps MC grid positions into ULG w
   const result = await page.evaluate(async () => {
     const {
       buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu
-    } = await import('/src/runtime/sph/sphMarchingCubesSurfaceAdapter.js');
+    } = await window.__ulgImportWithRetry('/src/runtime/sph/sphMarchingCubesSurfaceAdapter.js');
     if (!navigator.gpu) return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable', reason: 'requestAdapter returned null' };
@@ -8738,7 +8761,7 @@ test('SPH phase resident steps can submit through a ComputeManager-shaped GPU la
           readbackBytes: task.gpuResidentLane?.copyBudget?.readbackBytes ?? null,
           compactSummaryBytes: task.gpuResidentLane?.copyBudget?.compactSummaryBytes ?? null
         });
-        const module = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+        const module = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
         const execution = await module.runMlsMpmResidentStepsComputeTask(task.data);
         return {
           status: 'accepted-inline',
@@ -8792,7 +8815,10 @@ test('SPH phase resident steps can submit through a ComputeManager-shaped GPU la
   expect(result.backend).toBe('webgpu');
   expect(result.completedStepCount).toBe(1);
   expect(result.computeManagerTaskStatus).toBe('inline-execution-returned');
-  expect(result.computeManagerTaskLaneId).toBe('ulg:sph-resident:scene');
+  // Lanes are state-key scoped since f7427d4 (warm-continuation affinity);
+  // the caller's bare lane id is preserved in requestedLaneId.
+  expect(result.computeManagerTaskLaneId).toMatch(/^ulg:sph-resident:scene:state-[0-9a-z]+$/);
+  expect(result.computeManagerTaskRequestedLaneId).toBe('ulg:sph-resident:scene');
   expect(result.computeTaskSchema).toBe('peercompute.ulg.mls-mpm-resident-steps-compute-task.v0');
   expect(result.computeTaskResultSchema).toBe('peercompute.ulg.mls-mpm-resident-steps-compute-task-result.v0');
   expect(result.lawGraphNodeId).toBe('ulg-mls-mpm-sph-resident-pass-dag');
@@ -8844,7 +8870,7 @@ test('SPH phase resident steps publish after StateManager warm-delta admission',
           laneId: task.gpuResidentLane?.laneId ?? null,
           stateKey: task.gpuResidentLane?.stateKey ?? null
         });
-        const module = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+        const module = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
         const execution = await module.runMlsMpmResidentStepsComputeTask(task.data);
         stateManager.commitDelta(execution.commitDelta);
         return {
@@ -9166,8 +9192,8 @@ test('SPH phase mounted Schroeder materialized storage publishes adopted descrip
   const result = await page.evaluate(async () => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay.__sphScene;
-    const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
-    const schroederModule = await import('/src/runtime/sph/schroederHierarchyGpu.js');
+    const hostModule = await window.__ulgImportWithRetry('/src/runtime/peercomputeBrowserResidentHost.js');
+    const schroederModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
     const host = await hostModule.createPeerComputeResidentAuthorityHost({
       computeTaskModulePath: '/src/runtime/sph/sphMlsMpmGpuStep.js',
       enableWorkers: false,
@@ -9692,8 +9718,8 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   const result = await page.evaluate(async () => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay.__sphScene;
-    const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
-    const evidenceModule = await import('/src/runtime/mechanicsPromotionEvidence.js');
+    const hostModule = await window.__ulgImportWithRetry('/src/runtime/peercomputeBrowserResidentHost.js');
+    const evidenceModule = await window.__ulgImportWithRetry('/src/runtime/mechanicsPromotionEvidence.js');
     const host = await hostModule.createPeerComputeResidentAuthorityHost({
       computeTaskModulePath: '/src/runtime/sph/sphMlsMpmGpuStep.js',
       enableWorkers: false,
@@ -10777,7 +10803,7 @@ test('SPH phase browser PeerCompute NodeKernel network gate starts and stops exp
   await page.goto('/');
 
   const result = await page.evaluate(async () => {
-    const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
+    const hostModule = await window.__ulgImportWithRetry('/src/runtime/peercomputeBrowserResidentHost.js');
     const host = await hostModule.createPeerComputeResidentAuthorityHost({
       computeTaskModulePath: '/src/runtime/sph/sphMlsMpmGpuStep.js',
       enableWorkers: false,
@@ -10862,7 +10888,7 @@ test('SPH phase browser PeerCompute provider transport replays resident warm del
         }
         throw new Error(`Timed out waiting for ${label}`);
       };
-      const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
+      const hostModule = await window.__ulgImportWithRetry('/src/runtime/peercomputeBrowserResidentHost.js');
       const roomId = `ulg-provider-live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const docName = `${roomId}-doc`;
       const scope = 'ulg-sph-resident-pass-dag';
@@ -10998,7 +11024,7 @@ test('SPH phase browser PeerCompute remote placement gate configures hooks witho
   await page.goto('/');
 
   const result = await page.evaluate(async () => {
-    const hostModule = await import('/src/runtime/peercomputeBrowserResidentHost.js');
+    const hostModule = await window.__ulgImportWithRetry('/src/runtime/peercomputeBrowserResidentHost.js');
     const host = await hostModule.createPeerComputeResidentAuthorityHost({
       computeTaskModulePath: '/src/runtime/sph/sphMlsMpmGpuStep.js',
       enableWorkers: false,
@@ -11314,7 +11340,7 @@ test('SPH phase resident auto scheduler uses an injected ComputeManager lane hos
           stateKey: task.gpuResidentLane?.stateKey ?? null,
           lawGraphNodeId: task.lawGraphNode?.nodeId ?? null
         });
-        const module = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
+        const module = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
         const result = await module.runMlsMpmResidentStepsComputeTask(task.data);
         return {
           status: 'accepted-inline-global-compute-manager',
@@ -11689,7 +11715,7 @@ test('Schroeder cross-level grid coupling conserves mass and momentum numericall
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const coupling = await import('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
+    const coupling = await window.__ulgImportWithRetry('/src/runtime/sph/schroederCrossLevelCouplingGpu.js');
 
     const GPUBufferUsageRef = globalThis.GPUBufferUsage;
     const makeGridBuffer = (label, rows) => {
@@ -12277,11 +12303,11 @@ test('Schroeder admitted split materializes appended particles and grows the ado
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
-    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
-    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
-    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
-    const abi = await import('/ulg-gpu-abi/src/index.js');
+    const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const stepModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await window.__ulgImportWithRetry('/ulg-gpu-abi/src/index.js');
 
     const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     const SLOT_FLOATS = abi.SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT.length;
@@ -12499,12 +12525,12 @@ test('Schroeder admitted merge compacts freed slots and shrinks the adopted coun
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
-    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
-    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
-    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
-    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
-    const abi = await import('/ulg-gpu-abi/src/index.js');
+    const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await window.__ulgImportWithRetry('/ulg-gpu-abi/src/index.js');
 
     const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     const SLOT_FLOATS = abi.SCHROEDER_PARTICLE_STORAGE_SLOT_ASSIGNMENT_ROW_LAYOUT.length;
@@ -12732,12 +12758,12 @@ test('Schroeder coarsen-eligible cell merges through the real proposal chain and
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
-    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
-    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
-    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
-    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
-    const abi = await import('/ulg-gpu-abi/src/index.js');
+    const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await window.__ulgImportWithRetry('/ulg-gpu-abi/src/index.js');
 
     const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     const MIGRATION_FLOATS = abi.SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;
@@ -13155,12 +13181,12 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
-    const hierarchy = await import('/src/runtime/sph/schroederHierarchyGpu.js');
-    const countModule = await import('/src/runtime/sph/schroederParticleStorageCountGpu.js');
-    const compactionModule = await import('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
-    const stepModule = await import('/src/runtime/sph/sphMlsMpmGpuStep.js');
-    const buffersModule = await import('/src/runtime/sph/sphGpuBuffers.js');
-    const abi = await import('/ulg-gpu-abi/src/index.js');
+    const hierarchy = await window.__ulgImportWithRetry('/src/runtime/sph/schroederHierarchyGpu.js');
+    const countModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCountGpu.js');
+    const compactionModule = await window.__ulgImportWithRetry('/src/runtime/sph/schroederParticleStorageCompactionGpu.js');
+    const stepModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphMlsMpmGpuStep.js');
+    const buffersModule = await window.__ulgImportWithRetry('/src/runtime/sph/sphGpuBuffers.js');
+    const abi = await window.__ulgImportWithRetry('/ulg-gpu-abi/src/index.js');
 
     const MECHANICS_FLOATS = buffersModule.MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
     const MIGRATION_FLOATS = abi.SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT.length;

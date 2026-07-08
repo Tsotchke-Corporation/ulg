@@ -39772,3 +39772,8 @@ then landed as a physics-derived floor: surface radius >= SPH smoothing
 length (the interpolation support scale). Screenshots: connected smooth
 pool. Remaining surface item: material color/lighting parity + box
 context. Round 9 validating.
+
+## 2026-07-08 — Round 9: 60/0/2 in 18.8m. Continuity floor validated clean.
+
+Second fully clean round. Proceeding to surface item 3: material
+color/lighting parity in the native surface consumer.

@@ -39707,3 +39707,14 @@ equipartition) rederiving under the trust radius.
 Derivation costs measured (JS, this machine): H2O optimize+Hessian
 ~50s; CO2 ~25-40 min; single N2 RHF 369 ms. Hessians must never run at
 cold start - offline bank only.
+
+## 2026-07-08 — Round 4: trust-radius runtime tax found and reverted (1dfc5b5)
+
+Round 4 tallied 57/3/2 in 38.4m — DOUBLE round 3's 18.7m. The global
+0.3 Bohr optimizer displacement cap (df04ec8) multiplied step counts in
+every live cohesion derivation: derived-props gate timed out at 4m,
+buoyancy cohort burned its 18m budget, and the third failure was the
+12h-old dev server 504ing imports past even the 20s retry budget.
+maxStepBohr is now opt-in (vibrations generator only); dev server
+restarted fresh. The pause-fix, lifecycle pins, boot/import hardening
+all held (zero related failures in round 4).

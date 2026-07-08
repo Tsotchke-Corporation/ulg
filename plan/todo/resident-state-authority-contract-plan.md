@@ -449,3 +449,32 @@ granting mechanics child stages authoritative mutation yet.
   untouched.
 - The authority ledger can be mapped later onto PeerCompute's law graph and
   StateManager commit-delta path without inventing a second model.
+
+## Promotion Slice Design - 2026-07-08
+
+Scoping for the named promotion point ("stage-chain output promoted to
+admitted compact state and retained-buffer refs under StateManager
+authority"), from code audit:
+
+- The remote seed graph (peercomputeBrowserResidentHost.js ~1204) already
+  carries `mechanics-stage-state-seed` with `authoritativeByDefault: false`,
+  and the downstream resident-steps node runs evidence-only
+  (`suppressCommitDelta: true`, `emitCommitDelta: false`, fence optional via
+  `residentRequireGpuFence !== true`).
+- The admission machinery already exists and is validated elsewhere:
+  `attachResidentStateManagerCommitBridge`
+  (peercomputeResidentCommitBridge.js, 350 lines) validates deltas per
+  accepted scope with fence evidence; the mounted resident path and the SS
+  adopted-storage path both commit through it.
+- Promotion slice = (1) a request-level opt-in
+  (`promoteMechanicsStageSeed: true`) that flips the seed node to emit a
+  commit delta in an accepted scope, requires `gpuFenceSatisfied` on the
+  producing G2P node, and records the seed's stateFamilies as the delta's
+  write set; (2) the resident-steps node consuming the ADMITTED seed
+  (StateManager read) instead of the raw resultInputs when promotion is on;
+  (3) integration coverage in peercomputeComputeManagerIntegration.test.mjs
+  (node-side, no browser needed) proving: admitted delta with fence, scope
+  rejection without fence, and resident continuation from the admitted seed
+  matching the evidence-only baseline bit-for-bit.
+- Keep default OFF until the distributed plan needs it; the mounted demo
+  path is unaffected.

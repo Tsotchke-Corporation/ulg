@@ -41,10 +41,12 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
   elevated-but-labelled for a watchable demo.
 - **Gas heat capacity uses equipartition** (constant Cv). Upgrade: derive Cp(T) of N2/O2/CO2/water
   vapour from molecularThermochemistry (geometry + vibrations) — validated exact at 298 K.
-- **Performance**: the SPH carrier + thermal conduction are O(N²) with per-pair array allocations
-  (vsub/vdot/kernelGradient) — ~64 ms/step at 152 particles. De-allocate the inner loops; add a
-  cell/neighbour list for scaling; GPU hot loop is the real-time endgame
-  (`plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md` and
+- ~~Performance: per-pair allocations in the O(N²) loops~~ DONE (2026-07-07 audit): the
+  momentum/density loops (sphOperators.js) and thermal conduction (thermalPhase.js) are already
+  inlined scalar math with no per-pair allocation. Remaining: a cell/neighbour list would take
+  O(N²)→O(N), but the CPU carrier is now only the `mech=sph` opt-out reference (MLS-MPM resident
+  GPU is the default integrator since d8dcbc0), so this is deprioritized behind the GPU plans
+  (`plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`,
   `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`).
 - Multi-material EOS is weakly-compressible (sound speeds ~180 m/s), not the true stiff EOS —
   reduced reference, sphValidation stays false.

@@ -73,6 +73,20 @@ export default defineConfig({
   ],
   server: {
     https: resolveLocalHttpsConfig(),
+    // Pre-transform the heavy runtime module graphs at server start: e2e
+    // gates dynamically import these mid-test, and a cold transform (or a
+    // dep re-optimize storm) can 504 module fetches long enough to exhaust
+    // in-page retry budgets.
+    warmup: {
+      clientFiles: [
+        './src/runtime/peercomputeBrowserResidentHost.js',
+        './src/runtime/sph/sphMlsMpmGpuStep.js',
+        './src/runtime/sph/schroederHierarchyGpu.js',
+        './src/runtime/sph/sphMarchingCubesSurfaceAdapter.js',
+        './src/visualization/sphPhaseScene.js',
+        './src/visualization/sphPhaseDemoMount.js'
+      ]
+    },
     fs: {
       allow: [
         repoRoot,

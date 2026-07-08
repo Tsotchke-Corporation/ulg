@@ -1503,8 +1503,11 @@ test('SPH resident material seed surfaces preserve domains without CPU geometry'
       batch.averageColorRgb.map((value) => Number(value.toFixed(3)))
     ]).sort(),
     [
-      ['h2o|h2o|liquid|domain:base', 1, 2, 0, 0.11, [0.3, 0.5, 1]],
-      ['h2o|h2o|liquid|domain:drop', 2, 2, 0, 0.21, [0.9, 0.4, 0.6]]
+      // The SPH smoothing length (0.3 here) floors seed-surface radii:
+      // physical particle radii run ~half the sample spacing and a union
+      // of barely-touching metaballs ripples into boundary flakes.
+      ['h2o|h2o|liquid|domain:base', 1, 2, 0, 0.3, [0.3, 0.5, 1]],
+      ['h2o|h2o|liquid|domain:drop', 2, 2, 0, 0.3, [0.9, 0.4, 0.6]]
     ]
   );
 });

@@ -92,3 +92,20 @@ test('unbanked gas species keep the equipartition model tag', () => {
   const cpMolar = props.phases[0].cpJPerKgK * props.molarMassKgPerMol;
   assert.ok(Math.abs(cpMolar - 3.5 * R) < 0.05, `N2 Cp ${cpMolar.toFixed(3)} J/mol/K`);
 });
+
+test('runtime energy ladder gives temperature-dependent gas cp (Einstein sub-segments)', async () => {
+  const { specificInternalEnergyJPerKg } = await import('../src/runtime/material/thermoState.js');
+  const { equilibriumFromSpecificEnergy } = await import('../src/runtime/material/phaseEquilibrium.js');
+  const props = deriveFormulaMaterialProperties({ formula: 'CO2', phaseModel: 'ideal-gas' });
+  // Effective cp must RISE with temperature as the 566 cm^-1 bends and the
+  // stretches activate: du over [900, 1000] K exceeds du over [200, 300] K.
+  const duCold = specificInternalEnergyJPerKg(props, 300) - specificInternalEnergyJPerKg(props, 200);
+  const duHot = specificInternalEnergyJPerKg(props, 1000) - specificInternalEnergyJPerKg(props, 900);
+  assert.ok(duHot > duCold * 1.15, `cp(950K)/cp(250K) = ${(duHot / duCold).toFixed(3)} must exceed 1.15`);
+  // Round trip through the inverse at a hot point: the piecewise-linear
+  // ladder must reproduce T within a sub-segment's width.
+  const eHot = specificInternalEnergyJPerKg(props, 1234);
+  const eq = equilibriumFromSpecificEnergy(props, eHot);
+  assert.ok(Math.abs(eq.temperatureK - 1234) < 5, `round trip ${eq.temperatureK.toFixed(1)} K vs 1234 K`);
+  assert.equal(eq.stablePhase, 'gas');
+});

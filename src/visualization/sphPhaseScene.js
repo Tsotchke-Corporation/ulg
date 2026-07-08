@@ -8682,14 +8682,15 @@ export function createContinuousSurfaceBatches({
   }
   return [...batches.values()].map((batch) => ({
     ...batch,
-    // A continuous surface from discrete samples needs metaball support at
-    // the SAMPLE SPACING scale: physical particle radii run ~half the
-    // spacing, and a union of barely-touching balls ripples across the
-    // isovalue into boundary flakes. The spacing estimate is a floor, not
-    // just a fallback for missing radii.
+    // Particle radii lead; the bounds-based spacing estimate stays a
+    // FALLBACK only - as a floor it overshoots badly for sparse batches
+    // (a 2-particle pair 0.2 m apart estimated 1.8 m). The continuity
+    // floor that fixes boundary flakes is the smoothing-length floor in
+    // the render-row and seed producers, where the fluid's interpolation
+    // scale is known.
     surfaceRadiusM: Math.max(
-      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM) ?? 0,
-      estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
+      estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
+        ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM),
       estimateSurfaceRadiusFromParticleRadiiM(batch.liquidContinuityRadiiM) ?? 0
     )
   }));

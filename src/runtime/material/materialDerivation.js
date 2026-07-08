@@ -282,8 +282,14 @@ function gasHeatCapacityForFormula(atomCounts, geometry, temperatureK, molarMass
   if (banked) {
     const bankedAtoms = banked.optimizedAtoms.map((a) => ({ Z: a.Z, position: [...a.positionBohr] }));
     const cp = idealGasHeatCapacity(bankedAtoms, banked.vibrationsCm1, temperatureK);
+    // Rigid-rotor part (translation + rotation + R), no vibrations: the
+    // exact base for a temperature-dependent gas energy segment where the
+    // Einstein terms add on top (thermoState subdivides on these fields).
+    const rigidRotorCpJPerMolK = (1.5 + (cp.linear ? 1 : 1.5) + 1) * R;
     return {
       cpJPerKgK: cp.cpJPerMolK / molarMassKgPerMol,
+      rigidRotorCpJPerKgK: rigidRotorCpJPerMolK / molarMassKgPerMol,
+      linear: cp.linear,
       model: 'molecular-rrho-harmonic-vibrations-banked',
       method: banked.method,
       vibrationsCm1: [...banked.vibrationsCm1]
@@ -332,7 +338,16 @@ export function deriveFormulaMaterialProperties({
       idealGas: true,
       heatCapacityModel: { gas: gasHeat.model },
       gasVibrationsCm1: gasHeat.vibrationsCm1,
-      phases: [{ name: 'gas', cpJPerKgK: gasCp, densityKgPerM3: gasDensity, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }],
+      phases: [{
+        name: 'gas',
+        cpJPerKgK: gasCp,
+        gasVibrationsCm1: gasHeat.vibrationsCm1,
+        gasRigidRotorCpJPerKgK: gasHeat.rigidRotorCpJPerKgK ?? null,
+        densityKgPerM3: gasDensity,
+        temperatureRange: [0, OPEN_TOP_K],
+        bulkModulusPa: null,
+        shearModulusPa: 0
+      }],
       transitions: []
     }, {
       entries: [
@@ -379,7 +394,8 @@ export function deriveFormulaMaterialProperties({
   const latentVaporizationJPerKg = Math.max(cohesion.value * AVOGADRO / molarMassKgPerMol, latentFusion * 2);
   const entropyVaporization = R * (10 + Math.sqrt(atomsPerFormula));
   const boilingPointK = Math.max(meltingPointK * 1.15, (latentVaporizationJPerKg * molarMassKgPerMol) / entropyVaporization);
-  const gasCp = gasHeatCapacityForFormula(counts, geom, boilingPointK, molarMassKgPerMol).cpJPerKgK;
+  const condensedGasHeat = gasHeatCapacityForFormula(counts, geom, boilingPointK, molarMassKgPerMol);
+  const gasCp = condensedGasHeat.cpJPerKgK;
   const gasDensity = idealGasDensityKgPerM3({
     pressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
     temperatureK: boilingPointK,
@@ -401,7 +417,16 @@ export function deriveFormulaMaterialProperties({
     phases: [
       { name: 'solid', cpJPerKgK: cpSolid, densityKgPerM3, temperatureRange: [0, meltingPointK], debyeTemperatureK, bulkModulusPa, shearModulusPa },
       { name: 'liquid', cpJPerKgK: highTemperatureCp * (1 + MOLECULAR_LINDEMANN_RATIO), densityKgPerM3: densityKgPerM3 * (1 - 3 * MOLECULAR_LINDEMANN_RATIO * MOLECULAR_LINDEMANN_RATIO), temperatureRange: [meltingPointK, boilingPointK], bulkModulusPa: bulkModulusPa * 0.75, shearModulusPa: 0 },
-      { name: 'gas', cpJPerKgK: gasCp, densityKgPerM3: gasDensity, temperatureRange: [boilingPointK, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }
+      {
+        name: 'gas',
+        cpJPerKgK: gasCp,
+        gasVibrationsCm1: condensedGasHeat.vibrationsCm1,
+        gasRigidRotorCpJPerKgK: condensedGasHeat.rigidRotorCpJPerKgK ?? null,
+        densityKgPerM3: gasDensity,
+        temperatureRange: [boilingPointK, OPEN_TOP_K],
+        bulkModulusPa: null,
+        shearModulusPa: 0
+      }
     ],
     transitions: [
       { from: 'solid', to: 'liquid', temperatureK: meltingPointK, latentHeatJPerKg: latentFusion },

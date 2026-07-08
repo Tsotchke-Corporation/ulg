@@ -52,6 +52,66 @@ export function orderedSegments(properties) {
   return segments;
 }
 
+const R_GAS = 8.314462618;
+const CM1_TO_K = 1.4387768766;
+// Piecewise-linearization cap for vibrational gas segments: past this the
+// Einstein terms are essentially classical and a single constant-cp tail
+// segment is exact to well under 1%.
+const GAS_VIBRATION_SUBDIVISION_CAP_K = 4000;
+const GAS_VIBRATION_SUBDIVISION_COUNT = 12;
+
+// Exact vibrational-gas specific internal energy (J/kg) at temperature T:
+// rigid-rotor (translation + rotation + R) linear term plus the Einstein
+// enthalpy of each banked harmonic mode. Derived, not tabulated.
+function vibrationalGasEnergyFromZero(rigidRotorCpJPerKgK, thetaK, molarMassKgPerMol, temperatureK) {
+  let vibrational = 0;
+  for (const theta of thetaK) {
+    const ratio = theta / Math.max(temperatureK, 1e-9);
+    if (ratio < 60) vibrational += theta / (Math.exp(ratio) - 1);
+  }
+  return rigidRotorCpJPerKgK * temperatureK + (R_GAS * vibrational) / molarMassKgPerMol;
+}
+
+// Subdivide a vibrational gas phase into constant-cp sub-segments whose
+// breakpoints sit EXACTLY on the Einstein enthalpy curve. Both the CPU
+// inversion here and the GPU thermal segment table (which uploads
+// eStart/eEnd/tLo/tHi verbatim and inverts linearly) get temperature-
+// dependent gas heat capacity with no new segment semantics.
+function vibrationalGasSubSegments(phase, tLo, tHi, molarMassKgPerMol, eStartBase) {
+  const thetaK = phase.gasVibrationsCm1.map((nu) => nu * CM1_TO_K);
+  const rigidRotor = phase.gasRigidRotorCpJPerKgK;
+  const energyAt = (t) => vibrationalGasEnergyFromZero(rigidRotor, thetaK, molarMassKgPerMol, t);
+  const capT = Math.min(tHi, Math.max(tLo + 1, GAS_VIBRATION_SUBDIVISION_CAP_K));
+  const breakpoints = [tLo];
+  for (let i = 1; i <= GAS_VIBRATION_SUBDIVISION_COUNT; i += 1) {
+    breakpoints.push(tLo + ((capT - tLo) * i) / GAS_VIBRATION_SUBDIVISION_COUNT);
+  }
+  if (tHi > capT) breakpoints.push(tHi);
+  const segments = [];
+  let cumulative = eStartBase;
+  for (let i = 0; i < breakpoints.length - 1; i += 1) {
+    const a = breakpoints[i];
+    const b = breakpoints[i + 1];
+    const du = energyAt(b) - energyAt(a);
+    const seg = {
+      type: 'phase',
+      phase: phase.name,
+      tLo: a,
+      tHi: b,
+      cpJPerKgK: du / (b - a),
+      debyeTemperatureK: null,
+      molarMassKgPerMol,
+      atomsPerFormula: 1,
+      gasVibrationalSubSegment: true,
+      eStart: cumulative
+    };
+    cumulative += du;
+    seg.eEnd = cumulative;
+    segments.push(seg);
+  }
+  return segments;
+}
+
 function buildOrderedSegments(properties) {
   const phases = properties.phases || [];
   const transitions = properties.transitions || [];
@@ -63,6 +123,33 @@ function buildOrderedSegments(properties) {
     const phase = phases[i];
     const tLo = phase.temperatureRange[0];
     const tHi = i < transitions.length ? transitions[i].temperatureK : phase.temperatureRange[1];
+    const vibrationalGas = phase.name === 'gas'
+      && Array.isArray(phase.gasVibrationsCm1)
+      && phase.gasVibrationsCm1.length > 0
+      && Number.isFinite(phase.gasRigidRotorCpJPerKgK)
+      && phase.gasRigidRotorCpJPerKgK > 0
+      && Number.isFinite(molarMassKgPerMol)
+      && molarMassKgPerMol > 0;
+    if (vibrationalGas) {
+      const subSegments = vibrationalGasSubSegments(phase, tLo, tHi, molarMassKgPerMol, cumulativeEnergy);
+      segments.push(...subSegments);
+      cumulativeEnergy = subSegments[subSegments.length - 1].eEnd;
+      if (i < transitions.length) {
+        const transition = transitions[i];
+        const eStartPlateau = cumulativeEnergy;
+        cumulativeEnergy += transition.latentHeatJPerKg;
+        segments.push({
+          type: 'plateau',
+          from: transition.from,
+          to: transition.to,
+          temperatureK: transition.temperatureK,
+          latentHeatJPerKg: transition.latentHeatJPerKg,
+          eStart: eStartPlateau,
+          eEnd: cumulativeEnergy
+        });
+      }
+      continue;
+    }
     const seg = {
       type: 'phase',
       phase: phase.name,

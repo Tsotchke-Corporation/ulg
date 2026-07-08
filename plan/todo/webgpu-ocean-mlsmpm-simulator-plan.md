@@ -1510,3 +1510,36 @@ Reconciliation, 2026-07-06:
   moving surface-table/material-interface work fully GPU-local.
 - The plan remains the performance backlog; treat the binned-neighbor
   infrastructure and the separation pass as its newest landed slices.
+
+## Resident surface quality: "chunky yogurt" diagnosis (2026-07-07, user report)
+
+The native marching-cubes surface path renders faceted lumps + sliver
+shards; the classic mech=sph three.js path renders smooth/lit surfaces
+with box context. Verified by side-by-side probes (scratchpad
+yog-mlsmpm-*/yog-sph-*/yog-dense-*.png). Physics is fine (pool spreads
+level, ball falls straight); the gap is presentation.
+
+Root causes located:
+1. FLAT FACE NORMALS: webGpuMarchingCubesExtensionSurfaceRowsWgsl main()
+   writes normal = cross(p1-p0, p2-p0) to all 3 vertices of every
+   triangle (sphMarchingCubesSurfaceAdapter.js ~line 233). Fix design:
+   isosurface gradient normals, n = -normalize(grad rho), sampled from
+   the retained render-field buffer (trilinear central differences in
+   field voxel space; compact positions are already in field voxel
+   coords because the extension consumed the same volume descriptor).
+   Binding room exists (6 of 8 used); params struct has 3 reusable pad
+   floats (field_resolution, scalar_offset, gradient_enabled). Plumbing
+   needed: scalarBuffer + scalarOffset + resolution from
+   createUlgRenderFieldBufferVolumeDescriptor's descriptor down to
+   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu (the translation
+   call site at sphPhaseScene ~25228 does not currently see the
+   descriptor). Fallback to face normal when |grad| ~ 0 or field absent.
+2. SLIVER SHARDS at fluid boundary (worse at higher particle count):
+   degenerate triangles near the isovalue noise floor; consider zero-ing
+   sub-epsilon-area triangles in the same kernel pass.
+3. MATERIAL/LIGHTING PARITY: native path draws iron near-black vs the
+   classic silver Drude color, no box wireframe context, flat shading.
+   Compare the native consumer's draw shader color/lighting against the
+   three.js material path.
+
+Sequential-screenshot verification per plan/Agents.md when implemented.

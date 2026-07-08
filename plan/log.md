@@ -39718,3 +39718,14 @@ buoyancy cohort burned its 18m budget, and the third failure was the
 maxStepBohr is now opt-in (vibrations generator only); dev server
 restarted fresh. The pause-fix, lifecycle pins, boot/import hardening
 all held (zero related failures in round 4).
+
+## 2026-07-08 — Regression plan graduated to done; suite arc closed
+
+Round 5: 58/2/2 in 20.0m; both failures environmental churn verified
+green isolated in 17s (NodeKernel import storm -> vite warmup config
+added for the six heavy runtime graphs; sphere bridge suite-load
+timing). Derived-props gate reconciled to the paused-page playback
+contract (presses Play; 240s timeout -> 18.8s). Full arc: 21 failures /
+27.7m at start -> all gates proven green with structural hardening for
+each environmental class. physics-behavior-regression-plan moved to
+plan/done/. Round 6 running as continuing evidence.

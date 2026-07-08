@@ -39753,3 +39753,12 @@ All 60 runnable gates green with the gradient-normals WGSL live, fastest
 round yet. Arc complete: 21 failed / 27.7m at session start ->
 60 passed / 0 failed / 17.7m. Proceeding to surface item 2 (boundary
 sliver triangles).
+
+## 2026-07-08 — Round 8: 59/1/2 in 18.0m; cull validated
+
+Degenerate-triangle cull validated across the suite (no new failure
+class; surface gates green in-suite). The single failure was the
+derived-props gate brushing its budget under suite load - green isolated
+in 17.2s. Session close: rounds 7-8 = 60/0 and 59/1-churn. Next queued:
+extraction-policy smoothing/isovalue tuning cycle (flakes), material/
+lighting parity, per the webgpu-ocean plan diagnosis.

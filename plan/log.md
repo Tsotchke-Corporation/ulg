@@ -39762,3 +39762,13 @@ derived-props gate brushing its budget under suite load - green isolated
 in 17.2s. Session close: rounds 7-8 = 60/0 and 59/1-churn. Next queued:
 extraction-policy smoothing/isovalue tuning cycle (flakes), material/
 lighting parity, per the webgpu-ocean plan diagnosis.
+
+## 2026-07-08 — Boundary flakes resolved (c2f712b); surface item 2 of 3 closed
+
+Root cause: metaball radius = mean physical particle radius (~half the
+sample spacing) in the render-row batches - a union of barely-touching
+balls ripples across the isovalue. Confirmed live via blob=1.5 override,
+then landed as a physics-derived floor: surface radius >= SPH smoothing
+length (the interpolation support scale). Screenshots: connected smooth
+pool. Remaining surface item: material color/lighting parity + box
+context. Round 9 validating.

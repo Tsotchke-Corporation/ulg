@@ -1538,8 +1538,12 @@ Root causes located:
    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu (the translation
    call site at sphPhaseScene ~25228 does not currently see the
    descriptor). Fallback to face normal when |grad| ~ 0 or field absent.
-2. SLIVER SHARDS at fluid boundary (worse at higher particle count):
-   PARTIALLY DIAGNOSED FURTHER (2026-07-08): a grid-space degenerate-area
+2. ~~SLIVER SHARDS~~ RESOLVED (c2f712b): the render-row batches set the
+   metaball radius to the mean physical particle radius (~half spacing);
+   the union of barely-touching balls rippled across the isovalue. The
+   SPH smoothing length now floors the surface radius (the fluid's own
+   interpolation support scale). Dense-scene pool renders as connected
+   smooth water. Earlier notes: a grid-space degenerate-area
    cull (< 0.02 voxel^2, translation kernel v3) landed but the visible
    flakes are UNCHANGED - they are sizable thin triangles from density
    noise crossing the isovalue at the fluid boundary, i.e. a FIELD-level

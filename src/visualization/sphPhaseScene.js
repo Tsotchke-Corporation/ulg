@@ -14407,6 +14407,105 @@ export function createSphPhaseScene(container, {
     return bridge.depthTexture.createView();
   }
 
+  // Box wireframe chrome for the native surface path: the classic three.js
+  // scene draws the container as LineSegments; the native consumer draws the
+  // same 12 edges in its own opaque pass so the fluid has spatial context.
+  function ensureSphNativeSurfaceBoxWireframe(bridge = sphResidentSurfaceDrawRenderBridge) {
+    if (!bridge?.device || !bridge?.format) return null;
+    if (bridge.boxWireframe?.pipeline) return bridge.boxWireframe;
+    const device = bridge.device;
+    const module = device.createShaderModule({
+      label: 'ulg-sph-native-surface-box-wireframe',
+      code: /* wgsl */`
+struct BoxParams {
+  view_projection: mat4x4<f32>,
+  dims_m: vec4<f32>,
+  color: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> params: BoxParams;
+
+const BOX_EDGES = array<vec3<f32>, 24>(
+  vec3<f32>(0., 0., 0.), vec3<f32>(1., 0., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 0., 1.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(0., 0., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 0., 0.),
+  vec3<f32>(0., 1., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 1., 0.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(1., 1., 1.), vec3<f32>(0., 1., 1.),
+  vec3<f32>(0., 1., 1.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(0., 0., 0.), vec3<f32>(0., 1., 0.),
+  vec3<f32>(1., 0., 0.), vec3<f32>(1., 1., 0.),
+  vec3<f32>(1., 0., 1.), vec3<f32>(1., 1., 1.),
+  vec3<f32>(0., 0., 1.), vec3<f32>(0., 1., 1.)
+);
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+  let corner = BOX_EDGES[index] * params.dims_m.xyz;
+  return params.view_projection * vec4<f32>(corner, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  return vec4<f32>(params.color.rgb * params.color.a, params.color.a);
+}
+`
+    });
+    const pipeline = device.createRenderPipeline({
+      label: 'ulg-sph-native-surface-box-wireframe',
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs_main' },
+      fragment: {
+        module,
+        entryPoint: 'fs_main',
+        targets: [{
+          format: bridge.format,
+          blend: {
+            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
+          }
+        }]
+      },
+      primitive: { topology: 'line-list' },
+      depthStencil: {
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        depthWriteEnabled: false,
+        depthCompare: 'less-equal'
+      }
+    });
+    const uniformBuffer = device.createBuffer({
+      label: 'ulg-sph-native-surface-box-wireframe-params',
+      size: 96,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+    });
+    bridge.boxWireframe = { pipeline, uniformBuffer, bindGroup, paramsArray: new Float32Array(24) };
+    return bridge.boxWireframe;
+  }
+
+  function drawSphNativeSurfaceBoxWireframe(bridge, pass, viewProjection) {
+    const wireframe = ensureSphNativeSurfaceBoxWireframe(bridge);
+    if (!wireframe) return false;
+    const params = wireframe.paramsArray;
+    params.set(viewProjection.elements, 0);
+    params[16] = dims[0];
+    params[17] = dims[1];
+    params[18] = dims[2];
+    params[19] = 0;
+    params[20] = 0.36;
+    params[21] = 0.82;
+    params[22] = 0.74;
+    params[23] = 0.42;
+    bridge.device.queue.writeBuffer(wireframe.uniformBuffer, 0, params);
+    pass.setPipeline(wireframe.pipeline);
+    pass.setBindGroup(0, wireframe.bindGroup);
+    pass.draw(24);
+    return true;
+  }
+
   function ensureSphResidentSurfaceDrawOitTargets(bridge = sphResidentSurfaceDrawRenderBridge) {
     if (!bridge?.device || !bridge?.canvas) return null;
     const widthPx = bridge.canvas.width || 1;
@@ -18204,6 +18303,9 @@ export function createSphPhaseScene(container, {
           for (const additionalDraw of additionalOpaqueDraws) {
             opaquePass.setBindGroup(0, additionalDraw.bindGroup);
             opaquePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
+          }
+          if (depthView) {
+            drawSphNativeSurfaceBoxWireframe(bridge, opaquePass, viewProjection);
           }
         }
       let schroederProxySubmit = null;

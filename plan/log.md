@@ -39811,3 +39811,19 @@ the classic three.js look. Round 11 validating.
 Third fully clean round (7, 9, 11). The complete surface-quality arc -
 gradient normals, continuity floor, metal F0, container wireframe - is
 landed with suite validation behind every commit.
+
+## 2026-07-08 — Internal-coordinate optimizer (b029378); CO2 blocker characterized
+
+H2O now derives via (r, theta) golden-section descent: 26s (2x faster)
+and a better-relaxed minimum (bend 2340 vs 3102 cm^-1 residual-strain).
+CO2's blocker is precisely characterized: SCF root hopping (0.42 Ha
+discontinuities between converged neighbors on the linear PES scan);
+internal descent finds the correct r~2.2 Bohr but finite differences
+across root hops give pseudo-modes. Solver-level density-matrix
+continuity is the queued fix (frontier-todo). Bank regenerated, 5/5
+gates, derivation tests green.
+
+Session handoff state: suite rounds 7-11 = 60/0, 59/1, 60/0, 59/1,
+60/0 (churn verified isolated each time). Surface arc complete. Open
+multi-session plans: SCF density continuity, cold-start cache,
+resident-state authority, material polytope, runtime Cp(T) consumption.

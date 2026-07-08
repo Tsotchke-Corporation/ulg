@@ -39827,3 +39827,19 @@ Session handoff state: suite rounds 7-11 = 60/0, 59/1, 60/0, 59/1,
 60/0 (churn verified isolated each time). Surface arc complete. Open
 multi-session plans: SCF density continuity, cold-start cache,
 resident-state authority, material polytope, runtime Cp(T) consumption.
+
+## 2026-07-08 — Round 12: 60/0/2 in 18.6m. Boys fix validated; CO2 milestone.
+
+Fourth fully clean round (7, 9, 11, 12), this one carrying the Boys-
+function precision fix (2822064) through every calibrated gate with
+zero threshold shifts. The CO2 arc is closed end-to-end: one integral
+precision hole (alternating series cancellation for x in [16, 30])
+masqueraded as optimizer dissociation, geometry collapse, and SCF root
+hopping across three prior fix attempts; with correct integrals CO2
+banks textbook modes and Cp(298K) within 4% of experiment, and H2O
+lands the exact STO-3G literature frequencies. Solver upgrades kept:
+DIIS, MOM, warm-start, internal-coordinate descent, linearity-aware
+mode dropping. Method v2 bump; 22/22 node gates incl. CO2 bend gate.
+
+Frontier gas-Cp item reduced to its final piece: runtime Cp(T) via a
+piecewise enthalpy map in the demo thermal step.

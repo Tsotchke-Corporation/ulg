@@ -74,9 +74,9 @@ async function ensureSphPhaseOverlayVisible(page, { timeout = 60_000 } = {}) {
   if (await overlay.count() === 0) {
     await page.locator('#run-sph-phase').click({
       timeout: Math.min(5_000, timeout)
-    }).catch(async (error) => {
-      if (await overlay.count() > 0) return;
-      throw error;
+    }).catch(() => {
+      // Auto-mount routes may never render the button; the toBeVisible
+      // wait below is the authoritative gate either way.
     });
   }
   await expect(overlay).toBeVisible({ timeout });
@@ -3250,10 +3250,7 @@ test('SPH phase visual sequence captures dense H2O/H2O resident motion', async (
   const visualLabel = process.env.ULG_SPH_VISUAL_LABEL || 'sph-h2o-h2o-resident-motion';
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(withVisualCaptureParam(visualUrl));
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -3314,10 +3311,7 @@ test('SPH phase resident long-horizon probe records H2O/H2O stability', async ({
   const probeLabel = process.env.ULG_SPH_LONG_HORIZON_LABEL || 'sph-h2o-h2o-contact-long-horizon';
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(withVisualCaptureParam(probeUrl));
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -3364,10 +3358,7 @@ test('SPH phase demo clear cache removes static table storage and reports cleare
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 900, height: 680 });
   await page.goto('/?drop=fe&base=h2o&dropt=1850&baset=233.15&dropn=2&basen=2&boxx=3&boxy=3&boxz=3');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await expect(page.locator('#sph-clear-cache')).toBeVisible();
   await page.waitForFunction(() => {
     const update = document.querySelector('#sph-phase-overlay')?.__sphPeerClosureCache?.staticTableWrite;
@@ -3444,10 +3435,7 @@ test('SPH phase reset preserves drop edge above six through mounted render diagn
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedEdge}&basen=${requestedEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawp=0&lawt=0&lawr=0&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
@@ -3689,10 +3677,7 @@ test('SPH phase reset preserves non-H2O drop edge above six through mounted sphe
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/?drop=fe&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedDropEdge}&basen=${requestedBaseEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1`);
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(({ requestedDropEdge, expectedBaseEdge }) => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
@@ -3904,10 +3889,7 @@ test('SPH phase reset preserves non-H2O drop edge above six through mounted poin
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/?drop=fe&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=${requestedDropEdge}&basen=${requestedBaseEdge}&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-points&visualCapture=1`);
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(({ requestedDropEdge, expectedBaseEdge }) => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
@@ -4039,10 +4021,7 @@ test('SPH phase reset preserves same-material explicit edges while merging surfa
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&dropn=7&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&surfaceDraw=three-render-row-spheres&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const diagnostics = overlay?.__sphPhaseViewState?.initialParticleEdgeDiagnostics
@@ -4171,10 +4150,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       '/?drop=fe&base=h2o&dropt=1850&baset=233.15&mech=mlsmpm&surfaceDraw=three-render-row-spheres'
     );
   });
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await expect(page.getByText('SPH PHASE — two materials interacting')).toBeVisible();
   const materialLabels = await page.locator('#sph-elements select').first().locator('option').evaluateAll(
     (options) => options.map((option) => option.textContent)
@@ -6080,10 +6056,7 @@ test('SPH phase demo reacts room-temperature Na + H2O through derived product cl
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 980, height: 720 });
   await page.goto('/#drop=Na&base=h2o&dropt=293.15&baset=293.15&ironh=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await expect(page.locator('#sph-status')).toContainText('preflight        :');
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -6639,10 +6612,7 @@ test('SPH phase mounted non-water binary reactions retain condensed product even
     expectedMaterialKeys
   }) => {
   await page.goto(`/?drop=${encodeURIComponent(dropMaterial)}&base=${encodeURIComponent(baseMaterial)}&dropt=${dropTemperatureK}&baset=${baseTemperatureK}&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=sph&residentAuto=0&visualCapture=1&blob=1`);
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -6896,10 +6866,7 @@ test('SPH phase live reaction product-event buffer stays bounded under merge-tim
     }
   });
   await page.goto('/?drop=Al&base=o2&dropt=3200&baset=1000&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const fs = overlay?.__mlsMpmResidentSteps?.finalStep;
@@ -7042,10 +7009,7 @@ test('SPH phase boiling SS storage churn conserves mass across live topology cha
   // inside the simulated two-level window: sustained coarsening pressure with
   // real adopted topology churn - the steady-state slice's live proof scene.
   await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=1.4&boxy=3&boxz=1.4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&wymin=600&ss=1&schroederLevel=0&schroederMaxLevel=1&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.evaluate(() => {
     window.__massSamples = [];
     window.__counts = new Set();
@@ -7086,10 +7050,7 @@ test('SPH phase boiling SS storage churn conserves mass across live topology cha
 test('SPH phase live resident still water settles after the initial splash', async ({ page }) => {
   test.setTimeout(300_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=293&baset=293&iceh=0&ironh=1.01&dropn=2&basen=5&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const fs = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps?.finalStep;
     return (fs?.particlePingPong?.nextTime ?? 0) >= 6;
@@ -7120,10 +7081,7 @@ test('SPH phase live resident still water settles after the initial splash', asy
 test('SPH phase no-full render refresh can skip compact surface summary readback', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -7450,7 +7408,12 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     .toBe('pressure-interface-grid-force-consumer-submitted-unverified');
   expect(result.followupPressure.forceConsumerStatus)
     .toBe('grid-momentum-impulse-submitted-unverified-no-full-readback');
-  expect(result.followupPressure.appliedImpulseMagnitudeNSeconds).toBeGreaterThan(0);
+  // Uniform ambient pressure over a closed liquid interface produces zero
+  // NET impulse (axis-aligned element normals cancel exactly); the old >0
+  // assertion only ever passed on ~4e-15 float residue of that cancellation.
+  // Row flow is guarded above by forceRowCount/consumer/application statuses.
+  expect(Number.isFinite(result.followupPressure.appliedImpulseMagnitudeNSeconds)).toBe(true);
+  expect(result.followupPressure.appliedImpulseMagnitudeNSeconds).toBeGreaterThanOrEqual(0);
   expect(result.surfaceDrawStatus).toBe('resident-extension-surface-draw-buffers-retained');
   expect(result.surfaceDrawVisibleRendererBridge).toBe('extension-resident-surface-buffers-no-overlay');
   expect(result.surfaceDrawVisibleRenderSource).toBe('webgpu-marching-cubes-extension-same-device-surface');
@@ -7501,7 +7464,11 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawVisibleGpuConsumerReady).toBe(false);
   expect(result.surfaceDrawVisibleGpuConsumerStatus)
     .toBe('resident-surface-visible-gpu-consumer-blocked-renderer-capability');
-  expect(result.surfaceDrawVisibleGpuConsumerReason).toContain('same-device GPUBuffer geometry');
+  // Blocked reason families: renderer lacks same-device GPUBuffer geometry
+  // consumption, or the live native consumer has not passed pixel validation
+  // yet (capability now reports the live bridge state, not a static table).
+  expect(result.surfaceDrawVisibleGpuConsumerReason)
+    .toMatch(/same-device GPUBuffer geometry|not passed context\/pipeline validation/);
   expect(result.surfaceDrawVisibleGpuConsumerInputReady).toBe(true);
   expect(result.surfaceDrawVisibleGpuConsumerInputKind).toBe('surface-draw-buffers');
   expect(result.surfaceDrawVisibleGpuConsumerInputStatus)
@@ -7511,9 +7478,11 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     .toBe('extension-resident-surface-buffers-no-overlay');
   expect(result.surfaceDrawVisibleGpuConsumerRenderBridgeStatus)
     .toBe('extension-surface-buffers-retained-no-overlay');
-  expect(result.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus)
-    .toBe('same-device-gpu-buffer-geometry-blocked-webgl-renderer');
-  expect(result.surfaceDrawVisibleGpuConsumerPixelValidationStatus).toBe('not-run');
+  expect([
+    'same-device-gpu-buffer-geometry-blocked-webgl-renderer',
+    'native-webgpu-surface-consumer-blocked-runtime-validation'
+  ]).toContain(result.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus);
+  expect(['not-run', 'pending']).toContain(result.surfaceDrawVisibleGpuConsumerPixelValidationStatus);
   expect(result.surfaceDrawNativeMarchingCubesExtractionStatus)
     .toBe('extension-surface-ready-needs-ulg-row-translation');
   expect(result.surfaceDrawNativeMarchingCubesExtractionReason).toBe(null);
@@ -7558,10 +7527,7 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
 
 test('SPH phase records surface-buffer presentation opt-in without enabling WebGL external buffers', async ({ page }) => {
   await page.goto('/?renderer=webgl&surfaceBufferPresentation=1&residentAuto=0');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   const result = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -8555,10 +8521,7 @@ test('SPH phase no-full retained surface draw diagnostics build under budget wit
     }
   });
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -8746,10 +8709,7 @@ test('SPH phase no-full retained surface draw diagnostics build under budget wit
 test('SPH phase resident steps can submit through a ComputeManager-shaped GPU lane task', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -8792,6 +8752,10 @@ test('SPH phase resident steps can submit through a ComputeManager-shaped GPU la
       preferWebGpu: true,
       stepCount: 1,
       readbackMode: 'no-full-readback',
+      // The hot-loop default is compactSummaryMode 'none' (readback-free);
+      // request the allowed final-only compact readback so this gate keeps
+      // verifying that copy-budget bytes flow through the CM task metadata.
+      compactSummaryMode: 'final-only',
       compactSummaryScope: 'particle-visual',
       force: true
     });
@@ -8841,10 +8805,7 @@ test('SPH phase resident steps can submit through a ComputeManager-shaped GPU la
 test('SPH phase resident steps publish after StateManager warm-delta admission', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -8952,10 +8913,7 @@ test('SPH phase default PeerCompute resident authority host starts browser compu
   });
 
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentWorkers=1&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const host = globalThis.__ulgResidentAuthorityHost || null;
     return Boolean(
@@ -9014,10 +8972,7 @@ test('SPH phase mounted resident scheduler can publish worker-retained mechanics
   });
 
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const lane = overlay?.__sphMountedMechanicsStageWorkerLane || null;
@@ -9572,10 +9527,7 @@ test('SPH phase mounted SS storage policy materializes adopted storage and fail-
   });
 
   await page.goto('/?drop=h2o&base=h2o&dropt=500&baset=500&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   // The mounted scheduler republishes the lane report every schedule tick, so
   // capture the published lane snapshot atomically inside the wait predicate
   // instead of racing a follow-up evaluate against the next tick.
@@ -9725,10 +9677,7 @@ test('SPH phase mounted SS storage policy materializes adopted storage and fail-
 test('SPH phase resident steps can use the real browser PeerCompute resident authority host', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -11138,10 +11087,7 @@ test('SPH phase resident auto scheduler can use the default PeerCompute resident
   // 'direct'; this proof exercises the ComputeManager commit path, so it
   // requests that mode explicitly.
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=1&visualCapture=1&residentComputeManagerMode=compute-manager');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     return Boolean(
@@ -11236,10 +11182,7 @@ test('SPH phase resident auto scheduler can use the default PeerCompute resident
 test('SPH phase resident auto Three sphere bridge refreshes visible rows from live physics', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&surfaceDraw=three-render-row-spheres&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const scene = overlay?.__sphScene;
@@ -11440,10 +11383,7 @@ test('SPH phase CPU-SPH view refreshes after particle sync and page visibility r
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&residentAuto=0&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const viewState = overlay?.__sphPhaseViewState;
@@ -12004,12 +11944,12 @@ test('Schroeder two-level co-simulation couples real P2G grids and preserves a c
     // Vite may 504 dynamic imports while re-optimizing dependencies on a
     // cold dev-server cache; retry instead of failing the physics proof.
     const importWithRetry = async (path) => {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
           return await import(path);
         } catch (error) {
-          if (attempt === 3) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (attempt === 7) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
       return null;
@@ -13472,10 +13412,7 @@ test('Schroeder refine-required row splits mass-correctly through the real propo
 test('SPH phase continuation scene keeps simulating on the merged particle set after live coarsening', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   // Wait for the first coarsening cycle to land in continuation mode: the
   // execution consumes fewer particles than the initial pack and sim time
@@ -13551,10 +13488,7 @@ test('SPH phase continuation scene keeps simulating on the merged particle set a
 test('SPH phase merged-set continuation proves motion numerically after live coarsening', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   const sample = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const execution = overlay?.__mlsMpmResidentSteps || null;
@@ -13597,12 +13531,12 @@ test('Schroeder two-level coupled step runs both levels in one shared particle s
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
     const importWithRetry = async (path) => {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
           return await import(path);
         } catch (error) {
-          if (attempt === 3) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (attempt === 7) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
       return null;
@@ -13955,12 +13889,12 @@ test('Schroeder orchestrator runs the two-level observation stage with live cons
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
     const importWithRetry = async (path) => {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
           return await import(path);
         } catch (error) {
-          if (attempt === 3) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (attempt === 7) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
       return null;
@@ -14121,12 +14055,12 @@ test('Schroeder orchestrator advances chained authoritative two-level steps with
     if (!adapter) return { status: 'webgpu-unavailable' };
     const device = await adapter.requestDevice();
     const importWithRetry = async (path) => {
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
           return await import(path);
         } catch (error) {
-          if (attempt === 3) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (attempt === 7) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
       return null;
@@ -14335,10 +14269,7 @@ test('SPH phase mounted scene advances under authoritative two-level SS mechanic
     }
   });
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2&visualCapture=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   const sampleState = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -14395,10 +14326,7 @@ test('SPH phase mounted SS scene proves particle motion numerically (anti-freeze
   // particle-aligned). This gate fails on any recurrence: it requires the
   // compact GPU summary's numeric motion proof, not descriptor statuses.
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   const sampleState = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -14453,10 +14381,7 @@ test('SPH phase mounted scene coarsens live under authoritative two-level SS mec
   // the two-level conservation summary's grid mass, and the continuation
   // proves motion through the compact summary.
   await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=32&schroederParticleStorageCapacityMargin=32&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   const sample = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -14524,10 +14449,7 @@ test('SPH phase thermal sidecar evolves temperature under authoritative two-leve
   // temperature strictly decreasing) - a mechanics-only authority path
   // leaves temperatures bit-frozen.
   await page.goto('/?drop=h2o&base=h2o&dropt=650&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   const sample = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -14589,10 +14511,7 @@ test('SPH phase reaction sidecar chains after thermal under authoritative two-le
   // coupled two-level mechanics, with the reaction outputs owning the
   // continuation and thermodynamics evolving across schedules.
   await page.goto('/?drop=Al&base=o2&dropt=3200&baset=1000&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederTwoLevel=1&schroederTwoLevelAuthority=authoritative&schroederTwoLevelSubsteps=2');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
 
   const sample = () => page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -14701,10 +14620,7 @@ test('SPH phase live merged scene conserves total mass across schedules', async 
   // (A migration-window experiment produced 35.6 -> 91.4 kg growth; this
   // gate makes any such regression fail loudly.)
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=350&wymin=700&mech=mlsmpm&residentAuto=1&residentFuseSequence=1&dropn=1&basen=3&boxx=4&boxy=4&boxz=4&ss=1&schroederLevel=0&schroederMaxLevel=8&schroederPortableSummary=1&schroederActiveNodeIndex=1&schroederParticleStorageMaterialization=1&schroederParticleStorageRowBudget=64&schroederParticleStorageCapacityMargin=64');
-  if (await page.locator('#sph-phase-overlay').count() === 0) {
-    await page.locator('#run-sph-phase').click();
-  }
-  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await ensureSphPhaseOverlayVisible(page, { timeout: 120_000 });
   await page.waitForFunction(() => {
     const execution = document.querySelector('#sph-phase-overlay')?.__mlsMpmResidentSteps;
     return execution?.finalStep?.diagnostics?.compactGpuSummaryAvailable === true

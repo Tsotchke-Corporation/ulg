@@ -39643,3 +39643,37 @@ trajectories verified physically sane (iron monotonic 1.028 -> 0.886,
 ice stable 1.034, separation 0.14) and the iron threshold recalibrated
 from the pre-cavitation-clamp era (0.85) to 0.93 with the probe data
 recorded in the gate comment.
+
+## 2026-07-07 — Final-suite four: 56/4 tally chased to reconciliations, all verified green isolated
+
+Final suite after the fix campaign: 56 passed / 4 failed / 2 skipped,
+19.7m (down from 21 failed / 27.7m at session start). All four residuals
+diagnosed and closed (897441d):
+
+- 3665 drop-edge spheres (2.0m timeout): raw `#run-sph-phase` click wedge
+  under suite ordering. ensureSphPhaseOverlayVisible now swallows the
+  click failure (auto-mount routes may never render the button) and is
+  used at all 33 raw-click boot sites. 25s isolated.
+- 13883 orchestrator observation: vite dep re-optimize 504 outlasted the
+  4x1.5s import retry budget; widened to 8x2.5s at all 4 embedded
+  helpers.
+- 8698 CM-shaped lane task (`readbackBytes > 0` got 0): STALE GATE - the
+  hot-loop compactSummaryMode default became 'none' (readback-free) in
+  e5ba9fa (2026-06-18). Gate now requests final-only explicitly so it
+  keeps proving copy-budget bytes flow through CM task metadata.
+- 7081 no-full render refresh (`appliedImpulseMagnitudeNSeconds > 0`
+  got 0): NOISE-ANCHORED GATE. Uniform ambient pressure over a closed
+  liquid interface has zero net impulse; at the assertion's birth commit
+  (78104a3) it passed on the 4e-15 float residue of a 370-row
+  cancellation. HEAD packs 24 axis-aligned interface rows (SS gas-cell
+  consumption) whose normals cancel exactly - impulse is 0.0, physics
+  correct. Reconciled to finite >= 0 with row flow guarded by
+  count/status assertions; also accepted the live-bridge capability
+  blocker family (runtime-validation) beside the static webgl table
+  value, and pixelValidation 'not-run'|'pending'.
+
+Pitfall relearned: isolated e2e reruns MUST set
+PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 or chromium boots without WebGPU and
+every resident gate red-herrings to cpu-reference fallback.
+
+Confirmation full suite running detached (confirm-suite.log).

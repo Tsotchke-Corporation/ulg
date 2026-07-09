@@ -39982,3 +39982,30 @@ decomposed with side-by-side captures (molten Cu 1600K, Na/H2O):
    Na/H2O reaction scene fills the box with fragmented polygons while
    the sphere lane stays readable. Needs splash-scale field smoothing
    or adaptive MC resolution where sheets thin out.
+
+## 2026-07-09 — Surface lane ported to sphere-lane PBR (GGX + scene lights + ACES); MC budget doubled
+
+Per the user directive, the native surface fragment shader now runs the
+SAME rendering recipe as the sphere lane instead of the hand-rolled
+two-light Blinn-Phong rig: the scene's exact light set (ambient 1.4,
+hemisphere 0xddffff/0x202a30 0.9, key white 1.1 from (4,8,6), fill
+0xbfe9ff 0.5 from (-6,3,-4)), Cook-Torrance GGX specular (D_GGX x
+Smith-correlated V x Schlick F) per directional light,
+energy-conserving Lambert, a RoomEnvironment stand-in sampled through
+the Karis split-sum env BRDF (metals reflect the room across the whole
+surface like MeshPhysicalMaterial), and Three's tone pipeline
+(exposure 1.08 -> ACESFilmic -> display encode). Shading is per-pixel
+on the gradient normals.
+
+Tessellation: the conservative vertex-row budget (128MB) was capping
+marching-cubes resolution at 29-33 in typical 4-6 surface scenes -
+octahedral droplet silhouettes, and small volumes flickering below the
+isovalue (the user called both). Budget doubled to 256MB: single
+surface now reaches the 64 cap, 4-6 surfaces get 42/36. Worst-case
+allocation only; actual MC output is far smaller. Active-voxel
+compaction (exclusive-scan allocation) is the recorded path to higher
+caps without VRAM inflation.
+
+Visual evidence: molten Cu luminous warm gold with room reflections;
+solid Fe shows env-lit metal; rounder silhouettes at held 60 fps
+(physics 398/s unaffected). Renderer units 93/0; full units 989/0.

@@ -1994,7 +1994,12 @@ export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_MATERIAL_INTERFACE_MAX_FIELD_CELLS_DEFAULT = 8_000;
 export const SPH_MATERIAL_INTERFACE_MAX_RESOLUTION_DEFAULT = 14;
 export const SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL = 15;
-export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 128 * 1024 * 1024;
+// 256MB worst-case vertex-row allocation (actual MC output is far smaller):
+// at 128MB a typical 4-6 surface scene budgeted down to resolution 29-33,
+// which reads as octahedral droplets and lets small volumes flicker below
+// the isovalue. 256MB lifts those tiers to 37-42 (single surface caps at
+// the 64 max). Active-voxel compaction is the real fix (task list).
+export const SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT = 256 * 1024 * 1024;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
 const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS_DEFAULT = Object.freeze({});
 const SPH_THREE_WEBGPU_RENDERER_RESIDENT_REQUIRED_LIMITS = Object.freeze({
@@ -5959,40 +5964,71 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
   let f0 = mix(vec3<f32>(dielectric_f0), base_color, metalness);
   let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
-  let fresnel = dielectric_f0 + (1.0 - dielectric_f0) * pow(1.0 - ndotv, 5.0);
-  let specular_power = max(2.0, (1.0 - roughness) * (1.0 - roughness) * 160.0);
-  // Two-light rig: warm key from upper front-left, cool dim fill from the
-  // opposite side, plus a hemispheric sky term. Low diffuse wrap keeps
-  // directional shape (the old single fixed light + fixed view direction
-  // read as flat ambient).
-  let key_dir = normalize(vec3<f32>(0.42, 0.78, 0.45));
-  let key_color = vec3<f32>(1.0, 0.97, 0.9);
-  let fill_dir = normalize(vec3<f32>(-0.55, 0.2, -0.62));
-  let fill_color = vec3<f32>(0.45, 0.56, 0.68);
+  // Sphere-lane PBR parity: the particle bridge renders through Three's
+  // MeshPhysicalMaterial (GGX microfacet BRDF, energy-conserving Lambert)
+  // under the scene's exact light set - ambient 1.4, hemisphere
+  // (0xddffff/0x202a30) 0.9, key directional white 1.1 from (4,8,6), fill
+  // 0xbfe9ff 0.5 from (-6,3,-4) - with a RoomEnvironment IBL. This shader
+  // mirrors that: same lights, GGX + Smith + Schlick, split-sum environment
+  // approximation, then the same ACESFilmic(exposure 1.08) tone pipeline.
+  let albedo = base_color * (1.0 - metalness);
+  let alpha_r = roughness * roughness;
+  // Scene lights (linear-light colors x intensity, /pi folded into Lambert).
+  let ambient_irradiance = vec3<f32>(1.4);
+  let hemi_sky = vec3<f32>(0.733, 1.0, 1.0);
+  let hemi_ground = vec3<f32>(0.0144, 0.0241, 0.0306);
+  let hemi_irradiance = mix(hemi_ground, hemi_sky, clamp(normal.y * 0.5 + 0.5, 0.0, 1.0)) * 0.9;
+  let key_dir = normalize(vec3<f32>(4.0, 8.0, 6.0));
+  let key_radiance = vec3<f32>(1.1);
+  let fill_dir = normalize(vec3<f32>(-6.0, 3.0, -4.0));
+  let fill_radiance = vec3<f32>(0.518, 0.815, 1.0) * 0.5;
+  let inv_pi = 0.3183098862;
   let key_ndotl = clamp(dot(normal, key_dir), 0.0, 1.0);
   let fill_ndotl = clamp(dot(normal, fill_dir), 0.0, 1.0);
-  let diffuse = base_color * (1.0 - metalness)
-    * (key_color * (0.14 + 0.86 * key_ndotl) + fill_color * fill_ndotl * 0.5);
-  let key_half = normalize(key_dir + view_dir);
-  let key_spec = pow(clamp(dot(normal, key_half), 0.0, 1.0), specular_power) * key_ndotl;
-  let fill_half = normalize(fill_dir + view_dir);
-  let fill_spec = pow(clamp(dot(normal, fill_half), 0.0, 1.0), specular_power) * fill_ndotl * 0.35;
-  let specular = (f0 + vec3<f32>(fresnel * (1.0 - metalness)))
-    * (key_spec * key_color + fill_spec * fill_color) * 1.4;
-  // Fresnel environment: liquids and metals pick up a sky-toned reflection at
-  // grazing angles. Schlick with the material's own F0 vector: a metal's
-  // F0 IS its base color (~0.5+ face-on), so iron reflects the environment
-  // across the whole surface - the scalar dielectric fresnel (~0.04 face-on)
-  // previously left metals near-black away from grazing angles.
-  let horizon_color = mix(vec3<f32>(0.16, 0.22, 0.28), vec3<f32>(0.5, 0.62, 0.72),
+  let diffuse = albedo * inv_pi
+    * (ambient_irradiance + hemi_irradiance + key_radiance * key_ndotl + fill_radiance * fill_ndotl);
+  // GGX specular per directional light (D * V_SmithCorrelated * F_Schlick).
+  var specular = vec3<f32>(0.0);
+  {
+    let a2 = alpha_r * alpha_r;
+    let dirs = array<vec3<f32>, 2>(key_dir, fill_dir);
+    let radiances = array<vec3<f32>, 2>(key_radiance, fill_radiance);
+    for (var li = 0u; li < 2u; li = li + 1u) {
+      let l = dirs[li];
+      let ndotl = clamp(dot(normal, l), 0.0, 1.0);
+      if (ndotl <= 0.0) { continue; }
+      let h = normalize(l + view_dir);
+      let ndoth = clamp(dot(normal, h), 0.0, 1.0);
+      let vdoth = clamp(dot(view_dir, h), 0.0, 1.0);
+      let d_denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
+      let d_ggx = a2 / max(3.14159265 * d_denom * d_denom, 1.0e-6);
+      let v_smith = 0.5 / max(
+        ndotl * (ndotv * (1.0 - alpha_r) + alpha_r) + ndotv * (ndotl * (1.0 - alpha_r) + alpha_r),
+        1.0e-6
+      );
+      let f_schlick = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdoth, 5.0);
+      specular = specular + radiances[li] * ndotl * d_ggx * v_smith * f_schlick;
+    }
+  }
+  // Environment (RoomEnvironment stand-in): bright interior gradient sampled
+  // by the split-sum approximation (Karis analytic env BRDF), so metals
+  // reflect the room across the whole surface exactly like the sphere lane.
+  let env_color = mix(vec3<f32>(0.23, 0.26, 0.30), vec3<f32>(0.85, 0.92, 1.0),
     clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
-  let fresnel_v = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0);
-  let env_reflection = horizon_color * fresnel_v * (1.0 - roughness * 0.7);
+  let env_r = vec4<f32>(-1.0, -0.0275, -0.572, 0.022) * roughness
+    + vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+  let env_a004 = min(env_r.x * env_r.x, exp2(-9.28 * ndotv)) * env_r.x + env_r.y;
+  let env_ab = vec2<f32>(-1.04, 1.04) * env_a004 + env_r.zw;
+  let env_specular = env_color * (f0 * env_ab.x + vec3<f32>(env_ab.y));
   let scatter_haze = clamp(log2(1.0 + optical.scattering_coefficient_per_m) * 0.018, 0.0, 0.35);
-  let rim = pow(1.0 - ndotv, 3.0) * (0.08 + scatter_haze) * (1.0 - roughness);
-  let sky_fill = base_color * (1.0 - metalness) * (0.04 + 0.09 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+  let rim = pow(1.0 - ndotv, 3.0) * scatter_haze;
   let emissive = resident_surface_emissive();
-  let lit = diffuse + sky_fill + specular + env_reflection + base_color * rim + emissive;
+  var lit = diffuse + specular + env_specular + base_color * rim + emissive;
+  // Three tone pipeline: exposure, ACESFilmic, then display encode below.
+  lit = lit * 1.08;
+  let aces_a = lit * (2.51 * lit + vec3<f32>(0.03));
+  let aces_b = lit * (2.43 * lit + vec3<f32>(0.59)) + vec3<f32>(0.14);
+  lit = clamp(aces_a / aces_b, vec3<f32>(0.0), vec3<f32>(1.0));
   let is_vapor = round(in.phase_id) == 3.0;
   let transmissive_surface_alpha = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
   let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);

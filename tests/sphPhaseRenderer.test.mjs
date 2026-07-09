@@ -658,10 +658,12 @@ test('SPH native marching-cubes surface resolution budgets conservative vertex r
   const defaultResolution = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(1);
   const defaultByteLength =
     estimateNativeMarchingCubesVertexRowsByteLengthForResolution(defaultResolution);
-  // 128MB default budget (raised from 32MB for the GPU-resident native
-  // consumer path, where the surface-table resolution is also floored to the
-  // budgeted value; the CPU-era base resolutions read as chunky).
-  assert.equal(defaultResolution, 52);
+  // 256MB default budget (raised from 128MB, 2026-07-09): multi-surface
+  // scenes budgeted to resolution 29-33 which read as octahedral droplets
+  // and let small volumes flicker below the isovalue. A single surface now
+  // reaches the 64 resolution cap; the allocation is conservative
+  // worst-case, actual MC output is far smaller.
+  assert.equal(defaultResolution, 64);
   assert.ok(defaultByteLength <= SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT);
 
   const twoSurfaceResolution = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(2);

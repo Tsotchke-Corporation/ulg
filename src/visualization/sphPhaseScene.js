@@ -5728,7 +5728,10 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
     mix(orange, white_hot, clamp((t - 0.55) / 0.85, 0.0, 1.0)),
     t > 0.55
   );
-  return color * min(t * t + 0.15, 1.6);
+  // Sphere-lane parity: the particle bridge drives emissive at intensity
+  // ~1.8x its material color; the previous t^2+0.15 scale left molten metal
+  // surfaces reading matte next to their glowing sphere twins.
+  return color * min(1.9 * t * t + 0.2, 2.6);
 }
 
 @group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;

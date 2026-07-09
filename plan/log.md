@@ -39962,3 +39962,23 @@ sanctioned dissipation, and excluded-volume separation + the free-slip
 floor carry the real near-floor behavior. Still-water e2e settling gate
 passes (40.3s); units 989/0; atomics 11/11; settle screenshot shows a
 broad floor-filling pool instead of the dome.
+
+## 2026-07-09 — Surface-vs-spheres quality gap: emissive parity landed; remaining gaps evidenced
+
+User report "materials look amazing as spheres but not as a surface"
+decomposed with side-by-side captures (molten Cu 1600K, Na/H2O):
+
+1. FIXED: native-surface emissive ran at roughly half the sphere
+   lane's intensity (t^2+0.15 scale vs the particle bridge's 1.8x
+   emissive) - molten Cu read as matte clay next to glowing sphere
+   twins. Blackbody scale raised to sphere parity (1.9t^2+0.2, cap
+   2.6); Cu now renders luminous warm gold. Renderer units green.
+2. REMAINING (recorded): the native emissive is a single uniform
+   temperature per surface (live band-filtered max), so glow has no
+   spatial variation - per-fragment temperature needs a resident
+   temperature field or per-vertex T in the compact rows.
+3. REMAINING (recorded): agitated liquid shatters into sharp
+   translucent shards (thin splash sheets under MC resolution) - the
+   Na/H2O reaction scene fills the box with fragmented polygons while
+   the sphere lane stays readable. Needs splash-scale field smoothing
+   or adaptive MC resolution where sheets thin out.

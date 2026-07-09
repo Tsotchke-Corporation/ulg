@@ -39888,3 +39888,35 @@ kernel tombstone semantics (skip m<=0 rows in pair/wall terms) as the
 general defensive fix. SS two-level violates the SS plan's own
 conservation acceptance gate; this outranks the remaining round-13
 failures.
+
+## 2026-07-08 — Correction + true root cause: SS two-level mechanics explodes tiny-mass gas cohorts
+
+CORRECTION to the previous entry: mass is NOT destroyed — that claim
+was a probe artifact (toFixed(1) rounded the gas drop's physical
+2.7 g/particle mass to 0). The 650K drop packs at gas density
+correctly.
+
+True root cause, proven by matched live-GPU batch-1 forensics: under
+plain resident mechanics the drop stays a coherent block at
+y [0.99, 1.48] (0.5 m above the base — not yet in contact, hence the
+gentle cooling); under SS two-level the SAME drop is scattered to
+y [0.63, 2.73] within 8 ms of sim time (~300 m/s) — the two-level
+mechanics blasts the tiny-mass gas cohort apart, some particles slam
+into the bath, and the thermal sidecar then equilibrates them on
+contact exactly as the demo-scale law says it should (per-step drain
+matches the pair-clamp math and the Node CPU reference; cadence and
+dtS verified identical between paths at 2000 calls/sim-s x 5e-4).
+Thermal, bins, separation, masses, tables: all exonerated by A/B.
+
+Prime suspect for the explosion: the cross-level delta-prolongation /
+coarse-correction transfer imparting velocity ~ delta_p / m on
+near-massless fine nodes (the WGSL's own comment warns about
+"quantized tiny-mass parent velocities"). Fix direction (general,
+physics-derived): momentum-conserving transfer with bounded velocity
+deltas for tiny masses (CFL-style cap or mass-share-limited dv), never
+a gas-specific patch. Gate 14494 likely also needs recalibration
+afterward: with v2 tables, fast equilibration on contact is correct
+physics, and the old plateau-park pass was an artifact of the same
+explosion under v1 tables. Full trail in task #3; probes in the
+session scratchpad (probe-ss-ut / probe-plain-ut with cohort
+y-extents).

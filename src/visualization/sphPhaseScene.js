@@ -6061,12 +6061,16 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let aces_a = lit * (2.51 * lit + vec3<f32>(0.03));
   let aces_b = lit * (2.43 * lit + vec3<f32>(0.59)) + vec3<f32>(0.14);
   lit = clamp(aces_a / aces_b, vec3<f32>(0.0), vec3<f32>(1.0));
+  // No artistic alpha anywhere (user directive): compositing weights are
+  // physically derived only. Transmissive dielectrics are fully opaque -
+  // their transparency lives entirely in the transmitted-light term above
+  // (Three's MeshPhysicalMaterial transmission model; refracted-scene
+  // sampling is the recorded follow-up). Participating media (vapor) use
+  // Beer-Lambert coverage 1 - exp(-tau) from the derived optical depth -
+  // that IS the PBR transparency of a volume, not a tuned opacity.
   let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
-  let vapor_alpha = max(clamp(optical.opacity, 0.0, 1.0), optical_alpha);
-  // Transmissive surfaces stay near-opaque (0.92 keeps a faint OIT depth
-  // cue); vapor keeps optical-depth-driven alpha.
-  let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), vapor_alpha, is_vapor);
-  let alpha = select(base_alpha, 0.92, transmissive_surface);
+  let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), optical_alpha, is_vapor);
+  let alpha = select(base_alpha, 1.0, transmissive_surface);
   // The canvas format is non-sRGB (getPreferredCanvasFormat), so linear-light
   // shading must be display-encoded here or everything reads ~2x too dark.
   let display_lit = pow(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));

@@ -40044,3 +40044,16 @@ reads as a solid glassy body with fresnel response rather than a ghost
 film. Renderer units 93/0 (shader guard regex updated). True refracted
 scene sampling (transmission framebuffer with IOR offset + roughness
 blur) is the recorded follow-up in the surface-parity task.
+
+## 2026-07-09 — Artistic alpha removed entirely (user directive): PBR-only transparency
+
+Session-audit follow-through on "alpha should probably not be used at
+all": transmissive dielectrics now render fully opaque (alpha 1.0) with
+transparency living entirely in the transmitted-light term; vapor keeps
+only Beer-Lambert coverage 1-exp(-tau) from derived optical depth (the
+physical transparency of a participating volume - the artistic
+max(opacity, ...) floor is gone). Quench capture: hot iron embedded in
+a glassy opaque ice block, correct depth, 60 fps. Refracted-scene
+sampling (transmission framebuffer, IOR offset, roughness blur) remains
+the top surface-parity item so the background reads through water
+physically. Renderer 93/0; full units green.

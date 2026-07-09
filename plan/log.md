@@ -40057,3 +40057,20 @@ a glassy opaque ice block, correct depth, 60 fps. Refracted-scene
 sampling (transmission framebuffer, IOR offset, roughness blur) remains
 the top surface-parity item so the background reads through water
 physically. Renderer 93/0; full units green.
+
+## 2026-07-09 — Background image picker (user request)
+
+The scene menu's background section now has an image selector beside
+the color picker: solid color (default) or one of the four
+plan/background-*.jpg images the user added (tracked in the repo,
+served by the dev server). URL param bgimg= round-trips. Mechanism:
+scene.setBackgroundImage() sets the CSS background (cover/center) on
+the container and clears every canvas fully transparent - the native
+consumer contexts moved from alphaMode 'opaque' to 'premultiplied'
+(composites identically while alpha=1) and the WebGL renderer gained an
+alpha context; the native clear value becomes premultiplied zero when
+an image is active. Solid-color mode is unchanged (clear alpha 1).
+Selecting a color while an image is active updates the fallback and
+defers (status scene-background-color-deferred-behind-image).
+Verified live: background-2 shows through with water + wireframe
+composited on top at 60 fps. Units 989/0.

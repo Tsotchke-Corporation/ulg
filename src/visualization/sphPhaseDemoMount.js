@@ -1904,6 +1904,26 @@ export async function mountSphPhaseDemoOverlay({
   backgroundColorInput.setAttribute('aria-label', 'Choose scene background color');
   backgroundColorInput.style.cssText = 'width:100%;height:40px;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;padding:4px;';
   backgroundColorEl.appendChild(backgroundColorInput);
+  // Background image picker: the plan/ images ship with the repo and are
+  // served by the dev server; the first entry falls back to the solid color.
+  const BACKGROUND_IMAGE_OPTIONS = Object.freeze([
+    ['', 'Background: solid color'],
+    ['/plan/background-1.jpg', 'Background image 1'],
+    ['/plan/background-2.jpg', 'Background image 2'],
+    ['/plan/background-3.jpg', 'Background image 3'],
+    ['/plan/background-4.jpg', 'Background image 4']
+  ]);
+  const backgroundImageSelect = document.createElement('select');
+  backgroundImageSelect.title = 'Choose a background image (or the solid color)';
+  backgroundImageSelect.setAttribute('aria-label', 'Choose scene background image');
+  backgroundImageSelect.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;padding:6px;';
+  for (const [value, label] of BACKGROUND_IMAGE_OPTIONS) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    backgroundImageSelect.appendChild(option);
+  }
+  backgroundColorEl.appendChild(backgroundImageSelect);
 
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
@@ -1975,7 +1995,8 @@ export async function mountSphPhaseDemoOverlay({
     lawv: lawInputs.viscosity,
     lawst: lawInputs.surfaceTension,
     blob: blobInput,
-    bg: backgroundColorInput
+    bg: backgroundColorInput,
+    bgimg: backgroundImageSelect
   };
   function urlValueForControl(el) {
     return el?.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
@@ -3946,6 +3967,9 @@ export async function mountSphPhaseDemoOverlay({
   applySchroederRenderProxyOverlayFlag(scene);
   overlay.__sphScene = scene;
   overlay.__sphSceneBackgroundColor = scene.scene?.userData?.sphSceneBackgroundColor || null;
+  if (backgroundImageSelect.value) {
+    applyBackgroundImageFromControl('initial-url-controls');
+  }
   overlay.__sphPeerComputeRenderOwnershipPolicy =
     scene.getPeerComputeRenderOwnershipPolicy?.()
     || scene.scene?.userData?.sphPeerComputeRenderOwnershipPolicy
@@ -6970,6 +6994,13 @@ export async function mountSphPhaseDemoOverlay({
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
+  function applyBackgroundImageFromControl(reason = 'background-image-control-input') {
+    overlay.__sphSceneBackgroundImage = scene.setBackgroundImage?.(backgroundImageSelect.value || null, { reason }) || null;
+  }
+  backgroundImageSelect.addEventListener('change', () => {
+    applyBackgroundImageFromControl('background-image-control-change');
+    syncUrlFromControls();
+  });
   function applyBackgroundColorFromControl(reason = 'background-color-control-input') {
     overlay.__sphSceneBackgroundColor = scene.setBackgroundColor?.(backgroundColorOf(), { reason }) || null;
     syncUrlFromControls();
@@ -7083,6 +7114,12 @@ export async function mountSphPhaseDemoOverlay({
         reason: `${resetReason}-scene-reused`,
         refresh: false
       }) || null;
+      if (backgroundImageSelect.value) {
+        overlay.__sphSceneBackgroundImage = scene.setBackgroundImage?.(backgroundImageSelect.value, {
+          reason: `${resetReason}-scene-reused`,
+          refresh: false
+        }) || null;
+      }
       scene.resetResidentStateForParticleReset?.({
         reason: `${resetReason}-scene-reused`,
         clearOverlay: true
@@ -7513,6 +7550,9 @@ export async function mountSphPhaseDemoOverlay({
       el.addEventListener('change', syncUrlFromControls);
     } else if (key === 'bg') {
       el.addEventListener('change', () => applyBackgroundColorFromControl('background-color-control-change'));
+    } else if (key === 'bgimg') {
+      // Background image changes are render-only; the change listener added
+      // at control creation already applies + syncs the URL. No demo rebuild.
     } else {
       el.addEventListener('change', scheduleDemoRebuild);
     }

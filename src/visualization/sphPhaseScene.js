@@ -9369,7 +9369,13 @@ export function createSphPhaseScene(container, {
     return host || sceneResidentAuthorityHost || globalThis.__ulgResidentAuthorityHost || null;
   }
   let sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(backgroundColor);
+  let sceneBackgroundImageUrl = null;
   function residentSurfaceDrawBackgroundClearValue() {
+    // When a background image is active the canvases clear fully transparent
+    // (premultiplied zero) so the container's CSS image shows through.
+    if (sceneBackgroundImageUrl) {
+      return { r: 0, g: 0, b: 0, a: 0 };
+    }
     // Parse the display-space hex directly (Three.Color may convert managed
     // colors to linear; the native canvas clear wants raw display channels).
     const hex = String(sceneBackgroundColorHex || SPH_SCENE_BACKGROUND_COLOR_DEFAULT).replace('#', '');
@@ -9415,7 +9421,7 @@ export function createSphPhaseScene(container, {
       requiredLimits: threeWebGpuRendererRequiredLimits,
       ...(threeWebGpuAppOwnedDevice ? { device: threeWebGpuAppOwnedDevice } : {})
     })
-    : new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: Boolean(preserveDrawingBuffer) }));
+    : new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: Boolean(preserveDrawingBuffer) }));
   renderer.userData = {
     ...(renderer.userData || {}),
     sphRequestedRendererBackend: requestedRendererBackend,
@@ -10759,12 +10765,59 @@ export function createSphPhaseScene(container, {
         });
     return publishWorkerOffscreenRenderRowsStatus(status);
   }
+  function setBackgroundImage(nextUrl, { reason = 'background-image-control', refresh = true } = {}) {
+    const url = typeof nextUrl === 'string' && nextUrl.trim() ? nextUrl.trim() : null;
+    sceneBackgroundImageUrl = url;
+    if (url) {
+      container.style.backgroundImage = `url(${JSON.stringify(url)})`;
+      container.style.backgroundSize = 'cover';
+      container.style.backgroundPosition = 'center';
+      container.style.backgroundRepeat = 'no-repeat';
+      // Canvases go fully transparent so the CSS image shows through.
+      scene.background = null;
+      renderer.setClearColor?.(new Three.Color('#000000'), 0);
+      renderer.domElement.style.backgroundColor = 'transparent';
+    } else {
+      container.style.backgroundImage = '';
+      setBackgroundColor(sceneBackgroundColorHex, { reason: `${reason}:cleared`, refresh: false });
+    }
+    scene.userData.sphSceneBackgroundImage = {
+      schema: 'peercompute.ulg.sph-scene-background-image.v0',
+      status: url ? 'scene-background-image-applied' : 'scene-background-image-cleared',
+      reason,
+      url,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (refresh) {
+      forceViewportRefreshBurst({ reason: `background-image:${reason}`, frameCount: 2 });
+    }
+    return scene.userData.sphSceneBackgroundImage;
+  }
+
   function setBackgroundColor(nextColor, { reason = 'background-color-control', refresh = true } = {}) {
     sceneBackgroundColorHex = normalizeSphSceneBackgroundColorHex(nextColor, sceneBackgroundColorHex);
     const color = new Three.Color(sceneBackgroundColorHex);
+    container.style.backgroundColor = sceneBackgroundColorHex;
+    if (sceneBackgroundImageUrl) {
+      // An active background image owns canvas transparency; only the
+      // container fallback color updates until the image is cleared.
+      scene.userData.sphSceneBackgroundColor = {
+        schema: 'peercompute.ulg.sph-scene-background-color.v0',
+        status: 'scene-background-color-deferred-behind-image',
+        reason,
+        color: sceneBackgroundColorHex,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      return scene.userData.sphSceneBackgroundColor;
+    }
     scene.background = color;
     renderer.setClearColor?.(color, 1);
-    container.style.backgroundColor = sceneBackgroundColorHex;
     renderer.domElement.style.backgroundColor = sceneBackgroundColorHex;
     scene.userData.sphSceneBackgroundColor = {
       schema: 'peercompute.ulg.sph-scene-background-color.v0',
@@ -14327,7 +14380,7 @@ export function createSphPhaseScene(container, {
           device,
           format,
           usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-          alphaMode: 'opaque'
+          alphaMode: 'premultiplied'
         });
       }
       const contextConfigureCount = (previous?.contextConfigureCount || 0) + (needsConfigure ? 1 : 0);
@@ -14436,7 +14489,7 @@ export function createSphPhaseScene(container, {
       device,
       format,
       usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
-      alphaMode: 'opaque'
+      alphaMode: 'premultiplied'
     });
     bridge.configuredCanvasWidth = canvas.width;
     bridge.configuredCanvasHeight = canvas.height;
@@ -16478,7 +16531,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         device,
         format,
         usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
-        alphaMode: 'opaque'
+        alphaMode: 'premultiplied'
       });
       const module = device.createShaderModule({
         label: 'ulg-sph-resident-render-row-overlay',
@@ -30663,6 +30716,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     setParticles,
     setSurfaceRadiusScale,
     setBackgroundColor,
+    setBackgroundImage,
     getBackgroundColor() {
       return sceneBackgroundColorHex;
     },

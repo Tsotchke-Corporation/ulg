@@ -6037,18 +6037,36 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let rim = pow(1.0 - ndotv, 3.0) * scatter_haze;
   let emissive = resident_surface_emissive();
   var lit = diffuse + specular + env_specular + base_color * rim + emissive;
+  let is_vapor = round(in.phase_id) == 3.0;
+  let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
+  // PBR transmission (MeshPhysicalMaterial model): transmissive dielectrics
+  // render near-OPAQUE - transparency lives in the transmitted light, not in
+  // alpha blending. Transmitted term = environment through the volume,
+  // Beer-Lambert attenuated by the material's own absorption over its
+  // attenuation distance, weighted by (1 - Fresnel) x transmission. The old
+  // path drew water as a ghost alpha film (alpha = 1 - 0.72 x transmission).
+  if (transmissive_surface) {
+    let fresnel_w = clamp(dot(f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndotv, 5.0), vec3<f32>(0.333)), 0.0, 1.0);
+    let attenuation_sigma = -log(clamp(optical.attenuation_linear, vec3<f32>(1.0e-4), vec3<f32>(1.0)))
+      / max(optical.attenuation_distance_m, 1.0e-3);
+    let path_m = clamp(optical.attenuation_distance_m, 0.02, 2.0);
+    let transmitted_tint = exp(-attenuation_sigma * path_m);
+    let transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
+      clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
+    let transmitted = transmitted_env * transmitted_tint * base_color;
+    lit = lit + (1.0 - fresnel_w) * clamp(optical.transmission, 0.0, 1.0) * transmitted;
+  }
   // Three tone pipeline: exposure, ACESFilmic, then display encode below.
   lit = lit * 1.08;
   let aces_a = lit * (2.51 * lit + vec3<f32>(0.03));
   let aces_b = lit * (2.43 * lit + vec3<f32>(0.59)) + vec3<f32>(0.14);
   lit = clamp(aces_a / aces_b, vec3<f32>(0.0), vec3<f32>(1.0));
-  let is_vapor = round(in.phase_id) == 3.0;
-  let transmissive_surface_alpha = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
   let optical_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
   let vapor_alpha = max(clamp(optical.opacity, 0.0, 1.0), optical_alpha);
-  let transmissive_alpha = clamp(max(0.08, 1.0 - optical.transmission * 0.72 + optical_alpha * 0.5), 0.08, 1.0);
+  // Transmissive surfaces stay near-opaque (0.92 keeps a faint OIT depth
+  // cue); vapor keeps optical-depth-driven alpha.
   let base_alpha = select(clamp(optical.opacity, 0.0, 1.0), vapor_alpha, is_vapor);
-  let alpha = select(base_alpha, transmissive_alpha, transmissive_surface_alpha);
+  let alpha = select(base_alpha, 0.92, transmissive_surface);
   // The canvas format is non-sRGB (getPreferredCanvasFormat), so linear-light
   // shading must be display-encoded here or everything reads ~2x too dark.
   let display_lit = pow(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));

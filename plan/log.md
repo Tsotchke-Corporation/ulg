@@ -40029,3 +40029,18 @@ the scene shows the Cs block resting on the F gas region, that is the
 demo-scale gas EOS behaving as a stiff cushion (gas particles hold
 near-fixed rest volume instead of flowing aside) - recorded with the
 vibrating-gas report as the gas-behavior investigation.
+
+## 2026-07-09 — Alpha-film transparency replaced with PBR transmission (user report)
+
+Transmissive dielectrics (water/ice) were drawn as alpha-blended films
+(alpha = 1 - 0.72 x transmission) - the user's "global transparency"
+report. Ported the MeshPhysicalMaterial transmission model: the surface
+renders near-opaque (alpha 0.92) and transparency lives in the
+transmitted light - environment through the volume, Beer-Lambert
+attenuated by the material's own absorption over its attenuation
+distance, weighted by (1 - Fresnel) x transmission, added into lit
+before the ACES pipeline. Vapor keeps optical-depth alpha. Water now
+reads as a solid glassy body with fresnel response rather than a ghost
+film. Renderer units 93/0 (shader guard regex updated). True refracted
+scene sampling (transmission framebuffer with IOR offset + roughness
+blur) is the recorded follow-up in the surface-parity task.

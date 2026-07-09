@@ -40074,3 +40074,46 @@ Selecting a color while an image is active updates the fallback and
 defers (status scene-background-color-deferred-behind-image).
 Verified live: background-2 shows through with water + wireframe
 composited on top at 60 fps. Units 989/0.
+
+## Round 13 — fluorine visible: gas electronic-band optics (task #5 closed)
+
+**Root cause (browser-probed, definitive):** the F|F|gas surface was never a render bug.
+GPU field healthy (1407 active cells, maxD 4154 vs iso 24 via forced
+`renderFieldSurfaceSummaryMode:'readback'`), extraction attached 10,308 verts in the
+indirect draw, camera written per frame. F was invisible because its optics resolved to
+`blocked-missing-optical-closure` → opacity 0 and vapor alpha `1−exp(−optical_depth)` ≈ 0:
+the gas-only ideal-gas closure derived no optical inputs at all.
+
+**Fix (general, derived + bank-anchored per existing policy):**
+- New optical law `molecular-gas-electronic-band-absorption-pbr` (opticalClosure.js):
+  κ(λ) = n_gas·σ(λ) from a Gaussian Franck–Condon continuum at the molecule's lowest
+  electronic band, Thomas–Reiche–Kuhn integrated cross-section; width E0/6 and f=1e-3 as
+  universal fallbacks when the bank has no FWHM/oscillator strength. Deep-UV bands (N2,
+  H2, O2, CO2) → correctly invisible; visible-tail bands (F2, Cl2, Br2, I2, NO2, O3) →
+  correct hues. F2 predicts κ_blue ≈ 20/m vs measured ~25/m.
+- Derived band centre: ΔSCF UHF vertical triplet at the breathing-mode-relaxed ground
+  geometry (`gasVerticalExcitationEv`, opt-in via `deriveGasElectronicExcitation`) —
+  Koopmans gap is useless (F2: 22 eV), ΔSCF at the experimental geometry gives 5.2 eV,
+  but at STO-3G's own compressed equilibrium 8.4 eV — still too high for the visible tail.
+- So runtime values are anchored: new `data/material-properties/molecular-electronic-bands.json`
+  (spectroscopic band centre/FWHM/f) applied in `referenceBankAnchoring.js` as
+  `anchorGasElectronicBand` — same reference-fallback tier, source
+  `material-property-reference-bank`, ΔSCF residuals retained.
+
+**Traps hit (documented for posterity):**
+- A `reference-fallback` provenance entry with an unlisted source string inside the PURE
+  derivation path silently kills the demo boot: `requireFirstPrinciplesMaterialProperties`
+  throws in `createDerivedMaterialClosure` (no allowlist there) and the overlay sits at
+  "Hot loop is not fully GPU-resident yet" with zero console errors. Bank data must flow
+  through the anchoring variant, never through `deriveFormulaMaterialProperties`.
+- Eager ΔSCF in the ideal-gas branch stalls the demo build (reaction discovery derives
+  many candidate products; each unbanked even-electron molecule cost a ~10-point UHF scan).
+  Runtime is bank-only; ΔSCF is opt-in.
+- Earlier probe read "field" bytes from `compactPositionRowsBuffer` (biggest-buffer scan
+  hit a vertex buffer) — always match buffers by identity/metadata, not size.
+
+**Verified:** browser screenshots (native surface lane): amber-orange translucent F2 cloud
+over blue water; spheres lane still renders (F spheres white — sphere-lane tint from the
+new gas-band response is a noted follow-up). Tests: opticalClosure 12/12 incl. new
+regression (F yellow visible, H2 thin), materialPropertyProvenance 6/6,
+materialPropertyBank 10/10. Full unit suite launched in background.

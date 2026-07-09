@@ -1,7 +1,7 @@
 import { createMaterialClosureArtifact, hashPayload } from '../../../ulg-gpu-abi/src/index.js';
 import { atomicMassKg, symbolForZ, valenceElectronCount, zForSymbol } from '../electronicStructure/periodicTable.js';
 import { allElementMolecularEnergy } from '../electronicStructure/allElementMolecularSolver.js';
-import { atomizationEnergyHa, rhf } from '../electronicStructure/molecularHartreeFock.js';
+import { atomizationEnergyHa, rhf, uhf } from '../electronicStructure/molecularHartreeFock.js';
 import { anchorDerivedMaterialProperties } from './referenceBankAnchoring.js';
 import { idealGasHeatCapacity } from '../electronicStructure/molecularThermochemistry.js';
 import molecularVibrationsBank from '../../../data/material-properties/molecular-vibrations.json' with { type: 'json' };
@@ -201,6 +201,81 @@ function homoLumoColor(geometry) {
   return null;
 }
 
+// Lowest vertical electronic excitation of the free molecule from ΔSCF:
+// E(lowest triplet) − E(ground singlet), both at the ground geometry. The
+// Koopmans HOMO–LUMO gap overshoots badly (F2: 22 eV vs the observed ~4 eV
+// band) because it drops electron–hole relaxation; the ΔSCF total-energy
+// difference keeps it and lands in the right class (F2: 5.2 eV). This sets
+// the centre of the gas visible-absorption band in the optical closure.
+// Even-electron molecules only — open-shell ground states have no cheap
+// spin-flip proxy, so they return null and stay optically unclosed.
+const gasVerticalExcitationCache = new Map();
+
+function gasVerticalExcitationEv(atomCounts, geometry) {
+  // Single atoms have no molecular electronic band in this model (noble gases
+  // are correctly colourless), and the breathing-mode scan would be meaningless.
+  if (!allInMolecularBasis(atomCounts) || !Array.isArray(geometry) || geometry.length < 2) return null;
+  const cacheKey = canonicalFormula(atomCounts);
+  if (gasVerticalExcitationCache.has(cacheKey)) return gasVerticalExcitationCache.get(cacheKey);
+  const excitation = computeGasVerticalExcitationEv(atomCounts, geometry);
+  gasVerticalExcitationCache.set(cacheKey, excitation);
+  return excitation;
+}
+
+function computeGasVerticalExcitationEv(atomCounts, geometry) {
+  const electrons = Object.entries(atomCounts)
+    .reduce((sum, [Z, count]) => sum + Number(Z) * Number(count), 0);
+  if (!Number.isFinite(electrons) || electrons < 2 || electrons % 2 !== 0) return null;
+  try {
+    // "Vertical" means at the ground-state equilibrium geometry — the template
+    // geometry's fixed 1.15 Å diatomic bond compresses F2 by 0.26 Å and inflates
+    // the triplet gap from ~5 eV to ~17 eV. Banked harmonic-minimum geometries
+    // are already optimized; otherwise relax the breathing mode (uniform scale s
+    // on all positions), which is exact for diatomics.
+    const banked = MOLECULAR_VIBRATIONS_BY_FORMULA.get(canonicalFormula(atomCounts));
+    let groundGeometry = banked
+      ? banked.optimizedAtoms.map((a) => ({ Z: a.Z, position: [...a.positionBohr] }))
+      : null;
+    let singlet = null;
+    if (!groundGeometry) {
+      const scaled = (s) => geometry.map((a) => ({ Z: a.Z, position: a.position.map((x) => x * s) }));
+      let best = null;
+      for (let s = 0.9; s <= 1.6001; s += 0.1) {
+        let result = null;
+        try {
+          result = uhf(scaled(s), { multiplicity: 1 });
+        } catch {
+          continue;
+        }
+        if (result?.scfConverged && (!best || result.totalEnergyHa < best.energyHa)) {
+          best = { s, energyHa: result.totalEnergyHa, result };
+        }
+      }
+      if (!best) return null;
+      for (const s of [best.s - 0.05, best.s + 0.05]) {
+        try {
+          const result = uhf(scaled(s), { multiplicity: 1 });
+          if (result?.scfConverged && result.totalEnergyHa < best.energyHa) {
+            best = { s, energyHa: result.totalEnergyHa, result };
+          }
+        } catch {
+          // keep the coarse-scan minimum
+        }
+      }
+      groundGeometry = scaled(best.s);
+      singlet = best.result;
+    } else {
+      singlet = uhf(groundGeometry, { multiplicity: 1 });
+    }
+    const triplet = uhf(groundGeometry, { multiplicity: 3 });
+    if (!singlet?.scfConverged || !triplet?.scfConverged) return null;
+    const excitationEv = (triplet.totalEnergyHa - singlet.totalEnergyHa) * HARTREE_EV;
+    return excitationEv > 0 ? excitationEv : null;
+  } catch {
+    return null;
+  }
+}
+
 function formulaAtomicVolumes(atomCounts, options) {
   let volumePerFormulaM3 = 0;
   let weightedBulkPa = 0;
@@ -331,6 +406,14 @@ export function deriveFormulaMaterialProperties({
       temperatureK: STANDARD_TEMPERATURE_K,
       molarMassKgPerMol
     });
+    // The live ΔSCF scan is seconds of Hartree-Fock per formula — far too slow
+    // for the demo build path, where reaction discovery derives many candidate
+    // products. Runtime band values come from reference-bank anchoring
+    // (referenceBankAnchoring.js); pass options.deriveGasElectronicExcitation
+    // to run the pure ΔSCF derivation here (tests, offline bank extension).
+    const gasExcitationEv = options?.deriveGasElectronicExcitation
+      ? gasVerticalExcitationEv(counts, geom)
+      : null;
     return withPropertyProvenance({
       molarMassKgPerMol,
       atomsPerFormula,
@@ -338,6 +421,9 @@ export function deriveFormulaMaterialProperties({
       idealGas: true,
       heatCapacityModel: { gas: gasHeat.model },
       gasVibrationsCm1: gasHeat.vibrationsCm1,
+      gasElectronicExcitationEv: gasExcitationEv,
+      gasElectronicBandFwhmEv: null,
+      gasElectronicOscillatorStrength: null,
       phases: [{
         name: 'gas',
         cpJPerKgK: gasCp,
@@ -365,6 +451,12 @@ export function deriveFormulaMaterialProperties({
           method: gasHeat.vibrationsCm1
             ? 'rigid-rotor plus banked harmonic-vibration Einstein heat capacity plus rho=pM/RT'
             : 'rigid-rotor/equipartition heat capacity plus rho=pM/RT'
+        }),
+        propertyProvenanceEntry({
+          paths: ['gasElectronicExcitationEv', 'gasElectronicBandFwhmEv', 'gasElectronicOscillatorStrength'],
+          status: DS.PHYSICAL_LAW,
+          source: 'delta-scf-uhf-vertical-triplet-excitation',
+          method: 'UHF total-energy difference E(triplet)-E(singlet) at the breathing-mode-relaxed ground geometry; null unless derivation requested (reference-bank anchoring supplies runtime band values)'
         })
       ],
       notes: [`${key || resolvedFormula} gas closure is derived from formula mass and molecular statistical mechanics.`]

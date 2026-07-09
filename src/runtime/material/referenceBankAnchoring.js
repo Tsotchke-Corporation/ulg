@@ -10,6 +10,7 @@
 // capacities with bank reference values, records the derived values as
 // residual diagnostics, and stamps the provenance accordingly.
 import compoundMaterialPropertyBank from '../../../data/material-properties/compounds.json' with { type: 'json' };
+import molecularElectronicBandsBank from '../../../data/material-properties/molecular-electronic-bands.json' with { type: 'json' };
 import { DEFAULT_MATERIAL_PROPERTY_BANK } from './defaultMaterialPropertyBank.js';
 import {
   PROPERTY_DERIVATION_STATUS,
@@ -53,12 +54,93 @@ function bankPhase(record, name) {
   return (record.phases || []).find((phase) => phase.name === name) || null;
 }
 
+// Spectroscopic gas-phase electronic absorption bands (visible/near-UV continua):
+// band centre (absorption maximum), FWHM, and integrated oscillator strength.
+// These anchor the ΔSCF-derived band centre because minimal-basis ΔSCF overshoots
+// σ* band centres by several eV (F2: 8.4 eV derived vs 4.34 eV observed) and the
+// Gaussian tail into the visible is exponentially sensitive to the centre. Same
+// admitted-fallback tier as the CRC transition anchors; the pure ΔSCF path stays
+// available via options.deriveGasElectronicExcitation in materialDerivation.
+const MOLECULAR_ELECTRONIC_BANDS_BY_FORMULA = new Map(
+  (molecularElectronicBandsBank?.records || [])
+    .filter((record) => record?.formula && record.bandCenterEv > 0)
+    .map((record) => [record.formula, record])
+);
+
+function anchorGasElectronicBand(properties, materialKey) {
+  const formula = properties?.formula;
+  const record = formula ? MOLECULAR_ELECTRONIC_BANDS_BY_FORMULA.get(formula) : null;
+  const hasGasPhase = (properties?.phases || []).some((phase) => phase?.name === 'gas');
+  if (!record || !hasGasPhase) {
+    return { properties, anchored: false, residuals: null, anchoredPaths: [] };
+  }
+  const residuals = {
+    gasElectronicBand: {
+      derivedExcitationEv: properties.gasElectronicExcitationEv ?? null,
+      referenceBandCenterEv: record.bandCenterEv
+    }
+  };
+  const anchoredPaths = [
+    'gasElectronicExcitationEv',
+    'gasElectronicBandFwhmEv',
+    'gasElectronicOscillatorStrength'
+  ];
+  const anchored = {
+    ...properties,
+    gasElectronicExcitationEv: record.bandCenterEv,
+    gasElectronicBandFwhmEv: record.bandFwhmEv ?? null,
+    gasElectronicOscillatorStrength: record.oscillatorStrength ?? null,
+    referenceBankAnchoring: {
+      schema: 'peercompute.ulg.material-reference-bank-anchoring.v0',
+      bank: properties.referenceBankAnchoring?.bank ?? 'molecular-electronic-bands',
+      recordSchema: properties.referenceBankAnchoring?.recordSchema ?? molecularElectronicBandsBank.schema,
+      source: properties.referenceBankAnchoring?.source ?? molecularElectronicBandsBank.source,
+      derivationResiduals: {
+        ...(properties.referenceBankAnchoring?.derivationResiduals || {}),
+        ...residuals
+      }
+    },
+    propertyProvenance: {
+      ...(properties.propertyProvenance || {}),
+      entries: [
+        ...(properties.propertyProvenance?.entries || []),
+        propertyProvenanceEntry({
+          paths: anchoredPaths,
+          status: PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK,
+          source: 'material-property-reference-bank',
+          method: 'gas-phase electronic band centre/FWHM/oscillator strength anchored to spectroscopic absorption maxima; derived ΔSCF value retained as derivationResiduals',
+          inputs: [record.formula]
+        })
+      ],
+      notes: [
+        ...(properties.propertyProvenance?.notes || []),
+        `Gas electronic band anchored to spectroscopic reference (${record.formula}); derivation residuals recorded.`
+      ]
+    }
+  };
+  return { properties: anchored, anchored: true, residuals, anchoredPaths };
+}
+
 /**
- * Anchor derived properties with bank reference boundaries. Returns
- * { properties, anchored, residuals, anchoredPaths }; when no usable bank
- * record exists the input properties pass through unchanged (anchored: false).
+ * Anchor derived properties with bank reference boundaries and spectroscopic
+ * gas electronic bands. Returns { properties, anchored, residuals,
+ * anchoredPaths }; when no usable bank record exists the input properties pass
+ * through unchanged (anchored: false).
  */
 export function anchorDerivedMaterialProperties(properties, materialKey) {
+  const phaseAnchoring = anchorDerivedPhaseBoundaries(properties, materialKey);
+  const bandAnchoring = anchorGasElectronicBand(phaseAnchoring.properties, materialKey);
+  if (!bandAnchoring.anchored) return phaseAnchoring;
+  if (!phaseAnchoring.anchored) return bandAnchoring;
+  return {
+    properties: bandAnchoring.properties,
+    anchored: true,
+    residuals: { ...(phaseAnchoring.residuals || {}), ...(bandAnchoring.residuals || {}) },
+    anchoredPaths: [...phaseAnchoring.anchoredPaths, ...bandAnchoring.anchoredPaths]
+  };
+}
+
+function anchorDerivedPhaseBoundaries(properties, materialKey) {
   const found = referenceBankRecordForMaterial(materialKey);
   if (!found || !properties?.phases?.length) {
     return { properties, anchored: false, residuals: null, anchoredPaths: [] };

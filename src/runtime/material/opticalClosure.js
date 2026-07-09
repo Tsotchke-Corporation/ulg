@@ -155,6 +155,9 @@ function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, 
     stableNumber(conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3),
     stableNumber(phaseDensityKgPerM3(properties, phase)),
     stableNumber(properties?.electronicGapEv),
+    stableNumber(properties?.gasElectronicExcitationEv),
+    stableNumber(properties?.gasElectronicBandFwhmEv),
+    stableNumber(properties?.gasElectronicOscillatorStrength),
     oscillatorCacheKey(properties?.opticalInterbandOscillators),
     Array.isArray(properties?.intrinsicColorSrgb) ? properties.intrinsicColorSrgb.map(stableNumber).join(',') : 'no-intrinsic'
   ].join('::');
@@ -849,6 +852,95 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
   });
 }
 
+// Visible colour of a molecular gas from its lowest electronic absorption band.
+// Band centre E0: the ΔSCF vertical triplet excitation derived in materialDerivation
+// (gasElectronicExcitationEv). Band shape: the low-lying excited states of halogen-like
+// molecules are repulsive, so absorption is a broad Franck–Condon continuum — modelled
+// as a Gaussian of width E0/6 (universal broad-continuum estimate, same class as the
+// Drude ω_p/30 damping). Strength: Thomas–Reiche–Kuhn integrated cross-section
+// e²/(4ε₀·m_e·c) scaled by a universal weak-continuum oscillator strength f = 1e-3 —
+// these transitions are spin/symmetry-hindered and measured halogen continua sit at
+// f ~ 1e-3 (frontier: derive f from transition dipoles instead of this constant).
+// κ(λ) = n_gas·σ(λ) with n_gas from the ideal-gas number density, so a molecule whose
+// band sits in the deep UV (N2, H2, O2) stays correctly invisible while F2/Cl2 pick up
+// their yellow-green tints from the band tail — no per-material tuning anywhere.
+const GAS_CONTINUUM_OSCILLATOR_STRENGTH = 1e-3;
+const TRK_INTEGRATED_CROSS_SECTION_M2_HZ = 2.6540e-6; // e²/(4 ε₀ m_e c)
+const EV_TO_HZ = 2.417989242e14;
+
+function gasElectronicBandAbsorptionPerM(nm, { excitationEv, numberDensityPerM3, bandSigmaEv, oscillatorStrength }) {
+  if (!(excitationEv > 0) || !(numberDensityPerM3 > 0)) return 0;
+  const photonEv = 1239.841984 / nm;
+  const sigmaEv = bandSigmaEv > 0 ? bandSigmaEv : excitationEv / 6;
+  const f = oscillatorStrength > 0 ? oscillatorStrength : GAS_CONTINUUM_OSCILLATOR_STRENGTH;
+  const bandSigmaHz = sigmaEv * EV_TO_HZ;
+  const peakSigmaM2 = (TRK_INTEGRATED_CROSS_SECTION_M2_HZ * f)
+    / (Math.sqrt(2 * Math.PI) * bandSigmaHz);
+  const detuningEv = photonEv - excitationEv;
+  return numberDensityPerM3 * peakSigmaM2
+    * Math.exp(-(detuningEv * detuningEv) / (2 * sigmaEv * sigmaEv));
+}
+
+const GAUSSIAN_FWHM_TO_SIGMA = 1 / (2 * Math.sqrt(2 * Math.LN2));
+
+function molecularGasBandRenderParams({ properties, pathLengthM = 0.3 }) {
+  const excitationEv = properties?.gasElectronicExcitationEv;
+  if (!(excitationEv > 0)) return null;
+  const density = phaseDensityKgPerM3(properties, 'gas');
+  const molarMass = properties?.molarMassKgPerMol;
+  if (!(density > 0) || !(molarMass > 0)) return null;
+  const numberDensityPerM3 = (density / molarMass) * 6.02214076e23;
+  const bandSigmaEv = properties?.gasElectronicBandFwhmEv > 0
+    ? properties.gasElectronicBandFwhmEv * GAUSSIAN_FWHM_TO_SIGMA
+    : null;
+  const oscillatorStrength = properties?.gasElectronicOscillatorStrength ?? null;
+  const absorptionAt = (nm) => gasElectronicBandAbsorptionPerM(nm, {
+    excitationEv,
+    numberDensityPerM3,
+    bandSigmaEv,
+    oscillatorStrength
+  });
+  const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
+  const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+  const opacity = opticalDepthToOpacity(opticalDepth);
+  const transmission = Math.exp(-Math.min(80, opticalDepth));
+  const n = 1.0005; // gas refractive index ≈ air; surface Fresnel is negligible
+  const responseColor = spectralResponseToSrgb(
+    (nm) => Math.exp(-absorptionAt(nm) * Math.max(0.01, pathLengthM))
+  );
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
+    absorptionCoefficientPerM: absorptionAt(nm),
+    pathLengthM,
+    reflectance: ((n - 1) / (n + 1)) ** 2,
+    n,
+    k: 0
+  }));
+  return withPbrMetadata({
+    metalness: 0,
+    roughness: 1,
+    transmission,
+    ior: n,
+    opacity,
+    attenuationColor: [responseColor.r, responseColor.g, responseColor.b],
+    attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
+    condensationScatter: 0,
+    internalScatter: 0,
+    opticalDepth,
+    absorptionCoefficientPerM,
+    provenance: {
+      status: 'derived',
+      source: 'delta-scf-electronic-band-gas-absorption',
+      method: 'electronic band centre (banked spectroscopic or ΔSCF) -> Gaussian Franck-Condon continuum (banked FWHM or E0/6) -> Thomas-Reiche-Kuhn cross-section (banked f or 1e-3 weak-continuum estimate) -> Beer-Lambert',
+      inputs: { gasElectronicExcitationEv: excitationEv, bandSigmaEv, oscillatorStrength, pathLengthM, numberDensityPerM3 },
+      validation: false
+    }
+  }, {
+    baseColorSrgb: [responseColor.r, responseColor.g, responseColor.b],
+    renderModel: 'molecular-gas-electronic-band-absorption-pbr',
+    spectralSamples
+  });
+}
+
 /**
  * Physically-derived render parameters for a material surface — what the renderer should use
  * instead of hand-picked opacities. Everything here comes from the optics, not from tuning:
@@ -951,6 +1043,10 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
         : 'molecular-transparent-beer-lambert-pbr',
       spectralSamples
     });
+  }
+  if (phase === 'gas') {
+    const gasBand = molecularGasBandRenderParams({ properties, pathLengthM });
+    if (gasBand) return gasBand;
   }
   const compound = compoundGapRenderParams({ properties, phase, pathLengthM });
   if (compound) return compound;

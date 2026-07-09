@@ -1,0 +1,24 @@
+{
+  "schema": "peercompute.ulg.molecular-electronic-bands.v0",
+  "source": "spectroscopic-absorption-maximum",
+  "notes": [
+    "Gas-phase visible/near-UV electronic absorption continua: band centre (absorption maximum),",
+    "FWHM, and integrated oscillator strength from standard spectroscopy references. These anchor",
+    "the delta-SCF derived band centre (reference-fallback provenance, like the CRC transition",
+    "anchors) because minimal-basis delta-SCF overshoots sigma* band centres by several eV",
+    "(F2: 8.4 eV derived vs 4.34 eV observed) and the Gaussian tail into the visible is",
+    "exponentially sensitive to the centre. Strict mode can rerun the pure delta-SCF path."
+  ],
+  "records": [
+    { "formula": "F2", "bandCenterEv": 4.34, "bandFwhmEv": 1.6, "oscillatorStrength": 0.0025, "note": "1Pi_u <- X continuum, lambda_max ~285 nm; tail past 450 nm gives the pale yellow" },
+    { "formula": "Cl2", "bandCenterEv": 3.76, "bandFwhmEv": 1.4, "oscillatorStrength": 0.0025, "note": "1Pi_u <- X continuum, lambda_max ~330 nm; yellow-green" },
+    { "formula": "Br2", "bandCenterEv": 2.99, "bandFwhmEv": 1.2, "oscillatorStrength": 0.003, "note": "lambda_max ~415 nm; red-brown vapour" },
+    { "formula": "I2", "bandCenterEv": 2.36, "bandFwhmEv": 0.9, "oscillatorStrength": 0.005, "note": "B <- X, lambda_max ~525 nm; violet vapour" },
+    { "formula": "O3", "bandCenterEv": 2.07, "bandFwhmEv": 0.8, "oscillatorStrength": 0.00001, "note": "Chappuis band, lambda_max ~600 nm; faint blue" },
+    { "formula": "NO2", "bandCenterEv": 3.1, "bandFwhmEv": 1.3, "oscillatorStrength": 0.01, "note": "visible band, lambda_max ~400 nm; brown" },
+    { "formula": "N2", "bandCenterEv": 12.5, "bandFwhmEv": 1.0, "oscillatorStrength": 0.0001, "note": "first dipole-allowed b1Pi_u deep in vacuum UV; colourless" },
+    { "formula": "O2", "bandCenterEv": 8.6, "bandFwhmEv": 1.2, "oscillatorStrength": 0.002, "note": "Schumann-Runge B3Sigma_u- <- X; vacuum UV; colourless" },
+    { "formula": "CO2", "bandCenterEv": 8.9, "bandFwhmEv": 1.0, "oscillatorStrength": 0.0001, "note": "1B2 <- X vacuum UV; colourless" },
+    { "formula": "H2", "bandCenterEv": 11.3, "bandFwhmEv": 1.0, "oscillatorStrength": 0.3, "note": "Lyman B1Sigma_u+ <- X vacuum UV; colourless" }
+  ]
+}

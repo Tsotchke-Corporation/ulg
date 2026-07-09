@@ -252,3 +252,27 @@ test('interband branch is localized-d/f driven and renderer can use precomputed 
   assert.equal(render.provenance.source, 'scalar-relativistic-kohn-sham-drude-lorentz-skin-depth');
   assert.equal(render.interbandOscillators.length, oscillators.length);
 });
+
+test('gaseous fluorine is visibly yellow from its banked electronic band; H2 stays optically thin', async () => {
+  const { deriveMaterialProperties } = await import('../src/runtime/material/materialDerivation.js');
+  const { anchorDerivedMaterialProperties } = await import('../src/runtime/material/referenceBankAnchoring.js');
+  // Band centre anchored to the spectroscopic maximum (reference-fallback, CRC-anchor policy);
+  // the pure delta-SCF path overshoots sigma* centres in the minimal basis.
+  const pureF = deriveMaterialProperties('F');
+  assert.equal(pureF.gasElectronicExcitationEv, null);
+  const f = anchorDerivedMaterialProperties(pureF, 'F').properties;
+  assert.ok(Math.abs(f.gasElectronicExcitationEv - 4.34) < 1e-9);
+  const render = opticalRenderParams({ material: 'F', phase: 'gas', pathLengthM: 0.3, properties: f });
+  assert.equal(render.renderModel, 'molecular-gas-electronic-band-absorption-pbr');
+  // Visible: past the vapor show threshold (1e-2) with a yellow response
+  // (blue absorbed by the 1Pi_u <- X band tail, red transmitted).
+  assert.ok(render.opticalDepth > 0.05, `optical depth ${render.opticalDepth} should be visible`);
+  const [r, g, b] = render.baseColorSrgb;
+  assert.ok(r > 0.8 && r > g && g > b && b < 0.2, `F2 response should be yellow-orange, got ${render.baseColorSrgb}`);
+
+  const h2 = anchorDerivedMaterialProperties(deriveMaterialProperties('h2'), 'h2').properties;
+  // The banked H2 Lyman band sits deep in the vacuum UV, so H2 is correctly near-invisible.
+  assert.ok(h2.gasElectronicExcitationEv > 6);
+  const h2Render = opticalRenderParams({ material: 'h2', phase: 'gas', pathLengthM: 0.3, properties: h2 });
+  assert.ok(h2Render.opticalDepth < 5e-3, `H2 optical depth ${h2Render.opticalDepth} should be thin`);
+});

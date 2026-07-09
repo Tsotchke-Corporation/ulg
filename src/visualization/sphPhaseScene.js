@@ -5681,6 +5681,19 @@ const SURFACE_CONFIG = {
   }
 };
 
+// Gas-phase surfaces need the vapor-scale field config regardless of the
+// material name: the condensed default isolation (80) encodes liquid/solid
+// density, ~3 orders above what an expanded gas field reaches, so any gas
+// other than the named 'steam' key (F2, Cl2, H2, boiled metals) attached
+// with zero marching-cubes vertices and never rendered.
+function surfaceConfigForDescriptor(renderKey, phase) {
+  const named = SURFACE_CONFIG[renderKey];
+  if (named) return named;
+  const phaseName = String(phase ?? '').toLowerCase();
+  if (phaseName === 'gas' || phaseName === 'vapor') return SURFACE_CONFIG.steam;
+  return SURFACE_CONFIG.default;
+}
+
 const CPU_SURFACE_ADAPTIVE_RESOLUTION = Object.freeze([
   { maxParticles: 8, resolution: 12, maxPolyCount: 9000 },
   { maxParticles: 27, resolution: 14, maxPolyCount: 14000 },
@@ -22167,7 +22180,7 @@ fn fs_main() -> @location(0) vec4<f32> {
   function ensureSurface(descriptorOrKey, properties = null, configOverride = null, opticsOverride = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
-    const config = configOverride || SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
+    const config = configOverride || surfaceConfigForDescriptor(descriptor.renderKey, descriptor.phase);
     const optics = opticsOverride || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
     const opticalSignature = opticalSignatureForMaterial(optics);
     const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
@@ -22506,7 +22519,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, materialProperties);
       const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor);
       const surfaceConfig = adaptiveCpuSurfaceConfig(
-        SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default,
+        surfaceConfigForDescriptor(batch.renderKey, batch.phase),
         batch.count
       );
       const ensureStartMs = nowMs();
@@ -22757,7 +22770,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     // budget pass it as a floor so the field actually uses the budget.
     const resolvedMinResolution = Math.max(0, Math.round(Number(minResolution) || 0));
     const descriptors = batches.map((batch) => {
-      const baseConfig = SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default;
+      const baseConfig = surfaceConfigForDescriptor(batch.renderKey, batch.phase);
       const config = adaptiveCpuSurfaceConfig(baseConfig, batch.count);
       const needsAliasSafeRenderField = batch.count > 0 && (
         batch.count <= SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES
@@ -23375,7 +23388,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         renderDomainKey: fieldSurface.renderDomainKey
       });
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
-      const baseConfig = SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
+      const baseConfig = surfaceConfigForDescriptor(descriptor.renderKey, descriptor.phase);
       const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
       const surface = ensureSurface(descriptor, properties, {
         ...baseConfig,

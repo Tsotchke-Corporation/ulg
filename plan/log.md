@@ -40009,3 +40009,23 @@ caps without VRAM inflation.
 Visual evidence: molten Cu luminous warm gold with room reflections;
 solid Fe shows env-lit metal; rounder silhouettes at held 60 fps
 (physics 398/s unaffected). Renderer units 93/0; full units 989/0.
+
+## 2026-07-09 — Gas-phase surfaces get the vapor field config by phase, not name
+
+Any gas surface other than the literal 'steam' render key (F2, Cl2,
+H2, boiled metals) was built with the condensed-matter field config
+(isolation 80, ~3 orders above what an expanded gas field reaches) and
+attached with zero marching-cubes vertices. Config selection is now
+phase-aware (gas/vapor -> the vapor-scale config). NOT yet sufficient
+for fluorine: F still draws 0 verts - the remaining gate is the vapor
+optical visibility rule (derived F gas optics read as optically thin;
+physically F2 is pale yellow via a visible absorption band the optical
+closure chain does not yet derive) plus possibly the native table
+build path. Folded into the F task. Renderer units 93/0.
+
+User physics question answered honestly: cesium does NOT float on
+fluorine gas in reality (solid Cs ~1.9 g/cm3 vs F2 gas ~1.7 g/L). If
+the scene shows the Cs block resting on the F gas region, that is the
+demo-scale gas EOS behaving as a stiff cushion (gas particles hold
+near-fixed rest volume instead of flowing aside) - recorded with the
+vibrating-gas report as the gas-behavior investigation.

@@ -961,7 +961,10 @@ test('fluid law groups expose implemented viscosity and pending surface tension'
   assert.equal(viewState.physicalLawGroups.surfaceTension, true);
   assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidVelocityDiffusionAlpha, 0.1);
   assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidVelocityDiffusionStartS, 0.16);
-  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidWallDampingAlpha, 0.2);
+  // Wall damping default retired to 0 (2026-07-09): the 0.2-era value was
+  // tuned while settling physics was broken and read as excessive surface
+  // tension once excluded-volume separation and the free-slip floor landed.
+  assert.equal(driver.demo.gpuMechanics.mlsMpmLiquidWallDampingAlpha, 0);
   assert.deepEqual(viewState.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);
   driver.step();
   assert.deepEqual(driver.demo.lastStepTiming.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);

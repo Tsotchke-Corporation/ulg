@@ -39944,3 +39944,21 @@ Br2/I2 and non-alkali metals keep the proxy (Al+O2 still 933K - real
 passivation kinetics). Verified: Node discovery activation 0; live
 browser Cs+F at 293K reacts (maxT 4422K); Al/O2 unchanged; reaction
 units 10/10.
+
+## 2026-07-09 — "Surface tension too high" root-caused: stale wall-damping default retired
+
+The user-visible doming/balling of settled water was NOT the surface
+tension law (lawst=0 A/B: identical mound). It was
+mlsMpmLiquidWallDampingAlpha=0.2 over a 1.5-grid-spacing floor layer at
+~2000 substeps/s - a June-15-era knob tuned while settling physics was
+broken. History wrinkle: the numericUrlOption absent-param bug had been
+silently zeroing it in every mounted scene, so users saw good spreading
+until my 2026-07-06 fix restored the stale default - the report
+followed. A/B at t~10 on the 280-particle settle: default p50/p90/max
+0.259/0.532/0.708 -> wallAlpha=0 0.153/0.306/0.421 (ideal flat pool
+p50 ~0.07); alpha=0.05 still mounds (0.218). Default retired to 0 -
+artificial viscosity (0.04) and velocity diffusion (0.1) remain the
+sanctioned dissipation, and excluded-volume separation + the free-slip
+floor carry the real near-floor behavior. Still-water e2e settling gate
+passes (40.3s); units 989/0; atomics 11/11; settle screenshot shows a
+broad floor-filling pool instead of the dome.

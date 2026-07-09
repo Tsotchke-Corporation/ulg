@@ -3685,7 +3685,13 @@ export function createSphPhaseDemo(options = {}) {
   const mlsMpmLiquidVelocityDiffusionAlpha = options.mlsMpmLiquidVelocityDiffusionAlpha ?? 0.1;
   const mlsMpmLiquidVelocityDiffusionRadiusM = options.mlsMpmLiquidVelocityDiffusionRadiusM ?? (2 * gridSpacingM);
   const mlsMpmLiquidVelocityDiffusionStartS = options.mlsMpmLiquidVelocityDiffusionStartS ?? (20 * mechanicalSubsteps * carrierDt);
-  const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
+  // Near-floor velocity damping is a reduced knob, not a law. Its 0.2-era
+  // default was tuned while settling physics was broken and reads as
+  // excessive surface tension now that excluded-volume separation and the
+  // free-slip floor carry the real behavior (pool p50 height 0.26 -> 0.15
+  // at zero damping in the 280-particle settle probe; artificial viscosity
+  // and velocity diffusion remain the sanctioned dissipation).
+  const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0;
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
   // Excluded-volume pair separation relaxation; undefined defers to the GPU
   // buffer default (sphGpuBuffers). Explicit 0 disables for A/B isolation.

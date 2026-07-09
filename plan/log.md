@@ -39920,3 +39920,27 @@ physics, and the old plateau-park pass was an artifact of the same
 explosion under v1 tables. Full trail in task #3; probes in the
 session scratchpad (probe-ss-ut / probe-plain-ut with cohort
 y-extents).
+
+## 2026-07-09 — User reports: F rendering + Cs/F reaction triaged; alkali-halogen contact rule landed
+
+Fluorine surface invisibility root-caused: F's element closure is
+gas-only (single gas phase, no transitions, drop u=0 - the
+jellium/empty-core chain cannot derive condensed phases for molecular
+diatomics; known frontier limitation), and 27 sparse expanded gas
+particles never cross the render-field isovalue -> F|F|gas surface
+attaches with 0 vertices. Same story at dropt=80 (F should be liquid at
+85K boil; the closure has no liquid). Fix routes through the molecular
+chain (frontier), plus the gas-LOD/optical-depth render item.
+
+Cs+F non-reaction root-caused and FIXED: discovery worked (csf,
+DH<0) but the reduced thermal-mobility activation proxy
+(max reactant melting point) put activation at Cs's derived melting
+point 297.16K - 4K above the 293K scenario. Landed the general
+alkali + gaseous-halogen contact rule mirroring the existing
+active-metal/water precedent: group-1 metal + F2/Cl2 ignites on
+exothermic contact (activation 0, honest barrier-not-yet-derived model
+string; classifier resolves homonuclear diatomics via sole-element Z).
+Br2/I2 and non-alkali metals keep the proxy (Al+O2 still 933K - real
+passivation kinetics). Verified: Node discovery activation 0; live
+browser Cs+F at 293K reacts (maxT 4422K); Al/O2 unchanged; reaction
+units 10/10.

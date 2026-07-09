@@ -455,6 +455,35 @@ function waterReactiveClassForCandidate(candidate, ca, cb) {
   return waterReactiveMetalClass(metalComp.Z) || null;
 }
 
+// Alkali metal + gaseous halogen ignites on exothermic contact: the gas
+// reactant supplies the encounter mobility the melting-point proxy stood in
+// for, and group-1 metals carry no passivation barrier - the same contact
+// rule the active-metal/water family already uses (solid Na + liquid H2O).
+// Group membership is periodic-table structure, not a per-material patch.
+// Br2/I2 (liquid/solid at ambient) keep the thermal proxy until true
+// transition-state barriers are derived (frontier item).
+const AMBIENT_GAS_HALOGEN_Z = new Set([9, 17]);
+// Sole element of a single-element species (elemental metals {55:1} and
+// homonuclear diatomics like F2 {9:2} both qualify).
+function soleElementZ(comp) {
+  const elements = comp?.elements || comp?.atomCounts || null;
+  const keys = elements ? Object.keys(elements) : [];
+  if (keys.length === 1) return Number(keys[0]);
+  return Number.isFinite(comp?.Z) ? comp.Z : null;
+}
+function alkaliGasHalogenContactClass(candidate, ca, cb) {
+  if (candidate.familyId !== 'binary-ionic-synthesis') return null;
+  const caZ = soleElementZ(ca);
+  const cbZ = soleElementZ(cb);
+  const caClass = waterReactiveMetalClass(caZ);
+  const cbClass = waterReactiveMetalClass(cbZ);
+  const metalClass = caClass || cbClass;
+  if (metalClass !== 'alkali-metal-water-reactive') return null;
+  const partnerZ = caClass ? cbZ : caZ;
+  if (!AMBIENT_GAS_HALOGEN_Z.has(partnerZ)) return null;
+  return 'alkali-gas-halogen-contact';
+}
+
 function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const discovery = discoverReactionCandidates(ca?.formula || keyA, cb?.formula || keyB, options);
   const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
@@ -533,6 +562,7 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     ? { [waterKeyForCandidate(candidate, keyA, ca, keyB, cb)]: waterPhases.length ? waterPhases : ['liquid', 'gas'] }
     : null;
   const waterReactiveClass = waterReactiveClassForCandidate(candidate, ca, cb);
+  const alkaliHalogenClass = alkaliGasHalogenContactClass(candidate, ca, cb);
   return {
     dHHa: useDerivedEnergy
       ? dHHa
@@ -543,9 +573,13 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     specificEnthalpyJPerKg,
     reactant: keyA,
     partner: keyB,
-    activationTemperatureK: candidate.familyId === 'active-metal-water-hydroxide' ? 0 : undefined,
+    activationTemperatureK: candidate.familyId === 'active-metal-water-hydroxide' || alkaliHalogenClass
+      ? 0
+      : undefined,
     activationModel: candidate.familyId === 'active-metal-water-hydroxide'
       ? `barrier-not-yet-derived-${waterReactiveClass || 'water-reactive-metal'}-reacts-on-exothermic-contact-with-liquid-water`
+      : alkaliHalogenClass
+      ? 'barrier-not-yet-derived-alkali-metal-ignites-on-exothermic-contact-with-gaseous-halogen'
       : 'stoichiometric-reaction-candidate-derived-energy-pending-derived-barrier',
     phaseRequirements,
     sedenionScope: candidate.sedenionScope ?? null,

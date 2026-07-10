@@ -40751,3 +40751,38 @@ baseline 38% by t=2.2 s — ~8× faster spread), the entire Cs bulk melts to
 hot CsF products now cool over time instead of holding 4000 K. Iron quench
 unchanged (1434→1341 K vs baseline 1434→1335 K over the same window —
 conduction dominates in contact, as it must). Shots: /tmp/fork-rad-shots/.
+
+## Task #8 — the four "pre-existing SS e2e failures" were one environment defect
+
+Verdict: NOT product defects and NOT stale expectations. All four gates
+(demo.e2e.mjs 6116 gas-pressure promotion, 7035 boiling storage churn, 9546
+storage-policy materialization, 14425 live coarsening) PASS on SS tip 8b38c43
+once the dev-server environment is fixed — 4/4 green, confirmed twice.
+
+Root cause: vite.config.mjs resolved the sibling repos (peercompute,
+webgpu-marching-cubes) relative to the config file. A git worktree sits at
+.claude/worktrees/<agent>/, so '../peercompute/peercompute' resolved to a
+nonexistent path, vite's server.fs.allow silently dropped the peercompute
+root, and every '/@fs/home/cos/projects/peercompute/...' module request
+403'd. The browser-resident authority host
+(ensurePeerComputeResidentAuthorityHost) then failed closed with status
+'unavailable' — and with no host, the spatial-gas-ledger producer stage can
+never submit (blocked-resident-authority-host-spatial-gas-ledger-producer-
+submit-required), the strict-gate/pressure-interface chain stays blocked, and
+SS storage adoption/coarsening never activates. Every worktree-served e2e run
+inherited these four failures — including the "baseline A/B" that originally
+classified them as pre-existing (it also ran from a worktree, so the
+classification was right for the wrong reason: same failure on both sides,
+but environmental on both sides).
+
+Fix: vite.config.mjs sibling-root resolution walks both candidate bases
+('../' for the main checkout, '../../../../' for worktree checkouts) and
+canonicalizes via realpathSync so fs.allow prefix-matches the /@fs URLs.
+Diagnosis trail: scratch/fork8/probe-gate1.mjs (strict gate
+'not-run-resident-no-readback' → spatial ledger null → producer stage absent
+from stageStatus → host 'unavailable' → /@fs 403 → fs.allow path mismatch).
+
+Note for future forks: worktree vite servers ALSO silently lost the
+authority-host lane before this fix — any e2e run from a worktree that
+touched host-dependent paths (SS storage, pressure interface, spatial gas)
+was invalid. Unit suites were unaffected (no dev server involved).

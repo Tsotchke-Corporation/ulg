@@ -1,10 +1,27 @@
 import { defineConfig } from 'vite';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('.', import.meta.url));
-const peercomputeRoot = fileURLToPath(new URL('../peercompute/peercompute', import.meta.url));
-const webGpuMarchingCubesRoot = fileURLToPath(new URL('../webgpu-marching-cubes', import.meta.url));
+// Sibling repos live next to the MAIN checkout. Git worktrees sit at
+// .claude/worktrees/<agent>/ (three levels below the main root), so the
+// config-relative '../' lookup misses there and the /@fs allow list silently
+// dropped peercompute — the resident authority host then failed to
+// initialize in every worktree-served dev server, which poisoned the
+// host-dependent e2e gates with environment (not product) failures.
+// Resolve to a real path so vite's fs.allow prefix check matches the
+// canonical /@fs module URLs.
+const siblingRoot = (relativePath) => {
+  for (const base of ['../', '../../../../']) {
+    const candidate = fileURLToPath(new URL(base + relativePath, import.meta.url));
+    if (existsSync(candidate)) {
+      return realpathSync(candidate);
+    }
+  }
+  return fileURLToPath(new URL('../' + relativePath, import.meta.url));
+};
+const peercomputeRoot = siblingRoot('peercompute/peercompute');
+const webGpuMarchingCubesRoot = siblingRoot('webgpu-marching-cubes');
 const localHttpsKeyPath = fileURLToPath(new URL('./.cache/vite-https/key.pem', import.meta.url));
 const localHttpsCertPath = fileURLToPath(new URL('./.cache/vite-https/cert.pem', import.meta.url));
 const HASHED_BUILD_ASSET_PATH = /^\/assets\/.+-[A-Za-z0-9_-]{8,}\.[^/]+$/;

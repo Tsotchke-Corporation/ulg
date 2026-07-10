@@ -40302,3 +40302,33 @@ was edited.
   planetary slice.
 - Revisit the live Toychest blank headless capture separately if it will become
   an automated visual reference.
+## 2026-07-09 — SS two-level fix: CFL-consistent delta prolongation (tiny-mass gas explosion)
+
+Root cause of the two-level gas blow-up (task #3, gate 14494's true
+failure): the delta-form velocity prolongation read its coarse PRE
+velocity as raw momentum/mass. MLS-MPM P2G momentum carries fused
+stress impulses (dt * stress * grad w), so at a near-empty coarse
+parent (a few 2.7 g steam particles at 650 K) that ratio is impulse /
+tiny mass — far beyond any velocity the solver itself emits. The coarse
+POST grid is CFL-clamped by the grid update, so the transferred delta
+was the clamp difference: hundreds of m/s injected into fine nodes each
+substep, saturating the fine CFL ceiling (300 m/s) and scattering the
+drop cohort (y-extent [0.63, 3.5] by simT 0.008 vs plain's
+[0.99, 1.48]). Verified by kernel A/B: bypassing the prolongation alone
+restored coherence.
+
+Fix (schroederCrossLevelGridVelocityDeltaProlongationWgsl): (1) clamp
+the momentum/mass PRE read to the coarse update's own CFL ceiling
+(new param max_coarse_velocity_m_per_s = cfl * coarse_dx / coarse_dt,
+same DEFAULT_CFL_FACTOR the update used) so both delta operands live in
+the solver's representable velocity space — a saturated parent now
+yields ~zero delta instead of the clamp artifact; (2) mass-significance
+guard: skip a parent when min(pre,post)/max(pre,post) node mass < 1/2 —
+the update conserves node mass, so disagreement means the buffers
+describe different matter (layout drift / stale snapshot) and no valid
+delta exists; (3) defense in depth: |delta| <= vmax * delta_scale (one
+substep's share of the coarse velocity range). No absolute kg or m/s
+constants introduced; everything derives from the existing CFL rule.
+Post-fix probe: tinyY [0.97, 1.51] (span 0.54 m, matches plain), gas
+cohort stays ~650 K with gradual contact cooling instead of instant
+scatter.

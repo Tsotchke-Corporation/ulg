@@ -39,7 +39,7 @@ const GPU_MAP_MODE = {
 
 const DEFAULT_GRAVITY_M_PER_S2 = Object.freeze([0, -9.80665, 0]);
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
-const DEFAULT_CFL_FACTOR = 0.6;
+export const DEFAULT_CFL_FACTOR = 0.6;
 const GRID_UPDATE_SCOPE = 'mls-mpm-grid-velocity-update-gravity-cfl-walls';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';

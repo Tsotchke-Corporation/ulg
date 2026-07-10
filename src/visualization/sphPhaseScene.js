@@ -5754,7 +5754,19 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
   // Sphere-lane parity: the particle bridge drives emissive at intensity
   // ~1.8x its material color; the previous t^2+0.15 scale left molten metal
   // surfaces reading matte next to their glowing sphere twins.
-  return color * min(1.9 * t * t + 0.2, 2.6);
+  //
+  // Above the ramp's saturation anchor (t=1.0, 2200K) radiance follows
+  // Stefan-Boltzmann T^4 relative to the anchor instead of clamping: the old
+  // min(..., 2.6) flattened every temperature above ~2760K to one radiance,
+  // so a 5000K reaction crown rendered the same orange as a 2200K blob.
+  // ACES rolls the T^4 overshoot into white, giving hot cores the white-hot
+  // read. Below the anchor the legacy quadratic is unchanged (molten-metal
+  // range keeps its calibrated sphere-lane parity). Cap keeps accumulation
+  // sane; ACES output stays bounded regardless.
+  let quad_scale = min(1.9 * t * t + 0.2, 2.6);
+  let rel = temperature_k / 2200.0;
+  let stefan_scale = min(2.1 * rel * rel * rel * rel, 60.0);
+  return color * select(quad_scale, stefan_scale, temperature_k > 2200.0);
 }
 
 @group(0) @binding(0) var<storage, read> surface_vertices: array<vec4<f32>>;

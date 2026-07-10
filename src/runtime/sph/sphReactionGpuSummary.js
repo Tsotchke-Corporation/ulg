@@ -101,7 +101,8 @@ function createSummaryParamsArray({
   gasProductCount,
   atomTermCount,
   partialCount,
-  hasProposals = false
+  hasProposals = false,
+  dtSeconds = 0
 }) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
@@ -114,7 +115,9 @@ function createSummaryParamsArray({
   view.setUint32(24, partialCount, true);
   view.setUint32(28, hasProposals ? 1 : 0, true);
   view.setUint32(32, atomTermCount ?? 0, true);
-  view.setUint32(36, 0, true);
+  // Interface-flux extent law substep duration (f32 in the _pad1 lane); must
+  // match the apply kernel's dt so ledger and application agree.
+  view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
   view.setUint32(40, 0, true);
   view.setUint32(44, 0, true);
   return buffer;
@@ -793,6 +796,7 @@ export async function runSphReactionSummaryWebGpu({
   nextMechanicsBuffer = null,
   reactionRecordBuffer = null,
   proposalBuffer = null,
+  dtSeconds = 0,
   readProductEvents = false,
   retainProductEventBuffer = false,
   readCompactSummary = true,
@@ -945,7 +949,8 @@ export async function runSphReactionSummaryWebGpu({
       gasProductCount: reactionTable.gasProductCount ?? 0,
       atomTermCount: reactionTable.atomTermCount ?? 0,
       partialCount,
-      hasProposals: borrowedProposalBuffer
+      hasProposals: borrowedProposalBuffer,
+      dtSeconds
     }));
     let partialsPipeline = null;
     let partialsBindGroup = null;

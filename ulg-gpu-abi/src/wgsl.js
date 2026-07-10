@@ -1008,7 +1008,9 @@ struct ReactionParams {
   reactant_term_count: u32,
   product_term_count: u32,
   gas_product_count: u32,
-  _pad0: u32,
+  // Substep duration for the interface-flux extent law; 0 disables the cap
+  // (legacy whole-particle consumption) so stale packers stay well-defined.
+  dt_s: f32,
   _pad1: u32,
   _pad2: u32,
 };
@@ -1072,6 +1074,11 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] this reactant can deliver to a reactive
+  // contact at the reference temperature (kinetic-theory effusion for gases,
+  // Clausius-Clapeyron vapor carrier for volatile condensed reactants, 0 when
+  // no transport pathway is derivable). Packed by the reaction-table builder.
+  interface_flux: f32,
 };
 
 struct ProductTerm {
@@ -1425,6 +1432,71 @@ fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f3
   }
 }
 
+
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
+
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -1434,10 +1506,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_term_for_local_slot(reaction_index: u32, local_slot: u32) -> ProductTerm {
@@ -2013,7 +2085,16 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let self_limiting_extent = pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
   let partner_limiting_extent = partner_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-  let extent_mol = min(self_limiting_extent, partner_limiting_extent);
+  // Stoichiometric availability is the CAP; the interface flux sets the rate.
+  let extent_availability_mol = min(self_limiting_extent, partner_limiting_extent);
+  let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+    pos_mass.w, self_thermo.w, self_thermo.z,
+    self_term.coefficient, self_term.molar_mass, self_term.interface_flux,
+    partner_pos_mass.w, partner_thermo.w, partner_thermo.z,
+    partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+    params.dt_s
+  );
+  let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
   let self_consumed = min(pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
   let partner_consumed = min(partner_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
   let consumed_mass = self_consumed + partner_consumed;
@@ -2196,6 +2277,95 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (status != 1.0 || unplaced_mass_kg <= params.min_placed_mass_kg) {
       continue;
     }
+    let event_row0 = product_events[base];
+    let event_row1 = product_events[base + 1u];
+    let event_row2 = product_events[base + 2u];
+    let event_row4b = product_events[base + 4u];
+    let event_row5 = product_events[base + 5u];
+    let event_position = event_row0.xyz;
+    let event_material_id = event_row1.x;
+    let event_phase_id = event_row2.w;
+    var event_support_radius_m = 0.05;
+    if (event_row5.w > 0.0) {
+      event_support_radius_m = pow(event_row5.w * 0.238732414637843, 1.0 / 3.0);
+    }
+    // Merge-first: with the interface-flux extent law, burning pairs emit a
+    // small product event EVERY substep; minting a spare particle for each
+    // would exhaust the spare pool within milliseconds. Physically the new
+    // product joins the molten crown / gas bubble already at the interface,
+    // so fold the event into the nearest same-material same-phase particle
+    // within a capture radius (4x combined rest radii). Mass, momentum, and
+    // energy move verbatim (mass-weighted merges), so conservation is exact.
+    var merge_slot = params.particle_count;
+    var merge_distance = 3.0e38;
+    var nearest_slot = params.particle_count;
+    var nearest_distance = 3.0e38;
+    for (var candidate = 0u; candidate < params.particle_count; candidate = candidate + 1u) {
+      let candidate_state = next_state[candidate * params.state_stride_vec4];
+      if (candidate_state.w <= 0.0) {
+        continue;
+      }
+      let candidate_row0 = next_thermo[candidate * params.thermo_stride_vec4];
+      if (candidate_row0.x != event_material_id) {
+        continue;
+      }
+      let candidate_rest_density = max(candidate_row0.w, 1.0e-6);
+      let candidate_radius = pow(
+        max(3.0 * candidate_state.w / (12.5663706 * candidate_rest_density), 1.0e-30),
+        1.0 / 3.0
+      );
+      let capture_radius = 4.0 * (event_support_radius_m + candidate_radius);
+      let delta = event_position - candidate_state.xyz;
+      let distance = length(delta);
+      // Radius-limited merge requires the phase to match too (a gas puff must
+      // not fold into a solid crust at range).
+      if (candidate_row0.y == event_phase_id && distance <= capture_radius && distance < merge_distance) {
+        merge_distance = distance;
+        merge_slot = candidate;
+      }
+      // Track the nearest same-MATERIAL particle regardless of phase: when
+      // the radius merge misses AND no spare slot is available, folding the
+      // (tiny per-substep) event mass into the nearest carrier is the
+      // bounded, conserving terminal fallback -- the merged temperature and
+      // energy are exact, and the thermal solver re-derives the phase. The
+      // alternative is an unbounded live-event flood re-splatting the grid
+      // every substep (the frozen-event disease at high rate).
+      if (distance < nearest_distance) {
+        nearest_distance = distance;
+        nearest_slot = candidate;
+      }
+    }
+    if (merge_slot < params.particle_count) {
+      let state_base = merge_slot * params.state_stride_vec4;
+      let particle_pos_mass = next_state[state_base];
+      let particle_vel_u = next_state[state_base + 1u];
+      let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
+      let inv_merged = 1.0 / max(merged_mass, 1.0e-20);
+      let merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
+      let merged_velocity = (particle_vel_u.xyz * particle_pos_mass.w + event_row5.xyz * unplaced_mass_kg) * inv_merged;
+      let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
+      next_state[state_base] = vec4<f32>(merged_position, merged_mass);
+      next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
+      let thermo_base = merge_slot * params.thermo_stride_vec4;
+      let particle_thermo0 = next_thermo[thermo_base];
+      let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
+      next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
+      // Rest volume grows by the event's share so density stays consistent.
+      let mechanics_base = merge_slot * params.mechanics_stride_vec4;
+      let mechanics_row4 = next_mechanics[mechanics_base + 4u];
+      var merged_rest_volume = mechanics_row4.w;
+      if (event_row4b.y > 0.0) {
+        merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
+      }
+      next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
+      // Consume the event with the same convention as the spare-slot path:
+      // the placed share moves into the visible lane, the unplaced share and
+      // status zero, so the compactor and the grid splat drop it and ledger
+      // mass and particle mass never double-count.
+      product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
+      product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+      continue;
+    }
     // Claim the first spare slot at or after the cursor. Spare slots are
     // zero-mass particles reserved at demo build; every kernel in the
     // pipeline skips mass <= 0, so claiming one only ever adds matter.
@@ -2207,8 +2377,38 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
     }
     if (slot >= params.particle_count) {
-      // No spare capacity: the event stays live and keeps feeding the grid
-      // splat ledger exactly as before, so no mass is lost either way.
+      if (nearest_slot < params.particle_count) {
+        // No spare capacity but a same-material carrier exists somewhere:
+        // terminal fallback merge (see nearest_slot rationale above).
+        merge_slot = nearest_slot;
+        let state_base = merge_slot * params.state_stride_vec4;
+        let particle_pos_mass = next_state[state_base];
+        let particle_vel_u = next_state[state_base + 1u];
+        let merged_mass = particle_pos_mass.w + unplaced_mass_kg;
+        let inv_merged = 1.0 / max(merged_mass, 1.0e-20);
+        let merged_position = (particle_pos_mass.xyz * particle_pos_mass.w + event_position * unplaced_mass_kg) * inv_merged;
+        let merged_velocity = (particle_vel_u.xyz * particle_pos_mass.w + event_row5.xyz * unplaced_mass_kg) * inv_merged;
+        let merged_u = (particle_vel_u.w * particle_pos_mass.w + event_row4b.w * unplaced_mass_kg) * inv_merged;
+        next_state[state_base] = vec4<f32>(merged_position, merged_mass);
+        next_state[state_base + 1u] = vec4<f32>(merged_velocity, merged_u);
+        let thermo_base = merge_slot * params.thermo_stride_vec4;
+        let particle_thermo0 = next_thermo[thermo_base];
+        let merged_temperature = (particle_thermo0.z * particle_pos_mass.w + event_row4b.x * unplaced_mass_kg) * inv_merged;
+        next_thermo[thermo_base] = vec4<f32>(particle_thermo0.x, particle_thermo0.y, merged_temperature, particle_thermo0.w);
+        let mechanics_base = merge_slot * params.mechanics_stride_vec4;
+        let mechanics_row4 = next_mechanics[mechanics_base + 4u];
+        var merged_rest_volume = mechanics_row4.w;
+        if (event_row4b.y > 0.0) {
+          merged_rest_volume = merged_rest_volume + unplaced_mass_kg / event_row4b.y;
+        }
+        next_mechanics[mechanics_base + 4u] = vec4<f32>(mechanics_row4.x, mechanics_row4.y, mechanics_row4.z, merged_rest_volume);
+        product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
+        product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+        continue;
+      }
+      // No spare capacity and no same-material carrier anywhere: the event
+      // stays live and keeps feeding the grid splat ledger, so no mass is
+      // lost either way.
       continue;
     }
     cursor = slot + 1u;
@@ -2277,8 +2477,12 @@ struct ReactionSummaryParams {
   gas_product_count: u32,
   partial_count: u32,
   has_proposals: u32,
+  // Offset 32 is the shared packer's atom_term_count lane (used by the
+  // atom-residual summary kernel); keep it reserved here.
   _pad0: u32,
-  _pad1: u32,
+  // Substep duration for the interface-flux extent law; must match the apply
+  // kernel's dt_s so ledger and application agree. 0 disables the cap.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -2288,6 +2492,11 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] this reactant can deliver to a reactive
+  // contact at the reference temperature (kinetic-theory effusion for gases,
+  // Clausius-Clapeyron vapor carrier for volatile condensed reactants, 0 when
+  // no transport pathway is derivable). Packed by the reaction-table builder.
+  interface_flux: f32,
 };
 
 struct ProductMechanics {
@@ -2376,6 +2585,68 @@ fn reactant_term_row2(term_index: u32) -> vec4<f32> {
   return reaction_records[reactant_base + term_index * 3u + 2u];
 }
 
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -2385,10 +2656,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -2569,7 +2840,17 @@ fn main(
             if (has_stoichiometry) {
               let self_extent = source_pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
               let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-              let extent_mol = min(self_extent, partner_extent);
+              // Mirror of the apply kernel's flux-capped extent so ledger and
+              // application account the same consumed mass.
+              let extent_availability_mol = min(self_extent, partner_extent);
+              let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+                source_pos_mass.w, self_source_row0.w, self_source_row0.z,
+                self_term.coefficient, self_term.molar_mass, self_term.interface_flux,
+                partner_source_pos_mass.w, partner_source_row0.w, partner_source_row0.z,
+                partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+                params.dt_s
+              );
+              let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
               let self_consumed = min(source_pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
               let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
               let consumed_mass = self_consumed + partner_consumed;
@@ -2717,7 +2998,9 @@ struct ReactionSummaryParams {
   partial_count: u32,
   has_proposals: u32,
   _pad0: u32,
-  _pad1: u32,
+  // Interface-flux extent law substep duration (offset 36 in the shared
+  // summary params packer); must match the apply kernel's dt_s.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -2855,7 +3138,9 @@ struct ReactionSummaryParams {
   partial_count: u32,
   has_proposals: u32,
   _pad0: u32,
-  _pad1: u32,
+  // Interface-flux extent law substep duration (offset 36 in the shared
+  // summary params packer); must match the apply kernel's dt_s.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -2865,6 +3150,10 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] at the reference temperature — the
+  // transport prefactor for the interface-flux extent law (see the shared
+  // helper); packed by the reaction-table builder in the term row pad lane.
+  interface_flux: f32,
 };
 
 struct ProductMechanics {
@@ -2930,6 +3219,68 @@ fn product_term_row3(term_index: u32) -> vec4<f32> {
   return reaction_records[product_base + term_index * 4u + 3u];
 }
 
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -2939,10 +3290,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -3015,7 +3366,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
       let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
       let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-      let extent_mol = min(source_extent, partner_extent);
+      // Identical flux cap as the apply kernel so every ledger agrees on the
+      // consumed extent (divergence here mints phantom product mass).
+      let extent_availability_mol = min(source_extent, partner_extent);
+      let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+        source_pos_mass.w, source_row0.w, source_row0.z,
+        source_term.coefficient, source_term.molar_mass, source_term.interface_flux,
+        partner_source_pos_mass.w, partner_source_row0.w, partner_source_row0.z,
+        partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+        params.dt_s
+      );
+      let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
       let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
       let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;
@@ -3063,7 +3424,9 @@ struct ReactionSummaryParams {
   partial_count: u32,
   has_proposals: u32,
   atom_term_count: u32,
-  _pad1: u32,
+  // Interface-flux extent law substep duration (offset 36 in the shared
+  // summary params packer); must match the apply kernel's dt_s.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -3073,6 +3436,10 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] at the reference temperature — the
+  // transport prefactor for the interface-flux extent law (see the shared
+  // helper); packed by the reaction-table builder in the term row pad lane.
+  interface_flux: f32,
 };
 
 struct ProductMechanics {
@@ -3170,6 +3537,68 @@ fn product_mechanics_for(material_id: f32, phase_id: f32) -> ProductMechanics {
   return ProductMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -3179,10 +3608,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -3262,7 +3691,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
   let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-  let extent_mol = min(source_extent, partner_extent);
+  // Identical flux cap as the apply kernel so every ledger agrees on the
+  // consumed extent (divergence here mints phantom product mass).
+  let extent_availability_mol = min(source_extent, partner_extent);
+  let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+    source_pos_mass.w, source_row0.w, source_row0.z,
+    source_term.coefficient, source_term.molar_mass, source_term.interface_flux,
+    partner_source_pos_mass.w, partner_source_row0.w, partner_source_row0.z,
+    partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+    params.dt_s
+  );
+  let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
   let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
   let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
   let consumed_mass = source_consumed + partner_consumed;
@@ -3351,7 +3790,9 @@ struct ReactionSummaryParams {
   partial_count: u32,
   has_proposals: u32,
   atom_term_count: u32,
-  _pad1: u32,
+  // Interface-flux extent law substep duration (offset 36 in the shared
+  // summary params packer); must match the apply kernel's dt_s.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -3361,6 +3802,10 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] at the reference temperature — the
+  // transport prefactor for the interface-flux extent law (see the shared
+  // helper); packed by the reaction-table builder in the term row pad lane.
+  interface_flux: f32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -3424,6 +3869,68 @@ fn atom_term_row1(atom_term_index: u32) -> vec4<f32> {
   return reaction_records[atom_base + atom_term_index * 2u + 1u];
 }
 
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -3433,10 +3940,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -3506,7 +4013,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
       let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
       let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-      let extent_mol = min(source_extent, partner_extent);
+      // Identical flux cap as the apply kernel so every ledger agrees on the
+      // consumed extent (divergence here mints phantom product mass).
+      let extent_availability_mol = min(source_extent, partner_extent);
+      let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+        source_pos_mass.w, source_row0.w, source_row0.z,
+        source_term.coefficient, source_term.molar_mass, source_term.interface_flux,
+        partner_source_pos_mass.w, partner_source_row0.w, partner_source_row0.z,
+        partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+        params.dt_s
+      );
+      let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
       let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
       let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;
@@ -3541,7 +4058,9 @@ struct ReactionSummaryParams {
   partial_count: u32,
   has_proposals: u32,
   _pad0: u32,
-  _pad1: u32,
+  // Interface-flux extent law substep duration (offset 36 in the shared
+  // summary params packer); must match the apply kernel's dt_s.
+  dt_s: f32,
   _pad2: u32,
   _pad3: u32,
 };
@@ -3551,6 +4070,10 @@ struct ReactantTerm {
   coefficient: f32,
   molar_mass: f32,
   status: f32,
+  // Interface mass flux [kg/m^2/s] at the reference temperature — the
+  // transport prefactor for the interface-flux extent law (see the shared
+  // helper); packed by the reaction-table builder in the term row pad lane.
+  interface_flux: f32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -3618,6 +4141,68 @@ fn gas_product_row1(gas_index: u32) -> vec4<f32> {
   return reaction_records[gas_base + gas_index * 2u + 1u];
 }
 
+// Interface-flux extent cap [mol] for one reacting pair over one substep.
+// A contact event may only convert as much matter as transport can deliver
+// through the contact interface: extent_rate = A_contact * max_i(nu_i /
+// (coef_i * M_i)) where nu_i is reactant i's interface mass flux [kg/m^2/s]
+// at its current temperature and the max expresses that the mobile species'
+// pathway governs (e.g. water vapor reaching a sodium surface). A_contact is
+// the contact disc of the smaller rest-volume radius - the same contact
+// geometry the pair-conduction law uses - so thermal and chemical transport
+// see one consistent interface. nu scales as sqrt(T/T_ref) (effusion flux
+// rho*vbar/4 with vbar ~ sqrt(T)); the vapor-carrier density's exponential
+// Clausius-Clapeyron growth with T is NOT modelled - a conservative,
+// documented frontier gap. When neither reactant carries a derivable flux
+// (nu_i = 0: condensed-condensed, non-volatile) or dt is 0 (stale packer),
+// the cap disables and the stoichiometric availability bound alone applies -
+// the pre-flux-law behavior. Every module that computes a reaction extent
+// (apply, summary partials, product inventory, product events, atom
+// residual, gas species) MUST apply this identical cap or their ledgers
+// disagree and phantom product mass appears.
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K: f32 = 293.15;
+
+fn interface_flux_extent_cap_mol(
+  self_mass_kg: f32,
+  self_rest_density: f32,
+  self_temperature_k: f32,
+  self_coefficient: f32,
+  self_molar_mass: f32,
+  self_interface_flux: f32,
+  partner_mass_kg: f32,
+  partner_rest_density: f32,
+  partner_temperature_k: f32,
+  partner_coefficient: f32,
+  partner_molar_mass: f32,
+  partner_interface_flux: f32,
+  dt_s: f32
+) -> f32 {
+  let no_cap = 3.0e38;
+  if (dt_s <= 0.0) {
+    return no_cap;
+  }
+  let self_rate = self_interface_flux
+    * sqrt(max(self_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(self_coefficient * self_molar_mass, 1.0e-20);
+  let partner_rate = partner_interface_flux
+    * sqrt(max(partner_temperature_k, 1.0) / INTERFACE_FLUX_REFERENCE_TEMPERATURE_K)
+    / max(partner_coefficient * partner_molar_mass, 1.0e-20);
+  let mobile_rate = max(self_rate, partner_rate);
+  if (mobile_rate <= 0.0) {
+    return no_cap;
+  }
+  let self_radius = pow(
+    max(3.0 * self_mass_kg / (12.5663706 * max(self_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let partner_radius = pow(
+    max(3.0 * partner_mass_kg / (12.5663706 * max(partner_rest_density, 1.0e-6)), 1.0e-30),
+    1.0 / 3.0
+  );
+  let contact_radius = min(self_radius, partner_radius);
+  let contact_area = 3.14159265 * contact_radius * contact_radius;
+  return mobile_rate * contact_area * dt_s;
+}
+
 fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
   let header0 = reaction_header_row0(reaction_index);
   let reactant_term_offset = u32(max(header0.y, 0.0));
@@ -3627,10 +4212,10 @@ fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> Reactant
     let term0 = reactant_term_row0(term_index);
     let term2 = reactant_term_row2(term_index);
     if (term0.y == material_id && term2.z == 1.0) {
-      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z, term2.w);
     }
   }
-  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -3698,7 +4283,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
       let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
       let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
-      let extent_mol = min(source_extent, partner_extent);
+      // Identical flux cap as the apply kernel so every ledger agrees on the
+      // consumed extent (divergence here mints phantom product mass).
+      let extent_availability_mol = min(source_extent, partner_extent);
+      let extent_flux_cap_mol = interface_flux_extent_cap_mol(
+        source_pos_mass.w, source_row0.w, source_row0.z,
+        source_term.coefficient, source_term.molar_mass, source_term.interface_flux,
+        partner_source_pos_mass.w, partner_source_row0.w, partner_source_row0.z,
+        partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
+        params.dt_s
+      );
+      let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
       let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
       let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;

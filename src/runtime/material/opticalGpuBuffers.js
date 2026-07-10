@@ -328,7 +328,16 @@ function pbrNumber(value, fallback = 0) {
 function resolveDisplayPbrForOpticalRecord(params, materialPropertyBankPbrWarmInput = null) {
   const bankColor = srgbTriplet(materialPropertyBankPbrWarmInput?.baseColorSrgb);
   const closureColor = srgbTriplet(params.baseColorSrgb) || [1, 1, 1];
-  const usesBankPbr = Boolean(bankColor);
+  // Model-confidence precedence (warm inputs are non-authoritative by design):
+  // bank PBR rows may stand in for BLOCKED closures and for conductor
+  // reflectance estimates (the Drude omega_p/30 damping is a universal
+  // order-of-magnitude estimate that over-brightens e.g. iron), but a
+  // molecular/spectral closure colour (gas electronic band, Beer-Lambert,
+  // molecular gap) is quantitative and must not be overridden — the bank's
+  // generic near-white for F2 was erasing the derived halogen yellow.
+  const closureBlocked = Boolean(params.blocked) || params.provenance?.status === 'blocked';
+  const conductorEstimate = String(params.renderModel || '').startsWith('conductor-');
+  const usesBankPbr = Boolean(bankColor) && (closureBlocked || conductorEstimate);
   const bankIor = Number(materialPropertyBankPbrWarmInput?.ior);
   const ior = Number.isFinite(bankIor) && bankIor > 0
     ? bankIor

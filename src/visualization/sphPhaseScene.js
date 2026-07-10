@@ -8449,9 +8449,19 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
 } = {}) {
   if (!material) return material;
   const optics = material.userData?.optical || {};
+  // Prefer the material's own derived optics colour as the fallback tint;
+  // the hand-tabulated per-material list is the last resort for materials
+  // whose optical closure is blocked or missing entirely.
+  const derivedOpticsColor = !optics.blocked
+    && optics.vertexColorPolicy !== 'blocked'
+    && Array.isArray(optics.baseColorSrgb)
+    && srgbLuminance(optics.baseColorSrgb) > 0.05
+    ? optics.baseColorSrgb
+    : null;
   const fallbackColor = Array.isArray(fallbackColorSrgb)
     ? fallbackColorSrgb
-    : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+    : (derivedOpticsColor
+      || fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {}));
   let changed = false;
 
   if (material.vertexColors) {

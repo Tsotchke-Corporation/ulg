@@ -112,6 +112,7 @@ import {
   createThreeWebGpuResidentBridgeMaterialProxy,
   estimateNativeMarchingCubesVertexRowsByteLengthForResolution,
   nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget,
+  nativeMarchingCubesVertexRowsBudgetPerSurface,
   workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
 import {
@@ -5659,4 +5660,19 @@ test('SPH resident pressure interface state blocks force-row upload without grid
   assert.equal(state.pressureInterfaceGridForceAdmissionStatus, 'pressure-interface-grid-force-consumption-blocked');
   assert.equal(state.pressureInterfaceGridForceAdmissionApproved, false);
   assert.equal(state.gpuAuthoritativeState, false);
+});
+
+test('extraction-enforced vertex budget uncaps field resolution and yields per-surface row caps', () => {
+  // With the extension clamp active, resolution is bounded only by the
+  // global/requested caps — 4 surfaces no longer force 42.
+  const uncapped = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {
+    vertexRowsBudgetEnforcedByExtraction: true
+  });
+  assert.equal(uncapped, 64);
+  // Legacy math unchanged when the flag is absent.
+  const legacy = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {});
+  assert.ok(legacy < 64, `legacy budget resolution should stay capped, got ${legacy}`);
+  // Per-surface rows: 256MB / 4 surfaces / 64B rows (16-float surface vertex rows).
+  const rows = nativeMarchingCubesVertexRowsBudgetPerSurface(4, {});
+  assert.equal(rows, Math.floor(256 * 1024 * 1024 / 4 / 64));
 });

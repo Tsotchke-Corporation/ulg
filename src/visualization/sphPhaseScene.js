@@ -6579,9 +6579,32 @@ export function estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
     * Float32Array.BYTES_PER_ELEMENT;
 }
 
+// Per-surface vertex-rows cap for the extraction extension's budget clamp:
+// the extension allocates min(worst-case, budget) rows, bounds-guards writes,
+// and clamps the indirect draw count, so the translated-rows budget below is
+// a hard allocation bound rather than a resolution driver.
+export function nativeMarchingCubesVertexRowsBudgetPerSurface(surfaceCount, {
+  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+} = {}) {
+  const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
+  const resolvedBudget = Math.max(
+    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    Math.round(
+      Number(maxVertexRowsBufferByteLength)
+      || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+    )
+  );
+  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  return Math.max(3, Math.floor(resolvedBudget / resolvedSurfaceCount / bytesPerVertexRow));
+}
+
 export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surfaceCount, {
   maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
-  maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+  maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+  // When the extraction path enforces a per-surface vertex-rows budget
+  // (extension clamp), the worst-case allocation math no longer binds the
+  // field resolution — only the requested/global caps apply.
+  vertexRowsBudgetEnforcedByExtraction = false
 } = {}) {
   const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
   const resolvedBudget = Math.max(
@@ -6595,6 +6618,9 @@ export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surf
     2,
     Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION)
   );
+  if (vertexRowsBudgetEnforcedByExtraction) {
+    return Math.max(2, Math.min(resolvedRequestedMax, RESIDENT_RENDER_FIELD_MAX_RESOLUTION));
+  }
   const bytesPerDualGridVoxel = SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
     * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
@@ -24553,7 +24579,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     isovalue = null,
     materialPayload = null,
     pbrPayload = null,
-    readbackMode = 'gpu-conservative-no-readback'
+    readbackMode = 'gpu-conservative-no-readback',
+    vertexRowsBudget = 0
   } = {}) {
     if (!descriptor?.ok) {
       return {
@@ -24583,7 +24610,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       materialPayload,
       pbrPayload,
       ownsBuffer: true,
-      readbackMode
+      readbackMode,
+      vertexRowsBudget: vertexRowsBudget > 0 ? vertexRowsBudget : undefined
     });
     const extractionElapsedMs = Math.max(0, nowMs() - extractionStartedMs);
     const extensionError = extensionExecution?.errors?.[0]
@@ -26802,9 +26830,15 @@ fn fs_main() -> @location(0) vec4<f32> {
       const nativeMarchingCubesSurfaceTableMaxResolution = useNativeMarchingCubesSurfaceTableBudget
         ? nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(fieldBatches.length, {
           maxVertexRowsBufferByteLength: requestedNativeMarchingCubesMaxVertexRowsBufferByteLength,
-          maxResolution: RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+          maxResolution: RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
+          vertexRowsBudgetEnforcedByExtraction: true
         })
         : null;
+      const nativeMarchingCubesVertexRowsBudget = useNativeMarchingCubesSurfaceTableBudget
+        ? nativeMarchingCubesVertexRowsBudgetPerSurface(fieldBatches.length, {
+          maxVertexRowsBufferByteLength: requestedNativeMarchingCubesMaxVertexRowsBufferByteLength
+        })
+        : 0;
       const residentBudgetedSurfaceTable = useNativeMarchingCubesSurfaceTableBudget
         ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
           maxResolution: nativeMarchingCubesSurfaceTableMaxResolution,
@@ -27724,6 +27758,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                   device: resolvedDeviceResult.device,
                   descriptor: nativeDescriptor,
                   isovalue: nativeDescriptor.isovalue,
+                  vertexRowsBudget: nativeMarchingCubesVertexRowsBudget,
                   materialPayload: {
                     material: nativeSurfaceRecord.material ?? null,
                     phase: nativeSurfaceRecord.phase ?? null,
@@ -27871,6 +27906,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                             device: resolvedDeviceResult.device,
                             descriptor: additionalDescriptor,
                             isovalue: additionalDescriptor.isovalue,
+                            vertexRowsBudget: nativeMarchingCubesVertexRowsBudget,
                             materialPayload: {
                               material: additionalRecord.material ?? null,
                               phase: additionalRecord.phase ?? null,

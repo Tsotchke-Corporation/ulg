@@ -39,6 +39,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-07-09 AKDT: `plan/todo/sol-critic.md` is the required
+Schroeder coherent-solid architecture correction. A solid needs an authoritative
+body/material frame, body-local members, independently refinable contact
+proxies, and a persistent rest/material-space render carrier. The transient SS
+grid must not become the solid's identity or visible lattice. Route rigid,
+deformable, mixed solid-liquid, phase/fracture, and planetary work through this
+contract under PeerCompute authority. Validation must remain GPU-native through
+manufactured states, metamorphic A/B execution, and compact invariant reductions;
+do not introduce a CPU mirror solver or CPU parity gate.
+
 Current routing note, 2026-07-01 AKDT SS branch: new architecture work now
 routes through `plan/todo/SS/`. SS means Schroeder Simulation: the Schroeder
 Tree plus Schroeder Algorithm. This supersedes the external-only generalized

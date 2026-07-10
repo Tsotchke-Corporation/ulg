@@ -40381,3 +40381,25 @@ gas-aware bound (20/20). Full npm test green on the final tree (recorded in
 the commit message). Note: the CPU-lane MLS_MPM_G2P_MAX_VOLUME_RATIO_J stays
 at 64 — the GPU-native validation directive drops CPU parity as a gate, and
 the CPU lane is not the production path; flagged rather than mirrored.
+
+## Round 14 — vertex-budget clamp uncaps extraction resolution (task #4 part 1)
+
+The conservative no-readback marching-cubes path always had exact GPU-side
+vertex offsets (atomic compaction in compute_num_verts) and an exact indirect
+draw count; only the vertex BUFFER allocation was worst-case (15 verts/voxel),
+and that allocation math was what capped the native extraction lane at 42³ for
+4 live surfaces. Extension change (webgpu-marching-cubes): extractSurface
+accepts vertexRowsBudget; allocation = min(worst, budget); writes past the
+allocation are dropped (arrayLength guard); a one-thread clamp pass bounds the
+draw count and exposes the exact total in counter slot 1 for saturation
+diagnostics — no readback anywhere. ULG side: resolution budget function gains
+vertexRowsBudgetEnforcedByExtraction (returns the requested/global cap);
+nativeMarchingCubesVertexRowsBudgetPerSurface splits the 256MB translated-rows
+budget per surface (1,048,576 rows at 4 surfaces — F uses ~15k); both
+extraction call sites pass the budget. Verified in-browser: all 4 extraction
+descriptors now run 64³ (was 42³), F cloud smoother at 14,976 verts, render
+fps unchanged (~54). Renderer tests 94/0 incl. new regression.
+
+Remaining in task #4: raise RESIDENT_RENDER_FIELD_MAX_RESOLUTION beyond 64
+(now safe — allocation no longer scales with res³), per-fragment emissive,
+refracted scene sampling, splash shard fragmentation, prefiltered env cubemap.

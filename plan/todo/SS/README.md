@@ -10,6 +10,14 @@ Primary plan:
 
 - `schroeder-tree-and-algorithm-plan.md`
 
+Required coherent-solid correction:
+
+- `../sol-critic.md` - preserve solid body/material identity, pose, angular
+  state, inertia, connectivity, contact proxies, and rest/material-space shape
+  independently of the transient grid and render LOD. This is required for
+  mostly-solid and mixed solid-liquid scenes from human to planetary scale.
+  Use GPU-native invariant/metamorphic validation; do not build a CPU mirror.
+
 Active execution plan (2026-07-02):
 
 - `fable-plan-2026-07-02.md` — land the runtime-policy checkpoint, then a
@@ -29,8 +37,10 @@ Supporting routing:
 4. Adjacent-level conservative restriction/prolongation.
 5. Phase-volume migration, starting with water-to-steam expansion.
 6. Law work queues for reaction/contact/interface.
-7. Aggregate far-field traversal for laws that declare physical error bounds.
-8. Render LOD and PeerCompute portable summaries.
+7. Coherent-solid body/member/contact/shape carriers and mixed solid-liquid
+   coupling from `../sol-critic.md`.
+8. Aggregate far-field traversal for laws that declare physical error bounds.
+9. Render LOD and PeerCompute portable summaries.
 
 ## Rules
 

@@ -40479,3 +40479,37 @@ highlights are broader (smooth surface vs many small spheres - physically
 expected), env reflection still analytic (background-image env sampling is
 the recorded follow-up), single-layer refraction only (water behind water
 sees opaques only, same limitation as Three transmission).
+## Task #9 fork — conduction pair-contact support + matured reaction-energy diagnosis
+
+**General fix landed:** the conduction pair test used one global support 2h derived
+from the condensed-phase spacing, so it could never span coarse low-density
+particles (a 12.6 kg F2 particle's nominal rest-volume radius is 1.21 m). The
+kernel now derives a per-pair contact support max(2h, r_i + r_j) with
+r = (3m/(4·pi·rho_rest))^(1/3) from data already in the thermo rows (row0.w =
+rest density; zero new bindings), keeps the hat weight on the widened support
+(symmetric in i,j, so gather-side exchange stays pairwise-consistent), and
+self-selects neighbor structure: bins when their 5-cell reach covers the widest
+pair support in the scene (params.max_pair_support_m, derived JS-side from
+particle masses and each material's minimum phase density), exhaustive scan
+otherwise (coarse scenes are small-n). ThermalParams grew 96 -> 112 B (ABI
+contract test updated).
+
+**Diagnosis matured (numbers from live GPU probes, Cs+F scene):** conduction
+geometry is NOT what keeps the Cs blob inert in the current scene — its F
+particles are 0.0126 kg (r = 0.12 m), all pair supports sit under the global
+0.496 m. The energy audit over 24 s: reaction releases ~3 MJ (125 kW); ~100% of
+it stays as sensible heat in the EJECTED CsF products (sustained 2000-4400 K,
+nearest neighbor 0.6-0.8 m — thermally isolated); Cs bulk gains ~0%. Two real
+blockers, both out of this fork's scope: (1) product particles inherit velocity
+and are immediately expelled from the interface, advecting the reaction heat
+away before the contact window can deposit it — physically the molten salt
+layer stays ON the metal (this is task #6 item 3 territory: product placement
+mechanics); (2) the scene is stoichiometrically starved — 1.02 kg of F2 can
+consume at most 4.7% of the 152 kg Cs, so a surviving blob is correct; the
+missing drama is local (surface melt, flash), not global. Radiative transfer
+(sigma·T^4 at 4000 K dominates real flame-to-surface heating) is a candidate
+general law for a follow-up.
+
+Validation: physics atomics 11/11; gates 14371 + 14494 pass on the patched
+tree; iron quench still cools at the established rate (1394 -> 1295 K over the
+probe window); full npm test 994 tests, 975 pass, 0 fail.

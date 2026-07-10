@@ -1407,6 +1407,42 @@ export function destroySphThermalResponseGraphBuffers(buffers) {
   if (buffers.ownsGraphSampleBuffer !== false) buffers.graphSampleBuffer?.destroy?.();
 }
 
+// Widest conduction pair support in the scene: max over particles of the
+// nominal contact radius r = (3m/(4*pi*rho_min))^(1/3), where rho_min is the
+// particle material's lowest phase density (its gas phase — the largest the
+// particle can physically become). Bounds the GPU neighbor-bin scan radius;
+// the per-pair support itself is computed in-kernel from each pair's rest
+// densities. CPU copies may be stale under GPU-resident continuation — a
+// stale mass bound only widens/narrows the scan, never breaks pair symmetry.
+export function resolveThermalMaxPairSupportM(sphParticleState, phaseResponseTable) {
+  const state = sphParticleState?.state;
+  const thermo = sphParticleState?.thermo;
+  const responses = phaseResponseTable?.responses;
+  const count = Math.max(0, Math.round(Number(sphParticleState?.particleCount) || 0));
+  if (!state?.length || !thermo?.length || !responses?.length || count === 0) return 0;
+  const minDensityByMaterial = new Map();
+  for (let offset = 0; offset + 9 < responses.length; offset += SPH_THERMAL_PHASE_RESPONSE_FLOATS) {
+    const materialId = Math.round(responses[offset]);
+    const densities = [responses[offset + 8], responses[offset + 9]]
+      .filter((density) => Number.isFinite(density) && density > 0);
+    if (!densities.length) continue;
+    const localMin = Math.min(...densities);
+    const previous = minDensityByMaterial.get(materialId);
+    minDensityByMaterial.set(materialId, previous > 0 ? Math.min(previous, localMin) : localMin);
+  }
+  let maxRadiusM = 0;
+  for (let p = 0; p < count; p += 1) {
+    const mass = state[p * SPH_GPU_PARTICLE_STATE_FLOATS + 3];
+    if (!(mass > 0)) continue;
+    const materialId = Math.round(thermo[p * SPH_GPU_PARTICLE_THERMO_FLOATS]);
+    const density = minDensityByMaterial.get(materialId);
+    if (!(density > 0)) continue;
+    const radius = Math.cbrt((3 * mass) / (4 * Math.PI * density));
+    if (radius > maxRadiusM) maxRadiusM = radius;
+  }
+  return maxRadiusM > 0 ? 2 * maxRadiusM : 0;
+}
+
 function createParamsArray({
   particleCount,
   materialCount,
@@ -1419,9 +1455,10 @@ function createParamsArray({
   boxDimsM,
   wallTemperaturesK,
   materialBankWarmInputRowCount = 0,
-  neighborBins = null
+  neighborBins = null,
+  maxPairSupportM = 0
 }) {
-  const buffer = new ArrayBuffer(96);
+  const buffer = new ArrayBuffer(112);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, materialCount, true);
@@ -1455,6 +1492,7 @@ function createParamsArray({
   view.setUint32(84, binsEnabled ? Math.round(neighborBins.ny) : 0, true);
   view.setUint32(88, binsEnabled ? Math.round(neighborBins.nz) : 0, true);
   view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
+  view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
   return buffer;
 }
 
@@ -1558,7 +1596,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   );
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-thermal-params',
-    size: 96,
+    size: 112,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
@@ -1573,7 +1611,8 @@ export function createSphThermalStepWebGpuEncoderStage({
     boxDimsM: dims,
     wallTemperaturesK,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
-    neighborBins
+    neighborBins,
+    maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable)
   }));
   const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder

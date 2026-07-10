@@ -1371,6 +1371,9 @@ export function buildSphPhaseDemoState({
   for (let spare = 0; spare < spareProductSlotCount; spare += 1) {
     all.push({
       ...spareTemplate,
+      // Distinct role so role-filtered views (packing geometry, drop/base
+      // membership) stay exact; the per-(role|material|phase) class tables
+      // skip spare rows instead (zero-mass reserves carry no class statistics).
       role: 'spare-product-slot',
       x: [cx, (ironBase + iceBase) / 2, cz],
       v: [0, 0, 0],
@@ -1384,6 +1387,7 @@ export function buildSphPhaseDemoState({
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
     p.role = all[index].role;
+    p.spareProductSlot = all[index].spareProductSlot === true;
     p.temperatureK = all[index].temperatureK;
     p.pressurePa = all[index].pressurePa;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;

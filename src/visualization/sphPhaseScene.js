@@ -5772,6 +5772,29 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
 @group(1) @binding(0) var scene_color_copy: texture_2d<f32>;
 @group(1) @binding(1) var scene_color_sampler: sampler;
 
+// Prefiltered environment from the scene background image (latlong layout,
+// mip chain indexed by roughness). A 1x1 dummy keeps the analytic hemisphere
+// fallback when no background image is active.
+@group(1) @binding(2) var env_map: texture_2d<f32>;
+@group(1) @binding(3) var env_sampler: sampler;
+
+fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+  var d = dir;
+  let len2 = dot(d, d);
+  if (len2 <= 1.0e-8) {
+    d = vec3<f32>(0.0, 1.0, 0.0);
+  } else {
+    d = d / sqrt(len2);
+  }
+  let u = atan2(d.z, d.x) * 0.15915494 + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) * 0.31830989;
+  let mip_count = f32(textureNumLevels(env_map));
+  let lod = clamp(roughness, 0.0, 1.0) * max(mip_count - 1.0, 0.0);
+  let sampled = textureSampleLevel(env_map, env_sampler, vec2<f32>(u, v), lod).rgb;
+  // The background image is display-encoded; shading runs in linear light.
+  return pow(clamp(sampled, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
+}
+
 struct OitFragmentOut {
   @location(0) accum: vec4<f32>,
   @location(1) revealage: vec4<f32>,
@@ -6050,8 +6073,11 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // Environment (RoomEnvironment stand-in): bright interior gradient sampled
   // by the split-sum approximation (Karis analytic env BRDF), so metals
   // reflect the room across the whole surface exactly like the sphere lane.
-  let env_color = mix(vec3<f32>(0.23, 0.26, 0.30), vec3<f32>(0.85, 0.92, 1.0),
+  var env_color = mix(vec3<f32>(0.23, 0.26, 0.30), vec3<f32>(0.85, 0.92, 1.0),
     clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+  if (textureDimensions(env_map, 0).x > 1u) {
+    env_color = env_latlong_sample(reflect(-view_dir, normal), roughness);
+  }
   let env_r = vec4<f32>(-1.0, -0.0275, -0.572, 0.022) * roughness
     + vec4<f32>(1.0, 0.0425, 1.04, -0.04);
   let env_a004 = min(env_r.x * env_r.x, exp2(-9.28 * ndotv)) * env_r.x + env_r.y;
@@ -6105,8 +6131,18 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
       transmitted = refracted_linear * transmitted_tint;
     } else {
       // Analytic fallback (opaque pass, legacy lane, non-native bridges).
-      let transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
+      var transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
         clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
+      if (textureDimensions(env_map, 0).x > 1u) {
+        // Refraction miss-case: with no scene copy bound, the transmitted
+        // light comes from the environment along the refracted ray (total
+        // internal reflection falls back to the reflected ray).
+        var refr_env_dir = refract(-view_dir, normal, 1.0 / ior);
+        if (dot(refr_env_dir, refr_env_dir) <= 1.0e-8) {
+          refr_env_dir = reflect(-view_dir, normal);
+        }
+        transmitted_env = env_latlong_sample(refr_env_dir, roughness);
+      }
       transmitted = transmitted_env * transmitted_tint * base_color;
     }
     lit = lit + (1.0 - fresnel_w) * clamp(optical.transmission, 0.0, 1.0) * transmitted;
@@ -10916,6 +10952,7 @@ export function createSphPhaseScene(container, {
   function setBackgroundImage(nextUrl, { reason = 'background-image-control', refresh = true } = {}) {
     const url = typeof nextUrl === 'string' && nextUrl.trim() ? nextUrl.trim() : null;
     sceneBackgroundImageUrl = url;
+    applySceneEnvironmentFromBackgroundImage(url);
     if (url) {
       container.style.backgroundImage = `url(${JSON.stringify(url)})`;
       container.style.backgroundSize = 'cover';
@@ -11213,6 +11250,35 @@ export function createSphPhaseScene(container, {
     } else {
       window.setTimeout(run, 1500);
     }
+  }
+
+  // Sphere-lane consistency with the native lane's env map: an active
+  // background image becomes the Three scene environment (equirect), so
+  // MeshPhysicalMaterial reflections carry the same image; clearing restores
+  // the RoomEnvironment stand-in.
+  let backgroundEnvironmentTexture = null;
+  function applySceneEnvironmentFromBackgroundImage(url) {
+    try {
+      if (!url) {
+        if (backgroundEnvironmentTexture) {
+          try { backgroundEnvironmentTexture.dispose?.(); } catch { /* replaced */ }
+          backgroundEnvironmentTexture = null;
+          scene.environment = environment?.texture || null;
+        }
+        return;
+      }
+      new THREE.TextureLoader().load(url, (texture) => {
+        if (sceneBackgroundImageUrl !== url) {
+          texture.dispose?.();
+          return;
+        }
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        texture.colorSpace = THREE.SRGBColorSpace;
+        try { backgroundEnvironmentTexture?.dispose?.(); } catch { /* replaced */ }
+        backgroundEnvironmentTexture = texture;
+        scene.environment = texture;
+      });
+    } catch { /* non-browser lanes keep the analytic environment */ }
   }
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -14684,6 +14750,109 @@ export function createSphPhaseScene(container, {
     return bridge.refractionCopyTexture;
   }
 
+  // Prefiltered environment map from the scene background image: 256x128
+  // latlong with a full mip chain built by successive 2x box downsampling
+  // (the standard cheap prefilter for roughness-indexed specular lookups;
+  // exact GGX prefiltering is a recorded follow-up). The photo is treated as
+  // a latlong panorama so reflections carry its palette and large features.
+  // Rebuilds only when the background-image URL changes; clearing the image
+  // restores the 1x1 dummy and with it the analytic hemisphere fallback.
+  function rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge) {
+    if (!bridge?.device || !bridge.refractionBindGroupLayout) return;
+    bridge.refractionDummyBindGroup = bridge.device.createBindGroup({
+      label: 'ulg-sph-resident-surface-draw-refraction-dummy-bind-group',
+      layout: bridge.refractionBindGroupLayout,
+      entries: [
+        { binding: 0, resource: bridge.refractionDummyTexture.createView() },
+        { binding: 1, resource: bridge.refractionSampler },
+        { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
+        { binding: 3, resource: bridge.envSampler }
+      ]
+    });
+  }
+
+  function ensureSphResidentSurfaceEnvMap(bridge) {
+    if (!bridge?.device || !bridge.envSampler) return;
+    const url = sceneBackgroundImageUrl;
+    if (bridge.envMapUrl === url || bridge.envMapPendingUrl === url) return;
+    if (!url) {
+      bridge.envMapUrl = null;
+      bridge.envMapPendingUrl = null;
+      try { bridge.envMapTexture?.destroy?.(); } catch { /* device teardown */ }
+      bridge.envMapTexture = null;
+      bridge.envMapView = null;
+      rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
+      return;
+    }
+    if (typeof Image === 'undefined' || typeof document === 'undefined') return;
+    bridge.envMapPendingUrl = url;
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      if (bridge.envMapPendingUrl !== url) return;
+      bridge.envMapPendingUrl = null;
+      if (sceneBackgroundImageUrl !== url || !bridge.device) return;
+      try {
+        const baseWidth = 256;
+        const baseHeight = 128;
+        const mipLevelCount = 9; // 256 -> 1 in halvings; height clamps at 1
+        const texture = bridge.device.createTexture({
+          label: 'ulg-sph-resident-surface-draw-env-map',
+          size: [baseWidth, baseHeight, 1],
+          format: 'rgba8unorm',
+          mipLevelCount,
+          usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+        });
+        let levelWidth = baseWidth;
+        let levelHeight = baseHeight;
+        let source = image;
+        for (let level = 0; level < mipLevelCount; level += 1) {
+          const canvas2d = document.createElement('canvas');
+          canvas2d.width = levelWidth;
+          canvas2d.height = levelHeight;
+          const ctx = canvas2d.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(source, 0, 0, levelWidth, levelHeight);
+          const pixels = ctx.getImageData(0, 0, levelWidth, levelHeight);
+          bridge.device.queue.writeTexture(
+            { texture, mipLevel: level },
+            pixels.data,
+            { bytesPerRow: levelWidth * 4, rowsPerImage: levelHeight },
+            [levelWidth, levelHeight, 1]
+          );
+          source = canvas2d; // chain halvings so each mip box-filters the last
+          levelWidth = Math.max(1, levelWidth >> 1);
+          levelHeight = Math.max(1, levelHeight >> 1);
+        }
+        try { bridge.envMapTexture?.destroy?.(); } catch { /* replaced */ }
+        bridge.envMapTexture = texture;
+        bridge.envMapView = texture.createView();
+        bridge.envMapUrl = url;
+        rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
+        markSphResidentRenderProgress('surface-env-map-built', {
+          stage: 'surface-env-map',
+          url,
+          width: baseWidth,
+          height: baseHeight,
+          mipLevelCount
+        });
+      } catch (error) {
+        markSphResidentRenderProgress('surface-env-map-build-failed', {
+          stage: 'surface-env-map',
+          url,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    };
+    image.onerror = () => {
+      if (bridge.envMapPendingUrl === url) bridge.envMapPendingUrl = null;
+      markSphResidentRenderProgress('surface-env-map-image-load-failed', {
+        stage: 'surface-env-map',
+        url
+      });
+    };
+    image.src = url;
+  }
+
   function ensureSphResidentSurfaceDrawDepthView(bridge = sphResidentSurfaceDrawRenderBridge) {
     if (!bridge?.device || !bridge?.canvas) return null;
     const widthPx = bridge.canvas.width || 1;
@@ -17601,6 +17770,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.oitCompositePipeline
         && previousBridge.oitCompositeBindGroupLayout
         && previousBridge.oitSampler
+        // Env-map era bridges carry envSampler; older layouts (2-entry
+        // refraction group) must rebuild against the 4-entry layout.
+        && previousBridge.envSampler
         && previousBridge.surfaceInputLayout === surfaceInputLayout
         && (previousBridge.cameraBufferByteLength ?? 0) >= cameraBufferByteLength
         && previousBridge.opticalGpuBuffers?.recordsBuffer
@@ -17828,6 +18000,16 @@ fn fs_main() -> @location(0) vec4<f32> {
             binding: 1,
             visibility: GPU_SHADER_STAGE.FRAGMENT,
             sampler: { type: 'filtering' }
+          },
+          {
+            binding: 2,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            texture: { sampleType: 'float' }
+          },
+          {
+            binding: 3,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            sampler: { type: 'filtering' }
           }
         ]
       });
@@ -17979,12 +18161,31 @@ fn fs_main() -> @location(0) vec4<f32> {
         format: 'rgba8unorm',
         usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
       });
+      // Environment sampler wraps in longitude (latlong seam) and walks the
+      // prefiltered mip chain for roughness-indexed lookups.
+      const envSampler = device.createSampler({
+        label: 'ulg-sph-resident-surface-draw-env-sampler',
+        magFilter: 'linear',
+        minFilter: 'linear',
+        mipmapFilter: 'linear',
+        addressModeU: 'repeat',
+        addressModeV: 'clamp-to-edge'
+      });
+      const envDummyTexture = device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-env-dummy',
+        size: [1, 1, 1],
+        format: 'rgba8unorm',
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
+      const envDummyView = envDummyTexture.createView();
       const refractionDummyBindGroup = device.createBindGroup({
         label: 'ulg-sph-resident-surface-draw-refraction-dummy-bind-group',
         layout: refractionBindGroupLayout,
         entries: [
           { binding: 0, resource: refractionDummyTexture.createView() },
-          { binding: 1, resource: refractionSampler }
+          { binding: 1, resource: refractionSampler },
+          { binding: 2, resource: envDummyView },
+          { binding: 3, resource: envSampler }
         ]
       });
       const fieldGradientDummyBuffer = device.createBuffer({
@@ -18123,6 +18324,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         refractionSampler,
         refractionDummyTexture,
         refractionDummyBindGroup,
+        envSampler,
+        envDummyTexture,
+        envDummyView,
         surfaceInputLayout,
         surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
@@ -18675,6 +18879,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           schroederProxySubmit.drawInstanceCount;
       }
         opaquePass.end();
+        ensureSphResidentSurfaceEnvMap(bridge);
         let refractionBindGroup = bridge.refractionDummyBindGroup || null;
         if (
           bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
@@ -18699,7 +18904,9 @@ fn fs_main() -> @location(0) vec4<f32> {
               layout: bridge.refractionBindGroupLayout,
               entries: [
                 { binding: 0, resource: copyTexture.createView() },
-                { binding: 1, resource: bridge.refractionSampler }
+                { binding: 1, resource: bridge.refractionSampler },
+                { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
+                { binding: 3, resource: bridge.envSampler }
               ]
             });
           }

@@ -40786,3 +40786,26 @@ Note for future forks: worktree vite servers ALSO silently lost the
 authority-host lane before this fix — any e2e run from a worktree that
 touched host-dependent paths (SS storage, pressure interface, spatial gas)
 was invalid. Unit suites were unaffected (no dev server involved).
+
+## Round 15 — surface-lane env reflections from the scene background image (task #4)
+
+The surface lane's specular env was a flat analytic vertical gradient. Now an
+active background image (scene.setBackgroundImage / bgimg picker) builds a
+256x128 latlong environment with a full mip chain (successive 2x box
+downsampling — the standard cheap prefilter for roughness-indexed lookups;
+exact GGX prefiltering is a recorded follow-up) and the WGSL env term samples
+it at the reflected ray with roughness-indexed LOD (textureNumLevels-based).
+The refraction miss-case (analytic fallback branch) samples the same map along
+the refracted ray (TIR falls back to the reflected ray). Gate is the existing
+1x1-dummy textureDimensions pattern at new @group(1) bindings 2/3; no image =
+byte-identical analytic path. The refraction dummy bind group is rebuilt when
+the env map loads/clears so OPAQUE draws get env reflections too (their scene
+copy stays dummy). Bridge-reuse guard extended (envSampler presence) so
+pre-change bridges rebuild against the 4-entry layout. Sphere-lane
+consistency: the background image also becomes the Three scene environment
+(equirect) and clearing restores the RoomEnvironment stand-in.
+
+Verified in-browser (http://5191, plan/background-1.jpg — an actual equirect
+plaza panorama): water blob reflects sky/buildings/pavement with clear
+structure vs the old two-tone; analytic path confirmed unchanged with no
+image. Renderer tests 94/0.

@@ -87,3 +87,13 @@ update the plan docs.
 
 The user likes to be called "big dog." If you're genuinely following this guide,
 do it — it's the quick signal that you read this file.
+
+## Superseding GPU-Native Validation Direction - 2026-07-09
+
+The newest user direction supersedes hard guardrail 2's CPU-reference parity
+requirement for ULG/Schroeder WebGPU physics. Do not build a CPU mirror solver or
+make CPU parity an acceptance gate. Validate GPU implementations through
+manufactured states, mathematical invariants, metamorphic GPU executions,
+same-device A/B paths, and compact GPU reductions. Read back only fixed-size
+evidence records; validation must not introduce CPU-owned hot state, serial data
+structures, readback/reupload boundaries, or a CPU fallback architecture.

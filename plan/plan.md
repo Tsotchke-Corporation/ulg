@@ -9,6 +9,17 @@ track starts after the next clean break and covers per-particle support radius,
 normalized variable-support P2G/G2P, conservation-safe split/merge/coarsening,
 and mass/momentum/volume/energy continuity tests.
 
+## Coherent Solid Routing
+
+- [ ] Implement `plan/todo/sol-critic.md`: add a GPU-resident coherent-solid
+  lane with authoritative body frames, material members, independently refined
+  contact proxies, persistent rest/material-space shape carriers, conservative
+  solid-liquid coupling, phase/fracture topology admission, and human-to-
+  planetary chart/orbit behavior. Collision/material particles may drive
+  mechanics, but they must not dictate a coherent solid's visible topology.
+  Validation is GPU-native through manufactured states, metamorphic runs, and
+  compact invariant reductions; do not add a CPU mirror solver or parity gate.
+
 ## Current Target
 
 Current checkpoint, 2026-06-29 AKDT: the worker-owned presentation worker can

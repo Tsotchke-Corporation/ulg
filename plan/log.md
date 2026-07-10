@@ -40117,3 +40117,188 @@ over blue water; spheres lane still renders (F spheres white — sphere-lane tin
 new gas-band response is a noted follow-up). Tests: opticalClosure 12/12 incl. new
 regression (F yellow visible, H2 thin), materialPropertyProvenance 6/6,
 materialPropertyBank 10/10. Full unit suite launched in background.
+
+## 2026-07-09T14:32:51-08:00 - Final Schroeder critique adds coherent solids from Toychest
+
+Prompt recorded at `2026-07-09T14:32:51-08:00`; documentation slice completed
+at `2026-07-09T14:40:49-08:00`.
+
+User prompt:
+
+> I think we also need to include something in the plan for solids composed of
+> particles that can gracefully move through the grid without looking like a
+> blob in a 3d lattice. this will be absolutely necessary when scenes consist
+> mostly of solids that are also mixed with liquids. from human scale up to
+> planets in orbit. look at the toychest demo from peercompute and come up with
+> a way of adding this to your critique and write out your final critique to a
+> todo item labeled sol-critic.md
+
+The immediately preceding user correction also remains authoritative: do not
+build a CPU mirror/reference solver or use CPU parity as the WebGPU acceptance
+gate. CPU-shaped reference work previously introduced serial structures,
+readback/synchronization boundaries, and partial CPU stages that prevented full
+GPU residency. Validation now uses mathematical invariants, manufactured
+states, metamorphic GPU executions, same-device A/B paths, and compact GPU
+reductions.
+
+### Concrete investigation
+
+1. Re-read `plan/plan.md`, the current `plan/log.md` tail, the SS plan/routing,
+   and ULG/root agent instructions before editing.
+2. Checked ICC for both repositories. ULG was current at `61dfc3a`; PeerCompute
+   was current at `377c36c`. No ICC refresh or repo-local ICC write was needed.
+3. Located and traced PeerCompute Toychest from demo creation through rigid body
+   buffers, body-local collision samples, GPU local-to-world transforms,
+   `v + omega x r`, sample contact, force/torque reduction, pose integration,
+   and direct mesh rendering from body pose buffers.
+4. Inspected current ULG solid mechanics and rendering. Resident MLS-MPM has
+   fixed-corotated per-particle solid stress and deformation history, but no
+   coherent body frame. Solid render paths use spheres or material/phase
+   density fields, so a rigid recognizable body has no independent shape
+   authority.
+5. Compared the SS plan vocabulary and gates with the required solid state. It
+   has no body frame, quaternion/orientation, inertia, angular momentum,
+   connectivity, fracture, or orbital contract.
+6. Reviewed primary technical anchors for APIC, MLS-MPM/CPIC, interacting
+   solid/fluid MPM, GIMP grid-crossing behavior, explicit embedded Lagrangian
+   surfaces, and hybrid planetary integration.
+7. Created `plan/todo/sol-critic.md` with the final critique, a coherent-solid
+   body/member/contact/shape architecture, mixed solid-liquid pass, deformable
+   and phase/topology modes, planetary charts/orbits, PeerCompute ownership,
+   SOL-0 through SOL-6 slices, GPU-only acceptance gates, visual sequences,
+   performance gates, non-goals, and completion criteria.
+8. Routed the new todo from the root plan, todo index, and SS index.
+9. Appended the GPU-native validation correction to the root instructions and
+   added an explicit superseding section to ULG `Agents.md`, resolving its stale
+   CPU-parity guardrail without deleting the historical text.
+
+### Toychest conclusion
+
+Toychest's useful pattern is not its fixed grid or penalty contact. It stores one
+authoritative body pose, linear/angular state, mass, and inertia, while contact
+particles retain immutable body-local coordinates. GPU kernels transform those
+samples each step, reduce their forces and torques back to the body, and
+integrate the body once. The default renderer hides particles and transforms a
+persistent shape mesh from the same GPU body pose buffers.
+
+ULG should promote that representation split into a `solidCoherentBody` law
+adapter under ComputeManager/GPUHub/StateManager authority. Rigid interiors
+should not run dense MPM. Independently refinable boundary samples should
+couple to liquid with equal-and-opposite impulses, while a rest/material-space
+mesh or SDF preserves visible shape. Fixed-corotated MLS-MPM remains the
+deformable-solid path, with an embedded material-space surface. Planets retain
+an orbital/body frame and coarse multipoles, then materialize regional
+solid/ocean/impact charts only where needed.
+
+Do not port Toychest's one-chart uniform grid, fixed cell capacity, collision-
+sample-dependent mass, demo penalty constants, scene-owned device/scheduler,
+CPU-maintained draw ranges, or simple Euler integration into ULG.
+
+### Commands run
+
+Core repository/context commands:
+
+```bash
+sed -n '1,220p' plan/plan.md
+tail -n 260 plan/log.md
+sed -n '1,240p' Agents.md
+sed -n '1,160p' plan/Agents.md
+EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness
+EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo peercompute --check-staleness
+rg --files . | rg -i 'toy.?chest|chest|toy'
+rg -n -i 'toychest|toy chest|toy-chest' . --glob '!node_modules/**' --glob '!.git/**' --glob '!dist/**' --glob '!build/**'
+rg -n -i 'rigid|solid|deformation|rest.?mesh|material.?space|shape.?matching|quaternion|orientation|inertia|elastic|plastic|mesh' src tests plan/todo plan/done --glob '*.js' --glob '*.mjs' --glob '*.md'
+```
+
+Key Toychest and ULG source reads:
+
+```bash
+nl -ba demos/webgpuphys/demos/toychest.js
+nl -ba demos/webgpuphys/demos/shared/shapeRenderer.js
+nl -ba demos/webgpuphys/src/world.js
+nl -ba demos/webgpuphys/src/shaders/local_to_world.wgsl
+nl -ba demos/webgpuphys/src/shaders/body_vel_to_particle_vel.wgsl
+nl -ba demos/webgpuphys/src/shaders/update_force.wgsl
+nl -ba demos/webgpuphys/src/shaders/reduce_force.wgsl
+nl -ba demos/webgpuphys/src/shaders/reduce_torque.wgsl
+rg -n 'solidFlag|mpmSolid|deformationF|corotated_stress' src/runtime/sph ulg-gpu-abi/src/wgsl.js
+rg -n -i 'solid.*render|render.*solid|solid.*surface|rigid|mesh|lattice|blob' src/visualization/sphPhaseScene.js src/runtime/sph/sphMlsMpmGpuStep.js src/runtime/sph/sphPhaseDemo.js
+```
+
+Toychest live inspection:
+
+```bash
+ss -ltnp | rg ':5179|:5173|:4173' || true
+curl -sS -o /dev/null -w '%{http_code} %{url_effective}\n' http://127.0.0.1:5179/demos/toychest.html || true
+PEERCOMPUTE_NO_OPEN=1 npm run dev -- --host 127.0.0.1 --port 5199 --strictPort
+node --input-type=module -e "import { chromium } from 'playwright'; /* launch /bin/google-chrome with WebGPU, load https://127.0.0.1:5199/demos/toychest.html, capture /tmp/peercompute-toychest-5199.png, and report DOM/console state */"
+```
+
+Documentation validation:
+
+```bash
+git diff --check
+rg -n '[[:blank:]]+$' plan/todo/sol-critic.md
+rg -c 'sol-critic.md' plan/plan.md plan/todo/README.md plan/todo/SS/README.md
+ss -ltnp | rg ':5199'
+git status --short --branch
+```
+
+### Files touched
+
+- `/home/cos/projects/AGENTS.md`
+- `Agents.md`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/SS/README.md`
+- `plan/todo/sol-critic.md`
+- `plan/log.md`
+
+No runtime source, shader, test, package, generated artifact, or PeerCompute file
+was edited.
+
+### Validation results and failures
+
+- ICC status: both `ulg` and `peercompute` indexes were current.
+- Static Toychest source trace: passed. Body pose and local contact samples are
+  separate; particles reduce force/torque; meshes read body pose buffers.
+- Checked-in `demos/webgpuphys/toychest-screenshot.gif`: visually inspected;
+  it shows many recognizable solid silhouettes rather than rendered particle
+  lattices.
+- The first Playwright launch failed because the package's downloaded
+  `chromium_headless_shell` executable was missing. Rerunning with the repo's
+  `/bin/google-chrome` fallback succeeded; no browser installation was made.
+- Port 5179 was occupied by another PeerCompute surface. A first capture reached
+  that app rather than Toychest. An isolated Vite server was therefore started
+  on HTTPS port 5199.
+- The isolated Toychest page reported `Particles: 12926 | FPS: 60`, WebGPU
+  available, and no console/page errors after 12 seconds. A second early sample
+  reported `Particles: 12560 | FPS: 26` and no issues.
+- Both headless live screenshots showed only the cleared canvas/UI rather than
+  the solid draw, so live image capture is not accepted as visual proof. The
+  likely causes remain headless WebGPU capture behavior, camera/frustum state,
+  or a current demo render issue. This planning task did not modify PeerCompute
+  to investigate it.
+- The temporary port-5199 Vite server was stopped and verified absent.
+- `git diff --check`, todo routing checks, and the explicit untracked-file
+  trailing-whitespace check passed before this log append.
+- No ULG runtime/unit/E2E test was run because this slice changed documentation
+  and instructions only. The todo defines the required future GPU and visual
+  gates.
+
+### Open questions
+
+- Establish the first rigid approximation admission metric from material
+  stiffness, strain/yield/damage state, timescale, and requested error.
+- Choose the production contact representation for the first SOL slice: area-
+  weighted surface samples, SDF tiles, or a hybrid.
+- Specify the mixed-cell multi-field/interface operator so fluid momentum does
+  not blend through rigid mass.
+- Select a GPU deterministic/controlled-error body-key reduction strategy for
+  admission evidence while retaining a faster non-admission path if justified.
+- Define how embedded deformable surface topology is rebuilt after admitted
+  fracture or melting.
+- Define chart transforms and orbital/local coupling error budgets before the
+  planetary slice.
+- Revisit the live Toychest blank headless capture separately if it will become
+  an automated visual reference.

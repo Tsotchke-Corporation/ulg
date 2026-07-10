@@ -40613,3 +40613,48 @@ Cs+F — products hold 4000 K AT the interface (glowing molten crown in the
 screenshots, /tmp/fork-placement/), ledger clean, F consumption ~9%/window.
 Gates 14371 + 14494 pass; physics atomics 11/11; reaction/ABI/renderer/demo
 tests green. Full suite running at commit time; report follows.
+
+## Task #11 — reaction violence calibration (investigation; numbers, no source changes)
+
+Scenes: standard URL family (ironh=1.01, dropn=3, basen=5, boxx/y/z=4, mlsmpm).
+Probes committed: scratch/probe-violence.mjs (per-material/phase mass, y-extents,
+T, internal energy, KE per sample), scratch/probe-violence-shots.mjs (timelines).
+
+**Q1 spawn geometry — NOT in contact.** At t=0.008s the h2o pool surface sits at
+y=0.76 and the drop block bottom at ironh=1.01 — 0.25 m clearance. However the
+reaction PAIRING radius (raised in 0f632a4 to clear the MLS-MPM contact gap,
+~sum of rest radii ≈ 0.12+0.12 m) equals that clearance, so the bottom drop
+layer pairs with the pool surface on the first proposal pass. Spawn geometry is
+sane; the instant ignition is the pairing radius meeting the extent law below.
+
+**Q2 extent law — whole-particle consumption per event (the core finding).**
+wgsl.js ~2014-2018: extent_mol = min(self_mass, partner_mass)/(coef·M) — one
+contact event consumes the full limiting particle in a single substep. No dt,
+no rate, no interface-flux bound. Measured: 127 kg of Na (17 of 27 particles)
+consumed in the FIRST 8 ms (~16 t/s vs real cm-pellet g/s). The blast then
+launches the surviving block (all remaining Na at y=3.48 by t=0.096) — the same
+mechanism that later STARVES Cs+F (see Q4). Fix spec (not implemented, big):
+per-pair per-substep extent bound nu·A_contact·dt with A_contact from the same
+rest-radius contact geometry as conduction, nu an Arrhenius surface rate (for
+activation-0 contact classes, a diffusion/collision-limited prefactor); events
+below the bound carry the residual extent forward instead of consuming whole
+particles.
+
+**Q3 energy partition — magnitude is RIGHT, rate is wrong.** Na consumed by
+t=0.008: 127 kg; products naoh 233 kg @ 2511 K (u=4.71 MJ/kg) + h2 4.26 kg.
+Energy released into internal energy ≈ 0.96 GJ → 7.5 MJ/kg-Na vs real ~8 MJ/kg
+(2Na+2H2O -> 2NaOH+H2). Bulk water KE peaks at 2.9 MJ (0.3% of release) at the
+blast and decays — partition is heat-dominated as physics wants. Product NaOH
+at ~2500 K is the real flame class. The "detonation" is purely the 8 ms burn.
+
+**Q4 Cs+F — partial self-acceleration, burst-stall, blocker identified.**
+F consumed: 1.037→0.759 kg (27%) by sim t≈1.4 s vs old ~21%/30 s — ≈20× faster
+with conduction+placement landed; crown holds ~2100 K at the interface
+(timeline shots /tmp/fork11-shots/cs-*.png: burning orange cloud, white-hot
+crown patches). But consumption STALLS after each burst: the whole-layer
+detonation kicks the Cs block ~1 m off the F cloud (cs-3.png shows it airborne)
+and reaction resumes only on re-contact. Bulk Cs stays ~300-340 K. Verdict:
+sustained runaway is blocked by the SAME missing rate law (bursts eject the
+reactants apart); radiation (sigma·T^4 from the 2100 K crown) is the second
+missing coupling and belongs to task #9. Recommendation: implement the
+interface-flux extent law first; re-measure; then radiation.

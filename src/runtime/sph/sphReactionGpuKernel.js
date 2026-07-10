@@ -2677,6 +2677,7 @@ export async function runSphReactionStepWebGpu({
         sourceThermoBuffer: summarySourceThermoBuffer,
         nextStateBuffer: outStateBuffer,
         nextThermoBuffer: outThermoBuffer,
+        nextMechanicsBuffer: outMechanicsBuffer,
         reactionRecordBuffer,
         proposalBuffer,
         readProductEvents: false,

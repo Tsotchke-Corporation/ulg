@@ -132,7 +132,10 @@ test('elemental fluorine selection resolves to ambient F2 gas for phase and reac
 test('demo initial state: hot molten-iron block on a cold ice block', () => {
   const demo = buildSphPhaseDemoState();
   assert.ok(demo.counts.drop > 0 && demo.counts.base > 0);
-  assert.equal(demo.counts.total, demo.counts.drop + demo.counts.base);
+  // Total includes the reserved zero-mass spare slots that GPU product-event
+  // placement claims when reactions emit gas products (task #6 item 3).
+  assert.ok(demo.counts.spareProductSlots >= 8);
+  assert.equal(demo.counts.total, demo.counts.drop + demo.counts.base + demo.counts.spareProductSlots);
   assert.equal(demo.dropMaterial, 'fe');
   assert.equal(demo.baseMaterial, 'h2o');
   const fe = demo.state.particles.filter((p) => p.material === 'fe');

@@ -40579,3 +40579,37 @@ material colour 1, 0.31, 0 linear); csf-after3 (Cs block keeps the bank
 tan-gold — conductor path unchanged — falling into amber F2 gas; derived
 dark-red CsF liquid). Water identical before/after (no bank row). Tests:
 opticalGpuBuffers 21/21, sphPhaseRenderer 94/94, full npm test green.
+
+## Gas product placement: products become real mechanics citizens (task #6 item 3)
+
+**Audit (stage 1, live GPU readback):** unplaced gas product mass lived
+forever in product-event rows (Na+H2O: 13 events, 2.716 kg H2, never drained;
+h2 particle count always 0). Condensed products inherited ONE parent's
+pre-contact velocity and ejected from the interface at up to 31 m/s.
+
+**Fix (stages 2+3, all conservation-argued in comments):**
+- Freed-slot placement: fully-consumed reactant slots now place GAS product
+  terms after condensed ones (product_term_for_parent_slot / _for_gas_slot in
+  the reaction apply kernel) instead of routing all gas to the event sidecar.
+- Spare-slot placement kernel (sphReactionProductEventPlacementWgsl): demo
+  build reserves zero-mass spare particle rows (1/8 of live count, min 8,
+  GPU integrator only); a deterministic single-invocation kernel claims one
+  per live event right after the event kernel, writing pos/COM-velocity/
+  u (parent energies + enthalpy share, now carried in event row4.w)/
+  one-hot phase thermo/reset mechanics from the event rows, then zeroes the
+  event so ledger and particle mass never double-count. No spare capacity ->
+  the event stays live exactly as before (conserving fallback).
+- COM product velocity: products (in-slot and placed) launch at the consumed
+  pair's mass-weighted COM velocity; remainders keep their own velocities, so
+  pair momentum is exact. This is what keeps hot products AT the interface.
+- Zero-mass inertness hardened: render-row writer masks material id for
+  massless rows; sphere batching skips them; CPU thermal + CPU MLS-MPM lanes
+  skip them (division-by-zero-mass NaNs caught by the atomics gate).
+
+**Validated:** Na+H2O — h2 particles exist (8 x 0.34 kg = exactly the old
+frozen ledger mass), unplacedKg = 0 in EVERY sample, naoh ejection 31 -> ~20
+m/s, bath warms 294 -> 325 K (reaction heat finally conducts into water).
+Cs+F — products hold 4000 K AT the interface (glowing molten crown in the
+screenshots, /tmp/fork-placement/), ledger clean, F consumption ~9%/window.
+Gates 14371 + 14494 pass; physics atomics 11/11; reaction/ABI/renderer/demo
+tests green. Full suite running at commit time; report follows.

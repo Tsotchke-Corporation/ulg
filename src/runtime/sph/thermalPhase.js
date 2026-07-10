@@ -67,8 +67,10 @@ export function thermalStep(state, {
   // Interior conduction: energy-conserving pairwise exchange dE = C (T_j - T_i) w(r) dt.
   for (let i = 0; i < n; i += 1) {
     const pi = particles[i];
+    if (!(particles[i].massKg > 0)) continue;
     for (let j = i + 1; j < n; j += 1) {
       const pj = particles[j];
+      if (!(pj.massKg > 0)) continue;
       const dx = pi.x[0] - pj.x[0];
       const dy = pi.x[1] - pj.x[1];
       const dz = pi.x[2] - pj.x[2];
@@ -84,6 +86,7 @@ export function thermalStep(state, {
   // Wall flux: a particle within `layer` of a face exchanges with that face's reservoir.
   for (let i = 0; i < n; i += 1) {
     const pi = particles[i];
+    if (!(pi.massKg > 0)) continue;
     for (const f of FACE_AXES) {
       const coord = pi.x[f.axis];
       const distance = f.atMax ? dims[f.axis] - coord : coord;

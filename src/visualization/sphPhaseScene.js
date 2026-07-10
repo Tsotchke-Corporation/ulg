@@ -8827,6 +8827,9 @@ export function createContinuousSurfaceBatches({
       : (estimateGlobalParticleSpacingM(positionsM, particleCount) ?? 0.25));
   for (let i = 0; i < particleCount; i += 1) {
     const source = materials?.[i];
+    // Spare product slots decode with a masked material id (0 -> 'unknown');
+    // they carry no mass and must not become sphere instances or batches.
+    if (source && typeof source === 'object' && source.material === 'unknown') continue;
     const descriptorBase = renderDescriptorOf(source);
     const sourceObject = source && typeof source === 'object' ? source : {};
     const explicitDomainId = normalizeRenderDomainId(

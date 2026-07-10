@@ -1158,6 +1158,7 @@ export function buildSphPhaseDemoState({
   adaptiveParticleSpacing = true,
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
+  mechanics = 'mlsmpm',
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
@@ -1355,12 +1356,38 @@ export function buildSphPhaseDemoState({
   });
 
   const all = [...baseParticles, ...dropParticles];
+  // Spare zero-mass particle slots for GPU product-event placement: gas
+  // reaction products become real particles by claiming one of these instead
+  // of living forever as immovable product-event mass/pressure sources.
+  // Zero-mass particles are inert in every kernel (P2G/G2P/thermal/render all
+  // skip mass <= 0), so reserving them only costs buffer rows. Capacity is
+  // 1/8 of the live particle count (min 8): each reaction event places at
+  // most one gas particle and placed slots are permanent, so the headroom
+  // bounds how much gas the scene can hold as resolved particles before the
+  // event ledger takes over again (which remains the conserving fallback).
+  const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
+  const spareProductSlotCount = gpuResidentMechanics ? Math.max(8, Math.round(all.length / 8)) : 0;
+  const spareTemplate = all[0];
+  for (let spare = 0; spare < spareProductSlotCount; spare += 1) {
+    all.push({
+      ...spareTemplate,
+      // Distinct role so role-filtered views (packing geometry, drop/base
+      // membership) stay exact; the per-(role|material|phase) class tables
+      // skip spare rows instead (zero-mass reserves carry no class statistics).
+      role: 'spare-product-slot',
+      x: [cx, (ironBase + iceBase) / 2, cz],
+      v: [0, 0, 0],
+      massKg: 0,
+      spareProductSlot: true
+    });
+  }
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
     p.role = all[index].role;
+    p.spareProductSlot = all[index].spareProductSlot === true;
     p.temperatureK = all[index].temperatureK;
     p.pressurePa = all[index].pressurePa;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
@@ -1404,7 +1431,12 @@ export function buildSphPhaseDemoState({
       dropSizeM: dropBlockEdgeM,
       baseSizeM: baseBlockEdgeM
     }),
-    counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
+    counts: {
+      drop: dropParticles.length,
+      base: baseParticles.length,
+      spareProductSlots: spareProductSlotCount,
+      total: all.length
+    },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
 }

@@ -411,6 +411,9 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
 });
 
 test('SPH GPU reaction table ABI exposes derived reaction and product phase rows', () => {
+  // Event row4.w carries the products' specific internal energy (parent
+  // energies + enthalpy share) since gas-product placement landed: the
+  // placement kernel needs u to mint a real particle from an event.
   assert.equal(ULG_SPH_GPU_REACTION_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-table.v0');
   assert.equal(ULG_REACTION_CLOSURE_SCHEMA, 'peercompute.ulg.reaction-closure.v0');
   assert.equal(ULG_SPH_GPU_REACTION_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step.v0');
@@ -683,7 +686,7 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionProductEventWgsl, /struct ProductMechanics/);
   assert.match(sphReactionProductEventWgsl, /fn product_mechanics_for/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 2u\] = vec4<f32>\(f32\(partner_index\), row_moles, routing_id, phase_id\)/);
-  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 4u\] = vec4<f32>\(temperature_k, rest_density_kg_per_m3, 1\.0, 0\.0\)/);
+  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 4u\] = vec4<f32>\(temperature_k, rest_density_kg_per_m3, 1\.0, product_u\)/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 5u\] = vec4<f32>\(product_velocity\.x, product_velocity\.y, product_velocity\.z, support_volume_m3\)/);
   assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 7u\] = vec4<f32>/);
   assert.match(sphReactionProductEventWgsl, /@compute @workgroup_size\(64\)/);

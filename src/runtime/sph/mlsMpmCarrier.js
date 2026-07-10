@@ -364,6 +364,16 @@ export function createMlsMpmCarrier({
     // --- P2G: scatter mass, momentum (APIC) + internal stress to the grid ---
     for (let pi = 0; pi < n; pi += 1) {
       const p = particles[pi];
+      // Spare product slots (zero mass) are inert until the GPU placement
+      // kernel claims them; density = m/V is 0/0 for them, so skip the
+      // physics but keep the carrier fields stamped (consumers assert
+      // mpmSolid/mpmJ on every particle).
+      if (!(Number(p.massKg) > 0)) {
+        ensureParticleState(p);
+        p.mpmSolid = false;
+        p.mpmCondensed = false;
+        continue;
+      }
       ensureParticleState(p);
       const J = mat3det(p.mpmF);
       const volume = p.mpmVolume0 * J;
@@ -460,6 +470,7 @@ export function createMlsMpmCarrier({
     // --- G2P: gather velocity + reconstruct affine C, advect, update volume J ---
     for (let pi = 0; pi < n; pi += 1) {
       const p = particles[pi];
+      if (!(Number(p.massKg) > 0)) continue;
       const baseX = Math.floor(p.x[0] * invDx - 0.5);
       const baseY = Math.floor(p.x[1] * invDx - 0.5);
       const baseZ = Math.floor(p.x[2] * invDx - 0.5);

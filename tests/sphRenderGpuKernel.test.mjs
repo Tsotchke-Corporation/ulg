@@ -2815,3 +2815,72 @@ test('SPH render surface draw metadata optional WebGPU accepts resident no-full-
   assert.equal(execution.result.compactionMode, 'webgpu-surface-prefix-scan-compact');
   assert.equal(execution.surfaceDrawReadback, false);
 });
+
+test('splash-shard dispersion correction thins bridge cells between diverging droplets only', () => {
+  const table = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'Au|Au|solid',
+    material: 'Au',
+    phase: 'solid',
+    renderKey: 'Au',
+    resolution: 8,
+    isolation: 20,
+    subtract: 5,
+    radiusNorm: 0.2,
+    colorLinear: [1, 0.7, 0.1]
+  }]);
+  const materialId = stableOpticalMaterialId('Au');
+  // Two particles 1 m apart straddling the field midpoint; velocity in the
+  // row pads (lanes 17-19).
+  const makeRows = (velocityA, velocityB) => {
+    const rows = new Float32Array(2 * SPH_GPU_RENDER_ROW_FLOATS);
+    const fill = (base, x, velocity) => {
+      rows[base] = x; rows[base + 1] = 5; rows[base + 2] = 5;
+      rows[base + 3] = 4; // massKg
+      rows[base + 4] = materialId;
+      rows[base + 5] = GPU_PHASE_IDS.solid;
+      rows[base + 6] = 293.15;
+      rows[base + 8] = 19300;
+      rows[base + 10] = 1; // representedEntityCount
+      rows[base + 16] = 1; // phaseFractionSolid
+      rows[base + 17] = velocity[0];
+      rows[base + 18] = velocity[1];
+      rows[base + 19] = velocity[2];
+    };
+    fill(0, 4.5, velocityA);
+    fill(SPH_GPU_RENDER_ROW_FLOATS, 5.5, velocityB);
+    return rows;
+  };
+  const build = (rows, renderSmearDtS) => buildSphRenderFieldCpu({
+    renderRows: rows,
+    surfaceTable: table,
+    fieldPadding: 0.22,
+    refEdgeM: 10,
+    renderSmearDtS
+  });
+
+  const divergingRows = makeRows([-10, 0, 0], [10, 0, 0]);
+  const baseline = build(divergingRows, 0);
+  const corrected = build(divergingRows, 0.05);
+  // Bridge cell at the field midpoint (x=y=z=4 of 8): normalized 0.5.
+  const bridgeIndex = (4 * 8 * 8 + 4 * 8 + 4) * baseline.rowStrideFloats;
+  assert.ok(baseline.fieldRows[bridgeIndex] > 0, 'bridge cell must be occupied in the baseline');
+  // Diverging droplets (sigma_v = 10 m/s, dt 0.05 s -> 0.5 m smear vs 1 m
+  // separation) must lose most of their bridging density.
+  assert.ok(
+    corrected.fieldRows[bridgeIndex] < baseline.fieldRows[bridgeIndex] * 0.6,
+    `bridge density should thin: ${corrected.fieldRows[bridgeIndex]} vs ${baseline.fieldRows[bridgeIndex]}`
+  );
+
+  // A coherently moving pair (same velocity vector, same speed) has zero
+  // dispersion: the field must be bit-identical to the uncorrected build.
+  const coherentRows = makeRows([10, 0, 0], [10, 0, 0]);
+  const coherentBaseline = build(coherentRows, 0);
+  const coherentCorrected = build(coherentRows, 0.05);
+  assert.deepEqual(Array.from(coherentCorrected.fieldRows), Array.from(coherentBaseline.fieldRows));
+
+  // A single particle (dispersion undefined -> zero) is also bit-exact.
+  const soloRows = makeRows([-10, 0, 0], [10, 0, 0]).slice(0, SPH_GPU_RENDER_ROW_FLOATS);
+  const soloBaseline = build(soloRows, 0);
+  const soloCorrected = build(soloRows, 0.05);
+  assert.deepEqual(Array.from(soloCorrected.fieldRows), Array.from(soloBaseline.fieldRows));
+});

@@ -4588,7 +4588,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // Tri-phase split (thermo row1 = solid/liquid/gas/plasma fractions): the
   // render field weights each particle's contribution per phase surface so
   // transition-boundary particles morph between surfaces instead of popping.
-  render_rows[render_row_base + 4u] = vec4<f32>(thermo1.x, 0.0, 0.0, 0.0);
+  // Pads row4.yzw carry the particle velocity so the render-field kernel can
+  // measure per-cell velocity dispersion (splash-shard smear correction).
+  let render_vel_u = sph_state[particle_index * 2u + 1u];
+  render_rows[render_row_base + 4u] = vec4<f32>(thermo1.x, render_vel_u.x, render_vel_u.y, render_vel_u.z);
 }
 `;
 
@@ -4600,7 +4603,10 @@ struct RenderFieldParams {
 	  product_event_count: u32,
   field_padding: f32,
   ref_edge_m: f32,
-  _pad1: f32,
+  // Render refresh interval (s): a cell whose particles diverge at sigma_v
+  // smears its mass over sigma_v*dt between refreshes; the metaball
+  // correction below folds that spread into the sample distance.
+  render_smear_dt_s: f32,
   _pad2: f32,
 };
 
@@ -4733,6 +4739,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // uniform temperature there).
   var temperature_weighted = 0.0;
   var temperature_weight = 0.0;
+  // Velocity moments (weights = the same positive metaball values) for the
+  // splash-shard smear correction: cell dispersion sigma_v^2 = E|v|^2-|Ev|^2
+  // is zero for a coherently moving or single-particle cell, so only cells
+  // bridging DIVERGING droplets are corrected.
+  var velocity_weighted = vec3<f32>(0.0, 0.0, 0.0);
+  var velocity_sq_weighted = 0.0;
 	  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
@@ -4743,7 +4755,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     ) {
       continue;
     }
-    let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x);
+    let row4 = render_row4(particle_index);
+    let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, row4.x);
     if (phase_weight <= 0.003) {
       continue;
     }
@@ -4761,8 +4774,64 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
 	      temperature_weighted = temperature_weighted + row1.z * value;
 	      temperature_weight = temperature_weight + value;
+	      let particle_velocity = row4.yzw;
+	      velocity_weighted = velocity_weighted + particle_velocity * value;
+	      velocity_sq_weighted = velocity_sq_weighted + dot(particle_velocity, particle_velocity) * value;
 	    }
 	  }
+
+  // Splash-shard smear correction: mass in a dispersing cell spreads over
+  // L = sigma_v * render_smear_dt between refreshes, so each contribution is
+  // re-sampled at the smeared distance (dist2 + L^2, in normalized field
+  // units). Coherent cells (sigma_v ~ 0) skip the pass entirely, keeping
+  // solids, resting pools, and single-particle cohorts bit-exact; the guard
+  // threshold is fp-noise scale (L < 1e-5 of the field edge), not a tunable.
+  if (temperature_weight > 0.0 && params.render_smear_dt_s > 0.0) {
+    let mean_velocity = velocity_weighted / temperature_weight;
+    let dispersion_sq_ms = max(0.0, velocity_sq_weighted / temperature_weight - dot(mean_velocity, mean_velocity));
+    let smear_norm = sqrt(dispersion_sq_ms) * params.render_smear_dt_s * span / ref_edge;
+    let smear_sq = smear_norm * smear_norm;
+    if (smear_sq > 1.0e-10) {
+      var corrected_density = 0.0;
+      var corrected_palette = vec3<f32>(0.0, 0.0, 0.0);
+      var corrected_temperature_weighted = 0.0;
+      var corrected_temperature_weight = 0.0;
+	      for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+        let row0 = render_row0(particle_index);
+        let row1 = render_row1(particle_index);
+        let row2 = render_row2(particle_index);
+        if (
+          row1.x != material_id
+          || (render_domain_id > 0.0 && row2.w != render_domain_id)
+        ) {
+          continue;
+        }
+        let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x);
+        if (phase_weight <= 0.003) {
+          continue;
+        }
+        let particle = vec3<f32>(
+          clamp(params.field_padding + (row0.x / ref_edge) * span, 0.001, 0.999),
+          clamp(params.field_padding + (row0.y / ref_edge) * span, 0.001, 0.999),
+          clamp(params.field_padding + (row0.z / ref_edge) * span, 0.001, 0.999)
+        );
+        let delta = cell - particle;
+        let dist2 = dot(delta, delta) + smear_sq;
+        let value = (strength * phase_weight) / (0.000001 + dist2) - subtract;
+	        if (value > 0.0) {
+	          corrected_density = corrected_density + value;
+	          let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
+	          corrected_palette = corrected_palette + color * smooth_palette_weight(ratio) * phase_weight;
+	          corrected_temperature_weighted = corrected_temperature_weighted + row1.z * value;
+	          corrected_temperature_weight = corrected_temperature_weight + value;
+	        }
+	      }
+      density = corrected_density;
+      palette = corrected_palette;
+      temperature_weighted = corrected_temperature_weighted;
+      temperature_weight = corrected_temperature_weight;
+    }
+  }
 
 	  for (var event_index = 0u; event_index < params.product_event_count; event_index = event_index + 1u) {
 	    let event0 = product_event_row0(event_index);

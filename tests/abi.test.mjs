@@ -738,9 +738,10 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     'volumeRatioJ:f32',
     'pressurePa:f32',
     'phaseFractionSolid:f32',
-    'renderRowPad0:f32',
-    'renderRowPad1:f32',
-    'renderRowPad2:f32'
+    // Splash-shard dispersion: the former pads carry particle velocity.
+    'velocityXMPerS:f32',
+    'velocityYMPerS:f32',
+    'velocityZMPerS:f32'
   ]);
   assert.match(sphRenderRowsWgsl, /struct RenderRowsParams/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(0\) var<storage, read> sph_state/);

@@ -1023,7 +1023,8 @@ function createRenderFieldParamsArray({
   surfaceCount,
   totalFieldCells,
   fieldPadding,
-  refEdgeM
+  refEdgeM,
+  renderSmearDtS = 0
 }) {
   const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
@@ -1033,7 +1034,9 @@ function createRenderFieldParamsArray({
   view.setUint32(12, productEventCount, true);
   view.setFloat32(16, fieldPadding, true);
   view.setFloat32(20, refEdgeM, true);
-  view.setFloat32(24, 0, true);
+  // Render refresh interval for the splash-shard smear correction; 0 keeps
+  // the correction pass inert (legacy field behavior).
+  view.setFloat32(24, Math.max(0, Number(renderSmearDtS) || 0), true);
   view.setFloat32(28, 0, true);
   return buffer;
 }
@@ -1572,12 +1575,15 @@ function accumulateMetaballSample({
   supportNorm,
   color,
   density,
-  palette
+  palette,
+  // Splash-shard smear: the dispersion correction re-samples each metaball at
+  // the smeared distance (dist^2 + (sigma_v*dt)^2 in normalized field units).
+  distanceSqOffset = 0
 }) {
   const dx = cell[0] - position[0];
   const dy = cell[1] - position[1];
   const dz = cell[2] - position[2];
-  const dist2 = dx * dx + dy * dy + dz * dz;
+  const dist2 = dx * dx + dy * dy + dz * dz + distanceSqOffset;
   const value = strength / (0.000001 + dist2) - subtract;
   if (value <= 0) return { density, palette };
   const ratio = Math.sqrt(dist2) / Math.max(supportNorm, 1e-6);
@@ -1600,7 +1606,8 @@ export function buildSphRenderFieldCpu({
   particleCount = null,
   productEventCount = null,
   fieldPadding = 0.22,
-  refEdgeM = 10
+  refEdgeM = 10,
+  renderSmearDtS = 0
 } = {}) {
   if (!(renderRows instanceof Float32Array)) {
     throw new TypeError('buildSphRenderFieldCpu requires Float32Array render rows');
@@ -1629,41 +1636,80 @@ export function buildSphRenderFieldCpu({
       let palette = [0, 0, 0];
       let temperatureWeighted = 0;
       let temperatureWeight = 0;
-      for (let particleIndex = 0; particleIndex < resolvedParticleCount; particleIndex += 1) {
-        const renderOffset = particleIndex * SPH_GPU_RENDER_ROW_FLOATS;
-        const materialId = renderRows[renderOffset + 4];
-        const phaseId = renderRows[renderOffset + 5];
-        const renderDomainId = renderRows[renderOffset + 11];
-        if (
-          materialId !== surface.materialId
-          || !renderDomainMatchesSurface(renderDomainId, surface.renderDomainId)
-        ) continue;
-        const phaseWeight = renderPhaseWeightForSurface(
-          surface.phaseId,
-          phaseId,
-          renderRows[renderOffset + 9],
-          renderRows[renderOffset + 16]
-        );
-        if (phaseWeight <= 0.003) continue;
-        const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
-        const accumulated = accumulateMetaballSample({
-          cell,
-          position: particle,
-          strength: surface.strength * phaseWeight,
-          subtract: surface.subtract,
-          supportNorm,
-          color: surface.colorLinear,
-          density,
-          palette
-        });
-        const sampleValue = accumulated.density - density;
-        if (sampleValue > 0) {
-          temperatureWeighted += renderRows[renderOffset + 6] * sampleValue;
-          temperatureWeight += sampleValue;
+      // Velocity moments for the splash-shard smear correction (weights =
+      // positive metaball values, same convention as temperature): dispersion
+      // is zero for coherent or single-particle cells, so only bridging cells
+      // between diverging droplets are corrected.
+      let velocityWeighted = [0, 0, 0];
+      let velocitySqWeighted = 0;
+      // A dispersion-corrected pass may replace the particle sums, so the
+      // particle pass is a closure over a smear term (0 = uncorrected).
+      const particlePass = (smearSq) => {
+        const pass = { density: 0, palette: [0, 0, 0], temperatureWeighted: 0, temperatureWeight: 0, accumulateMoments: smearSq === 0 };
+        for (let particleIndex = 0; particleIndex < resolvedParticleCount; particleIndex += 1) {
+          const renderOffset = particleIndex * SPH_GPU_RENDER_ROW_FLOATS;
+          const materialId = renderRows[renderOffset + 4];
+          const phaseId = renderRows[renderOffset + 5];
+          const renderDomainId = renderRows[renderOffset + 11];
+          if (
+            materialId !== surface.materialId
+            || !renderDomainMatchesSurface(renderDomainId, surface.renderDomainId)
+          ) continue;
+          const phaseWeight = renderPhaseWeightForSurface(
+            surface.phaseId,
+            phaseId,
+            renderRows[renderOffset + 9],
+            renderRows[renderOffset + 16]
+          );
+          if (phaseWeight <= 0.003) continue;
+          const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
+          const accumulated = accumulateMetaballSample({
+            cell,
+            position: particle,
+            strength: surface.strength * phaseWeight,
+            subtract: surface.subtract,
+            supportNorm,
+            color: surface.colorLinear,
+            density: pass.density,
+            palette: pass.palette,
+            distanceSqOffset: smearSq
+          });
+          const sampleValue = accumulated.density - pass.density;
+          if (sampleValue > 0) {
+            pass.temperatureWeighted += renderRows[renderOffset + 6] * sampleValue;
+            pass.temperatureWeight += sampleValue;
+            if (pass.accumulateMoments) {
+              const vx = renderRows[renderOffset + 17];
+              const vy = renderRows[renderOffset + 18];
+              const vz = renderRows[renderOffset + 19];
+              velocityWeighted[0] += vx * sampleValue;
+              velocityWeighted[1] += vy * sampleValue;
+              velocityWeighted[2] += vz * sampleValue;
+              velocitySqWeighted += (vx * vx + vy * vy + vz * vz) * sampleValue;
+            }
+          }
+          pass.density = accumulated.density;
+          pass.palette = accumulated.palette;
         }
-        density = accumulated.density;
-        palette = accumulated.palette;
+        return pass;
+      };
+      let particleSums = particlePass(0);
+      if (particleSums.temperatureWeight > 0 && renderSmearDtS > 0) {
+        const w = particleSums.temperatureWeight;
+        const meanV = [velocityWeighted[0] / w, velocityWeighted[1] / w, velocityWeighted[2] / w];
+        const dispersionSqMs = Math.max(0, velocitySqWeighted / w - (meanV[0] ** 2 + meanV[1] ** 2 + meanV[2] ** 2));
+        const span = 1 - 2 * fieldPadding;
+        const smearNorm = Math.sqrt(dispersionSqMs) * renderSmearDtS * span / Math.max(refEdgeM, 1e-12);
+        const smearSq = smearNorm * smearNorm;
+        // fp-noise guard (L < 1e-5 of the field edge), mirrors the GPU kernel.
+        if (smearSq > 1e-10) {
+          particleSums = particlePass(smearSq);
+        }
       }
+      density = particleSums.density;
+      palette = particleSums.palette;
+      temperatureWeighted = particleSums.temperatureWeighted;
+      temperatureWeight = particleSums.temperatureWeight;
       for (let eventIndex = 0; eventIndex < resolvedProductEventCount; eventIndex += 1) {
         if (!productEventRows) break;
         const eventOffset = eventIndex * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS;
@@ -5964,6 +6010,7 @@ export async function buildSphRenderFieldWebGpu({
   productEventCount = null,
   fieldPadding = 0.22,
   refEdgeM = 10,
+  renderSmearDtS = 0,
   readbackMode = FULL_READBACK_MODE,
   retainFieldRowsBuffer = false,
   retainSurfaceBuffer = false,
@@ -6048,7 +6095,8 @@ export async function buildSphRenderFieldWebGpu({
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
     fieldPadding,
-    refEdgeM
+    refEdgeM,
+    renderSmearDtS
   }));
 
   const renderFieldBindings = [

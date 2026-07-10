@@ -82,11 +82,16 @@ function finiteVector3(value, fallback) {
   ];
 }
 
-function particleWallClearanceM(restVolumeM3, boxDimsM = DEFAULT_BOX_DIMS_M) {
+function particleWallClearanceM(restVolumeM3, boxDimsM = DEFAULT_BOX_DIMS_M, gridSpacingM = 0) {
   const volume = finiteNumber(restVolumeM3, 0);
   if (!(volume > 0)) return 0;
   const minDim = Math.min(...boxDimsM.filter((value) => value > 0));
-  const clearance = 0.5 * Math.cbrt(volume);
+  let clearance = 0.5 * Math.cbrt(volume);
+  // Half-cell cap: matches g2p_particle_wall_clearance in the WGSL — a
+  // clearance beyond half a grid cell is a phantom forbidden shell that
+  // pinned low-density (gas) particles far from the walls.
+  const spacing = finiteNumber(gridSpacingM, 0);
+  if (spacing > 0) clearance = Math.min(clearance, 0.5 * spacing);
   return Number.isFinite(minDim) && minDim > 0
     ? Math.min(clearance, 0.49 * minDim)
     : clearance;
@@ -204,7 +209,8 @@ export function applyMlsMpmParticleSeparationCpu({
   mechanics,
   particleCount,
   boxDimsM = DEFAULT_BOX_DIMS_M,
-  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT
+  relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
+  gridSpacingM = 0
 } = {}) {
   const alpha = finiteNumber(relaxation, 0);
   if (!(alpha > 0) || !(particleCount > 1)) return { correctedCount: 0 };
@@ -292,7 +298,7 @@ export function applyMlsMpmParticleSeparationCpu({
       state[iState + 5] + corrections[base + 4],
       state[iState + 6] + corrections[base + 5]
     ];
-    const wallClearance = particleWallClearanceM(mechanics[iMech + 19], dims);
+    const wallClearance = particleWallClearanceM(mechanics[iMech + 19], dims, gridSpacingM);
     for (let axis = 0; axis < 3; axis += 1) {
       const lower = wallClearance;
       const upper = Math.max(lower, dims[axis] - wallClearance);
@@ -612,7 +618,7 @@ export function reconstructMlsMpmG2pCpu({
     ];
     const solid = mechanics[mechanicsOffset + 20] > 0.5;
     const condensed = isCondensedMechanicsRow(mechanics, mechanicsOffset);
-    const wallClearance = particleWallClearanceM(mechanics[mechanicsOffset + 19], dims);
+    const wallClearance = particleWallClearanceM(mechanics[mechanicsOffset + 19], dims, gridUpdate.gridSpacingM);
     for (let axis = 0; axis < 3; axis += 1) {
       const lower = wallClearance;
       const upper = Math.max(lower, dims[axis] - wallClearance);
@@ -697,7 +703,8 @@ export function reconstructMlsMpmG2pCpu({
     mechanics,
     particleCount: sphParticleState.particleCount,
     boxDimsM: dims,
-    relaxation: particleSeparationRelaxation
+    relaxation: particleSeparationRelaxation,
+    gridSpacingM: gridUpdate.gridSpacingM
   });
 
   return outputEnvelope({
@@ -830,6 +837,7 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   relaxation = MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   maxPairRestDistanceM = 0,
   minCellSizeM = 0,
+  gridSpacingM = 0,
   scratch = null
 } = {}) {
   const alpha = finiteNumber(relaxation, 0);
@@ -863,6 +871,8 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     view.setUint32(32, binPlan.nz >>> 0, true);
     view.setUint32(36, SEPARATION_BIN_CAPACITY >>> 0, true);
     view.setFloat32(40, binPlan.cellSizeM, true);
+    // grid_spacing_m: caps the wall clearance at half a cell (matches G2P).
+    view.setFloat32(44, Math.max(finiteNumber(gridSpacingM, 0), 0), true);
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
     const correctionsBuffer = device.createBuffer({
       label: 'ulg-mls-mpm-separation-corrections',
@@ -1135,7 +1145,8 @@ export async function runMlsMpmG2pWebGpu({
       maxPairRestDistanceM: maxSeparationRestDistanceM(
         mlsMpmParticleState.mechanics,
         sphParticleState.particleCount
-      )
+      ),
+      gridSpacingM: gridUpdate.gridSpacingM
     });
     separationTransientBuffers = separation.transientBuffers;
     if (!noFullReadback) {

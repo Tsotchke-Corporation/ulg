@@ -6713,6 +6713,14 @@ fn g2p_particle_wall_clearance(rest_volume_m3: f32) -> f32 {
     return 0.0;
   }
   var clearance = 0.5 * g2p_cubic_root_positive(rest_volume_m3);
+  // The wall boundary condition operates at grid resolution: a clearance
+  // larger than half a cell builds a phantom forbidden shell inside the box.
+  // Low-density phases made that shell meters thick (steam rest volume is
+  // ~1.7 m^3/kg, so 0.5*v0^(1/3) pinned steam mid-air, "800 K water" to the
+  // floor, and quench splash to a ceiling shelf at box_y - clearance).
+  // Compressible parcels overlap walls physically; sub-cell wall response
+  // belongs to the pressure law, not a rigid-ball radius.
+  clearance = min(clearance, 0.5 * params.grid_spacing_m);
   let min_dim = min(params.box_x, min(params.box_y, params.box_z));
   if (min_dim > 0.0) {
     clearance = min(clearance, 0.49 * min_dim);
@@ -6986,7 +6994,7 @@ struct SeparationParams {
   bin_nz: u32,
   bin_capacity: u32,
   bin_cell_size_m: f32,
-  separation_pad0: f32,
+  grid_spacing_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
@@ -7043,7 +7051,7 @@ struct SeparationParams {
   bin_nz: u32,
   bin_capacity: u32,
   bin_cell_size_m: f32,
-  separation_pad0: f32,
+  grid_spacing_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> in_state: array<vec4<f32>>;
@@ -7208,7 +7216,7 @@ struct SeparationParams {
   bin_nz: u32,
   bin_capacity: u32,
   bin_cell_size_m: f32,
-  separation_pad0: f32,
+  grid_spacing_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> corrections: array<vec4<f32>>;
@@ -7238,11 +7246,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let vel_u = out_state[particle_index * 2u + 1u];
   var position = pos_mass.xyz + dx;
   var velocity = vel_u.xyz + dv;
-  // Same finite-volume wall clearance contract as G2P.
+  // Same finite-volume wall clearance contract as G2P, including the
+  // half-cell cap (see g2p_particle_wall_clearance for the rationale).
   let rest_volume = max(in_mechanics[particle_index * 8u + 4u].w, 0.0);
   var wall_clearance = 0.0;
   if (rest_volume > 0.0) {
     wall_clearance = 0.5 * separation_apply_cbrt(rest_volume);
+    if (params.grid_spacing_m > 0.0) {
+      wall_clearance = min(wall_clearance, 0.5 * params.grid_spacing_m);
+    }
     let min_dim = min(params.box_x, min(params.box_y, params.box_z));
     if (min_dim > 0.0) {
       wall_clearance = min(wall_clearance, 0.49 * min_dim);

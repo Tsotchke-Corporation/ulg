@@ -3639,7 +3639,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       boxDimsM: dims,
       relaxation: mlsMpmParticleState?.particleSeparationRelaxation
         ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
-      maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount)
+      maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
+      gridSpacingM: gridSpec.gridSpacingM
     });
     device.queue.submit([encoder.finish()]);
     // Only read within this submitted sequence; WebGPU defers actual release.
@@ -4299,6 +4300,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         // Thermal conduction shares these bins; its clamped scan radius (<=3)
         // must cover the 2h support, so cells are at least 2h/3.
         minCellSizeM: (2 / 3) * Math.max(finiteNumber(sphParticleState?.smoothingLengthM, 0), 0),
+        gridSpacingM: gridSpec.gridSpacingM,
         scratch: separationScratch
       });
       separationScratch = separation.scratch;

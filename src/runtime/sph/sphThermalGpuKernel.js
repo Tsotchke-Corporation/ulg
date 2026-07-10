@@ -20,6 +20,7 @@ import {
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import { opticalRenderParams } from '../material/opticalClosure.js';
 import {
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT,
   MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA
@@ -76,6 +77,53 @@ const PAIR_CONDUCTION_RELAXATION_LIMIT = 0.25;
 // reads as "no thermal transfer". 1500 keeps the same relaxation clamps and
 // wall-rate ratio while making conduction visible in seconds.
 export const SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT = 1500;
+export const SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT = 293;
+export const SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
+// Pair radiation truncation range in units of (r_i + r_j); mirrors the WGSL
+// RADIATION_PAIR_RANGE_RADII constant (view factor < ~0.4% beyond it).
+export const SPH_THERMAL_RADIATION_PAIR_RANGE_RADII = 4;
+// Universal near-gray IR emissivity for condensed dielectrics: fundamental
+// molecular/lattice vibrational bands make condensed non-metals near-black in
+// thermal infrared (water 0.96, oxides 0.8-0.95). Same estimate class as the
+// Drude omega_p/30 damping; refining it per material needs an IR-band optical
+// closure (frontier).
+const CONDENSED_DIELECTRIC_GRAY_EMISSIVITY = 0.9;
+
+// Kirchhoff's law: emissivity = absorptivity, taken from the derived optical
+// closure. Conductors: 1 - R with R the Drude luminous reflectance. Gas-only
+// materials: the band-limited absorbed fraction 1 - exp(-opticalDepth) over
+// the optics path (visible-band derived; IR ro-vibrational bands are a
+// documented frontier gap, so thin diatomics radiate weakly here, which is the
+// conservative direction). Condensed dielectrics: universal near-gray IR
+// estimate above. Unknown/blocked optics fall to 0 for gases (no derived
+// absorption -> transparent to radiation, fail-safe) and to the near-gray
+// estimate for condensed matter.
+export function deriveGrayEmissivityForMaterial(material, properties = null) {
+  const conductionDensity = Number(properties?.conductionElectronDensityPerM3);
+  const phases = Array.isArray(properties?.phases) ? properties.phases : [];
+  const gasOnly = phases.length > 0 && phases.every((phase) => String(phase?.name).toLowerCase() === 'gas');
+  try {
+    if (Number.isFinite(conductionDensity) && conductionDensity > 0) {
+      const optics = opticalRenderParams({ material, phase: 'solid', properties });
+      const reflectance = Number(optics?.reflectance);
+      if (Number.isFinite(reflectance)) {
+        return Math.min(0.98, Math.max(0.02, 1 - reflectance));
+      }
+      return CONDENSED_DIELECTRIC_GRAY_EMISSIVITY;
+    }
+    if (gasOnly) {
+      const optics = opticalRenderParams({ material, phase: 'gas', properties });
+      const opticalDepth = Number(optics?.opticalDepth);
+      if (Number.isFinite(opticalDepth) && opticalDepth > 0) {
+        return Math.min(0.98, 1 - Math.exp(-opticalDepth));
+      }
+      return 0;
+    }
+  } catch {
+    // Fall through to the class default below.
+  }
+  return CONDENSED_DIELECTRIC_GRAY_EMISSIVITY;
+}
 const THERMAL_DEBYE_GRAPH_SAMPLE_COUNT = 32;
 const FACE_IDS = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const FULL_READBACK_MODE = 'full-parity-readback';
@@ -254,12 +302,14 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
         );
       }
     }
-    records.push(materialId, segmentOffset, materialSegments.length, THERMAL_STATUS.ready);
+    const emissivityGray = deriveGrayEmissivityForMaterial(material, properties);
+    records.push(materialId, segmentOffset, materialSegments.length, THERMAL_STATUS.ready, emissivityGray, 0, 0, 0);
     metadata.push({
       material,
       materialId,
       segmentOffset,
       segmentCount: materialSegments.length,
+      emissivityGray,
       phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))],
       materialPropertyBankWarmInput: materialBankWarmInput,
       materialPropertyBankWarmInputStatus: materialBankWarmInput
@@ -676,11 +726,13 @@ export function buildSphThermalPhaseResponseTable(materialPropertiesOrTable = {}
         0
       );
     }
-    records.push(materialId, responseOffset, segmentCount, THERMAL_STATUS.ready);
+    const emissivityGray = finiteNumber(table.records[recordOffset + 4], 0);
+    records.push(materialId, responseOffset, segmentCount, THERMAL_STATUS.ready, emissivityGray, 0, 0, 0);
     metadata.push({
       materialId,
       responseOffset,
-      responseCount: segmentCount
+      responseCount: segmentCount,
+      emissivityGray
     });
   }
   return {
@@ -716,6 +768,33 @@ function responseFractions(response, alpha) {
     phaseFractionsFor(response.phaseFromId, fromFraction),
     phaseFractionsFor(response.phaseToId, toFraction)
   );
+}
+
+// Gray emissivity for a material id from a packed thermal table (material or
+// phase-response — both carry it at record lane 4).
+export function thermalEmissivityFromTable(table, materialId) {
+  const stride = Math.max(1, Math.round(finiteNumber(table?.recordStrideFloats, SPH_THERMAL_MATERIAL_RECORD_FLOATS)));
+  const materialCount = Math.max(0, Math.round(finiteNumber(table?.materialCount, 0)));
+  for (let recordIndex = 0; recordIndex < materialCount; recordIndex += 1) {
+    const recordOffset = recordIndex * stride;
+    if (table.records[recordOffset] !== materialId) continue;
+    if (stride < 5) return 0;
+    return Math.min(1, Math.max(0, finiteNumber(table.records[recordOffset + 4], 0)));
+  }
+  return 0;
+}
+
+function particleNominalRadiusM(massKg, restDensityKgPerM3) {
+  if (!(massKg > 0) || !(restDensityKgPerM3 > 0)) return 0;
+  return Math.cbrt((3 * massKg) / (4 * Math.PI * restDensityKgPerM3));
+}
+
+function radiativeViewAreaM2(rI, rJ, distanceM) {
+  if (!(rI > 0) || !(rJ > 0)) return 0;
+  const d2 = Math.max(distanceM * distanceM, 1e-12);
+  const geometric = Math.PI * rI * rI * (rJ * rJ) / (4 * d2);
+  const rMin = Math.min(rI, rJ);
+  return Math.min(geometric, Math.PI * rMin * rMin);
 }
 
 export function resolveThermalPhaseResponseFromTable(table, materialId, specificInternalEnergyJPerKg) {
@@ -1013,8 +1092,10 @@ function outputEnvelope({
   state,
   thermo,
   wallHeatJ,
+  radiativeAmbientHeatJ = 0,
   dtS,
   conductionRate,
+  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
   wallRate,
   wallLayerM,
   boxDimsM,
@@ -1101,6 +1182,7 @@ export function runSphThermalStepCpu({
   boxDimsM = [5, 5, 5],
   dtS = 0,
   conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
+  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM
 } = {}) {
@@ -1118,6 +1200,7 @@ export function runSphThermalStepCpu({
   const thermo = new Float32Array(sphParticleState.thermo);
   const du = new Float64Array(particleCount);
   const wallHeatJ = Object.fromEntries(FACE_IDS.map((faceId) => [faceId, 0]));
+  let radiativeAmbientHeatJ = 0;
 
   for (let i = 0; i < particleCount; i += 1) {
     const oi = i * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -1133,6 +1216,9 @@ export function runSphThermalStepCpu({
     let conductionDUSpecific = 0;
     let neighborMinTemperatureK = temperature;
     let neighborMaxTemperatureK = temperature;
+    const selfRestDensity = finiteNumber(sphParticleState.thermo[ti + 3], 0);
+    const selfRadiusM = particleNominalRadiusM(mass, selfRestDensity);
+    const selfEmissivity = thermalEmissivityFromTable(thermalMaterialTable, materialId);
     for (let j = 0; j < particleCount; j += 1) {
       if (i === j) continue;
       const oj = j * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -1140,29 +1226,56 @@ export function runSphThermalStepCpu({
       const dy = sphParticleState.state[oi + 1] - sphParticleState.state[oj + 1];
       const dz = sphParticleState.state[oi + 2] - sphParticleState.state[oj + 2];
       const r = Math.hypot(dx, dy, dz);
-      if (r >= support) continue;
       const tj = j * SPH_GPU_PARTICLE_THERMO_FLOATS;
-      const weight = 1 - r / support;
+      const otherMass = Math.max(finiteNumber(sphParticleState.state[oj + 3], 0), 1e-30);
+      const otherRadiusM = particleNominalRadiusM(otherMass, finiteNumber(sphParticleState.thermo[tj + 3], 0));
+      // Mirrors the WGSL kernel: contact-pair support max(2h, r_i + r_j) and
+      // the radiation range RADIATION_PAIR_RANGE_RADII * (r_i + r_j).
+      const pairRadiiM = selfRadiusM + otherRadiusM;
+      const pairSupport = Math.max(support, pairRadiiM);
+      const radiationSupport = SPH_THERMAL_RADIATION_PAIR_RANGE_RADII * pairRadiiM;
+      if (r >= Math.max(pairSupport, radiationSupport)) continue;
       const otherTemperature = finiteNumber(sphParticleState.thermo[tj + 2], 0);
       neighborMinTemperatureK = Math.min(neighborMinTemperatureK, otherTemperature);
       neighborMaxTemperatureK = Math.max(neighborMaxTemperatureK, otherTemperature);
-      const otherMass = Math.max(finiteNumber(sphParticleState.state[oj + 3], 0), 1e-30);
       const otherTemperatureSlope = thermalTemperatureSlopeFromTable(
         thermalMaterialTable,
         sphParticleState.thermo[tj],
         finiteNumber(sphParticleState.state[oj + 7], 0)
       );
-      const rawDE = conductionRate * (otherTemperature - temperature) * weight * dt;
-      const dE = clampPairConductionEnergy({
-        dE: rawDE,
-        temperatureK: temperature,
-        otherTemperatureK: otherTemperature,
-        temperatureSlopeKdPerJPerKg: temperatureSlope,
-        otherTemperatureSlopeKdPerJPerKg: otherTemperatureSlope,
-        massKg: mass,
-        otherMassKg: otherMass
-      });
-      conductionDUSpecific += dE / mass;
+      if (r < pairSupport) {
+        const weight = 1 - r / pairSupport;
+        const rawDE = conductionRate * (otherTemperature - temperature) * weight * dt;
+        const dE = clampPairConductionEnergy({
+          dE: rawDE,
+          temperatureK: temperature,
+          otherTemperatureK: otherTemperature,
+          temperatureSlopeKdPerJPerKg: temperatureSlope,
+          otherTemperatureSlopeKdPerJPerKg: otherTemperatureSlope,
+          massKg: mass,
+          otherMassKg: otherMass
+        });
+        conductionDUSpecific += dE / mass;
+      }
+      if (selfEmissivity > 0 && r < radiationSupport) {
+        const otherEmissivity = thermalEmissivityFromTable(thermalMaterialTable, sphParticleState.thermo[tj]);
+        if (otherEmissivity > 0) {
+          const viewAreaM2 = radiativeViewAreaM2(selfRadiusM, otherRadiusM, r);
+          const t4Gap = otherTemperature ** 4 - temperature ** 4;
+          const rawRadDE = selfEmissivity * otherEmissivity * SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4
+            * t4Gap * viewAreaM2 * dt;
+          const radDE = clampPairConductionEnergy({
+            dE: rawRadDE,
+            temperatureK: temperature,
+            otherTemperatureK: otherTemperature,
+            temperatureSlopeKdPerJPerKg: temperatureSlope,
+            otherTemperatureSlopeKdPerJPerKg: otherTemperatureSlope,
+            massKg: mass,
+            otherMassKg: otherMass
+          });
+          conductionDUSpecific += radDE / mass;
+        }
+      }
     }
     const clampedConductionDUSpecific = clampSpecificEnergyDeltaToTemperatureRange({
       dUSpecific: conductionDUSpecific,
@@ -1192,6 +1305,23 @@ export function runSphThermalStepCpu({
       du[i] += dUSpecific;
       wallHeatJ[FACE_IDS[faceIndex]] += dUSpecific * mass;
     }
+    // Ambient gray-body radiation (mirrors the WGSL kernel): full-sphere
+    // Stefan-Boltzmann against the box environment; open-system source/sink
+    // accounted in radiativeAmbientHeatJ (positive = absorbed by particles).
+    if (selfEmissivity > 0 && selfRadiusM > 0 && ambientTemperatureK > 0) {
+      const surfaceAreaM2 = 4 * Math.PI * selfRadiusM * selfRadiusM;
+      const currentTemperatureK = temperature + du[i] * temperatureSlope;
+      const rawAmbientDE = selfEmissivity * SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4
+        * (ambientTemperatureK ** 4 - currentTemperatureK ** 4) * surfaceAreaM2 * dt;
+      const ambientDUSpecific = clampWallSpecificEnergyDelta({
+        dUSpecific: rawAmbientDE / mass,
+        temperatureK: currentTemperatureK,
+        wallTemperatureK: ambientTemperatureK,
+        temperatureSlopeKdPerJPerKg: temperatureSlope
+      });
+      du[i] += ambientDUSpecific;
+      radiativeAmbientHeatJ += ambientDUSpecific * mass;
+    }
   }
 
   for (let i = 0; i < particleCount; i += 1) {
@@ -1215,8 +1345,10 @@ export function runSphThermalStepCpu({
     state,
     thermo,
     wallHeatJ,
+    radiativeAmbientHeatJ,
     dtS: dt,
     conductionRate,
+    ambientTemperatureK,
     wallRate,
     wallLayerM: layer,
     boxDimsM: dims
@@ -1440,7 +1572,9 @@ export function resolveThermalMaxPairSupportM(sphParticleState, phaseResponseTab
     const radius = Math.cbrt((3 * mass) / (4 * Math.PI * density));
     if (radius > maxRadiusM) maxRadiusM = radius;
   }
-  return maxRadiusM > 0 ? 2 * maxRadiusM : 0;
+  // Radiation pairs interact out to RADIATION_PAIR_RANGE_RADII * (r_i + r_j);
+  // the neighbor structure must reach that far, not just contact range.
+  return maxRadiusM > 0 ? SPH_THERMAL_RADIATION_PAIR_RANGE_RADII * 2 * maxRadiusM : 0;
 }
 
 function createParamsArray({
@@ -1456,7 +1590,8 @@ function createParamsArray({
   wallTemperaturesK,
   materialBankWarmInputRowCount = 0,
   neighborBins = null,
-  maxPairSupportM = 0
+  maxPairSupportM = 0,
+  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT
 }) {
   const buffer = new ArrayBuffer(112);
   const view = new DataView(buffer);
@@ -1493,6 +1628,7 @@ function createParamsArray({
   view.setUint32(88, binsEnabled ? Math.round(neighborBins.nz) : 0, true);
   view.setFloat32(92, binsEnabled ? Number(neighborBins.cellSizeM) : 0, true);
   view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
+  view.setFloat32(100, Math.max(0, finiteNumber(ambientTemperatureK, SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT)), true);
   return buffer;
 }
 
@@ -1527,6 +1663,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   boxDimsM = [5, 5, 5],
   dtS = 0,
   conductionRate = SPH_THERMAL_PAIR_CONDUCTION_RATE_DEFAULT,
+  ambientTemperatureK = SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,
@@ -1612,7 +1749,8 @@ export function createSphThermalStepWebGpuEncoderStage({
     wallTemperaturesK,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount,
     neighborBins,
-    maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable)
+    maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
+    ambientTemperatureK
   }));
   const neighborBinsBound = Boolean(neighborBins?.binsBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder

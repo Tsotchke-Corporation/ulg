@@ -314,7 +314,16 @@ export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
   'segmentOffset:f32',
   'segmentCount:f32',
-  'status:f32'
+  'status:f32',
+  // Gray-body emissivity for radiative transfer, derived at table build from
+  // the optical closure via Kirchhoff's law (absorptivity = emissivity):
+  // conductors 1-R from the Drude luminous reflectance, gases the band-limited
+  // absorbed fraction over the optics path, condensed dielectrics the
+  // universal near-gray IR estimate. Row stays vec4-aligned (stride 8).
+  'emissivityGray:f32',
+  'radiationPad0:f32',
+  'radiationPad1:f32',
+  'radiationPad2:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
@@ -334,7 +343,13 @@ export const SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
   'responseOffset:f32',
   'responseCount:f32',
-  'status:f32'
+  'status:f32',
+  // Copied from the thermal material record (see emissivityGray there); the
+  // thermal kernel reads it per material for pair and ambient radiation.
+  'emissivityGray:f32',
+  'radiationPad0:f32',
+  'radiationPad1:f32',
+  'radiationPad2:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

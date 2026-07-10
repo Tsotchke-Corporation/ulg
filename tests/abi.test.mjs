@@ -352,9 +352,12 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-execution.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-parity.v0');
-  assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length, 4);
+  // Record rows grew 4 -> 8 (still vec4-aligned) for radiative transfer: the
+  // second vec4 carries the Kirchhoff gray emissivity derived from the
+  // optical closure at table build (2026-07-10 radiation law).
+  assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length, 8);
   assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length, 12);
-  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT.length, 4);
+  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT.length, 8);
   assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.length, 16);
   assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length % 4, 0);
   assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length % 4, 0);
@@ -364,7 +367,11 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'materialId:f32',
     'segmentOffset:f32',
     'segmentCount:f32',
-    'status:f32'
+    'status:f32',
+    'emissivityGray:f32',
+    'radiationPad0:f32',
+    'radiationPad1:f32',
+    'radiationPad2:f32'
   ]);
   assert.deepEqual(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.slice(0, 8), [
     'materialId:f32',
@@ -380,7 +387,11 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'materialId:f32',
     'responseOffset:f32',
     'responseCount:f32',
-    'status:f32'
+    'status:f32',
+    'emissivityGray:f32',
+    'radiationPad0:f32',
+    'radiationPad1:f32',
+    'radiationPad2:f32'
   ]);
   assert.deepEqual(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.slice(0, 8), [
     'materialId:f32',

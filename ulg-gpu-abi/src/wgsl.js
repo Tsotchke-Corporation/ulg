@@ -521,7 +521,7 @@ struct ThermalParams {
   bin_nz: u32,
   bin_cell_size_m: f32,
   max_pair_support_m: f32,
-  _pad_a: f32,
+  ambient_temperature_k: f32,
   _pad_b: f32,
   _pad_c: f32,
 };
@@ -648,7 +648,7 @@ fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) ->
   var material_response_count = 0u;
   var found_material = false;
   for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
-    let record = phase_response_records[record_index];
+    let record = phase_response_records[record_index * 2u];
     if (record.x == material_id) {
       material_response_offset = u32(record.y);
       material_response_count = u32(record.z);
@@ -685,6 +685,47 @@ fn material_bank_warm_input_anchor() -> f32 {
   // Non-authoritative warm-input presence probe. The value is intentionally
   // zeroed so closure-derived thermal graphs remain the only thermal source.
   return material_bank_warm_input_rows[0u].x * 0.0;
+}
+
+const STEFAN_BOLTZMANN_W_PER_M2_K4: f32 = 5.670374419e-8;
+// Pair radiation is truncated where the disc-to-disc view factor falls below
+// ~0.4% (d > 4*(r_i+r_j)); beyond that range the ambient term is the
+// aggregate radiative sink/source.
+const RADIATION_PAIR_RANGE_RADII: f32 = 4.0;
+
+fn pow4(x: f32) -> f32 {
+  let x2 = x * x;
+  return x2 * x2;
+}
+
+// Gray-body emissivity for the material, packed at table build into the
+// phase-response record's second vec4 (Kirchhoff: absorptivity from the
+// derived optical closure). Unknown materials return 0 - no radiation is the
+// fail-safe for a material without a derived absorption response.
+fn thermal_emissivity(material_id: f32) -> f32 {
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    let record = phase_response_records[record_index * 2u];
+    if (record.x == material_id) {
+      return clamp(phase_response_records[record_index * 2u + 1u].x, 0.0, 1.0);
+    }
+  }
+  return 0.0;
+}
+
+// Exchange area between two particles modelled as discs: the emitter's disc
+// pi*r_i^2 scaled by the solid-angle fraction of the receiver r_j^2/(4 d^2).
+// Symmetric in (i, j), so gather-side pair exchange conserves energy. Capped
+// at the parallel-plate contact limit pi*min(r_i, r_j)^2 (view factor F = 1
+// across the smaller face) so contact-range radiation never exceeds the
+// closed-form two-plate bound.
+fn radiative_view_area_m2(r_i: f32, r_j: f32, distance_m: f32) -> f32 {
+  if (r_i <= 0.0 || r_j <= 0.0) {
+    return 0.0;
+  }
+  let d2 = max(distance_m * distance_m, 1.0e-12);
+  let geometric = 3.14159265359 * r_i * r_i * (r_j * r_j) / (4.0 * d2);
+  let contact_limit = 3.14159265359 * min(r_i, r_j) * min(r_i, r_j);
+  return min(geometric, contact_limit);
 }
 
 fn clamp_wall_du_specific(d_u_specific: f32, temperature_k: f32, wall_temperature_k: f32, temperature_slope: f32) -> f32 {
@@ -772,7 +813,7 @@ fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: v
   var material_response_count = 0u;
   var found_material = false;
   for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
-    let record = phase_response_records[record_index];
+    let record = phase_response_records[record_index * 2u];
     if (record.x == material_id) {
       material_response_offset = u32(record.y);
       material_response_count = u32(record.z);
@@ -871,6 +912,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
 	  let support = 2.0 * params.smoothing_length_m;
 	  let self_nominal_radius_m = particle_nominal_radius_m(mass, row0.w);
+	  let self_emissivity = thermal_emissivity(row0.x);
 	  var du = material_bank_warm_input_anchor();
 	  var conduction_du = 0.0;
 	  var neighbor_min_temperature = temperature;
@@ -910,28 +952,52 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	            let distance = length(delta);
 	            let other_row0 = thermo_row0(other);
-	            let pair_support = max(
-	              support,
-	              self_nominal_radius_m + particle_nominal_radius_m(other_pos_mass.w, other_row0.w)
-	            );
-	            if (distance < pair_support) {
-	              let weight = 1.0 - distance / pair_support;
+	            let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
+	            let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
+	            let pair_support = max(support, pair_radii_m);
+	            let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
+	            if (distance < max(pair_support, radiation_support)) {
 	              let other_vel_u = state_vel_u(other);
 	              let other_temperature = other_row0.z;
 	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	              neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
 	              let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
-	              let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
-	              let dE = clamp_pair_conduction_energy(
-	                raw_dE,
-	                temperature,
-	                other_temperature,
-	                temperature_slope,
-	                other_temperature_slope,
-	                mass,
-	                other_pos_mass.w
-	              );
-	              conduction_du = conduction_du + dE / mass;
+	              if (distance < pair_support) {
+	                let weight = 1.0 - distance / pair_support;
+	                let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
+	                let dE = clamp_pair_conduction_energy(
+	                  raw_dE,
+	                  temperature,
+	                  other_temperature,
+	                  temperature_slope,
+	                  other_temperature_slope,
+	                  mass,
+	                  other_pos_mass.w
+	                );
+	                conduction_du = conduction_du + dE / mass;
+	              }
+	              // Gray-body pair radiation over the disc view area; shares the
+	              // conduction equalization clamp so one substep never crosses
+	              // the pair equilibrium, and the aggregate neighbor-range clamp
+	              // below bounds the total like conduction.
+	              if (self_emissivity > 0.0 && distance < radiation_support) {
+	                let other_emissivity = thermal_emissivity(other_row0.x);
+	                if (other_emissivity > 0.0) {
+	                  let view_area_m2 = radiative_view_area_m2(self_nominal_radius_m, other_nominal_radius_m, distance);
+	                  let raw_rad_dE = self_emissivity * other_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
+	                    * (pow4(other_temperature) - pow4(temperature)) * view_area_m2 * params.dt;
+	                  let rad_dE = clamp_pair_conduction_energy(
+	                    raw_rad_dE,
+	                    temperature,
+	                    other_temperature,
+	                    temperature_slope,
+	                    other_temperature_slope,
+	                    mass,
+	                    other_pos_mass.w
+	                  );
+	                  conduction_du = conduction_du + rad_dE / mass;
+	                }
+	              }
 	            }
 	          }
 	        }
@@ -946,28 +1012,52 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	    let distance = length(delta);
 	    let other_row0 = thermo_row0(other);
-	    let pair_support = max(
-	      support,
-	      self_nominal_radius_m + particle_nominal_radius_m(other_pos_mass.w, other_row0.w)
-	    );
-	    if (distance < pair_support) {
-	      let weight = 1.0 - distance / pair_support;
+	    let other_nominal_radius_m = particle_nominal_radius_m(other_pos_mass.w, other_row0.w);
+	    let pair_radii_m = self_nominal_radius_m + other_nominal_radius_m;
+	    let pair_support = max(support, pair_radii_m);
+	    let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
+	    if (distance < max(pair_support, radiation_support)) {
 	      let other_vel_u = state_vel_u(other);
 	      let other_temperature = other_row0.z;
 	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	      neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
 	      let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
-	      let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
-	      let dE = clamp_pair_conduction_energy(
-	        raw_dE,
-	        temperature,
-	        other_temperature,
-	        temperature_slope,
-	        other_temperature_slope,
-	        mass,
-	        other_pos_mass.w
-	      );
-	      conduction_du = conduction_du + dE / mass;
+	      if (distance < pair_support) {
+	        let weight = 1.0 - distance / pair_support;
+	        let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
+	        let dE = clamp_pair_conduction_energy(
+	          raw_dE,
+	          temperature,
+	          other_temperature,
+	          temperature_slope,
+	          other_temperature_slope,
+	          mass,
+	          other_pos_mass.w
+	        );
+	        conduction_du = conduction_du + dE / mass;
+	      }
+	      // Gray-body pair radiation over the disc view area; shares the
+	      // conduction equalization clamp so one substep never crosses
+	      // the pair equilibrium, and the aggregate neighbor-range clamp
+	      // below bounds the total like conduction.
+	      if (self_emissivity > 0.0 && distance < radiation_support) {
+	        let other_emissivity = thermal_emissivity(other_row0.x);
+	        if (other_emissivity > 0.0) {
+	          let view_area_m2 = radiative_view_area_m2(self_nominal_radius_m, other_nominal_radius_m, distance);
+	          let raw_rad_dE = self_emissivity * other_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
+	            * (pow4(other_temperature) - pow4(temperature)) * view_area_m2 * params.dt;
+	          let rad_dE = clamp_pair_conduction_energy(
+	            raw_rad_dE,
+	            temperature,
+	            other_temperature,
+	            temperature_slope,
+	            other_temperature_slope,
+	            mass,
+	            other_pos_mass.w
+	          );
+	          conduction_du = conduction_du + rad_dE / mass;
+	        }
+	      }
 	    }
 	  }
 	  }
@@ -988,6 +1078,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      let raw_du_specific = params.wall_rate * (face_wall_temperature - current_temperature) * weight * params.dt / mass;
 	      du = du + clamp_wall_du_specific(raw_du_specific, current_temperature, face_wall_temperature, temperature_slope);
 	    }
+	  }
+
+	  // Radiative exchange with the ambient environment (box interior at
+	  // params.ambient_temperature_k): full-sphere gray-body Stefan-Boltzmann.
+	  // This is a documented open-system source/sink (the environment absorbs
+	  // or supplies the energy, like the wall coupling above). The crossing
+	  // clamp guarantees a substep never overshoots past ambient equilibrium.
+	  if (self_emissivity > 0.0 && self_nominal_radius_m > 0.0 && params.ambient_temperature_k > 0.0) {
+	    let surface_area_m2 = 4.0 * 3.14159265359 * self_nominal_radius_m * self_nominal_radius_m;
+	    let current_temperature = temperature + du * temperature_slope;
+	    let raw_ambient_dE = self_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4
+	      * (pow4(params.ambient_temperature_k) - pow4(current_temperature))
+	      * surface_area_m2 * params.dt;
+	    du = du + clamp_wall_du_specific(raw_ambient_dE / mass, current_temperature, params.ambient_temperature_k, temperature_slope);
 	  }
 
   let next_u = vel_u.w + du;
@@ -1292,7 +1396,7 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
   var material_response_count = 0u;
   var found_material = false;
   for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
-    let record = phase_response_records[record_index];
+    let record = phase_response_records[record_index * 2u];
     if (record.x == material_id) {
       material_response_offset = u32(record.y);
       material_response_count = u32(record.z);

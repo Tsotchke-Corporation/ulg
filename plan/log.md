@@ -40716,3 +40716,38 @@ old file in memory and raced later edits (killed; repaired idempotently);
 (2) ReactionSummaryParams offset 32 is atom_term_count in the shared packer —
 dt_s lives at offset 36; (3) the retained event ledger accumulates across
 substeps, so "live events at read time" is the flood metric, not rowCount.
+
+## Round 16 — radiative heat transfer (task #9 final piece)
+
+Gray-body radiation joins conduction in the thermal kernel (GPU WGSL + CPU
+reference lane, mirrored):
+- Pair exchange dE = ε_i·ε_j·σ·(T_i⁴−T_j⁴)·A_view·dt on the existing thermal
+  neighbor structure; A_view = π·r_i²·(r_j²/4d²), symmetric in (i,j) so
+  gather-side exchange conserves energy, capped at the parallel-plate contact
+  limit π·min(r_i,r_j)². Radiation pairs truncate at 4·(r_i+r_j) (view factor
+  <0.4%); the neighbor-structure reach was widened accordingly.
+- Ambient loss dE = ε·σ·(T_amb⁴−T⁴)·4πr²·dt with ambient_temperature_k in the
+  params pad (default 293 K, no struct resize); the equalization/crossing
+  clamps from conduction bound both terms. Ambient exchange is ledgered
+  CPU-side as radiativeAmbientHeatJ (open-system sink like the wall coupling;
+  no GPU thermal ledger buffer exists — same status as wall heat).
+- Emissivity by Kirchhoff from the derived optical closure, packed per
+  material into the (4→8 float) thermal record rows: conductors 1−R from the
+  Drude luminous reflectance (fe 0.065), gas-only materials the band-limited
+  absorbed fraction 1−exp(−opticalDepth) (F₂ 0.74, thin diatomics ~0 — IR
+  ro-vibrational bands are a documented frontier gap, conservative direction),
+  condensed dielectrics the universal near-gray IR estimate 0.9 (h2o; same
+  estimate class as the Drude ω_p/30 damping).
+
+Validation: new invariant test — an isolated 1200 K iron ember cools along
+the analytic Stefan–Boltzmann curve within 5% over 5 s and giant steps
+converge onto ambient without runaway (the crossing clamp uses the local
+dT/du, so Debye-cp curvature leaves a bounded residual, asserted as such).
+Thermal unit file 16/0, contract battery updated for the 8-float records,
+atomics 11/11, gates 14371+14494 pass, full npm test 995/976/0.
+Cs+F on the patched tree: 66% of the F consumed by t=0.44 s (post-flux
+baseline 38% by t=2.2 s — ~8× faster spread), the entire Cs bulk melts to
+830–900 K (was ≤673 K), remote F pre-heats past 1000 K before contact, and
+hot CsF products now cool over time instead of holding 4000 K. Iron quench
+unchanged (1434→1341 K vs baseline 1434→1335 K over the same window —
+conduction dominates in contact, as it must). Shots: /tmp/fork-rad-shots/.

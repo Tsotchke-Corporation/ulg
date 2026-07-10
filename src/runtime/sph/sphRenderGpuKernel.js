@@ -1627,6 +1627,8 @@ export function buildSphRenderFieldCpu({
       const cell = [x / resolution, y / resolution, z / resolution];
       let density = 0;
       let palette = [0, 0, 0];
+      let temperatureWeighted = 0;
+      let temperatureWeight = 0;
       for (let particleIndex = 0; particleIndex < resolvedParticleCount; particleIndex += 1) {
         const renderOffset = particleIndex * SPH_GPU_RENDER_ROW_FLOATS;
         const materialId = renderRows[renderOffset + 4];
@@ -1654,6 +1656,11 @@ export function buildSphRenderFieldCpu({
           density,
           palette
         });
+        const sampleValue = accumulated.density - density;
+        if (sampleValue > 0) {
+          temperatureWeighted += renderRows[renderOffset + 6] * sampleValue;
+          temperatureWeight += sampleValue;
+        }
         density = accumulated.density;
         palette = accumulated.palette;
       }
@@ -1695,6 +1702,7 @@ export function buildSphRenderFieldCpu({
       fieldRows[fieldOffset + 1] = palette[0];
       fieldRows[fieldOffset + 2] = palette[1];
       fieldRows[fieldOffset + 3] = palette[2];
+      fieldRows[fieldOffset + 4] = temperatureWeight > 0 ? temperatureWeighted / temperatureWeight : 0;
     }
   }
   return {

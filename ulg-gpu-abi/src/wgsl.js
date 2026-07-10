@@ -3785,6 +3785,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   var density = 0.0;
   var palette = vec3<f32>(0.0, 0.0, 0.0);
+  // Density-weighted particle temperature for per-fragment emission; product
+  // events carry no per-event temperature, so only particles contribute and
+  // an event-only cell reads 0 (the draw shader falls back to the per-surface
+  // uniform temperature there).
+  var temperature_weighted = 0.0;
+  var temperature_weight = 0.0;
 	  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
@@ -3811,6 +3817,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	      density = density + value;
 	      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
 	      palette = palette + color * smooth_palette_weight(ratio) * phase_weight;
+	      temperature_weighted = temperature_weighted + row1.z * value;
+	      temperature_weight = temperature_weight + value;
 	    }
 	  }
 
@@ -3849,7 +3857,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let out_index = field_offset + cell_index;
   if (out_index < params.total_field_cells) {
-    render_field_cells[out_index] = vec4<f32>(density, palette);
+    let mean_temperature_k = select(0.0, temperature_weighted / max(temperature_weight, 1.0e-6), temperature_weight > 0.0);
+    render_field_cells[out_index * 2u] = vec4<f32>(density, palette);
+    render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, 0.0, 0.0, 0.0);
   }
 }
 `;
@@ -3948,8 +3958,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
-  let value = render_field_cells[field_offset + cell_index].x;
-  let neighbor = render_field_cells[field_offset + field_index_3d(nx, ny, nz, resolution)].x;
+  let value = render_field_cells[(field_offset + cell_index) * 2u].x;
+  let neighbor = render_field_cells[(field_offset + field_index_3d(nx, ny, nz, resolution)) * 2u].x;
   let isolation = s1.y * params.isolation_scale;
   let inside = value >= isolation;
   let neighbor_inside = neighbor >= isolation;
@@ -4100,9 +4110,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
-  let value = render_field_cells[field_offset + cell_index].x;
+  let value = render_field_cells[(field_offset + cell_index) * 2u].x;
   let neighbor_cell_index = compact_field_index_3d(nx, ny, nz, resolution);
-  let neighbor = render_field_cells[field_offset + neighbor_cell_index].x;
+  let neighbor = render_field_cells[(field_offset + neighbor_cell_index) * 2u].x;
   let isolation = s1.y * params.isolation_scale;
   let inside = value >= isolation;
   let neighbor_inside = neighbor >= isolation;
@@ -4173,7 +4183,7 @@ fn mc_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
 }
 
 fn mc_density(field_offset: u32, x: u32, y: u32, z: u32, resolution: u32) -> f32 {
-  return render_field_cells[field_offset + mc_field_index_3d(x, y, z, resolution)].x;
+  return render_field_cells[(field_offset + mc_field_index_3d(x, y, z, resolution)) * 2u].x;
 }
 
 fn mc_physical_coord_m(coord: f32, resolution: u32) -> f32 {
@@ -4344,7 +4354,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var min_pos = vec3<f32>(1.0e30, 1.0e30, 1.0e30);
   var max_pos = vec3<f32>(-1.0e30, -1.0e30, -1.0e30);
   for (var cell_index = 0u; cell_index < bounded_cell_count; cell_index = cell_index + 1u) {
-    let density = render_field_cells[field_offset + cell_index].x;
+    let density = render_field_cells[(field_offset + cell_index) * 2u].x;
     max_density = max(max_density, density);
     if (density >= isolation && density > 0.0) {
       let xy = resolution * resolution;
@@ -4420,7 +4430,7 @@ fn sv_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
 }
 
 fn sv_density(field_offset: u32, x: u32, y: u32, z: u32, resolution: u32) -> f32 {
-  return render_field_cells[field_offset + sv_field_index_3d(x, y, z, resolution)].x;
+  return render_field_cells[(field_offset + sv_field_index_3d(x, y, z, resolution)) * 2u].x;
 }
 
 fn sv_physical_coord_m(coord: f32, resolution: u32) -> f32 {

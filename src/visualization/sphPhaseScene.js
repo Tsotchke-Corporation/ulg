@@ -5716,6 +5716,10 @@ struct VertexOut {
   @location(2) @interpolate(flat) phase_id: f32,
   @location(3) @interpolate(flat) optical_state_id: f32,
   @location(4) world_position: vec3<f32>,
+  // Per-vertex field-sampled temperature, interpolated across the triangle so
+  // emission varies per fragment (hot core, cooler rim). 0 = no field sample;
+  // the emissive fn falls back to the per-surface uniform temperature.
+  @location(5) emissive_temperature_k: f32,
 };
 
 // View direction for shading. The compact-position variant replaces this with
@@ -5728,7 +5732,7 @@ fn resident_view_direction(world_position: vec3<f32>) -> vec3<f32> {
 // Thermal emission for hot materials (blackbody-ish ramp). The compact
 // variant supplies the surface's closure-derived emission temperature; the
 // legacy variant has no temperature input and stays dark.
-fn resident_surface_emissive() -> vec3<f32> {
+fn resident_surface_emissive(emissive_temperature_k: f32) -> vec3<f32> {
   return vec3<f32>(0.0);
 }
 
@@ -5954,6 +5958,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   out.material_id = row0.y;
   out.phase_id = row0.z;
   out.optical_state_id = row2.w;
+  out.emissive_temperature_k = 0.0;
   return out;
 }
 
@@ -6035,7 +6040,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let env_specular = env_color * (f0 * env_ab.x + vec3<f32>(env_ab.y));
   let scatter_haze = clamp(log2(1.0 + optical.scattering_coefficient_per_m) * 0.018, 0.0, 0.35);
   let rim = pow(1.0 - ndotv, 3.0) * scatter_haze;
-  let emissive = resident_surface_emissive();
+  let emissive = resident_surface_emissive(in.emissive_temperature_k);
   var lit = diffuse + specular + env_specular + base_color * rim + emissive;
   let is_vapor = round(in.phase_id) == 3.0;
   let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
@@ -6173,11 +6178,14 @@ export const SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL =
 }`
     )
     .replace(
-      `fn resident_surface_emissive() -> vec3<f32> {
+      `fn resident_surface_emissive(emissive_temperature_k: f32) -> vec3<f32> {
   return vec3<f32>(0.0);
 }`,
-      `fn resident_surface_emissive() -> vec3<f32> {
-  return blackbody_emission_rgb(camera_data.emissive_temperature_k);
+      `fn resident_surface_emissive(emissive_temperature_k: f32) -> vec3<f32> {
+  // Field-sampled per-fragment temperature when available; per-surface
+  // closure temperature where the field is empty or unbound.
+  let temperature_k = select(camera_data.emissive_temperature_k, emissive_temperature_k, emissive_temperature_k > 0.0);
+  return blackbody_emission_rgb(temperature_k);
 }`
     )
     .replace(
@@ -6282,6 +6290,49 @@ fn field_gradient_normal(grid_position: vec3<f32>) -> vec3<f32> {
   return normalize(-g);
 }
 
+// Temperature lane of the render-field cell row (lane offset +4; see
+// SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT): density-weighted mean particle
+// temperature, trilinearly sampled at the vertex and interpolated across the
+// triangle so emission varies spatially instead of per surface.
+fn field_temperature_at(ix: i32, iy: i32, iz: i32) -> f32 {
+  let cx = clamp(ix, 0, i32(camera_data.field_dim_x) - 1);
+  let cy = clamp(iy, 0, i32(camera_data.field_dim_y) - 1);
+  let cz = clamp(iz, 0, i32(camera_data.field_dim_z) - 1);
+  let index = camera_data.field_offset
+    + u32(cx) * camera_data.field_stride_x
+    + u32(cy) * camera_data.field_stride_y
+    + u32(cz) * camera_data.field_stride_z;
+  return render_field_scalars[index + 4u];
+}
+
+fn field_temperature_sample(p: vec3<f32>) -> f32 {
+  // Density-weighted trilinear: temperature is only defined inside matter, so
+  // plain trilinear dilutes surface vertices toward the 0K of neighbouring
+  // empty cells and stamps blocky cold patches on the isosurface. Weighting
+  // each corner by trilinear_weight x density interpolates over occupied
+  // cells only.
+  let base = floor(p);
+  let f = p - base;
+  let ix = i32(base.x);
+  let iy = i32(base.y);
+  let iz = i32(base.z);
+  var temperature_sum = 0.0;
+  var weight_sum = 0.0;
+  for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+    let dx = i32(corner & 1u);
+    let dy = i32((corner >> 1u) & 1u);
+    let dz = i32((corner >> 2u) & 1u);
+    let wx = select(1.0 - f.x, f.x, dx == 1);
+    let wy = select(1.0 - f.y, f.y, dy == 1);
+    let wz = select(1.0 - f.z, f.z, dz == 1);
+    let density = max(field_scalar_at(ix + dx, iy + dy, iz + dz), 0.0);
+    let weight = wx * wy * wz * density;
+    temperature_sum = temperature_sum + field_temperature_at(ix + dx, iy + dy, iz + dz) * weight;
+    weight_sum = weight_sum + weight;
+  }
+  return select(0.0, temperature_sum / weight_sum, weight_sum > 1.0e-6);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   let position_m = compact_world_position(vertex_index);
@@ -6304,6 +6355,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   out.material_id = camera_data.material_id;
   out.phase_id = camera_data.phase_id;
   out.optical_state_id = camera_data.optical_state_id;
+  out.emissive_temperature_k = 0.0;
+  if (camera_data.field_gradient_enabled > 0.5) {
+    out.emissive_temperature_k = field_temperature_sample(compact_position(vertex_index));
+  }
   return out;
 }
 

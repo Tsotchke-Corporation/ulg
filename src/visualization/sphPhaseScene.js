@@ -4067,6 +4067,7 @@ const SPH_SURFACE_VERTEX_ROW_INDEX = Object.freeze({
 });
 const GPU_TEXTURE_USAGE = {
   COPY_SRC: globalThis.GPUTextureUsage?.COPY_SRC ?? 1,
+  COPY_DST: globalThis.GPUTextureUsage?.COPY_DST ?? 2,
   TEXTURE_BINDING: globalThis.GPUTextureUsage?.TEXTURE_BINDING ?? 4,
   RENDER_ATTACHMENT: globalThis.GPUTextureUsage?.RENDER_ATTACHMENT ?? 16
 };
@@ -5761,6 +5762,16 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
 @group(0) @binding(2) var<storage, read> optical_records: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> spectral_samples: array<vec4<f32>>;
 
+// Scene-color copy for screen-space refraction through transmissive
+// dielectrics (water/ice). The copy is taken from the canvas after the opaque
+// pass (background + opaque surfaces + box wireframe), so the transmitted
+// term samples what is actually behind the surface instead of an analytic
+// environment. A 1x1 dummy texture disables the path (textureDimensions
+// gate) for the opaque pass, the legacy vertex-row lane, and non-native
+// bridges whose canvas is not configured with COPY_SRC.
+@group(1) @binding(0) var scene_color_copy: texture_2d<f32>;
+@group(1) @binding(1) var scene_color_sampler: sampler;
+
 struct OitFragmentOut {
   @location(0) accum: vec4<f32>,
   @location(1) revealage: vec4<f32>,
@@ -5989,7 +6000,15 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // 0xbfe9ff 0.5 from (-6,3,-4) - with a RoomEnvironment IBL. This shader
   // mirrors that: same lights, GGX + Smith + Schlick, split-sum environment
   // approximation, then the same ACESFilmic(exposure 1.08) tone pipeline.
-  let albedo = base_color * (1.0 - metalness);
+  let is_vapor = round(in.phase_id) == 3.0;
+  let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
+  // Three's MeshPhysicalMaterial transmission model: transmitted light
+  // REPLACES diffuse reflection (energy conservation) - a clear medium has
+  // almost no diffuse term. Adding full diffuse on top of transmission was
+  // why surface water read as a bright milky blob while the sphere lane
+  // rendered dark glass over the dark scene.
+  let diffuse_weight = select(1.0, 1.0 - clamp(optical.transmission, 0.0, 1.0), transmissive_surface);
+  let albedo = base_color * (1.0 - metalness) * diffuse_weight;
   let alpha_r = roughness * roughness;
   // Scene lights (linear-light colors x intensity, /pi folded into Lambert).
   let ambient_irradiance = vec3<f32>(1.4);
@@ -6042,8 +6061,6 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let rim = pow(1.0 - ndotv, 3.0) * scatter_haze;
   let emissive = resident_surface_emissive(in.emissive_temperature_k);
   var lit = diffuse + specular + env_specular + base_color * rim + emissive;
-  let is_vapor = round(in.phase_id) == 3.0;
-  let transmissive_surface = optical.transmission > 0.01 && metalness < 0.1 && !is_vapor;
   // PBR transmission (MeshPhysicalMaterial model): transmissive dielectrics
   // render near-OPAQUE - transparency lives in the transmitted light, not in
   // alpha blending. Transmitted term = environment through the volume,
@@ -6056,9 +6073,42 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
       / max(optical.attenuation_distance_m, 1.0e-3);
     let path_m = clamp(optical.attenuation_distance_m, 0.02, 2.0);
     let transmitted_tint = exp(-attenuation_sigma * path_m);
-    let transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
-      clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
-    let transmitted = transmitted_env * transmitted_tint * base_color;
+    var transmitted = vec3<f32>(0.0);
+    let scene_dims = textureDimensions(scene_color_copy, 0);
+    if (scene_dims.x > 1u) {
+      // Screen-space refraction: bend the view ray at the surface by the
+      // material IOR and sample the post-opaque scene copy at the deflected
+      // screen position. The offset scales with the transmission path length
+      // (thicker medium bends the image more); roughness widens the sample
+      // footprint (frosted glass) with a 5-tap blur.
+      let viewport = vec2<f32>(f32(scene_dims.x), f32(scene_dims.y));
+      let screen_uv = in.position.xy / viewport;
+      let refr_dir = refract(-view_dir, normal, 1.0 / ior);
+      let deviation = refr_dir + view_dir;
+      let uv_offset = vec2<f32>(deviation.x, -deviation.y) * path_m * 0.35;
+      let uv = clamp(
+        screen_uv + clamp(uv_offset, vec2<f32>(-0.15), vec2<f32>(0.15)),
+        vec2<f32>(0.001),
+        vec2<f32>(0.999)
+      );
+      let blur_px = roughness * 14.0;
+      let blur_uv = vec2<f32>(blur_px) / viewport;
+      var refracted = textureSampleLevel(scene_color_copy, scene_color_sampler, uv, 0.0).rgb;
+      refracted = refracted
+        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, blur_uv.y), 0.0).rgb
+        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, blur_uv.y), 0.0).rgb
+        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(blur_uv.x, -blur_uv.y), 0.0).rgb
+        + textureSampleLevel(scene_color_copy, scene_color_sampler, uv + vec2<f32>(-blur_uv.x, -blur_uv.y), 0.0).rgb;
+      refracted = refracted * 0.2;
+      // The canvas copy is display-encoded; shading runs in linear light.
+      let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
+      transmitted = refracted_linear * transmitted_tint;
+    } else {
+      // Analytic fallback (opaque pass, legacy lane, non-native bridges).
+      let transmitted_env = mix(vec3<f32>(0.10, 0.13, 0.16), vec3<f32>(0.35, 0.42, 0.48),
+        clamp(-normal.y * 0.5 + 0.5, 0.0, 1.0));
+      transmitted = transmitted_env * transmitted_tint * base_color;
+    }
     lit = lit + (1.0 - fresnel_w) * clamp(optical.transmission, 0.0, 1.0) * transmitted;
   }
   // Three tone pipeline: exposure, ACESFilmic, then display encode below.
@@ -14596,6 +14646,31 @@ export function createSphPhaseScene(container, {
     return true;
   }
 
+  // Scene-color copy target for screen-space refraction: matches the canvas
+  // size/format, filled by copyTextureToTexture after the opaque pass. Only
+  // the native surface-consumer lane configures its canvas with COPY_SRC.
+  function ensureSphResidentSurfaceRefractionCopy(bridge, width, height) {
+    if (!bridge?.device || !bridge?.format) return null;
+    const w = Math.max(1, Math.round(Number(width) || 0));
+    const h = Math.max(1, Math.round(Number(height) || 0));
+    const existing = bridge.refractionCopyTexture;
+    if (existing && bridge.refractionCopyWidth === w && bridge.refractionCopyHeight === h
+      && bridge.refractionCopyFormat === bridge.format) {
+      return existing;
+    }
+    try { existing?.destroy?.(); } catch { /* released with device */ }
+    bridge.refractionCopyTexture = bridge.device.createTexture({
+      label: 'ulg-sph-resident-surface-draw-refraction-copy',
+      size: [w, h, 1],
+      format: bridge.format,
+      usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+    });
+    bridge.refractionCopyWidth = w;
+    bridge.refractionCopyHeight = h;
+    bridge.refractionCopyFormat = bridge.format;
+    return bridge.refractionCopyTexture;
+  }
+
   function ensureSphResidentSurfaceDrawDepthView(bridge = sphResidentSurfaceDrawRenderBridge) {
     if (!bridge?.device || !bridge?.canvas) return null;
     const widthPx = bridge.canvas.width || 1;
@@ -17520,6 +17595,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         && previousBridge.opticalGpuTable === bridgeOpticalGpuTable
         && previousBridge.opticalGpuTableReuseKey === bridgeOpticalGpuTableReuseKey
         && previousBridge.fieldGradientDummyBuffer
+        // Bridges built before the refraction bind group exist must rebuild
+        // so the transparent pass can bind group(1).
+        && previousBridge.refractionDummyBindGroup
       );
       if (canReuseNativeBridge) {
         const bindGroup = device.createBindGroup({
@@ -17725,9 +17803,24 @@ fn fs_main() -> @location(0) vec4<f32> {
           }
         ]
       });
+      const refractionBindGroupLayout = device.createBindGroupLayout({
+        label: 'ulg-sph-resident-surface-draw-refraction-bind-group-layout',
+        entries: [
+          {
+            binding: 0,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            texture: { sampleType: 'float' }
+          },
+          {
+            binding: 1,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            sampler: { type: 'filtering' }
+          }
+        ]
+      });
       const pipelineLayout = device.createPipelineLayout({
         label: 'ulg-sph-resident-surface-draw-overlay-pipeline-layout',
-        bindGroupLayouts: [bindGroupLayout]
+        bindGroupLayouts: [bindGroupLayout, refractionBindGroupLayout]
       });
       const createOverlayPipeline = ({
         label,
@@ -17859,6 +17952,27 @@ fn fs_main() -> @location(0) vec4<f32> {
         label: 'ulg-sph-resident-surface-draw-camera',
         size: cameraBufferByteLength,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      });
+      const refractionSampler = device.createSampler({
+        label: 'ulg-sph-resident-surface-draw-refraction-sampler',
+        magFilter: 'linear',
+        minFilter: 'linear',
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge'
+      });
+      const refractionDummyTexture = device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-dummy',
+        size: [1, 1, 1],
+        format: 'rgba8unorm',
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
+      const refractionDummyBindGroup = device.createBindGroup({
+        label: 'ulg-sph-resident-surface-draw-refraction-dummy-bind-group',
+        layout: refractionBindGroupLayout,
+        entries: [
+          { binding: 0, resource: refractionDummyTexture.createView() },
+          { binding: 1, resource: refractionSampler }
+        ]
       });
       const fieldGradientDummyBuffer = device.createBuffer({
         label: 'ulg-sph-resident-surface-draw-field-gradient-dummy',
@@ -17992,6 +18106,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         cameraBuffer,
         cameraBufferByteLength,
         fieldGradientDummyBuffer,
+        refractionBindGroupLayout,
+        refractionSampler,
+        refractionDummyTexture,
+        refractionDummyBindGroup,
         surfaceInputLayout,
         surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
@@ -18509,6 +18627,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
         opaquePass.setPipeline(bridge.opaquePipeline || bridge.pipeline);
         opaquePass.setBindGroup(0, drawState.bindGroup);
+        if (bridge.refractionDummyBindGroup) {
+          opaquePass.setBindGroup(1, bridge.refractionDummyBindGroup);
+        }
         if (!nativeSurfaceClearOnly) {
           for (const draw of opaqueDraws) {
             opaquePass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
@@ -18541,6 +18662,35 @@ fn fs_main() -> @location(0) vec4<f32> {
           schroederProxySubmit.drawInstanceCount;
       }
         opaquePass.end();
+        let refractionBindGroup = bridge.refractionDummyBindGroup || null;
+        if (
+          bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          && !nativeSurfaceClearOnly
+          && bridge.refractionBindGroupLayout
+          && bridge.refractionSampler
+          && (transparentDraws.length > 0 || additionalTransparentDraws.length > 0)
+        ) {
+          const copyTexture = ensureSphResidentSurfaceRefractionCopy(
+            bridge,
+            canvasTexture.width,
+            canvasTexture.height
+          );
+          if (copyTexture) {
+            encoder.copyTextureToTexture(
+              { texture: canvasTexture },
+              { texture: copyTexture },
+              [canvasTexture.width, canvasTexture.height, 1]
+            );
+            refractionBindGroup = bridge.device.createBindGroup({
+              label: 'ulg-sph-resident-surface-draw-refraction-bind-group',
+              layout: bridge.refractionBindGroupLayout,
+              entries: [
+                { binding: 0, resource: copyTexture.createView() },
+                { binding: 1, resource: bridge.refractionSampler }
+              ]
+            });
+          }
+        }
         let transparentCompositeSubmitted = false;
         if (
           transparentDraws.length > 0
@@ -18576,6 +18726,9 @@ fn fs_main() -> @location(0) vec4<f32> {
           });
           transparentPass.setPipeline(bridge.transparentOitPipeline);
           transparentPass.setBindGroup(0, drawState.bindGroup);
+          if (bridge.refractionDummyBindGroup) {
+            transparentPass.setBindGroup(1, bridge.refractionDummyBindGroup);
+          }
           for (const draw of transparentDraws) {
             transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
           }
@@ -18619,6 +18772,9 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
         transparentPass.setPipeline(bridge.transparentPipeline || bridge.pipeline);
         transparentPass.setBindGroup(0, drawState.bindGroup);
+        if (refractionBindGroup) {
+          transparentPass.setBindGroup(1, refractionBindGroup);
+        }
         for (const draw of transparentDraws) {
           transparentPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }

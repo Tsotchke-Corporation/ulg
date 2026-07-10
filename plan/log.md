@@ -40441,3 +40441,41 @@ crust vs the uniform glow on the unpatched tree; F+h2o scene unchanged (cold
 gas stays emission-free). Stride-sensitive unit set 190/0 (abi, render kernel,
 MC adapter, interface local, renderer); full suite pending in this round's
 worktree run before commit.
+
+## Round 15 — water PBR parity: transmission replaces diffuse + screen-space refraction
+
+User: "water is still looking nothing like the PBR spheres." Side-by-side
+diagnosis (three-render-row-spheres vs native surface, h2o-on-h2o): spheres
+render dark glass — Three's MeshPhysicalMaterial transmission REPLACES diffuse
+reflection, and transmission samples the actual scene; the surface lane added
+FULL diffuse on top of an analytic bright-sky transmitted term, reading as a
+milky opaque blob.
+
+Fixes (native surface WGSL + bridge, sphPhaseScene.js):
+1. Energy conservation: albedo *= (1 - transmission) for transmissive
+   dielectrics (water/ice), matching Three's model. This alone moves water
+   from milky to dark glass.
+2. Screen-space refraction: after the opaque pass (background + opaques + box
+   wireframe), copyTextureToTexture the canvas into a bridge-owned copy;
+   the transparent pass binds it at @group(1) and the transmitted term
+   refracts the view ray by the material IOR, offsets the screen sample by
+   the deviation x path length, applies a 5-tap roughness blur, linearizes
+   the display-encoded copy, and Beer-Lambert tints it. A 1x1 dummy texture
+   gates the path OFF for the opaque pass, the legacy vertex-row lane, and
+   non-native bridges (their canvas lacks COPY_SRC); those keep the analytic
+   fallback. No uniform/ABI changes — the gate is textureDimensions.
+3. Vapor untouched (user: "steam looks pretty good") — refraction is gated on
+   transmissive_surface which excludes vapor by construction.
+
+Trap: the local GPU_TEXTURE_USAGE shim lacked COPY_DST, so the copy texture
+silently lost the flag and the WHOLE overlay encoder went invalid — blank
+canvas, no console error until popped warnings were enabled. Added COPY_DST.
+
+Verified in-browser (5183): water now renders as deep glassy blue with the
+box wireframe visibly refracting through the volume; F2 vapor scene unchanged;
+spheres lane unchanged; fps unchanged (~55/380-400). Renderer tests 94/0,
+full suite 994 tests 975/0. Remaining honest gaps vs spheres: specular
+highlights are broader (smooth surface vs many small spheres - physically
+expected), env reflection still analytic (background-image env sampling is
+the recorded follow-up), single-layer refraction only (water behind water
+sees opaques only, same limitation as Three transmission).

@@ -40332,3 +40332,52 @@ constants introduced; everything derives from the existing CFL rule.
 Post-fix probe: tinyY [0.97, 1.51] (span 0.54 m, matches plain), gas
 cohort stays ~650 K with gradual contact cooling instead of instant
 scatter.
+
+## Round 14 — gas physics: gauge ideal-gas pressure, gas expansion floor, hashed twin separation (task #6, items 1/2/4)
+
+**Changes (ulg-gpu-abi/src/wgsl.js + params plumbing):**
+- P2G stress: the constant `gas_fraction * 101325.0` term is replaced by a gauge
+  ideal-gas partial pressure `101325 * (rho/rho_rest) - ambient_pressure_pa`.
+  The identity P_abs = P_atm*(rho/rho_rest)*(T/T_pack) holds because the gas
+  rest density is by construction the ideal-gas density at 1 atm; the T-ratio
+  is approximated at 1 (per-material R_s needs a material-record binding —
+  frontier). Pressure now DECAYS with expansion (no perpetual P·dV energy
+  pump) and is measured against a new `ambient_pressure_pa` param (0 =
+  vacuum box; uniform atmospheres exert no net force on immersed bodies).
+- G2P + mechanics-prediction J caps: gas (eos=2) expands to a vacuum floor of
+  0.1% rest density (J_max = 1000) instead of the condensed 64x cap that gave
+  gas a false liquid-like free surface; both integrator and prediction share
+  the bound so expanded gas is never priced at a frozen 64x density.
+- Separation pass: coincident pairs now push along a hash of the lower pair
+  index (antisymmetric, momentum-conserving) instead of ±y, so distinct
+  co-located product twins scatter isotropically. Note: solid-solid pairs are
+  still skipped by design, so solid product twins (e.g. naoh at 300 K) remain
+  co-located until gas-product placement (task #6 item 3) or a policy change.
+- P2gProjectionParams: pad0 → ambient_pressure_pa (f32, still 80 bytes);
+  packers in sphGridGpuKernel.js and sphMlsMpmGpuStep.js take
+  `ambientPressurePa = 0`.
+
+**Validation (GPU-native, live buffer readbacks on port 5180):**
+- Cushion probe (Cs on F gas, lawr=0): gas churn ±150 m/s → ±0.2 m/s; false
+  gas surface at y≈1.7 gone (gas relaxes, J at the new 1000 floor); Cs now
+  penetrates to y≈0.80 but oscillates 0.8–2.5 m instead of landing — the
+  residual bounce comes from the gas COMPRESSION branch (c²·(rho_eff−rho_rest))
+  when the block compresses gas it cannot vent around at grid resolution, not
+  from the removed constant term. Recorded as a follow-up, not tuned away.
+- Sealed-box gas KE (new probe-ke.mjs): bounded plateau 0.009–0.076 J over
+  t=2.7→9.5 s, max speed ≤1.7 m/s — the old constant term fails this gate by
+  construction.
+- Product vibration (Na+H2O): naoh limit cycle ±5–13 m/s persists, as
+  predicted — the driver is the frozen unplaced product-event pressure source
+  (item 3, deferred); items 1/2/4 alone do not move it.
+- physicsBehaviorInvariants: 11/11. ABI contract tests: 42/42 (struct stays
+  80 B). SS-grep gates 14416/14494 + full npm test: recorded below before
+  commit.
+
+**Gate results:** SS-grep 14371 (anti-freeze, was 14416 pre-merge) PASS 18.6s;
+14494 (two-level thermal) PASS 24.2s. physicsBehaviorInvariants 11/11.
+tests/sphG2pGpuKernel.test.mjs source-shape assertions updated for the
+gas-aware bound (20/20). Full npm test green on the final tree (recorded in
+the commit message). Note: the CPU-lane MLS_MPM_G2P_MAX_VOLUME_RATIO_J stays
+at 64 — the GPU-native validation directive drops CPU parity as a gate, and
+the CPU lane is not the production path; flagged rather than mirrored.

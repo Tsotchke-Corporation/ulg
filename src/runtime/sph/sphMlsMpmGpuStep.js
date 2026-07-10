@@ -2641,7 +2641,8 @@ function createFusedP2gParamsArray(
   internalPressureScale = 1,
   schroederLevelFilter = null,
   schroederActiveNodeFilter = null,
-  gridDensityPressureEnabled = false
+  gridDensityPressureEnabled = false,
+  ambientPressurePa = 0
 ) {
   const filterEnabled = schroederLevelFilter?.enabled === true;
   const activeNodeFilterEnabled = schroederActiveNodeFilter?.enabled === true;
@@ -2670,6 +2671,9 @@ function createFusedP2gParamsArray(
     SCHROEDER_ACTIVE_NODE_FLOATS
   ))), true);
   view.setUint32(64, gridDensityPressureEnabled ? 1 : 0, true);
+  // ambient_pressure_pa: gauge reference for the ideal-gas partial pressure
+  // (0 = vacuum box). See P2gProjectionParams in ulg-gpu-abi/src/wgsl.js.
+  view.setFloat32(68, Number.isFinite(ambientPressurePa) ? ambientPressurePa : 0, true);
   return buffer;
 }
 

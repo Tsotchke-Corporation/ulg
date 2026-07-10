@@ -4975,6 +4975,16 @@ fn cubic_root_positive(value: f32) -> f32 {
 const MECHANICS_MIN_VOLUME_RATIO_J: f32 = 0.1;
 const MECHANICS_MAX_RADIUS_GROWTH_RATIO: f32 = 4.0;
 const MECHANICS_MAX_VOLUME_RATIO_J: f32 = 64.0;
+// Same gas-aware expansion bound as the G2P integrator (see
+// G2P_MAX_VOLUME_RATIO_J_GAS): the prediction must not clamp J tighter than
+// the authoritative state writer or expanded gas would be priced at a frozen
+// 64x-volume density in the stress path.
+const MECHANICS_MAX_VOLUME_RATIO_J_GAS: f32 = 1000.0;
+
+fn mechanics_max_volume_ratio_j(eos_model_id: f32) -> f32 {
+  let is_gas = eos_model_id > 1.5 && eos_model_id < 2.5;
+  return select(MECHANICS_MAX_VOLUME_RATIO_J, MECHANICS_MAX_VOLUME_RATIO_J_GAS, is_gas);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -5065,12 +5075,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     nf10 = 0.0; nf11 = s; nf12 = 0.0;
     nf20 = 0.0; nf21 = 0.0; nf22 = s;
     next_j = MECHANICS_MIN_VOLUME_RATIO_J;
-  } else if (next_j > MECHANICS_MAX_VOLUME_RATIO_J) {
-    let scale = cubic_root_positive(MECHANICS_MAX_VOLUME_RATIO_J / max(next_j, 1.0e-12));
+  } else if (next_j > mechanics_max_volume_ratio_j(row6.z)) {
+    let max_volume_ratio_j = mechanics_max_volume_ratio_j(row6.z);
+    let scale = cubic_root_positive(max_volume_ratio_j / max(next_j, 1.0e-12));
     nf00 = nf00 * scale; nf01 = nf01 * scale; nf02 = nf02 * scale;
     nf10 = nf10 * scale; nf11 = nf11 * scale; nf12 = nf12 * scale;
     nf20 = nf20 * scale; nf21 = nf21 * scale; nf22 = nf22 * scale;
-    next_j = MECHANICS_MAX_VOLUME_RATIO_J;
+    next_j = max_volume_ratio_j;
   }
 
   out_sph_state[state_base] = vec4<f32>(position.x, position.y, position.z, pos_mass.w);
@@ -5105,7 +5116,7 @@ struct P2gProjectionParams {
   schroeder_active_node_filter_enabled: u32,
   schroeder_active_node_stride_floats: u32,
   grid_density_pressure_enabled: u32,
-  p2g_params_pad0: u32,
+  ambient_pressure_pa: f32,
   p2g_params_pad1: u32,
   p2g_params_pad2: u32,
 };
@@ -5394,13 +5405,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // NOT added: a depth-frozen pressure field becomes unbalanced as soon
       // as particles circulate and pumps energy into the liquid.
       // On a vaporization plateau the growing gas fraction exerts its
-      // saturation-scale partial pressure so steam inflates gradually and
-      // buoyancy emerges from falling grid density.
+      // ideal-gas partial pressure so steam inflates gradually and buoyancy
+      // emerges from falling grid density.
+      //
+      // Gauge ideal-gas partial pressure. The gas rest density is BY
+      // CONSTRUCTION the ideal-gas density at one standard atmosphere
+      // (rho_rest = P_atm*M/(R*T_pack)), so P_abs = rho*R_s*T =
+      // P_atm*(rho/rho_rest)*(T/T_pack). The temperature ratio is
+      // approximated at 1: particles sit near the temperature their gas
+      // phase row was packed at, and carrying per-material R_s would need a
+      // new material-record binding (frontier). Unlike the previous constant
+      // P_atm term this pressure DECAYS as the gas expands - a gas particle
+      // no longer does P*dV work at constant P forever (the energy pump
+      // behind the +/-150 m/s churn) - and it is measured relative to
+      // params.ambient_pressure_pa, so a uniform atmosphere exerts no net
+      // force on immersed bodies (Archimedes) and a solid cannot rest on a
+      // gas cushion in a vacuum box.
       let thermo1 = sph_thermo[thermo_base + 1u];
       let gas_fraction = clamp(thermo1.z, 0.0, 1.0);
+      let gas_density_ratio = density / max(thermo0.w, 1.0e-9);
+      let gas_partial_pressure = 101325.0 * gas_density_ratio - params.ambient_pressure_pa;
       let pressure = params.internal_pressure_scale
         * (packed_pressure(density, thermo0.w, row6.y, row6.z)
-          + gas_fraction * 101325.0);
+          + gas_fraction * gas_partial_pressure);
       let dynamic_viscosity = max(row7.y, 0.0);
       let div_third = (c00 + c11 + c22) / 3.0;
       let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
@@ -6624,6 +6651,20 @@ fn g2p_cubic_root_positive(value: f32) -> f32 {
 const G2P_MIN_VOLUME_RATIO_J: f32 = 0.1;
 const G2P_MAX_RADIUS_GROWTH_RATIO: f32 = 4.0;
 const G2P_MAX_VOLUME_RATIO_J: f32 = 64.0;
+// Gas particles expand until their density reaches the vacuum-expansion
+// floor of 0.1% rest density (J_max = rho_rest/rho_floor = 1000) instead of
+// the condensed-phase 64x volume cap. The fixed cap froze expanding gas at
+// 64x rest volume, giving it a false liquid-like free surface (a discrete
+// "gas top" a solid could rest in) while the pressure law kept pushing.
+// With the gauge ideal-gas pressure (P proportional to rho ~ 1/J) the pair
+// (pressure, volume) stays integrable as J grows: P at the floor is 1e-3 atm,
+// so gas fills the domain and settles instead of pooling.
+const G2P_MAX_VOLUME_RATIO_J_GAS: f32 = 1000.0;
+
+fn g2p_max_volume_ratio_j(eos_model_id: f32) -> f32 {
+  let is_gas = eos_model_id > 1.5 && eos_model_id < 2.5;
+  return select(G2P_MAX_VOLUME_RATIO_J, G2P_MAX_VOLUME_RATIO_J_GAS, is_gas);
+}
 
 fn g2p_particle_wall_clearance(rest_volume_m3: f32) -> f32 {
   if (rest_volume_m3 <= 0.0) {
@@ -6856,12 +6897,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     nf10 = 0.0; nf11 = s; nf12 = 0.0;
     nf20 = 0.0; nf21 = 0.0; nf22 = s;
     next_j = G2P_MIN_VOLUME_RATIO_J;
-  } else if (next_j > G2P_MAX_VOLUME_RATIO_J) {
-    let scale = g2p_cubic_root_positive(G2P_MAX_VOLUME_RATIO_J / max(next_j, 1.0e-12));
+  } else if (next_j > g2p_max_volume_ratio_j(row6.z)) {
+    let max_volume_ratio_j = g2p_max_volume_ratio_j(row6.z);
+    let scale = g2p_cubic_root_positive(max_volume_ratio_j / max(next_j, 1.0e-12));
     nf00 = nf00 * scale; nf01 = nf01 * scale; nf02 = nf02 * scale;
     nf10 = nf10 * scale; nf11 = nf11 * scale; nf12 = nf12 * scale;
     nf20 = nf20 * scale; nf21 = nf21 * scale; nf22 = nf22 * scale;
-    next_j = G2P_MAX_VOLUME_RATIO_J;
+    next_j = max_volume_ratio_j;
   }
 
   out_sph_state[state_base] = vec4<f32>(position.x, position.y, position.z, pos_mass.w);
@@ -7068,8 +7110,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           if (dist > 1.0e-9) {
             normal = delta / dist;
           } else {
-            // Deterministic antisymmetric fallback for coincident particles.
-            normal = vec3<f32>(0.0, select(-1.0, 1.0, particle_index > other), 0.0);
+            // Deterministic antisymmetric fallback for coincident particles:
+            // hash the LOWER pair index into a unit direction so distinct
+            // coincident pairs scatter isotropically instead of every twin
+            // pair stacking along +/-y (reaction products spawn co-located at
+            // the reacting pair's position, so y-only pushes built columns).
+            // Both members hash the same index, so the pushes stay exactly
+            // antisymmetric and conserve pair momentum.
+            let low_index = min(particle_index, other);
+            var h = low_index * 2654435761u + 0x9e3779b9u;
+            h = (h ^ (h >> 16u)) * 2246822519u;
+            h = h ^ (h >> 13u);
+            let ux = f32(h & 1023u) / 511.5 - 1.0;
+            let uy = f32((h >> 10u) & 1023u) / 511.5 - 1.0;
+            let uz = f32((h >> 20u) & 1023u) / 511.5 - 1.0;
+            let raw = vec3<f32>(ux, uy, uz);
+            let raw_len = length(raw);
+            let hashed = select(vec3<f32>(0.0, 1.0, 0.0), raw / max(raw_len, 1.0e-6), raw_len > 1.0e-4);
+            normal = hashed * select(-1.0, 1.0, particle_index > other);
             dist = 0.0;
           }
           let w_other = 1.0 / max(other_pos_mass.w, 1.0e-30);

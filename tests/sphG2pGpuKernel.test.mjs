@@ -213,8 +213,11 @@ test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /if \(!solid\)/);
   assert.match(mlsMpmG2pReconstructWgsl, /G2P_MAX_RADIUS_GROWTH_RATIO:\s*f32\s*=\s*4\.0/);
   assert.match(mlsMpmG2pReconstructWgsl, /G2P_MAX_VOLUME_RATIO_J:\s*f32\s*=\s*64\.0/);
-  assert.match(mlsMpmG2pReconstructWgsl, /next_j > G2P_MAX_VOLUME_RATIO_J/);
-  assert.match(mlsMpmG2pReconstructWgsl, /next_j = G2P_MAX_VOLUME_RATIO_J/);
+  // Gas expands to the vacuum density floor (J_max 1000) while condensed
+  // phases keep the 64x cap; the bound is selected per-particle from the EOS id.
+  assert.match(mlsMpmG2pReconstructWgsl, /next_j > g2p_max_volume_ratio_j\(row6\.z\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /G2P_MAX_VOLUME_RATIO_J_GAS: f32 = 1000\.0/);
+  assert.match(mlsMpmG2pReconstructWgsl, /next_j = max_volume_ratio_j/);
   assert.doesNotMatch(mlsMpmG2pReconstructWgsl, /c00 = c00 \* 0\.25/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });

@@ -854,7 +854,8 @@ function createProjectionParamsArray(
   dt,
   productEventCount = 0,
   internalPressureScale = 1,
-  schroederLevelFilter = null
+  schroederLevelFilter = null,
+  ambientPressurePa = 0
 ) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
@@ -881,6 +882,10 @@ function createProjectionParamsArray(
   // spatial-density EOS term off (no previous-substep grid available); the
   // fused resident sequence enables it.
   view.setUint32(64, 0, true);
+  // ambient_pressure_pa: the gauge reference for the ideal-gas partial
+  // pressure. 0 = vacuum box (default); a uniform atmosphere would exert no
+  // net force on immersed bodies, so gas stress is measured relative to it.
+  view.setFloat32(68, finiteNumber(ambientPressurePa, 0), true);
   return buffer;
 }
 

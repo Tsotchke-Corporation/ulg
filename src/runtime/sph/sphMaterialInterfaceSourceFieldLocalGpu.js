@@ -283,7 +283,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   let density = f32(atomicLoad(&density_accum[out_index])) / max(params.density_scale, 1.0);
   let color = select(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(s2.y, s2.z, s2.w), density > 0.0);
-  render_field_cells[out_index] = vec4<f32>(density, color);
+  // Two vec4 lanes per cell (see SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT); the
+  // physics material-interface source field carries no temperature.
+  render_field_cells[out_index * 2u] = vec4<f32>(density, color);
+  render_field_cells[out_index * 2u + 1u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 `;
 

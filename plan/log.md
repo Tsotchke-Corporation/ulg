@@ -40412,3 +40412,32 @@ vertices. Bumped RESIDENT_RENDER_FIELD_MAX_RESOLUTION 64 -> 96. In-browser
 F+h2o: visibly rounder gas lobes and smoother pool rim at unchanged fps
 (render ~60, resident ~477). Legacy single-surface budget math now binds at 66
 (test updated; extraction path doesn't use it). Renderer tests 94/0.
+
+## Round 15 — per-fragment emissive temperature (task #4 item)
+
+Emission was a per-draw uniform (camera_data.emissive_temperature_k): a
+quenching iron ball glowed one flat colour. Now the render-field cell row
+carries a temperature lane and emission varies across each surface.
+
+- ABI: SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT 4 -> 8 floats (density+palette /
+  temperatureK+reserved). WGSL kernels address two vec4s per cell; JS strides
+  derive from the layout length (verified every consumer: splat writer, field
+  summary, material-interface candidates, MC cells, surface-vertex kernels,
+  local material-interface source writer, CPU parity builder,
+  createUlgRenderFieldBufferVolumeDescriptor).
+- Splat kernel accumulates density-weighted particle temperature (render row
+  thermo float, row1.z); product events contribute none, so event-only cells
+  read 0 and the draw falls back to the per-surface closure temperature.
+- Surface draw: VertexOut gains interpolated emissive_temperature_k; the
+  compact-position vertex stage samples the lane with DENSITY-WEIGHTED
+  trilinear interpolation (plain trilinear diluted surface vertices toward 0K
+  of empty neighbours and stamped blocky cold voxel patches — screenshot
+  evidence in the round's probe run).
+- Retained field doubles to ~113MB at 96³x4 surfaces; in-browser probes held
+  380-476 physics fps.
+
+Verified: quench scene shows glowing melt with particle-granularity cooled
+crust vs the uniform glow on the unpatched tree; F+h2o scene unchanged (cold
+gas stays emission-free). Stride-sensitive unit set 190/0 (abi, render kernel,
+MC adapter, interface local, renderer); full suite pending in this round's
+worktree run before commit.

@@ -278,7 +278,7 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
   const device = { label: 'ulg-render-device' };
   const scalarBuffer = {
     label: 'ulg-render-field-rows',
-    size: 4 * 4 * 8 * 8 * 8 * 2,
+    size: Float32Array.BYTES_PER_ELEMENT * SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length * 8 ** 3 * 2,
     device
   };
   const surfaceTable = {
@@ -341,14 +341,14 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
   assert.equal(descriptor.storageBuffer, scalarBuffer);
   assert.equal(descriptor.buffer, scalarBuffer);
   assert.deepEqual(descriptor.dims, [8, 8, 8]);
-  assert.deepEqual(descriptor.scalarStrides, [4, 32, 256]);
-  assert.equal(descriptor.scalarOffset, 8 ** 3 * 4);
-  assert.equal(descriptor.scalarOffsetBytes, 8 ** 3 * 4 * Float32Array.BYTES_PER_ELEMENT);
+  assert.deepEqual(descriptor.scalarStrides, [8, 64, 512]);
+  assert.equal(descriptor.scalarOffset, 8 ** 3 * 8);
+  assert.equal(descriptor.scalarOffsetBytes, 8 ** 3 * 8 * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(descriptor.scalarLane, 'density');
   assert.equal(descriptor.scalarLaneIndex, 0);
-  assert.equal(descriptor.rowStrideFloats, 32);
-  assert.equal(descriptor.sliceStrideFloats, 256);
-  assert.equal(descriptor.cellRowStrideFloats, 4);
+  assert.equal(descriptor.rowStrideFloats, 64);
+  assert.equal(descriptor.sliceStrideFloats, 512);
+  assert.equal(descriptor.cellRowStrideFloats, 8);
   assert.equal(descriptor.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(descriptor.positionTransform.enabled, true);
   assert.equal(descriptor.positionTransform.resolution, 8);

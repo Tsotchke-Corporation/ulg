@@ -495,11 +495,20 @@ export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'pad1:f32',
   'pad2:f32'
 ]);
+// Two vec4 lanes per cell: lane 0 = density + palette (unchanged legacy
+// layout), lane 1 = density-weighted mean temperature for per-fragment
+// emission plus reserved padding. WGSL kernels address the buffer as
+// array<vec4<f32>> with two vec4s per cell; JS strides derive from this
+// layout's length.
 export const SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT = Object.freeze([
   'density:f32',
   'paletteLinearR:f32',
   'paletteLinearG:f32',
-  'paletteLinearB:f32'
+  'paletteLinearB:f32',
+  'temperatureK:f32',
+  'reserved0:f32',
+  'reserved1:f32',
+  'reserved2:f32'
 ]);
 export const SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT = Object.freeze([
   'surfaceIndex:f32',

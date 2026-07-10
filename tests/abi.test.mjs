@@ -818,7 +818,11 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
     'density:f32',
     'paletteLinearR:f32',
     'paletteLinearG:f32',
-    'paletteLinearB:f32'
+    'paletteLinearB:f32',
+    'temperatureK:f32',
+    'reserved0:f32',
+    'reserved1:f32',
+    'reserved2:f32'
   ]);
   assert.equal(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length, 16);
   assert.equal(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length % 4, 0);

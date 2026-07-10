@@ -40513,3 +40513,43 @@ general law for a follow-up.
 Validation: physics atomics 11/11; gates 14371 + 14494 pass on the patched
 tree; iron quench still cools at the established rate (1394 -> 1295 K over the
 probe window); full npm test 994 tests, 975 pass, 0 fail.
+
+## Round 15 — frozen-particle disease: the wall-clearance phantom shell (task #10)
+
+**Symptoms (user, repeated):** steam pinned mid-air/floor ("water will stick to
+the floor even though it's 800k"), quench splash welded to a ceiling shelf at
+y=3.76, gas cohorts with byte-identical positions for 30+ s while velocities
+stayed live.
+
+**Ruled out by ablation on the live scene:** SS level-filter copy-through (two-
+level mechanics defaults OFF), particle-storage adoption (adopted=false),
+separation pass (sep=0 identical), pressure law group (lawp=0 identical).
+
+**Root cause:** `g2p_particle_wall_clearance` = 0.5·restVolume^(1/3), clamped
+only by 0.49·min(box). Rest volume is PHASE volume: steam at ~0.6 kg/m³ gives
+1.7 m³/kg, so sub-kg steam particles carried 0.25–1.2 m clearances — a phantom
+forbidden shell inside the box. Particles pin at their personal shell radius
+(p13 at exactly y=0.25403 = its clearance; ceiling shelf at exactly
+box_y − clearance = 3.76) with the axis clamp zeroing approach velocity every
+substep. Any particle that ever passes through a low-density phase keeps the
+huge rest volume until the next phase change, which is how re-condensed LIQUID
+froze at the ceiling.
+
+**Fix (general, discretization-derived):** clearance is capped at half a grid
+cell in G2P and the separation-apply kernel (params pad0 → grid_spacing_m; JS
+packers thread gridSpec.gridSpacingM), and in the CPU G2P/separation parity
+paths. Rationale: the wall boundary condition operates at grid resolution —
+sub-cell wall response belongs to the pressure law, not a rigid-ball radius;
+compressible parcels physically overlap walls.
+
+**Verified (before/after screenshots in /tmp/fork10/):** 800K scene — steam
+blobs RISE between frames (t=4.7→7.0), floor droplets settle, ceiling/floor
+welding gone; quench — no ceiling shelf, iron cooling rate unchanged
+(1417→1320 K over the probe window, matches pre-fix slope), dynamic foaming;
+Cs+F — renders, bounded, no explosion. Gates 14371 (anti-freeze) + 14494 pass.
+
+**Honest remainder (distinct physics, not this bug):** steam bubbles INSIDE a
+liquid pool still barely move — sub-cell bubbles are mass-dominated by liquid
+on shared grid nodes, so resolved buoyancy needs the finer SS level (task #7)
+or a dispersed-phase drift model. The frozen pool-interior particles (p13/p14)
+in the 800K probe are this class; free-space steam is fixed.

@@ -398,7 +398,11 @@ export const SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT = Object.freeze([
   'materialKeyHash:f32',
   'formulaHash:f32',
   'status:f32',
-  'pad0:f32'
+  // Interface mass flux [kg/m^2/s] at the reference temperature: the
+  // transport prefactor for the GPU interface-flux extent law (effusion for
+  // gases, Clausius-Clapeyron vapor carrier for volatile condensed
+  // reactants, 0 when no pathway is derivable).
+  'interfaceFluxKgPerM2S:f32'
 ]);
 export const SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT = Object.freeze([
   'reactionIndex:f32',

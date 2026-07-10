@@ -13,6 +13,6 @@ if (await page.locator('#sph-phase-overlay').count() === 0) await page.locator('
 await page.waitForSelector('#sph-phase-overlay', { timeout: 300000 });
 for (const [i, waitMs] of [[1, 4000], [2, 8000], [3, 12000], [4, 16000]]) {
   await page.waitForTimeout(waitMs);
-  await page.screenshot({ path: `/tmp/fork11-shots/${TAG}-${i}.png` });
+  await page.screenshot({ path: `/tmp/fork12-shots/${TAG}-${i}.png` });
 }
 await browser.close();

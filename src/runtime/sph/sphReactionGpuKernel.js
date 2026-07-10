@@ -280,6 +280,55 @@ function termPhaseMask(term, reaction) {
     || phaseMask(reaction?.phaseRequirements?.[term?.formula]);
 }
 
+const INTERFACE_FLUX_REFERENCE_TEMPERATURE_K = 293.15;
+const UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K = 8.314462618;
+const STANDARD_ATMOSPHERE_PA = 101325;
+
+// Interface mass flux [kg/m^2/s] a reactant can deliver to a reactive contact
+// at the reference temperature — the transport prefactor for the GPU kernel's
+// interface-flux extent law (kinetic-theory effusion, nu = rho * vbar / 4,
+// vbar = sqrt(8RT/(pi*M))):
+//  - gas-phase reactants use their gas rest density (the 1 atm ideal-gas
+//    density their closure derives);
+//  - volatile condensed reactants use their Clausius-Clapeyron vapor density
+//    at T_ref, derived from the boiling transition the material closure
+//    already carries (P_vap(T) = P_atm * exp(-(L*M/R)(1/T - 1/T_b))) — the
+//    vapor is the mobile carrier that reaches the partner surface (H2O vapor
+//    attacking sodium is the canonical case);
+//  - reactants with no gas phase and no liquid->gas transition return 0:
+//    solid-solid interdiffusion is a frontier gap (documented), and the
+//    kernel then rates the reaction by the partner's pathway (or leaves the
+//    pair on the legacy availability bound when neither has one).
+function interfaceFluxKgPerM2S(term, materialProperties = {}) {
+  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
+  if (!(molarMassKgPerMol > 0)) return 0;
+  const temperatureK = INTERFACE_FLUX_REFERENCE_TEMPERATURE_K;
+  const meanSpeedMPerS = Math.sqrt(
+    (8 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperatureK) / (Math.PI * molarMassKgPerMol)
+  );
+  const phases = properties?.phases || [];
+  if (termIsGas(term, materialProperties)) {
+    const gasPhase = phases.find((phase) => phase?.name === 'gas');
+    const gasDensity = finiteNumber(gasPhase?.densityKgPerM3, 0);
+    if (!(gasDensity > 0)) return 0;
+    return (gasDensity * meanSpeedMPerS) / 4;
+  }
+  const boiling = (properties?.transitions || []).find(
+    (transition) => transition?.from === 'liquid' && transition?.to === 'gas'
+  );
+  const boilingK = finiteNumber(boiling?.temperatureK, 0);
+  const latentJPerKg = finiteNumber(boiling?.latentHeatJPerKg, 0);
+  if (!(boilingK > 0) || !(latentJPerKg > 0)) return 0;
+  const clausius = (latentJPerKg * molarMassKgPerMol) / UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+  const vaporPressurePa = STANDARD_ATMOSPHERE_PA
+    * Math.exp(-clausius * (1 / temperatureK - 1 / boilingK));
+  const vaporDensityKgPerM3 = (vaporPressurePa * molarMassKgPerMol)
+    / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperatureK);
+  if (!(vaporDensityKgPerM3 > 0)) return 0;
+  return (vaporDensityKgPerM3 * meanSpeedMPerS) / 4;
+}
+
 function termIsGas(term, materialProperties = {}) {
   const properties = materialPropertiesFor(term?.material, materialProperties);
   const phases = properties?.phases || [];
@@ -517,7 +566,7 @@ export function buildSphReactionTable(reactions = [], {
         stableOpticalMaterialId(term.material),
         stableOpticalMaterialId(term.formula || term.material),
         termStatus,
-        0
+        interfaceFluxKgPerM2S(term, materialProperties)
       );
       reactantTermMetadata.push({
         reactionIndex,
@@ -2241,7 +2290,8 @@ function createParamsArray({
   gasProductCount,
   materialCount,
   segmentCount,
-  resetMechanics
+  resetMechanics,
+  dtSeconds = 0
 }) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
@@ -2254,7 +2304,9 @@ function createParamsArray({
   view.setUint32(24, reactantTermCount, true);
   view.setUint32(28, productTermCount, true);
   view.setUint32(32, gasProductCount, true);
-  view.setUint32(36, 0, true);
+  // Interface-flux extent law substep duration (f32 in the _pad0 lane);
+  // 0 keeps the legacy availability-only extent bound.
+  view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
   view.setUint32(40, 0, true);
   view.setUint32(44, 0, true);
   return buffer;
@@ -2296,6 +2348,9 @@ export async function runSphReactionStepWebGpu({
   reactionParticleBinMetadataReadback = false,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
+  // Substep duration for the interface-flux extent law; 0 (default) keeps the
+  // legacy availability-only extent so callers without a dt stay well-defined.
+  dtSeconds = 0,
   readbackMode = FULL_READBACK_MODE,
   readCompactReactionSummary = true,
   readReactionGasSpeciesSummary = true,
@@ -2464,7 +2519,8 @@ export async function runSphReactionStepWebGpu({
     gasProductCount: reactionTable.gasProductCount ?? 0,
     materialCount: resolvedPhaseResponseTable.materialCount,
     segmentCount: resolvedPhaseResponseTable.responseCount,
-    resetMechanics
+    resetMechanics,
+    dtSeconds
   }));
 
   const packBindings = [
@@ -2685,7 +2741,8 @@ export async function runSphReactionStepWebGpu({
         readCompactSummary: readCompactReactionSummary,
         readGasSpeciesSummary: readReactionGasSpeciesSummary,
         readProductInventory: readReactionProductInventory,
-        readAtomResidual: readReactionAtomResidual
+        readAtomResidual: readReactionAtomResidual,
+        dtSeconds
       });
     } catch (error) {
       reactionSummary = {

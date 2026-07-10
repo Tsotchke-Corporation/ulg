@@ -40658,3 +40658,61 @@ sustained runaway is blocked by the SAME missing rate law (bursts eject the
 reactants apart); radiation (sigma·T^4 from the 2100 K crown) is the second
 missing coupling and belongs to task #9. Recommendation: implement the
 interface-flux extent law first; re-measure; then radiation.
+
+## Interface-flux reaction extent law (task #9/#11 successor; the rate law)
+
+The extent law consumed whole particles per contact event (extent_mol =
+min-mass availability; no dt, no rate, no area) — 127 kg of Na in 8 ms and
+whole-layer Cs+F bursts that ejected the reactants apart. Reactions now carry
+a per-pair per-substep interface-flux cap:
+
+  extent_mol <= A_contact * max_i(nu_i(T_i) / (coef_i * M_i)) * dt
+
+- A_contact = pi * min(r_i, r_j)^2 with r from rest-volume radii — the same
+  contact geometry as pair conduction, so heat and chemistry see one
+  interface.
+- nu_i [kg/m^2/s] is derived per reactant at table-build time
+  (sphReactionGpuKernel.js interfaceFluxKgPerM2S): kinetic-theory effusion
+  rho*vbar/4 for gas reactants (vbar = sqrt(8RT/piM), rho = the gas closure's
+  rest density); Clausius-Clapeyron vapor-carrier flux for volatile condensed
+  reactants (P_vap from the boiling transition the closure already carries —
+  H2O gives 3.08 kg/m^2/s at 293 K, the mobile species that attacks sodium);
+  0 for non-volatile condensed (solid-solid interdiffusion = documented
+  frontier gap; the partner's pathway then governs). Packed in the reactant
+  term row's pad lane; kernel scales nu by sqrt(T/T_ref) (the vapor carrier's
+  exponential P_vap(T) growth is NOT modelled — conservative frontier note).
+- The availability (min-mass) law remains the hard cap; dt_s = 0 (stale
+  packers, CPU lanes) disables the cap and preserves legacy behavior.
+- ALL SIX WGSL modules that compute extents (apply, summary partials, product
+  inventory, product events, atom residual, gas species) carry the identical
+  helper — a partial rollout mints phantom product mass (measured: 1172 kg of
+  naoh from 127 kg of Na when only two modules were capped).
+
+Partial burn means neither source slot ever frees, so products flow through
+the event lane every substep; the placement kernel gained a merge path:
+radius-limited same-material same-phase merge first (4x combined rest radii —
+the crown/bubble grows), spare slot next, nearest same-material merge (any
+phase/distance) as the bounded conserving terminal fallback, live event only
+when the material has no carrier at all. Event zeroing follows the spare
+path's exact convention.
+
+Measured (port-5188 worktree probes, scratch/probe-violence*.mjs,
+probe-flux-debug.mjs):
+- Na+H2O: 8 ms whole-drop flash -> sustained 1.73 kg/s surface burn with
+  EXACT stoichiometry (2.32 kg Na -> 4.06 kg naoh + 0.102 kg h2; theory 4.03
+  + 0.102), bulk KE ~= 0 (heat-dominated), naoh ~550-670 K, Na warms via
+  contact. No spawn-blast.
+- Cs+F: burst-stall -> continuous combustion: 38% of F burned by t=2.2 s,
+  CsF crown 3700-5000 K, Cs bulk 450-673 K (molten; was pinned ~310 K),
+  violent bounce-and-reburn dynamics (screenshots /tmp/fork12-shots/).
+- Sealed-box gas KE plateaus (0.007 J, bounded). Live events: 0 in every
+  sample; unplacedKg: 0 (was a +8k/s live-event flood before the merge path).
+- Gates 14371 + 14494 pass; physics atomics 11/11 on the final tree;
+  contract battery (abi, kernel ABI, reaction kernel/summary, buffers) 58/0.
+
+Traps for posterity: (1) a WGSL helper whose replacement text contains its
+own search marker turns a replace loop infinite — the zombie python held the
+old file in memory and raced later edits (killed; repaired idempotently);
+(2) ReactionSummaryParams offset 32 is atom_term_count in the shared packer —
+dt_s lives at offset 36; (3) the retained event ledger accumulates across
+substeps, so "live events at read time" is the flood metric, not rowCount.

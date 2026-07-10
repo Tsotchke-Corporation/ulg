@@ -16315,6 +16315,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         boxDimsM: dims,
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
+        // Substep duration drives the interface-flux reaction extent law.
+        dtSeconds,
         schroederLawQueue,
         schroederLawNeighborCandidates,
         ...noFullReactionSummaryDefaults,

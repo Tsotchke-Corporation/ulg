@@ -136,7 +136,9 @@ const CONTRACTS = [
     wgslStruct: 'ThermalParams',
     // 80 -> 96: shared neighbor-bin fields (bins_enabled, capacity, dims,
     // cell size) for binned pair conduction.
-    bytes: 96
+    // 96 -> 112: max_pair_support_m (+16B pad) so the neighbor scan covers
+    // rest-volume contact radii of coarse low-density particles.
+    bytes: 112
   },
   {
     file: 'src/runtime/sph/sphReactionGpuKernel.js',

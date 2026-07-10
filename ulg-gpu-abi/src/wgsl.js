@@ -520,6 +520,10 @@ struct ThermalParams {
   bin_ny: u32,
   bin_nz: u32,
   bin_cell_size_m: f32,
+  max_pair_support_m: f32,
+  _pad_a: f32,
+  _pad_b: f32,
+  _pad_c: f32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -696,6 +700,19 @@ fn clamp_wall_du_specific(d_u_specific: f32, temperature_k: f32, wall_temperatur
   return d_u_specific;
 }
 
+// Conduction requires contact. The global support 2h is derived from the
+// condensed-phase spacing; coarse low-density particles (gases) are
+// physically larger than h — a particle of mass m at rest density rho
+// occupies a nominal radius r = (3m/(4*pi*rho))^(1/3). A pair conducts when
+// closer than max(2h, r_i + r_j). The pair support is symmetric in (i, j),
+// so gather-side energy exchange stays pairwise-consistent.
+fn particle_nominal_radius_m(mass_kg: f32, rest_density_kg_per_m3: f32) -> f32 {
+  if (mass_kg <= 0.0 || rest_density_kg_per_m3 <= 0.0) {
+    return 0.0;
+  }
+  return pow(0.238732414637843 * mass_kg / rest_density_kg_per_m3, 1.0 / 3.0);
+}
+
 fn clamp_pair_conduction_energy(
   d_e: f32,
   temperature_k: f32,
@@ -853,17 +870,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let temperature = row0.z;
 	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
 	  let support = 2.0 * params.smoothing_length_m;
+	  let self_nominal_radius_m = particle_nominal_radius_m(mass, row0.w);
 	  var du = material_bank_warm_input_anchor();
 	  var conduction_du = 0.0;
 	  var neighbor_min_temperature = temperature;
 	  var neighbor_max_temperature = temperature;
 
-	  if (params.bins_enabled == 1u && params.bin_capacity > 0u) {
+	  let scan_support = max(support, params.max_pair_support_m);
+	  // Bins can only serve pairs their scan radius reaches. Coarse low-density
+	  // scenes have contact radii spanning many bin cells (an F2 gas particle's
+	  // nominal radius is metres); those scenes are also small-n, so the
+	  // exhaustive pair scan is the right structure for them. Self-select.
+	  let bins_cover_support = scan_support <= 5.0 * max(params.bin_cell_size_m, 1.0e-9);
+	  if (params.bins_enabled == 1u && params.bin_capacity > 0u && bins_cover_support) {
 	    // Neighbor-bin scan: the shared per-substep bins hold every massive
 	    // particle; the scan radius covers the conduction support even when
 	    // the cell size was chosen for the (smaller) separation rest distance.
 	    let inv_cell = 1.0 / max(params.bin_cell_size_m, 1.0e-9);
-	    let scan_r = i32(clamp(u32(ceil(support * inv_cell)), 1u, 3u));
+	    let scan_r = i32(clamp(u32(ceil(scan_support * inv_cell)), 1u, 5u));
 	    let cx = i32(clamp(u32(max(position.x, 0.0) * inv_cell), 0u, params.bin_nx - 1u));
 	    let cy = i32(clamp(u32(max(position.y, 0.0) * inv_cell), 0u, params.bin_ny - 1u));
 	    let cz = i32(clamp(u32(max(position.z, 0.0) * inv_cell), 0u, params.bin_nz - 1u));
@@ -885,9 +909,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let other_pos_mass = state_pos_mass(other);
 	            let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	            let distance = length(delta);
-	            if (distance < support) {
-	              let weight = 1.0 - distance / support;
-	              let other_row0 = thermo_row0(other);
+	            let other_row0 = thermo_row0(other);
+	            let pair_support = max(
+	              support,
+	              self_nominal_radius_m + particle_nominal_radius_m(other_pos_mass.w, other_row0.w)
+	            );
+	            if (distance < pair_support) {
+	              let weight = 1.0 - distance / pair_support;
 	              let other_vel_u = state_vel_u(other);
 	              let other_temperature = other_row0.z;
 	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
@@ -917,9 +945,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    let other_pos_mass = state_pos_mass(other);
 	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
 	    let distance = length(delta);
-	    if (distance < support) {
-	      let weight = 1.0 - distance / support;
-	      let other_row0 = thermo_row0(other);
+	    let other_row0 = thermo_row0(other);
+	    let pair_support = max(
+	      support,
+	      self_nominal_radius_m + particle_nominal_radius_m(other_pos_mass.w, other_row0.w)
+	    );
+	    if (distance < pair_support) {
+	      let weight = 1.0 - distance / pair_support;
 	      let other_vel_u = state_vel_u(other);
 	      let other_temperature = other_row0.z;
 	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);

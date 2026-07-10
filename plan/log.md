@@ -40553,3 +40553,29 @@ liquid pool still barely move — sub-cell bubbles are mass-dominated by liquid
 on shared grid nodes, so resolved buoyancy needs the finer SS level (task #7)
 or a dispersed-phase drift model. The frozen pool-interior particles (p13/p14)
 in the 800K probe are this class; free-space steam is fixed.
+
+## Round 15 — sphere-lane gas colors: bank PBR warm inputs no longer override derived spectral colors
+
+F2 spheres rendered near-white despite the derived yellow (0.98, 0.54, 0):
+the material-property-bank PBR warm input for F ([1, 0.95, 0.93]) was
+UNCONDITIONALLY overriding the closure-derived base colour in
+resolveDisplayPbrForOpticalRecord — inverted precedence for a tier the log
+explicitly calls "non-authoritative warm input". Every optical GPU record
+(spheres AND surface base colour) took the bank tint; the surface lane's
+amber survived only because attenuation/spectral samples stayed derived.
+
+Fix (model-confidence precedence, general): bank PBR may stand in for
+BLOCKED closures and for conductor-model reflectance estimates (Drude
+omega_p/30 damping over-brightens iron to near-white, so measured-ish bank
+tints stay authoritative for metals), but molecular/spectral closure colours
+(gas electronic band, Beer-Lambert, molecular gap) are quantitative and now
+win. Also: stabilizeRenderRowSphereBridgeMaterial prefers the material's own
+derived optics colour as fallback tint before the hand-tabulated per-material
+list (last resort only).
+
+Verified (screenshots /tmp/fork-spherecolor/): f-before (white F spheres) vs
+f-after (vivid yellow-orange F spheres over unchanged blue water,
+material colour 1, 0.31, 0 linear); csf-after3 (Cs block keeps the bank
+tan-gold — conductor path unchanged — falling into amber F2 gas; derived
+dark-red CsF liquid). Water identical before/after (no bank row). Tests:
+opticalGpuBuffers 21/21, sphPhaseRenderer 94/94, full npm test green.

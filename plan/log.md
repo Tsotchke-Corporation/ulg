@@ -40845,3 +40845,36 @@ row — RECOMMENDED). Also requires velocity in the render rows (one pad lane
 for speed is insufficient — the vector is needed; three pads exist: exactly
 fits). Deferred to its own pass per the fits-cleanly gate; this note is the
 spec.
+
+## Round 16 — splash-shard velocity-dispersion smear (task #4 item 2 implemented)
+
+Implemented the Round 15c spec on the folding-into-lane-0 path (no field-row
+growth, no scratch buffers). Render rows: the three pad lanes (17-19) now
+carry particle velocity (layout renamed honestly to velocityX/Y/ZMPerS; ABI
+contract test updated) written by the GPU row writer from the state buffer.
+Render-field kernel: pass 1 accumulates density-weighted velocity moments
+alongside density/palette/temperature (weights = the positive metaball
+values, same convention as temperature); per-cell dispersion
+sigma_v^2 = E|v|^2 - |Ev|^2 is zero for coherent or single-particle cells by
+construction, so a coherently falling drop and every isolated small cohort
+are untouched (bit-exact skip below an fp-noise guard of 1e-10 in normalized
+units^2). Dispersing cells re-sample every metaball at the smeared distance
+dist^2 + L^2 with L = sigma_v * render_smear_dt (normalized), which thins
+the non-physical bridges between diverging droplets below the isovalue.
+render_smear_dt is the measured interval between render-field builds
+(scene-side, clamped to 0.25 s so a paused tab does not smear the scene
+away); params _pad1 became render_smear_dt_s, 0 = correction inert. CPU
+parity builder mirrors the law (buildSphRenderFieldCpu gains
+renderSmearDtS); accumulateMetaballSample gains distanceSqOffset.
+
+New regression test (sphRenderGpuKernel.test.mjs): diverging pair thins the
+bridge cell >40%; co-moving pair at the same speed and a single particle are
+bit-identical to the uncorrected build. Visual (fork-splash-shots): coherent
+h2o drop merges as ONE blob; iron-quench churn comparable with crisper lobe
+separation at unchanged fps (411 vs 349 physics); F+h2o cloud intact, no
+small-volume flicker. Cost: the correction pass only runs for cells whose
+dispersion exceeds the fp guard — coherent scenes pay only the moment FMAs.
+
+Honest note: the correction thins bridges between diverging droplets; it
+does not (and should not) split a genuinely connected fast sheet — true
+sheet breakup is sub-resolution physics (the on-hold finer SS level).

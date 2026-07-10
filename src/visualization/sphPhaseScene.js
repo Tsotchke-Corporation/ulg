@@ -11539,6 +11539,10 @@ export function createSphPhaseScene(container, {
     return draws;
   }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
+  // Timestamp of the previous render-field build: the interval between
+  // builds is the physical smear window for the splash-shard dispersion
+  // correction (mass disperses for sigma_v * dt between visual refreshes).
+  let sphResidentLastRenderFieldBuildMs = 0;
   const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
   const sphNativeMarchingCubesAdapterCaches = new Set();
   let pressureInterfaceForceRowsUpload = null;
@@ -27435,7 +27439,15 @@ fn fs_main() -> @location(0) vec4<f32> {
           if (!shouldUseRenderFieldRowsBufferPool) {
             destroyResidentRenderFieldRowsBufferPool('render-field-rows-buffer-pool-route-disabled');
           }
-          const buildRenderFieldForRows = () => buildSphRenderFieldWebGpu({
+          const buildRenderFieldForRows = () => {
+            // Measured interval since the previous field build, clamped to a
+            // quarter second so a paused tab does not smear everything away.
+            const nowBuildMs = nowMs();
+            const renderSmearDtS = sphResidentLastRenderFieldBuildMs > 0
+              ? Math.min(Math.max((nowBuildMs - sphResidentLastRenderFieldBuildMs) / 1000, 0), 0.25)
+              : 0;
+            sphResidentLastRenderFieldBuildMs = nowBuildMs;
+            return buildSphRenderFieldWebGpu({
             device: resolvedDeviceResult.device,
             renderRows: renderRowsExecution.renderRows,
             renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
@@ -27445,6 +27457,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             particleCount: renderRowsExecution.particleCount,
             fieldPadding: FIELD_PADDING,
             refEdgeM,
+            renderSmearDtS,
             readbackMode: visibleRenderFieldReadbackMode,
             retainFieldRowsBuffer: true,
             retainSurfaceBuffer: true,
@@ -27454,7 +27467,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             useQueueFenceForCleanup: false,
             targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
             targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null
-          });
+            });
+          };
           const timedBuildRenderFieldForRows = async () => {
             const startedAtMs = nowMs();
             try {

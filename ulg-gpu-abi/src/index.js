@@ -492,9 +492,12 @@ export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
   // phaseFractionGas this yields liquid = 1 - gas - solid. Pads keep the row
   // vec4-aligned (stride 5).
   'phaseFractionSolid:f32',
-  'renderRowPad0:f32',
-  'renderRowPad1:f32',
-  'renderRowPad2:f32'
+  // Particle velocity (m/s): the render-field kernel measures per-cell
+  // velocity dispersion from these lanes for the splash-shard smear
+  // correction (previously unused pads).
+  'velocityXMPerS:f32',
+  'velocityYMPerS:f32',
+  'velocityZMPerS:f32'
 ]);
 export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

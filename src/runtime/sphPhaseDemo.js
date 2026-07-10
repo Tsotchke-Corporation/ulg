@@ -1442,7 +1442,7 @@ export function particleColors(demo) {
     }
     // Metals: colour derived from the conduction-electron density (Drude plasma frequency). Water/
     // air: Beer–Lambert / Rayleigh. The electron density comes from the material closure.
-    const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase, conductionElectronDensityPerM3: props.conductionElectronDensityPerM3 });
+    const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase, conductionElectronDensityPerM3: props.conductionElectronDensityPerM3, properties: props });
     return { rgb: [c.r, c.g, c.b], closureBacked: true, source: 'optical-closure' };
   });
 }

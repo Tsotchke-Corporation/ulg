@@ -737,7 +737,18 @@ function waterAbsorption(nm) {
  * Intrinsic colour (sRGB {r,g,b}) of a material phase, derived first-principles. closureBacked.
  * Optional `pathLengthM` sets the absorption path for transparent media (default 3 m).
  */
-export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3, conductionElectronDensityPerM3 = null }) {
+export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3, conductionElectronDensityPerM3 = null, properties = null }) {
+  // Molecular gases with a derived/banked electronic band: the particle colour
+  // is the band-tail transmitted response (same law as the gas surface optics),
+  // so F2/Cl2 sphere-lane particles carry their yellow/green instead of the
+  // grey default. Deep-UV bands come out white, as they should.
+  if (phase === 'gas' && properties?.gasElectronicExcitationEv > 0) {
+    const gasParams = molecularGasBandRenderParams({ properties, pathLengthM: Math.min(pathLengthM, 0.3) });
+    if (gasParams?.baseColorSrgb) {
+      const [r, g, b] = gasParams.baseColorSrgb;
+      return { r, g, b };
+    }
+  }
   // Metals: derive the colour from the conduction-electron density (Drude). The caller passes the
   // density (from the material closure); a metal without one falls through to the grey default.
   if (conductionElectronDensityPerM3 > 0) {

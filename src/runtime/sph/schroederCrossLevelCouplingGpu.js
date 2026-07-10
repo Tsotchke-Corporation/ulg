@@ -23,6 +23,7 @@ import {
   MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
   runMlsMpmResidentSummaryWebGpu
 } from './sphMlsMpmGpuSummary.js';
+import { DEFAULT_CFL_FACTOR } from './sphGridUpdateGpuKernel.js';
 
 export {
   ULG_SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_EXECUTION_SCHEMA,
@@ -42,7 +43,7 @@ export const SCHROEDER_GRID_COUPLING_FLAG_Z_FASTEST = 2;
 // Grid slots 1-3 hold velocity (post-grid-update layout) instead of
 // momentum; prolongation copies parent velocity onto massive fine nodes.
 export const SCHROEDER_GRID_COUPLING_FLAG_VELOCITY_GRIDS = 4;
-export const SCHROEDER_GRID_COUPLING_PARAMS_BYTES = 80;
+export const SCHROEDER_GRID_COUPLING_PARAMS_BYTES = 96;
 // Index order of the flat grid-node arrays. The standalone operator tests use
 // 'x-fastest'; real MLS-MPM P2G grids from createMlsMpmGridSpec use
 // 'z-fastest' with gridShift 1 (see gridNodeCoords in sphGridGpuKernel.js).
@@ -116,6 +117,7 @@ export function createSchroederCrossLevelGridCouplingPlan({
   boxDimsM = null,
   deltaScale = 0,
   sharedAccelerationDtMPerS = null,
+  maxCoarseVelocityMPerS = 0,
   flags = 0
 } = {}) {
   const fineDims = gridDims3(fineGridDims);
@@ -178,6 +180,10 @@ export function createSchroederCrossLevelGridCouplingPlan({
       finiteNumber(sharedAccelerationDtMPerS?.[1], 0),
       finiteNumber(sharedAccelerationDtMPerS?.[2], 0)
     ],
+    // CFL velocity ceiling of the coarse grid update (cfl * coarse_dx /
+    // coarse_dt); the delta prolongation clamps its raw momentum/mass
+    // parent read to it. Zero disables the clamp.
+    maxCoarseVelocityMPerS: Math.max(0, finiteNumber(maxCoarseVelocityMPerS, 0)),
     // Sealed-box dims enable the delta-prolongation boundary-band mask; zero
     // dims disable it (open/chartless grids).
     boxDimsM: [
@@ -217,6 +223,7 @@ export function createSchroederCrossLevelGridCouplingParamsArray(plan) {
   view.setFloat32(68, finiteNumber(plan.sharedAccelerationDtMPerS?.[0], 0), true);
   view.setFloat32(72, finiteNumber(plan.sharedAccelerationDtMPerS?.[1], 0), true);
   view.setFloat32(76, finiteNumber(plan.sharedAccelerationDtMPerS?.[2], 0), true);
+  view.setFloat32(80, finiteNumber(plan.maxCoarseVelocityMPerS, 0), true);
   return buffer;
 }
 
@@ -1035,6 +1042,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       gridShift: fineSpec.shift,
       boxDimsM,
       deltaScale: 1 / substeps,
+      // CFL ceiling the coarse grid update itself applied (same default
+      // cfl factor; gridUpdateRunner above is invoked without an override).
+      maxCoarseVelocityMPerS: (DEFAULT_CFL_FACTOR * coarseDx) / Math.max(dtSeconds, 1e-12),
       // The fine grid updates integrate gravity themselves; exclude it from
       // the transferred coarse correction.
       sharedAccelerationDtMPerS: [

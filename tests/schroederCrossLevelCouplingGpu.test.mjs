@@ -97,8 +97,9 @@ test('Schroeder cross-level grid coupling params array encodes dims, stride, and
     flags: 3
   });
   const params = createSchroederCrossLevelGridCouplingParamsArray(plan);
-  // 80 bytes: the tail adds the subcycling delta scale.
-  assert.equal(params.byteLength, 80);
+  // 96 bytes: the tail adds the subcycling delta scale, shared-acceleration
+  // dt, and the coarse CFL velocity ceiling (+pad to a 16-byte multiple).
+  assert.equal(params.byteLength, 96);
   const view = new DataView(params);
   assert.equal(view.getUint32(0, true), 6);
   assert.equal(view.getUint32(4, true), 4);

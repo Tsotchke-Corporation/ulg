@@ -13839,6 +13839,14 @@ struct SchroederCrossLevelGridCouplingParams {
   shared_accel_dt_x: f32,
   shared_accel_dt_y: f32,
   shared_accel_dt_z: f32,
+  // CFL velocity ceiling of the coarse grid update (cfl * coarse_dx /
+  // coarse_dt). The delta prolongation clamps its raw momentum/mass parent
+  // read to this bound so it lives in the same representable velocity space
+  // as the (already clamped) post-update grid. Zero disables the clamp.
+  max_coarse_velocity_m_per_s: f32,
+  coupling_pad0: f32,
+  coupling_pad1: f32,
+  coupling_pad2: f32,
 };
 
 const SCHROEDER_GRID_COUPLING_WORKGROUP_SIZE: u32 = 64u;
@@ -14185,11 +14193,33 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (pre_mass <= 0.0 || post_mass <= 0.0) {
     return;
   }
-  let pre_velocity = vec3<f32>(
+  // Mass significance: the coarse grid update conserves node mass, so pre
+  // and post rows must describe the same matter. A relative mass mismatch
+  // (min/max below 1/2) means the two buffers are inconsistent (layout
+  // drift, stale snapshot) and no valid velocity delta exists here.
+  if (min(pre_mass, post_mass) < 0.5 * max(pre_mass, post_mass)) {
+    return;
+  }
+  var pre_velocity = vec3<f32>(
     coarse_pre_grid[coarse_offset + 1u],
     coarse_pre_grid[coarse_offset + 2u],
     coarse_pre_grid[coarse_offset + 3u]
   ) / pre_mass;
+  // P2G momentum carries fused stress impulses (dt * stress * grad w), so
+  // momentum/mass at a near-empty parent (a few gas particles) can exceed
+  // any velocity the solver itself would ever emit: impulse / tiny mass.
+  // The grid update clamps every velocity it produces to its CFL bound
+  // before anything consumes it; apply the identical clamp to this raw
+  // momentum read so pre and post velocities live in the same representable
+  // space. Without it the delta transfers the clamp difference (hundreds of
+  // m/s) into fine nodes and blasts tiny-mass cohorts apart.
+  let vmax = params.max_coarse_velocity_m_per_s;
+  if (vmax > 0.0) {
+    let pre_speed2 = dot(pre_velocity, pre_velocity);
+    if (pre_speed2 > vmax * vmax) {
+      pre_velocity = pre_velocity * (vmax / sqrt(pre_speed2));
+    }
+  }
   let post_velocity = vec3<f32>(
     coarse_post_grid[coarse_offset + 1u],
     coarse_post_grid[coarse_offset + 2u],
@@ -14208,7 +14238,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     params.shared_accel_dt_y,
     params.shared_accel_dt_z
   );
-  let delta = (post_velocity - pre_velocity - shared_accel_dt) * scale;
+  var delta = (post_velocity - pre_velocity - shared_accel_dt) * scale;
+  // Defense in depth: one substep's correction may not exceed its share of
+  // the coarse solver's own velocity range (vmax * scale). With both
+  // operands clamped above this is nearly redundant, but it bounds the
+  // applied delta even if a future layout change reintroduces raw reads.
+  if (vmax > 0.0) {
+    let delta_budget = vmax * scale;
+    let delta_speed2 = dot(delta, delta);
+    if (delta_speed2 > delta_budget * delta_budget) {
+      delta = delta * (delta_budget / sqrt(delta_speed2));
+    }
+  }
   fine_grid[fine_offset + 1u] = fine_grid[fine_offset + 1u] + delta.x;
   fine_grid[fine_offset + 2u] = fine_grid[fine_offset + 2u] + delta.y;
   fine_grid[fine_offset + 3u] = fine_grid[fine_offset + 3u] + delta.z;

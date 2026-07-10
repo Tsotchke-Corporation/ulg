@@ -40786,3 +40786,62 @@ Note for future forks: worktree vite servers ALSO silently lost the
 authority-host lane before this fix — any e2e run from a worktree that
 touched host-dependent paths (SS storage, pressure interface, spatial gas)
 was invalid. Unit suites were unaffected (no dev server involved).
+
+## Round 15 — surface-lane env reflections from the scene background image (task #4)
+
+The surface lane's specular env was a flat analytic vertical gradient. Now an
+active background image (scene.setBackgroundImage / bgimg picker) builds a
+256x128 latlong environment with a full mip chain (successive 2x box
+downsampling — the standard cheap prefilter for roughness-indexed lookups;
+exact GGX prefiltering is a recorded follow-up) and the WGSL env term samples
+it at the reflected ray with roughness-indexed LOD (textureNumLevels-based).
+The refraction miss-case (analytic fallback branch) samples the same map along
+the refracted ray (TIR falls back to the reflected ray). Gate is the existing
+1x1-dummy textureDimensions pattern at new @group(1) bindings 2/3; no image =
+byte-identical analytic path. The refraction dummy bind group is rebuilt when
+the env map loads/clears so OPAQUE draws get env reflections too (their scene
+copy stays dummy). Bridge-reuse guard extended (envSampler presence) so
+pre-change bridges rebuild against the 4-entry layout. Sphere-lane
+consistency: the background image also becomes the Three scene environment
+(equirect) and clearing restores the RoomEnvironment stand-in.
+
+Verified in-browser (http://5191, plan/background-1.jpg — an actual equirect
+plaza panorama): water blob reflects sky/buildings/pavement with clear
+structure vs the old two-tone; analytic path confirmed unchanged with no
+image. Renderer tests 94/0.
+
+## Round 15b — emission follows Stefan-Boltzmann above the ramp anchor (task #4 item 3)
+
+Diagnosis of the "heavily saturated orange" fireball: the emission scale
+min(1.9t^2+0.2, 2.6) flattened every temperature above ~2760K to a single
+radiance, so 5000K reaction crowns rendered the same orange as 2200K blobs and
+nothing could climb through ACES into white. Fix: above the ramp's saturation
+anchor (2200K, where the legacy quadratic reaches 2.1) radiance scales as
+2.1·(T/2200)^4 (capped at 60; ACES bounds output regardless). Below the anchor
+the calibrated quadratic is untouched, preserving sphere-lane parity in the
+molten-metal range and the iron-quench look. Verified: Cs+F fireball now shows
+white-hot cores punching through the orange cloud (/tmp/fork4-shots/
+csf-emission-before/after.png). Note: the sphere lane's own emissive
+(incandescentColor x 1.8) keeps its legacy scale — divergence only above
+~2760K where surfaces now correctly outshine; recorded as acceptable.
+
+## Round 15c — splash shard fragmentation: assessment (task #4 item 2, specced not implemented)
+
+The correct fragmentation criterion is RELATIVE velocity dispersion, not
+speed: a coherently falling drop (all particles at one velocity) must stay a
+single blob, so any per-particle absolute-speed sharpening is wrong by
+construction. The clean derived law: per render-field cell, accumulate
+density-weighted Sum(w·v) (vec3) and Sum(w·|v|^2) alongside the existing
+density splat (the kernel is already cell-centric, so this is single-pass);
+cell dispersion sigma_v^2 = E[|v|^2] - |E[v]|^2 identifies fragmentation
+zones (diverging droplets whose metaballs bridge non-physically); the iso
+correction subtracts the smear term proportional to sigma_v·dt_render
+(render cadence known JS-side, plumbed as a field param — both scales
+physical, no tunables). Cost: 4 velocity-accumulator lanes do NOT fit the
+8-float field row (lanes 5-7 = 3 free); implementation needs either a
+12-float row (memory x1.5) or folding the correction into lane 0 within the
+same cell loop (feasible: dispersion is complete before the cell writes its
+row — RECOMMENDED). Also requires velocity in the render rows (one pad lane
+for speed is insufficient — the vector is needed; three pads exist: exactly
+fits). Deferred to its own pass per the fits-cleanly gate; this note is the
+spec.

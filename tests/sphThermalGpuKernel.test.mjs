@@ -32,6 +32,8 @@ import {
   resolveThermalPhaseResponseFromTable,
   resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
+  SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4,
+  thermalEmissivityFromTable,
   runSphThermalStepCpu,
   runSphThermalStepWebGpu,
   runSphThermalStepWithOptionalWebGpu,
@@ -761,4 +763,96 @@ test('SPH thermal parity rejects state or thermo drift', () => {
   assert.ok(parity.maxStateAbs > 1);
   assert.ok(parity.maxThermoAbs > 0.5);
   assert.equal(parity.phaseChangeValidation, false);
+});
+
+
+// Radiative cooling invariant: an isolated hot particle in a large box must
+// follow the analytic Stefan-Boltzmann curve dT/dt = -eps*sigma*A*(T^4-Tamb^4)
+// / (m*du/dT). The reference integrates the same law with the lane's own
+// temperature map, so agreement verifies the kernel's radiation term (area,
+// emissivity, clamps) rather than a copied implementation.
+test('SPH thermal isolated hot particle cools along the Stefan-Boltzmann curve', () => {
+  const massKg = 0.001;
+  const startK = 1200;
+  const ambientK = 293;
+  const state = createSphState({
+    smoothingLengthM: 0.1,
+    dimension: 3,
+    particles: [{
+      id: 'ember',
+      material: 'fe',
+      x: [10, 10, 10],
+      v: [0, 0, 0],
+      massKg,
+      specificInternalEnergyJPerKg: specificInternalEnergyJPerKg(materialProperties.fe, startK)
+    }]
+  });
+  let packed = buildSphGpuParticleBuffers(state, { materialProperties });
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const materialId = packed.thermo[0];
+  const emissivity = thermalEmissivityFromTable(table, materialId);
+  assert.ok(emissivity > 0.02 && emissivity < 0.5, `iron emissivity ${emissivity} should be conductor-class`);
+  const restDensity = packed.thermo[3];
+  const radiusM = Math.cbrt((3 * massKg) / (4 * Math.PI * restDensity));
+  const areaM2 = 4 * Math.PI * radiusM * radiusM;
+  // ~2 K/s at 1200 K for this ember (eps 0.065, r 3.1 mm): integrate 5 s of
+  // sim time so the cooling is far above f32 state quantization.
+  const dtS = 5e-3;
+  const steps = 1000;
+  // Reference: forward-Euler of the analytic law on specific energy, using
+  // the same closure temperature map as the lane.
+  let uRef = packed.state[7];
+  for (let n = 0; n < steps; n += 1) {
+    const tRef = resolveThermalStateFromTable(table, materialId, uRef).temperatureK;
+    uRef += emissivity * SPH_THERMAL_STEFAN_BOLTZMANN_W_PER_M2_K4
+      * (ambientK ** 4 - tRef ** 4) * areaM2 * dtS / massKg;
+  }
+  const referenceEndK = resolveThermalStateFromTable(table, materialId, uRef).temperatureK;
+  for (let n = 0; n < steps; n += 1) {
+    const result = runSphThermalStepCpu({
+      sphParticleState: packed,
+      thermalMaterialTable: table,
+      wallTemperaturesK: {},
+      boxDimsM: [20, 20, 20],
+      dtS,
+      wallRate: 0,
+      ambientTemperatureK: ambientK
+    });
+    packed = { ...packed, state: result.state, thermo: result.thermo };
+  }
+  const laneEndK = packed.thermo[2];
+  assert.ok(laneEndK < startK - 5, `particle should cool measurably, got ${laneEndK}`);
+  assert.ok(laneEndK > ambientK, `cooling must not cross ambient, got ${laneEndK}`);
+  const coolingRef = startK - referenceEndK;
+  const coolingLane = startK - laneEndK;
+  assert.ok(
+    Math.abs(coolingLane - coolingRef) <= Math.max(2, 0.05 * coolingRef),
+    `lane cooling ${coolingLane.toFixed(2)}K vs analytic ${coolingRef.toFixed(2)}K`
+  );
+  // Overshoot guard: the crossing clamp computes the equalizing du from the
+  // LOCAL dT/du, so across a 900 K plunge the Debye cp curvature leaves a
+  // bounded residual past ambient rather than an exact stop; a second step
+  // clamps back. The guarantees under test: bounded near ambient (no runaway
+  // past the relaxation target) and convergence onto ambient.
+  let giantPacked = packed;
+  for (let n = 0; n < 2; n += 1) {
+    const giant = runSphThermalStepCpu({
+      sphParticleState: giantPacked,
+      thermalMaterialTable: table,
+      wallTemperaturesK: {},
+      boxDimsM: [20, 20, 20],
+      dtS: 1e6,
+      wallRate: 0,
+      ambientTemperatureK: ambientK
+    });
+    giantPacked = { ...giantPacked, state: giant.state, thermo: giant.thermo };
+    assert.ok(
+      Math.abs(giantPacked.thermo[2] - ambientK) < 60,
+      `giant step ${n} must land near ambient, got ${giantPacked.thermo[2]}`
+    );
+  }
+  assert.ok(
+    Math.abs(giantPacked.thermo[2] - ambientK) < 5,
+    `after two giant steps temperature must converge onto ambient, got ${giantPacked.thermo[2]}`
+  );
 });

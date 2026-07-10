@@ -1405,14 +1405,13 @@ fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
   out_particle_records[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
-fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f32) {
+fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f32, velocity: vec3<f32>) {
   let pos_mass = state_pos_mass(index);
-  let vel_u = state_vel_u(index);
   let source_row2 = thermo_row2(index);
   let resolved = resolve_thermal_rows(material_id, next_u, source_row2);
   let out_base = index * REACTION_PARTICLE_RECORD_VEC4S;
   out_particle_records[out_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
-  out_particle_records[out_base + 1u] = vec4<f32>(vel_u.x, vel_u.y, vel_u.z, next_u);
+  out_particle_records[out_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, next_u);
   out_particle_records[out_base + 2u] = resolved.row0;
   out_particle_records[out_base + 3u] = resolved.row1;
   out_particle_records[out_base + 4u] = resolved.row2;
@@ -1476,6 +1475,70 @@ fn product_term_for_visible_slot(reaction_index: u32, visible_slot: u32) -> Prod
     }
   }
   return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_visible_term_count(reaction_index: u32) -> u32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_count = u32(max(header1.x, 0.0));
+  let product_term_offset = u32(max(header0.w, 0.0));
+  var visible_count = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y < 0.5) {
+      visible_count = visible_count + 1u;
+    }
+  }
+  return visible_count;
+}
+
+fn product_term_for_gas_slot(reaction_index: u32, gas_slot: u32) -> ProductTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_count = u32(max(header1.x, 0.0));
+  let product_term_offset = u32(max(header0.w, 0.0));
+  // Clamp to the last gas term: a lone gas product placed from both freed
+  // parent slots receives each parent's own consumed-mass share, so the
+  // total placed mass still sums to the stoichiometric product mass.
+  var gas_count = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y >= 0.5) {
+      gas_count = gas_count + 1u;
+    }
+  }
+  if (gas_count == 0u) {
+    return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+  }
+  let target_slot = min(gas_slot, gas_count - 1u);
+  var gas_index = 0u;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term_index = product_term_offset + local;
+    let term0 = product_term_row0(term_index);
+    let term1 = product_term_row1(term_index);
+    if (term1.w == 1.0 && term1.y >= 0.5) {
+      if (gas_index == target_slot) {
+        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+      }
+      gas_index = gas_index + 1u;
+    }
+  }
+  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_term_for_parent_slot(reaction_index: u32, parent_slot: u32) -> ProductTerm {
+  // Condensed products claim freed parent slots first (they inherit the
+  // condensed-pressure role of the consumed reactant); the remaining freed
+  // slots place the GAS products as real eos=2 particles. Before this,
+  // gas products only ever existed as immovable product-event mass/pressure
+  // sources: the event kernel's visible-mass accounting now sees the placed
+  // particle and zeroes the event's unplaced share, so the event compacts
+  // away on the next pass -- mass is conserved between the two ledgers.
+  let visible_count = product_visible_term_count(reaction_index);
+  if (parent_slot < visible_count) {
+    return product_term_for_visible_slot(reaction_index, parent_slot);
+  }
+  return product_term_for_gas_slot(reaction_index, parent_slot - visible_count);
 }
 
 fn product_raw_mass_sum(reaction_index: u32, extent_mol: f32) -> f32 {
@@ -1944,7 +2007,7 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
         legacy_next_mass = max((pos_mass.w + partner_pos_mass.w) * term1.x, 0.0);
       }
     }
-    write_product_particle(particle_index, legacy_product_material_id, legacy_next_mass, legacy_next_u);
+    write_product_particle(particle_index, legacy_product_material_id, legacy_next_mass, legacy_next_u, vel_u.xyz);
     return;
   }
 
@@ -1977,6 +2040,18 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let product_u = ((self_consumed * vel_u.w) + (partner_consumed * partner_vel_u.w) - rx1.x * consumed_mass) / consumed_mass;
   let product_mass_scale = consumed_mass / raw_product_mass;
 
+  // Products are born at the consumed pair's mass-weighted COM velocity.
+  // Momentum accounting: unconsumed remainders keep their own velocities, so
+  // total momentum consumed*v_com + sum(remainder_i*v_i) equals the pair's
+  // pre-reaction momentum exactly. The old behavior (each product inherits
+  // one parent's full velocity) ejected hot products from the interface at
+  // the pre-contact approach speed, carrying the reaction enthalpy away and
+  // starving ignition (fork9 energy audit).
+  let source0_velocity = state_vel_u(source0_index).xyz;
+  let source1_velocity = state_vel_u(source1_index).xyz;
+  let product_com_velocity = (source0_velocity * source0_consumed + source1_velocity * source1_consumed)
+    / max(consumed_mass, 1.0e-20);
+
   var emits_product = false;
   var local_product_slot = 0u;
   var emitted_product_mass = 0.0;
@@ -1987,6 +2062,7 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     if (particle_index == source1_index && source1_free) {
       emits_product = true;
+      local_product_slot = select(0u, 1u, source0_free);
       emitted_product_mass = select(consumed_mass, source1_consumed, source0_free);
     }
   } else {
@@ -1999,15 +2075,18 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       local_product_slot = select(0u, 1u, source0_free);
     }
     if (emits_product && local_product_slot < product_term_count) {
-      let product_term = product_term_for_visible_slot(reaction_index, local_product_slot);
+      let product_term = product_term_for_parent_slot(reaction_index, local_product_slot);
       emitted_product_mass = extent_mol * product_term.coefficient * product_term.molar_mass * product_mass_scale;
     }
   }
 
   if (emits_product) {
-    let product_term = product_term_for_visible_slot(reaction_index, local_product_slot);
+    // Freed parent slots place condensed products first, then gas products
+    // (product_term_for_parent_slot): the H2/gas term that previously only
+    // existed as a frozen product event becomes a real eos=2 particle here.
+    let product_term = product_term_for_parent_slot(reaction_index, local_product_slot);
     if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
-      write_product_particle(particle_index, product_term.material_id, emitted_product_mass, product_u);
+      write_product_particle(particle_index, product_term.material_id, emitted_product_mass, product_u, product_com_velocity);
       return;
     }
   }
@@ -2071,6 +2150,120 @@ fn compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
     live_rows = live_rows + 1u;
   }
   compact_counts[0] = live_rows;
+}
+`;
+
+// Places unplaced product-event mass into spare (zero-mass) particle slots so
+// gas products become real mechanics citizens instead of immovable event
+// sources. Single-invocation deterministic loop (same policy as the event
+// compactor): event order and slot-claim order are stable across runs.
+// Conservation: the event carries the products' mass share, COM velocity,
+// specific internal energy (parent energies + enthalpy share), temperature,
+// rest density, and mechanics; placing it moves those amounts verbatim from
+// the event ledger onto one particle and zeroes the event, so the event
+// splat and the particle P2G never both see the same mass.
+export const sphReactionProductEventPlacementWgsl = `
+struct ProductEventPlacementParams {
+  particle_count: u32,
+  event_row_count: u32,
+  event_stride_vec4: u32,
+  state_stride_vec4: u32,
+  thermo_stride_vec4: u32,
+  mechanics_stride_vec4: u32,
+  min_placed_mass_kg: f32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> product_events: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> next_state: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> next_thermo: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> next_mechanics: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> params: ProductEventPlacementParams;
+
+@compute @workgroup_size(1)
+fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x != 0u) {
+    return;
+  }
+  let stride = max(params.event_stride_vec4, 8u);
+  var cursor = 0u;
+  for (var event = 0u; event < params.event_row_count; event = event + 1u) {
+    let base = event * stride;
+    let row3 = product_events[base + 3u];
+    let row4 = product_events[base + 4u];
+    let unplaced_mass_kg = row3.y;
+    let status = row4.z;
+    if (status != 1.0 || unplaced_mass_kg <= params.min_placed_mass_kg) {
+      continue;
+    }
+    // Claim the first spare slot at or after the cursor. Spare slots are
+    // zero-mass particles reserved at demo build; every kernel in the
+    // pipeline skips mass <= 0, so claiming one only ever adds matter.
+    var slot = params.particle_count;
+    for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
+      if (next_state[candidate * params.state_stride_vec4].w <= 0.0) {
+        slot = candidate;
+        break;
+      }
+    }
+    if (slot >= params.particle_count) {
+      // No spare capacity: the event stays live and keeps feeding the grid
+      // splat ledger exactly as before, so no mass is lost either way.
+      continue;
+    }
+    cursor = slot + 1u;
+    let row0 = product_events[base];
+    let row1 = product_events[base + 1u];
+    let row2 = product_events[base + 2u];
+    let row5 = product_events[base + 5u];
+    let row6 = product_events[base + 6u];
+    let row7 = product_events[base + 7u];
+    let material_id = row1.x;
+    let phase_id = row2.w;
+    let temperature_k = row4.x;
+    var rest_density = row4.y;
+    let product_u = row4.w;
+    let support_volume_m3 = row5.w;
+    let state_base = slot * params.state_stride_vec4;
+    next_state[state_base] = vec4<f32>(row0.x, row0.y, row0.z, unplaced_mass_kg);
+    next_state[state_base + 1u] = vec4<f32>(row5.x, row5.y, row5.z, product_u);
+    // Thermo rows: single-phase product at the event temperature. Phase
+    // fractions are the one-hot of the product term's target phase.
+    let thermo_base = slot * params.thermo_stride_vec4;
+    let solid_fraction = select(0.0, 1.0, phase_id > 0.5 && phase_id < 1.5);
+    let liquid_fraction = select(0.0, 1.0, phase_id >= 1.5 && phase_id < 2.5);
+    let gas_fraction = select(0.0, 1.0, phase_id >= 2.5 && phase_id < 3.5);
+    let plasma_fraction = select(0.0, 1.0, phase_id >= 3.5);
+    // Smoothing length / visual radius from the event's support volume
+    // (mass over product rest density), the same rest-volume radius the
+    // demo derives at build time.
+    var support_radius_m = 0.05;
+    if (support_volume_m3 > 0.0) {
+      support_radius_m = pow(support_volume_m3 * 0.238732414637843, 1.0 / 3.0);
+    }
+    next_thermo[thermo_base] = vec4<f32>(material_id, phase_id, temperature_k, rest_density);
+    next_thermo[thermo_base + 1u] = vec4<f32>(solid_fraction, liquid_fraction, gas_fraction, plasma_fraction);
+    next_thermo[thermo_base + 2u] = vec4<f32>(support_radius_m, 1.0, 1.0, support_radius_m);
+    // Mechanics: fresh rest state (F = I, J = 1) with the event's product
+    // mechanics -- mirrors write_reacted_mechanics in the reaction kernel.
+    var rest_volume = 0.0;
+    if (rest_density > 0.0) {
+      rest_volume = unplaced_mass_kg / rest_density;
+    }
+    let mechanics_base = slot * params.mechanics_stride_vec4;
+    next_mechanics[mechanics_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    next_mechanics[mechanics_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    next_mechanics[mechanics_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    next_mechanics[mechanics_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    next_mechanics[mechanics_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+    next_mechanics[mechanics_base + 5u] = vec4<f32>(row7.y, row7.z, row6.x, row6.y);
+    next_mechanics[mechanics_base + 6u] = vec4<f32>(row6.z, row6.w, row7.x, row7.z);
+    next_mechanics[mechanics_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // Consume the event: zero its unplaced share and status so the compactor
+    // and the grid splat drop it this substep.
+    product_events[base + 3u] = vec4<f32>(row3.x + unplaced_mass_kg, 0.0, row3.z, row3.w);
+    product_events[base + 4u] = vec4<f32>(row4.x, row4.y, 0.0, row4.w);
+  }
 }
 `;
 
@@ -2952,6 +3145,10 @@ fn product_phase_row2(phase_index: u32) -> vec4<f32> {
   return reaction_records[phase_base + phase_index * 3u + 2u];
 }
 
+fn reaction_row1(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u + 1u];
+}
+
 fn product_mechanics_for(material_id: f32, phase_id: f32) -> ProductMechanics {
   for (var phase_index = 0u; phase_index < params.product_phase_count; phase_index = phase_index + 1u) {
     let row0 = product_phase_row0(phase_index);
@@ -3105,6 +3302,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let partner_velocity = source_state[partner_index * 2u + 1u].xyz;
 	  let product_velocity = (source_velocity * source_consumed + partner_velocity * partner_consumed)
 	    / max(consumed_mass, 1.0e-20);
+	  // Specific internal energy of the products: consumed-mass-weighted parent
+	  // energies plus the reaction enthalpy share (rx1.x is J/kg of consumed
+	  // mass, negative for exothermic) -- identical to the apply kernel's
+	  // product_u, so a placed event particle carries the same energy the
+	  // in-slot product would have carried. Conservation: the enthalpy of the
+	  // consumed mass is split pro-rata between in-slot products and event mass.
+	  let source_u = source_state[particle_index * 2u + 1u].w;
+	  let partner_u = source_state[partner_index * 2u + 1u].w;
+	  let rx1 = reaction_row1(reaction_index);
+	  let product_u = ((source_consumed * source_u) + (partner_consumed * partner_u) - rx1.x * consumed_mass)
+	    / max(consumed_mass, 1.0e-20);
 	  let support_volume_m3 = select(
 	    0.0,
 	    unplaced_mass_kg / max(rest_density_kg_per_m3, 1.0e-20),
@@ -3115,7 +3323,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  product_events[out_base + 1u] = vec4<f32>(material_id, f32(product_term_index), f32(reaction_index), f32(particle_index));
 	  product_events[out_base + 2u] = vec4<f32>(f32(partner_index), row_moles, routing_id, phase_id);
 	  product_events[out_base + 3u] = vec4<f32>(visible_mass_kg, unplaced_mass_kg, coefficient, molar_mass);
-	  product_events[out_base + 4u] = vec4<f32>(temperature_k, rest_density_kg_per_m3, 1.0, 0.0);
+	  product_events[out_base + 4u] = vec4<f32>(temperature_k, rest_density_kg_per_m3, 1.0, product_u);
 	  product_events[out_base + 5u] = vec4<f32>(product_velocity.x, product_velocity.y, product_velocity.z, support_volume_m3);
 	  product_events[out_base + 6u] = vec4<f32>(
 	    product_mechanics.effective_bulk,
@@ -3671,8 +3879,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
   let render_row_base = particle_index * RENDER_ROW_VEC4_STRIDE;
+  // Spare product slots (zero mass) must never match a render surface or
+  // decode into a sphere instance: mask their material id to 0.
+  let render_material_id = select(thermo0.x, 0.0, pos_mass.w <= 0.0);
   render_rows[render_row_base] = pos_mass;
-  render_rows[render_row_base + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
+  render_rows[render_row_base + 1u] = vec4<f32>(render_material_id, thermo0.y, thermo0.z, thermo2.z);
   render_rows[render_row_base + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
   render_rows[render_row_base + 3u] = vec4<f32>(current_volume_m3, particle_radius_m, effective_volume_ratio_j, pressure_pa);
   // Tri-phase split (thermo row1 = solid/liquid/gas/plasma fractions): the

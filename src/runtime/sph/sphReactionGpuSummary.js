@@ -14,6 +14,7 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  sphReactionProductEventPlacementWgsl,
   sphReactionAtomResidualWgsl,
   sphReactionGasSpeciesSummaryWgsl,
   sphReactionProductEventWgsl,
@@ -789,6 +790,7 @@ export async function runSphReactionSummaryWebGpu({
   sourceThermoBuffer = null,
   nextStateBuffer = null,
   nextThermoBuffer = null,
+  nextMechanicsBuffer = null,
   reactionRecordBuffer = null,
   proposalBuffer = null,
   readProductEvents = false,
@@ -912,9 +914,11 @@ export async function runSphReactionSummaryWebGpu({
   });
   let deferLocalBufferCleanup = false;
   let localBuffersDestroyed = false;
+  let productEventPlacementParamsBuffer = null;
   const destroyLocalBuffers = () => {
     if (localBuffersDestroyed) return;
     localBuffersDestroyed = true;
+    productEventPlacementParamsBuffer?.destroy?.();
     if (!borrowedReactionRecordBuffer) recordsBuffer.destroy?.();
     if (!borrowedProposalBuffer) proposalsBuffer.destroy?.();
     partialsBuffer?.destroy?.();
@@ -1071,6 +1075,53 @@ export async function runSphReactionSummaryWebGpu({
         ]
       });
     }
+    let productEventPlacementPipeline = null;
+    let productEventPlacementBindGroup = null;
+    if (useProductEventBuffer && nextMechanicsBuffer) {
+      // Placement runs in the same submit right after the event kernel:
+      // unplaced product mass claims spare zero-mass particle slots and the
+      // consumed events are zeroed before compaction/merge or the grid splat
+      // ever see them, so ledger mass and particle mass never double-count.
+      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-product-event-placement',
+        label: 'ulg-sph-reaction-product-event-placement',
+        code: sphReactionProductEventPlacementWgsl,
+        entryPoint: 'place_product_events',
+        bindings: [
+          computeBufferBinding(0, 'storage'),
+          computeBufferBinding(1, 'storage'),
+          computeBufferBinding(2, 'storage'),
+          computeBufferBinding(3, 'storage'),
+          computeBufferBinding(4, 'uniform')
+        ]
+      });
+      const placementParamsBuffer = tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-sph-reaction-product-event-placement-params',
+        size: 32,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      }), device);
+      productEventPlacementParamsBuffer = placementParamsBuffer;
+      device.queue.writeBuffer(placementParamsBuffer, 0, new Uint32Array([
+        particleCount,
+        productEventCount,
+        SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
+        2,
+        3,
+        8
+      ]));
+      device.queue.writeBuffer(placementParamsBuffer, 24, new Float32Array([1.0e-9]));
+      productEventPlacementPipeline = pipeline;
+      productEventPlacementBindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: productEventBuffer } },
+          { binding: 1, resource: { buffer: nextStateBuffer } },
+          { binding: 2, resource: { buffer: nextThermoBuffer } },
+          { binding: 3, resource: { buffer: nextMechanicsBuffer } },
+          { binding: 4, resource: { buffer: placementParamsBuffer } }
+        ]
+      });
+    }
     if (shouldRunAtomResidual) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
         cacheKey: 'ulg-sph-reaction-atom-residual',
@@ -1158,6 +1209,13 @@ export async function runSphReactionSummaryWebGpu({
       productEventPass.setBindGroup(0, productEventBindGroup);
       productEventPass.dispatchWorkgroups(productEventWorkgroupCount);
       productEventPass.end();
+      if (productEventPlacementPipeline && productEventPlacementBindGroup) {
+        const placementPass = encoder.beginComputePass();
+        placementPass.setPipeline(productEventPlacementPipeline);
+        placementPass.setBindGroup(0, productEventPlacementBindGroup);
+        placementPass.dispatchWorkgroups(1);
+        placementPass.end();
+      }
       if (productEventReadBuffer) {
         encoder.copyBufferToBuffer(productEventBuffer, 0, productEventReadBuffer, 0, productEventByteLength);
       }

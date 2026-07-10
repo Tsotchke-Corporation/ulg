@@ -331,10 +331,19 @@ test('SPH reaction CPU reference consumes balanced product term rows for gas byp
   assert.equal(result.reactionLedger.visibleProductMassKgByMaterial.c2 ?? 0, 0);
 });
 
-test('SPH reaction WGSL routes gas products out of visible particle slots', () => {
+test('SPH reaction WGSL places gas products into freed parent slots after condensed products', () => {
+  // Contract updated 2026-07-10: condensed products still claim parent slots
+  // first (visible-slot routing), but gas products now become real eos=2
+  // particles in the remaining freed slots instead of evaporating into
+  // immovable product events (task #6 item 3). They still never displace a
+  // condensed product and never enter the condensed pressure solve.
   assert.match(sphReactionStepWgsl, /fn\s+product_term_for_visible_slot/);
   assert.match(sphReactionStepWgsl, /let\s+condensed\s*=\s*term1\.y\s*<\s*0\.5/);
-  assert.match(sphReactionStepWgsl, /product_term_for_visible_slot\(reaction_index,\s*local_product_slot\)/);
+  assert.match(sphReactionStepWgsl, /fn\s+product_term_for_gas_slot/);
+  assert.match(sphReactionStepWgsl, /fn\s+product_term_for_parent_slot/);
+  assert.match(sphReactionStepWgsl, /product_term_for_parent_slot\(reaction_index,\s*local_product_slot\)/);
+  // Products launch at the consumed pair's COM velocity (momentum-exact).
+  assert.match(sphReactionStepWgsl, /product_com_velocity/);
 });
 
 test('SPH reaction WGSL preserves visual particle radius while resolving product thermo rows', () => {

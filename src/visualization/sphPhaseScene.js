@@ -6563,7 +6563,11 @@ function normalizeResidentReadbackMode(value) {
 // padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
-const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 64;
+// 96 (from 64) after the extraction vertex-rows budget landed: vertex
+// allocation no longer scales with res³ (extension clamp), so the ceiling is
+// bound by field-buffer memory (96³·16B·4 surfaces ≈ 57MB) and field-kernel
+// cost, not by worst-case marching-cubes vertices.
+const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 96;
 
 export function estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
   resolution,

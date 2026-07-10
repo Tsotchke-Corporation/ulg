@@ -661,10 +661,11 @@ test('SPH native marching-cubes surface resolution budgets conservative vertex r
     estimateNativeMarchingCubesVertexRowsByteLengthForResolution(defaultResolution);
   // 256MB default budget (raised from 128MB, 2026-07-09): multi-surface
   // scenes budgeted to resolution 29-33 which read as octahedral droplets
-  // and let small volumes flicker below the isovalue. A single surface now
-  // reaches the 64 resolution cap; the allocation is conservative
-  // worst-case, actual MC output is far smaller.
-  assert.equal(defaultResolution, 64);
+  // and let small volumes flicker below the isovalue. With the global cap at
+  // 96 (extraction-enforced budgets, 2026-07-09) the legacy single-surface
+  // worst-case math itself binds at 66; the extraction path no longer uses
+  // this legacy math (vertexRowsBudgetEnforcedByExtraction).
+  assert.equal(defaultResolution, 66);
   assert.ok(defaultByteLength <= SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT);
 
   const twoSurfaceResolution = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(2);
@@ -5668,10 +5669,10 @@ test('extraction-enforced vertex budget uncaps field resolution and yields per-s
   const uncapped = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {
     vertexRowsBudgetEnforcedByExtraction: true
   });
-  assert.equal(uncapped, 64);
+  assert.equal(uncapped, 96);
   // Legacy math unchanged when the flag is absent.
   const legacy = nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(4, {});
-  assert.ok(legacy < 64, `legacy budget resolution should stay capped, got ${legacy}`);
+  assert.ok(legacy < 96, `legacy budget resolution should stay capped, got ${legacy}`);
   // Per-surface rows: 256MB / 4 surfaces / 64B rows (16-float surface vertex rows).
   const rows = nativeMarchingCubesVertexRowsBudgetPerSurface(4, {});
   assert.equal(rows, Math.floor(256 * 1024 * 1024 / 4 / 64));

@@ -40403,3 +40403,12 @@ fps unchanged (~54). Renderer tests 94/0 incl. new regression.
 Remaining in task #4: raise RESIDENT_RENDER_FIELD_MAX_RESOLUTION beyond 64
 (now safe — allocation no longer scales with res³), per-fragment emissive,
 refracted scene sampling, splash shard fragmentation, prefiltered env cubemap.
+
+## Round 14b — field resolution ceiling 64 -> 96
+
+With the extraction vertex budget enforced GPU-side, the resolution ceiling is
+bound by field memory (96³·16B·4 ≈ 57MB) and kernel cost, not worst-case
+vertices. Bumped RESIDENT_RENDER_FIELD_MAX_RESOLUTION 64 -> 96. In-browser
+F+h2o: visibly rounder gas lobes and smoother pool rim at unchanged fps
+(render ~60, resident ~477). Legacy single-surface budget math now binds at 66
+(test updated; extraction path doesn't use it). Renderer tests 94/0.

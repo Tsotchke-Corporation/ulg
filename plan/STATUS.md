@@ -1,6 +1,6 @@
 # Session status — 2026-07-10 (surface-lane + physics run)
 
-Branch `SS`, tip `b77a7af`. Full suite on tip: **993 pass / 0 fail**, all four
+Branch `SS`, tip `0b0520c`. Full suite on tip: **993 pass / 0 fail**, all four
 SS e2e gates green. Live server: https://<vpn-host>:5173 (main tree; port 5179+
 fork servers are gone).
 
@@ -16,11 +16,13 @@ fork servers are gone).
 9. Splash-shard velocity-dispersion law (spray → droplets, coherent drops
    bit-identical) — b77a7af
 
-**Remaining (cosmetic tier):** GGX-exact env prefiltering (mips are
-box-filtered → slightly soft reflections), env tint on the refraction hit
-case, sphere-lane emissive legacy scale above ~2760 K, mild top-face
-terracing from the metaball field. True sheet breakup is parked with the
-on-hold task #7 (finer SS level).
+**Task #4 CLOSED (0b0520c):** GGX-exact env prefiltering landed (linear-light
+importance sampling, 176 ms build, lobe-shape unit tests); refraction
+hit-case tinting proven unnecessary (screen copy is already env-lit by
+construction — documented so it stops reappearing); sphere-lane emissive now
+follows the same T^4 law as the surface lane. Only mild top-face terracing
+remains, parked with the on-hold task #7 (finer SS level), as is true
+sub-resolution sheet breakup.
 
 ## Physics landed this run
 - SS two-level explosion fix (CFL-consistent prolongation) — 3f5b2d9
@@ -38,3 +40,5 @@ on-hold task #7 (finer SS level).
 - Task #7 third SS grid level: ON HOLD per user (2026-07-10)
 - Cosmetic surface-lane leftovers above
 - Watch item: one-time canvas-click race on gate 6116 under CPU load
+
+10. Surface-lane closeout: GGX env prefilter + T^4 sphere emissive parity — 0b0520c

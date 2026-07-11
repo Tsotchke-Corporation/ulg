@@ -41399,3 +41399,22 @@ Validation/finalization pending:
   scenarios, or rendering.
 - Commit, upstream push, final ICC refresh, remote-head verification, and clean
   worktree verification remain to be recorded in the publication follow-up.
+
+Publication follow-up, 2026-07-10 20:44:24 AKDT:
+
+- Ran
+  `git add plan/solver-law-inventory.md plan/plan.md plan/log.md && git commit -m "Expand material and frontier solver inventory"`.
+  Commit `efa7de55aacc63ef1a382704aa63218019708dc7` contains the inventory,
+  plan, and narrative changes.
+- Ran `git push`; origin advanced from `214c6e3` to `efa7de5` on
+  `gpu-resident-physics-refactor`.
+- Verified with `git rev-parse HEAD` and
+  `git ls-remote --heads origin refs/heads/gpu-resident-physics-refactor` that
+  local and remote both pointed to
+  `efa7de55aacc63ef1a382704aa63218019708dc7`.
+- Ran `npm run icc:update`; it completed successfully with 405 indexed files,
+  2,964 memory chunks, and refreshed `.icc/ulg_status.json` plus
+  `.icc/ulg_arch_summary.md`.
+- This publication record is the only follow-up documentation change. It will
+  be committed and pushed, followed by one final ICC refresh and clean
+  local/remote verification.

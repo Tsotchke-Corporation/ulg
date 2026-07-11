@@ -3,7 +3,8 @@ import {
   particleRenderDescriptors,
   gasPressureSummary,
   phaseMassSummary,
-  surfaceEmissive
+  surfaceEmissive,
+  surfaceEmissiveTemperature
 } from './sphPhaseDemo.js';
 import { sphTotals } from './sph/sphConservation.js';
 import {
@@ -82,6 +83,7 @@ export function createSphPhaseViewState(driver) {
     particleRadiiM,
     materials,
     emissiveByMaterial: surfaceEmissive(demo),
+    emissiveTemperatureByMaterial: surfaceEmissiveTemperature(demo),
     materialProperties: demo.materialProperties,
     reactions: demo.reactions || [],
     reactionDiscovery: demo.reactionDiscovery || null,

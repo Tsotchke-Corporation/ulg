@@ -1576,6 +1576,29 @@ export function particleRenderDescriptors(demo, { gasPressure = null } = {}) {
  * weighted mean incandescent colour over the material's glowing particles, or null when none of
  * them are above the incandescence threshold (so a cold surface does not falsely glow).
  */
+// Luminance-weighted mean incandescent temperature per material — the CPU
+// counterpart of emissiveTemperatureByMaterialFromSphRenderRows, so the
+// sphere/CPU-mesh lanes can scale emissive intensity with the same
+// Stefan-Boltzmann law the surface WGSL uses above its ramp anchor.
+export function surfaceEmissiveTemperature(demo) {
+  const acc = {};
+  for (const p of demo.state.particles) {
+    const props = demo.materialProperties[p.material];
+    const eq = cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
+    const inc = incandescentColor(eq.temperatureK);
+    if (!inc.visible) continue;
+    const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
+    const a = acc[p.material] || (acc[p.material] = { t: 0, w: 0 });
+    a.t += eq.temperatureK * lum;
+    a.w += lum;
+  }
+  const out = {};
+  for (const [material, a] of Object.entries(acc)) {
+    out[material] = a.w > 0 ? a.t / a.w : null;
+  }
+  return out;
+}
+
 export function surfaceEmissive(demo) {
   const acc = {};
   for (const p of demo.state.particles) {

@@ -7599,6 +7599,7 @@ export async function mountSphPhaseDemoOverlay({
       particleRadiiM: viewState.particleRadiiM,
       materials: viewState.materials,
       emissiveByMaterial: viewState.emissiveByMaterial,
+      emissiveTemperatureByMaterial: viewState.emissiveTemperatureByMaterial ?? null,
       materialProperties: viewState.materialProperties,
       reactions: viewState.reactions,
       reactionContactRadiusM: viewState.reactionContactRadiusM,

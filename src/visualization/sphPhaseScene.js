@@ -7334,6 +7334,21 @@ export function resolveOpticalSurfaceVisibility({
   };
 }
 
+// Sphere/CPU-mesh lane counterpart of the surface WGSL blackbody_emission_rgb
+// intensity: 1.8 is the calibrated sphere anchor that matches the surface
+// quad ramp at its 2200 K saturation (quad_scale 2.1); above the anchor the
+// radiance follows Stefan-Boltzmann (T/2200)^4 relative growth with the same
+// relative ceiling (60/2.1). Without a temperature the legacy 1.8 applies, so
+// pre-change callers keep their exact behavior.
+export function sphereEmissiveIntensityForTemperature(temperatureK) {
+  const anchorK = 2200;
+  const base = 1.8;
+  const t = Number(temperatureK);
+  if (!Number.isFinite(t) || t <= anchorK) return base;
+  const rel = t / anchorK;
+  return Math.min(base * rel * rel * rel * rel, base * (60 / 2.1));
+}
+
 export function renderAlphaFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
   const opacity = clamp(Number.isFinite(optics.opacity) ? optics.opacity : 1, 0, 1);
   const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
@@ -8489,6 +8504,146 @@ function createThreeWebGpuSurfaceBufferMaterialProxy(material, {
     proxyReason: 'three-webgpu-external-buffer-basic-material-pipeline-proxy'
   });
 }
+
+// GGX importance-sampled prefilter for a latlong environment (split-sum
+// convention, Karis N=V=R). Pure and CPU-side: takes the base level's
+// display-encoded RGBA8 pixels, returns every mip level's pixels with mip L
+// prefiltered at roughness L/(mipLevelCount-1). Filtering happens in linear
+// light (decode 2.2 in, encode 1/2.2 out) to match env_latlong_sample's
+// post-sample decode. Exported for unit tests.
+export function buildGgxPrefilteredLatlongMips({
+  pixels,
+  width,
+  height,
+  mipLevelCount,
+  sampleCount = 64
+} = {}) {
+  const baseW = Math.max(1, Math.round(Number(width) || 0));
+  const baseH = Math.max(1, Math.round(Number(height) || 0));
+  const mips = Math.max(1, Math.round(Number(mipLevelCount) || 1));
+  const samples = Math.max(1, Math.round(Number(sampleCount) || 1));
+  // Linear-light base for bilinear taps.
+  const linear = new Float32Array(baseW * baseH * 3);
+  for (let i = 0; i < baseW * baseH; i += 1) {
+    linear[i * 3 + 0] = Math.pow((pixels[i * 4 + 0] || 0) / 255, 2.2);
+    linear[i * 3 + 1] = Math.pow((pixels[i * 4 + 1] || 0) / 255, 2.2);
+    linear[i * 3 + 2] = Math.pow((pixels[i * 4 + 2] || 0) / 255, 2.2);
+  }
+  const sampleBase = (u, v, out) => {
+    // Bilinear, wrap in u (azimuth), clamp in v (polar).
+    const x = u * baseW - 0.5;
+    const y = Math.min(Math.max(v * baseH - 0.5, 0), baseH - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const fx = x - x0;
+    const fy = y - y0;
+    const xa = ((x0 % baseW) + baseW) % baseW;
+    const xb = (xa + 1) % baseW;
+    const ya = Math.min(Math.max(y0, 0), baseH - 1);
+    const yb = Math.min(ya + 1, baseH - 1);
+    for (let c = 0; c < 3; c += 1) {
+      const a = linear[(ya * baseW + xa) * 3 + c] * (1 - fx) + linear[(ya * baseW + xb) * 3 + c] * fx;
+      const b = linear[(yb * baseW + xa) * 3 + c] * (1 - fx) + linear[(yb * baseW + xb) * 3 + c] * fx;
+      out[c] = a * (1 - fy) + b * fy;
+    }
+  };
+  const levels = [];
+  let levelW = baseW;
+  let levelH = baseH;
+  const tap = [0, 0, 0];
+  for (let level = 0; level < mips; level += 1) {
+    const out = new Uint8ClampedArray(levelW * levelH * 4);
+    if (level === 0) {
+      // Roughness 0: the base image unchanged.
+      for (let i = 0; i < levelW * levelH; i += 1) {
+        out[i * 4 + 0] = pixels[i * 4 + 0];
+        out[i * 4 + 1] = pixels[i * 4 + 1];
+        out[i * 4 + 2] = pixels[i * 4 + 2];
+        out[i * 4 + 3] = 255;
+      }
+    } else {
+      const roughness = level / Math.max(1, mips - 1);
+      const alpha = roughness * roughness;
+      // Tangent-space GGX half-vectors from the Hammersley set — identical for
+      // every texel at this roughness, so precompute once per level.
+      const dirs = new Float32Array(samples * 3);
+      for (let i = 0; i < samples; i += 1) {
+        const e1 = (i + 0.5) / samples;
+        // Radical inverse base 2.
+        let bits = i;
+        bits = ((bits << 16) | (bits >>> 16)) >>> 0;
+        bits = (((bits & 0x55555555) << 1) | ((bits & 0xaaaaaaaa) >>> 1)) >>> 0;
+        bits = (((bits & 0x33333333) << 2) | ((bits & 0xcccccccc) >>> 2)) >>> 0;
+        bits = (((bits & 0x0f0f0f0f) << 4) | ((bits & 0xf0f0f0f0) >>> 4)) >>> 0;
+        bits = (((bits & 0x00ff00ff) << 8) | ((bits & 0xff00ff00) >>> 8)) >>> 0;
+        const e2 = bits * 2.3283064365386963e-10;
+        const phi = 2 * Math.PI * e1;
+        const cosTheta = Math.sqrt((1 - e2) / (1 + (alpha * alpha - 1) * e2));
+        const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+        dirs[i * 3 + 0] = Math.cos(phi) * sinTheta;
+        dirs[i * 3 + 1] = Math.sin(phi) * sinTheta;
+        dirs[i * 3 + 2] = cosTheta;
+      }
+      for (let ty = 0; ty < levelH; ty += 1) {
+        const vPolar = ((ty + 0.5) / levelH) * Math.PI;
+        const ny = Math.cos(vPolar);
+        const rh = Math.sin(vPolar);
+        for (let tx = 0; tx < levelW; tx += 1) {
+          const azim = (((tx + 0.5) / levelW) - 0.5) * 2 * Math.PI;
+          // N = V = R for the split-sum prefilter.
+          const nx = Math.cos(azim) * rh;
+          const nz = Math.sin(azim) * rh;
+          // Orthonormal basis around N.
+          const upIsY = Math.abs(ny) < 0.999;
+          let t0x = upIsY ? 0 : 1;
+          let t0y = upIsY ? 1 : 0;
+          const t0z = 0;
+          let tx0 = t0y * nz - t0z * ny;
+          let tx1 = t0z * nx - t0x * nz;
+          let tx2 = t0x * ny - t0y * nx;
+          const tlen = Math.hypot(tx0, tx1, tx2) || 1;
+          tx0 /= tlen; tx1 /= tlen; tx2 /= tlen;
+          const bx = ny * tx2 - nz * tx1;
+          const by = nz * tx0 - nx * tx2;
+          const bz = nx * tx1 - ny * tx0;
+          let accR = 0;
+          let accG = 0;
+          let accB = 0;
+          let accW = 0;
+          for (let i = 0; i < samples; i += 1) {
+            const hx = dirs[i * 3 + 0] * tx0 + dirs[i * 3 + 1] * bx + dirs[i * 3 + 2] * nx;
+            const hy = dirs[i * 3 + 0] * tx1 + dirs[i * 3 + 1] * by + dirs[i * 3 + 2] * ny;
+            const hz = dirs[i * 3 + 0] * tx2 + dirs[i * 3 + 1] * bz + dirs[i * 3 + 2] * nz;
+            const ndoth = nx * hx + ny * hy + nz * hz;
+            const lx = 2 * ndoth * hx - nx;
+            const ly = 2 * ndoth * hy - ny;
+            const lz = 2 * ndoth * hz - nz;
+            const ndotl = nx * lx + ny * ly + nz * lz;
+            if (ndotl <= 0) continue;
+            const u = Math.atan2(lz, lx) * 0.15915494 + 0.5;
+            const v = Math.acos(Math.min(Math.max(ly, -1), 1)) * 0.31830989;
+            sampleBase(u, v, tap);
+            accR += tap[0] * ndotl;
+            accG += tap[1] * ndotl;
+            accB += tap[2] * ndotl;
+            accW += ndotl;
+          }
+          const w = accW > 0 ? 1 / accW : 0;
+          const o = (ty * levelW + tx) * 4;
+          out[o + 0] = Math.round(Math.pow(Math.min(Math.max(accR * w, 0), 1), 1 / 2.2) * 255);
+          out[o + 1] = Math.round(Math.pow(Math.min(Math.max(accG * w, 0), 1), 1 / 2.2) * 255);
+          out[o + 2] = Math.round(Math.pow(Math.min(Math.max(accB * w, 0), 1), 1 / 2.2) * 255);
+          out[o + 3] = 255;
+        }
+      }
+    }
+    levels.push({ width: levelW, height: levelH, pixels: out });
+    levelW = Math.max(1, levelW >> 1);
+    levelH = Math.max(1, levelH >> 1);
+  }
+  return levels;
+}
+
 
 export function stabilizeRenderRowSphereBridgeMaterial(material, {
   descriptor = null,
@@ -13101,6 +13256,7 @@ export function createSphPhaseScene(container, {
           particleBatches,
           fieldBatches,
           emissiveByMaterial: decoded.emissiveByMaterial,
+          emissiveTemperatureByMaterial: decoded.emissiveTemperatureByMaterial ?? null,
           materialProperties
         });
       }
@@ -14767,12 +14923,13 @@ export function createSphPhaseScene(container, {
   }
 
   // Prefiltered environment map from the scene background image: 256x128
-  // latlong with a full mip chain built by successive 2x box downsampling
-  // (the standard cheap prefilter for roughness-indexed specular lookups;
-  // exact GGX prefiltering is a recorded follow-up). The photo is treated as
-  // a latlong panorama so reflections carry its palette and large features.
-  // Rebuilds only when the background-image URL changes; clearing the image
-  // restores the 1x1 dummy and with it the analytic hemisphere fallback.
+  // latlong with a GGX importance-sampled mip chain (split-sum prefilter,
+  // Karis N=V=R), so roughness-indexed lookups return the correctly shaped
+  // specular lobe instead of a box blur. Filtering runs in linear light and
+  // re-encodes to the display gamma the sampling WGSL decodes. The photo is
+  // treated as a latlong panorama so reflections carry its palette and large
+  // features. Rebuilds only when the background-image URL changes; clearing
+  // the image restores the 1x1 dummy and the analytic hemisphere fallback.
   function rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge) {
     if (!bridge?.device || !bridge.refractionBindGroupLayout) return;
     bridge.refractionDummyBindGroup = bridge.device.createBindGroup({
@@ -14812,6 +14969,7 @@ export function createSphPhaseScene(container, {
         const baseWidth = 256;
         const baseHeight = 128;
         const mipLevelCount = 9; // 256 -> 1 in halvings; height clamps at 1
+        const envSampleCount = 64;
         const texture = bridge.device.createTexture({
           label: 'ulg-sph-resident-surface-draw-env-map',
           size: [baseWidth, baseHeight, 1],
@@ -14819,25 +14977,28 @@ export function createSphPhaseScene(container, {
           mipLevelCount,
           usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
         });
-        let levelWidth = baseWidth;
-        let levelHeight = baseHeight;
-        let source = image;
-        for (let level = 0; level < mipLevelCount; level += 1) {
-          const canvas2d = document.createElement('canvas');
-          canvas2d.width = levelWidth;
-          canvas2d.height = levelHeight;
-          const ctx = canvas2d.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(source, 0, 0, levelWidth, levelHeight);
-          const pixels = ctx.getImageData(0, 0, levelWidth, levelHeight);
+        const canvas2d = document.createElement('canvas');
+        canvas2d.width = baseWidth;
+        canvas2d.height = baseHeight;
+        const ctx = canvas2d.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(image, 0, 0, baseWidth, baseHeight);
+        const basePixels = ctx.getImageData(0, 0, baseWidth, baseHeight);
+        const prefilterStartMs = nowMs();
+        const levels = buildGgxPrefilteredLatlongMips({
+          pixels: basePixels.data,
+          width: baseWidth,
+          height: baseHeight,
+          mipLevelCount,
+          sampleCount: envSampleCount
+        });
+        const prefilterMs = Math.max(0, nowMs() - prefilterStartMs);
+        for (let level = 0; level < levels.length; level += 1) {
           bridge.device.queue.writeTexture(
             { texture, mipLevel: level },
-            pixels.data,
-            { bytesPerRow: levelWidth * 4, rowsPerImage: levelHeight },
-            [levelWidth, levelHeight, 1]
+            levels[level].pixels,
+            { bytesPerRow: levels[level].width * 4, rowsPerImage: levels[level].height },
+            [levels[level].width, levels[level].height, 1]
           );
-          source = canvas2d; // chain halvings so each mip box-filters the last
-          levelWidth = Math.max(1, levelWidth >> 1);
-          levelHeight = Math.max(1, levelHeight >> 1);
         }
         try { bridge.envMapTexture?.destroy?.(); } catch { /* replaced */ }
         bridge.envMapTexture = texture;
@@ -14849,7 +15010,10 @@ export function createSphPhaseScene(container, {
           url,
           width: baseWidth,
           height: baseHeight,
-          mipLevelCount
+          mipLevelCount,
+          prefilter: 'ggx-importance-split-sum',
+          prefilterSampleCount: envSampleCount,
+          prefilterMs
         });
       } catch (error) {
         markSphResidentRenderProgress('surface-env-map-build-failed', {
@@ -16562,7 +16726,10 @@ fn fs_main() -> @location(0) vec4<f32> {
           ?? null;
         if (emissive && material.emissive) {
           material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
-          material.emissiveIntensity = 1.8;
+          material.emissiveIntensity = sphereEmissiveIntensityForTemperature(
+            decoded?.emissiveTemperatureByMaterial?.[descriptor.material]
+              ?? decoded?.emissiveTemperatureByMaterial?.[descriptor.renderKey]
+          );
         }
         applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
         mesh.count = indices.length;
@@ -23041,6 +23208,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function applySurfaceBatches(batches, {
     emissiveByMaterial = null,
+    emissiveTemperatureByMaterial = null,
     materialProperties = null,
     renderSource = 'cpu-particles',
     renderRowsExecution = null
@@ -23107,7 +23275,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       const emissive = emissiveByMaterial?.[batch.material] ?? emissiveByMaterial?.[batch.renderKey] ?? null;
       if (emissive) {
         mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
-        mesh.material.emissiveIntensity = 1.8;
+        mesh.material.emissiveIntensity = sphereEmissiveIntensityForTemperature(
+          emissiveTemperatureByMaterial?.[batch.material] ?? emissiveTemperatureByMaterial?.[batch.renderKey]
+        );
       } else {
         mesh.material.emissive.setRGB(0, 0, 0);
         mesh.material.emissiveIntensity = 0;
@@ -23844,6 +24014,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     particleBatches = [],
     fieldBatches = [],
     emissiveByMaterial = null,
+    emissiveTemperatureByMaterial = null,
     materialProperties = null
   } = {}) {
     const surfaceTable = createRenderFieldSurfaceTableForBatches(fieldBatches);
@@ -23854,6 +24025,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fieldBatches,
       surfaceTable,
       emissiveByMaterial,
+      emissiveTemperatureByMaterial,
       materialCount: materialProperties ? Object.keys(materialProperties).length : 0,
       surfaceCount: fieldBatches.length,
       surfaceTableSurfaceCount: surfaceTable.surfaceCount,
@@ -23875,6 +24047,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     status = 'resident-render-surface-table-skipped',
     reason = null,
     emissiveByMaterial = null,
+    emissiveTemperatureByMaterial = null,
     materialProperties = null
   } = {}) {
     const surfaceTable = {
@@ -23895,6 +24068,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fieldBatches: [],
       surfaceTable,
       emissiveByMaterial,
+      emissiveTemperatureByMaterial,
       materialCount: materialProperties ? Object.keys(materialProperties).length : 0,
       surfaceCount: 0,
       surfaceTableSurfaceCount: 0,
@@ -23914,6 +24088,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function applySurfaceFields(surfaceFields, {
     emissiveByMaterial = null,
+    emissiveTemperatureByMaterial = null,
     materialProperties = null,
     renderSource = 'resident-gpu-render-field',
     renderRowsExecution = null,
@@ -23983,7 +24158,9 @@ fn fs_main() -> @location(0) vec4<f32> {
       const emissive = emissiveByMaterial?.[descriptor.material] ?? emissiveByMaterial?.[descriptor.renderKey] ?? null;
       if (emissive) {
         mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
-        mesh.material.emissiveIntensity = 1.8;
+        mesh.material.emissiveIntensity = sphereEmissiveIntensityForTemperature(
+          emissiveTemperatureByMaterial?.[descriptor.material] ?? emissiveTemperatureByMaterial?.[descriptor.renderKey]
+        );
       } else {
         mesh.material.emissive.setRGB(0, 0, 0);
         mesh.material.emissiveIntensity = 0;
@@ -24107,6 +24284,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     particleRadiiM = null,
     materials = null,
     emissiveByMaterial = null,
+    emissiveTemperatureByMaterial = null,
     materialProperties = null,
     reactions = null,
     reactionContactRadiusM = null,
@@ -24274,12 +24452,14 @@ fn fs_main() -> @location(0) vec4<f32> {
           particleBatches: residentSeedBatches,
           fieldBatches: residentFieldBatches,
           emissiveByMaterial,
+          emissiveTemperatureByMaterial,
           materialProperties
         })
         : captureResidentRenderSurfaceState({
           particleBatches: batches,
           fieldBatches: residentFieldBatches,
           emissiveByMaterial,
+          emissiveTemperatureByMaterial,
           materialProperties
         })
     ));
@@ -24354,6 +24534,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       applySurfaceBatches(cpuSurfaceBatches, {
         emissiveByMaterial,
+        emissiveTemperatureByMaterial,
         materialProperties,
         renderSource: 'cpu-particles'
       });
@@ -27186,6 +27367,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           particleBatches,
           fieldBatches,
           emissiveByMaterial: decoded.emissiveByMaterial,
+          emissiveTemperatureByMaterial: decoded.emissiveTemperatureByMaterial ?? null,
           materialProperties
         });
       }
@@ -27708,6 +27890,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             }]));
             applySurfaceFields(surfaceFields, {
               emissiveByMaterial: decoded.emissiveByMaterial,
+              emissiveTemperatureByMaterial: decoded.emissiveTemperatureByMaterial ?? null,
               materialProperties,
               renderSource: renderFieldSource,
               renderRowsExecution,
@@ -27776,6 +27959,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         if (cpuFallbackGeometryAvailable) {
           applySurfaceBatches(particleBatches, {
             emissiveByMaterial: decoded.emissiveByMaterial,
+            emissiveTemperatureByMaterial: decoded.emissiveTemperatureByMaterial ?? null,
             materialProperties,
             renderSource: renderFieldSource,
             renderRowsExecution

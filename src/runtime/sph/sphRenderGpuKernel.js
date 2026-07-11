@@ -284,6 +284,30 @@ function colorFor({ material, phase, temperatureK, materialProperties }) {
   return optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
 }
 
+// Luminance-weighted mean temperature of the incandescent particles per
+// material key — the sphere/CPU-mesh lanes are material-granular, so this is
+// the temperature their single emissive intensity should represent (the same
+// weighting the emissive COLOR average below uses).
+export function emissiveTemperatureByMaterialFromSphRenderRows(rows = []) {
+  const acc = {};
+  for (const row of rows || []) {
+    const incandescence = incandescentColor(row.temperatureK);
+    if (!incandescence.visible) continue;
+    const lum = 0.2126 * incandescence.srgb[0] + 0.7152 * incandescence.srgb[1] + 0.0722 * incandescence.srgb[2];
+    const keys = [row.material, row.renderKey].filter(Boolean);
+    for (const key of keys) {
+      const entry = acc[key] || (acc[key] = { t: 0, w: 0 });
+      entry.t += (Number(row.temperatureK) || 0) * lum;
+      entry.w += lum;
+    }
+  }
+  const out = {};
+  for (const [material, entry] of Object.entries(acc)) {
+    out[material] = entry.w > 0 ? entry.t / entry.w : null;
+  }
+  return out;
+}
+
 export function emissiveByMaterialFromSphRenderRows(rows = []) {
   const acc = {};
   for (const row of rows || []) {
@@ -399,6 +423,7 @@ export function decodeSphRenderRows(renderRows, {
     materials,
     rows,
     emissiveByMaterial: emissiveByMaterialFromSphRenderRows(rows),
+    emissiveTemperatureByMaterial: emissiveTemperatureByMaterialFromSphRenderRows(rows),
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,

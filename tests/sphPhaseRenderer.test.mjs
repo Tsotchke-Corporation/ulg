@@ -5677,3 +5677,73 @@ test('extraction-enforced vertex budget uncaps field resolution and yields per-s
   const rows = nativeMarchingCubesVertexRowsBudgetPerSurface(4, {});
   assert.equal(rows, Math.floor(256 * 1024 * 1024 / 4 / 64));
 });
+
+test('sphere-lane emissive intensity follows the surface Stefan-Boltzmann law above the anchor', async () => {
+  const { sphereEmissiveIntensityForTemperature } = await import('../src/visualization/sphPhaseScene.js');
+  // Legacy behavior preserved: no temperature or below-anchor keeps the calibrated 1.8.
+  assert.equal(sphereEmissiveIntensityForTemperature(undefined), 1.8);
+  assert.equal(sphereEmissiveIntensityForTemperature(1200), 1.8);
+  assert.equal(sphereEmissiveIntensityForTemperature(2200), 1.8);
+  // Continuous at the anchor, then (T/2200)^4 growth matching the surface WGSL
+  // (4a51364): 4400K = 2^4 = 16x the anchor intensity.
+  assert.ok(Math.abs(sphereEmissiveIntensityForTemperature(4400) - 1.8 * 16) < 1e-9);
+  // Same relative ceiling as the WGSL cap (60/2.1).
+  assert.ok(Math.abs(sphereEmissiveIntensityForTemperature(1e6) - 1.8 * (60 / 2.1)) < 1e-9);
+});
+
+test('emissive temperature by material is the luminance-weighted incandescent mean', async () => {
+  const { emissiveTemperatureByMaterialFromSphRenderRows } = await import('../src/runtime/sph/sphRenderGpuKernel.js');
+  const rows = [
+    { material: 'fe', renderKey: 'fe', temperatureK: 3000 },
+    { material: 'fe', renderKey: 'fe', temperatureK: 3000 },
+    { material: 'fe', renderKey: 'fe', temperatureK: 293 }, // below incandescence: excluded
+    { material: 'h2o', renderKey: 'h2o', temperatureK: 293 }
+  ];
+  const out = emissiveTemperatureByMaterialFromSphRenderRows(rows);
+  assert.ok(Math.abs(out.fe - 3000) < 1e-6);
+  assert.equal(out.h2o, undefined);
+});
+
+test('GGX latlong prefilter: identity base, constant invariance, monotone lobe spread', async () => {
+  const { buildGgxPrefilteredLatlongMips } = await import('../src/visualization/sphPhaseScene.js');
+  const w = 64;
+  const h = 32;
+  const mips = 7;
+
+  // Constant image: every mip stays that constant (within 8-bit rounding) —
+  // the prefilter must not invent or lose energy on a uniform environment.
+  const grey = new Uint8ClampedArray(w * h * 4).fill(128);
+  for (let i = 3; i < grey.length; i += 4) grey[i] = 255;
+  const greyLevels = buildGgxPrefilteredLatlongMips({ pixels: grey, width: w, height: h, mipLevelCount: mips, sampleCount: 32 });
+  assert.equal(greyLevels.length, mips);
+  for (const level of greyLevels) {
+    for (let i = 0; i < level.pixels.length; i += 4) {
+      assert.ok(Math.abs(level.pixels[i] - 128) <= 2, `constant image drifted: ${level.pixels[i]} at mip ${level.width}`);
+    }
+  }
+
+  // Point-light latlong: mip 0 is the untouched base; increasing roughness
+  // spreads the lobe (peak strictly decreases, lit-texel support grows).
+  const point = new Uint8ClampedArray(w * h * 4);
+  for (let i = 3; i < point.length; i += 4) point[i] = 255;
+  const cx = Math.floor(w / 2);
+  const cy = Math.floor(h / 2);
+  const o = (cy * w + cx) * 4;
+  point[o] = 255; point[o + 1] = 255; point[o + 2] = 255;
+  const levels = buildGgxPrefilteredLatlongMips({ pixels: point, width: w, height: h, mipLevelCount: mips, sampleCount: 64 });
+  assert.deepEqual(Array.from(levels[0].pixels), Array.from(point), 'mip 0 must be the base image unchanged');
+  // 8-bit point-source dilution makes lit-texel counts unreliable; the robust
+  // invariants are the peak: it must never grow with roughness and must fall
+  // substantially once the lobe is broad (energy spread over many texels).
+  const peaks = levels.map((level) => {
+    let peak = 0;
+    for (let i = 0; i < level.pixels.length; i += 4) {
+      if (level.pixels[i] > peak) peak = level.pixels[i];
+    }
+    return peak;
+  });
+  for (let l = 2; l <= 4; l += 1) {
+    assert.ok(peaks[l] <= peaks[l - 1] + 1, `peak must not grow with roughness (mip ${l}: ${peaks[l]} vs ${peaks[l - 1]})`);
+  }
+  assert.ok(peaks[4] < peaks[1] * 0.7, `broad lobe must dilute the point source (mip4 ${peaks[4]} vs mip1 ${peaks[1]})`);
+});

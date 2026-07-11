@@ -1,6 +1,7 @@
 # ULG Solver And Law Inventory
 
-Snapshot: 2026-07-10, branch `SS`, commit `c072c10`.
+Runtime source snapshot: 2026-07-10, baseline commit `c072c10`. Documentation
+is maintained on branch `gpu-resident-physics-refactor`.
 
 ## Reading Rules
 
@@ -79,6 +80,37 @@ solvers.
 | Gruneisen thermal expansion closure | CPU reduced solver | Thermal expansion and density as a function of temperature; this is not a complete shock Mie-Gruneisen EOS. | `src/runtime/material/gruneisenEos.js` |
 | Thermodynamic scenario preflight | CPU analysis solver | Energy/mass feasibility checks for the configured phase scenario. It does not advance the live simulation. | `src/runtime/thermoPreflight.js`, `src/runtime/material/thermodynamicPreflight.js` |
 | Optical closure derivation and lookup | CPU derivation plus WebGPU lookup | CPU derives spectral/PBR rows; WebGPU looks up packed rows. The lower-level optical derivation is not GPU-native. | `src/runtime/material/opticalClosure.js`, `src/runtime/material/opticalGpuBuffers.js` |
+
+## Material Property Determination Matrix
+
+This table separates a property **derivation** from a runtime law that merely
+consumes a supplied coefficient. In particular, conduction-electron density
+and Drude plasma frequency are optical inputs; neither is an electrical
+conductivity solver.
+
+| Property family | Current derivation/consumer | Status | Missing work |
+| --- | --- | --- | --- |
+| Composition, formula mass, and atom/charge counts | Periodic-table constants plus formula parsing and exact stoichiometric tallying in `formula.js` and `materialDerivation.js`. | CPU runtime | GPU-side accepted atom-vector consumption exists only in reduced reaction tables; formula parsing appropriately remains control-plane work. |
+| Electron configuration, valence, spin, orbitals, and ionization scale | Radial Kohn-Sham LDA/LSDA/KH and configuration rules in `radialKohnSham.js`. | CPU reduced/oracle | GPU-resident electronic solvers, spin-orbit/full Dirac treatment, and stronger correlation methods. |
+| Density, atomic volume, and packing | Atomic radial-density packing or jellium cold curves for elements; molecular/formula volume estimates and phase rows for compounds. | CPU reduced | Periodic solid structure, validated phase-specific density, and GPU-native derivation. |
+| Cohesive energy and cold curve | Uniform-electron-gas/jellium or radial packing; pair-potential/MD scans for parameterized systems. | CPU reduced/oracle | Periodic DFT, broad quantitative interatomic potentials, pressure-range validation, and GPU-native closure evaluation. |
+| Bulk/shear modulus, Lame parameters, and sound speed | Element closure reductions and phase mechanics-table construction; MLS-MPM consumes the resulting rows. | CPU-derived, WebGPU-consumed | Validated anisotropic/plastic constitutive properties and GPU-native property derivation. |
+| Heat capacity, internal energy, Debye temperature, and vibrations | Debye/statistical-mechanics laws, phase enthalpy tables, molecular vibrational analysis, and reduced MD estimators. | CPU reduced, WebGPU table-consumed | General phonon/quasiharmonic free-energy solver and GPU-native graph construction. |
+| Melting, boiling, latent heat, and phase fractions | Lindemann, Richards, Trouton, Clausius-Clapeyron, piecewise enthalpy ladders, and lever-rule inversion. | CPU reduced, WebGPU table-consumed | General Gibbs minimization, nucleation, nonequilibrium phase kinetics, and validated high-pressure phase diagrams. |
+| EOS and thermal expansion | Jellium cold curve, Gruneisen expansion, Tait/Cole condensed EOS, and local ideal-gas rows. | Mixed reduced runtime | Stiff/shock and mixture EOS, GPU-native gas-cell construction, pressure-work coupling, and broader validation. |
+| Viscosity and momentum transport | MLS-MPM consumes closure-supplied phase viscosity and adds a resolution-dependent artificial-viscosity term; CPU SPH has Monaghan artificial viscosity. | Runtime constitutive law, incomplete property derivation | A general material/phase viscosity resolver, temperature dependence, and GPU transport-closure kernels. |
+| Thermal conductivity and heat diffusion | The thermal kernel performs conservative pair conduction using configured global/pair rates and fixed-temperature wall exchange. | Reduced runtime law; **no general material-property solver** | Derive validated phase- and temperature-dependent thermal conductivity/diffusivity, mix it at interfaces, and model finite-capacity conductive solids/walls. |
+| Electrical conductivity, resistivity, and charge transport | Element closures derive conduction-electron density and plasma frequency for Drude optics only. | **Missing as a transport/property solver** | Scattering/relaxation-time or stronger conductivity closure, resistivity versus phase/temperature, carrier transport, charge conservation, and coupling to Maxwell/MHD/PIC. |
+| Diffusion and species transport | The MD property estimator can infer a diffusion coefficient from sampled trajectories; live continuum chemistry has no general species-diffusion solve. | CPU estimator; live solver missing | Resident multicomponent mass diffusion, mixing, electrochemical transport, and reaction-diffusion coupling. |
+| Surface tension and interfacial energy | A supplied `surfaceTensionNPerM` coefficient can be packed into mechanics rows. | Coefficient transport only; force solver missing | Derived phase/state-dependent interfacial properties plus an admitted curvature/free-energy force law. |
+| Optical dielectric response, color, IOR, absorption, scattering, and emissivity | Drude/Drude-Lorentz, interband oscillators, Beer-Lambert, molecular bands, Rayleigh/droplet scattering, CIE conversion, and gray-emissivity derivation. | CPU-derived, WebGPU lookup/thermal consumer | GPU-native spectral derivation, broader band/structure fidelity, microstructure closure, and scientific validation. |
+| Reaction products, energetics, and activation | Formula balancing, candidate discovery, reduced electronic/product energies, contact gating, and GPU extent/product conversion. | Mixed reduced runtime | Validated barriers/rates, reversible networks, competing reactions, electrochemistry, catalysis, and body-aware surface chemistry. |
+| Nuclear and radiation material properties | Thermal blackbody/emissive closures exist; the resolver manifest reserves isotope and nuclear/radiation row families. | Thermal emission only; nuclear properties missing | Isotope inventory, half-lives, cross sections/channels, daughter products, stopping/deposition data, and validation provenance. |
+
+`materialPropertyBank.js` validates and packs supplied records; it is not an
+independent property derivation solver. Likewise, a coefficient present in a
+mechanics or thermal row does not prove that ULG can derive that coefficient
+for an arbitrary material.
 
 ### Continuum And Multiphysics Solvers
 
@@ -388,6 +420,30 @@ do not satisfy any of these coherent-body slices.
 MoonLab and Eshkol currently contribute readiness probes, reference artifacts,
 and closure/handler contracts. Their staged magnetar MHD, PIC, radiation, and
 relativistic records are not local ULG implementations of those solvers.
+
+## Future Fusion, Space, And Supergalactic Solver Roadmap
+
+The plans do cover these scales, but at different levels of specificity. This
+matrix prevents a scale aspiration, external artifact, or buffer reservation
+from being counted as a working ULG solver.
+
+| Solver/law family | Current ULG status | Planned authority and scope |
+| --- | --- | --- |
+| Radioactive decay and isotope evolution | Missing; only a resolver-family contract exists. | Isotope inventories, decay channels/half-lives, stochastic or rate-equation kernels, daughter ledgers, and deposited-energy coupling. |
+| Fission, fusion, and activation | Missing; no executable fusion/fission state evolution or reaction channel solver exists. | Validated channel/closure records, reactant/product inventories, neutron/gamma/charged-particle outputs, energy deposition, and explicit validation blockers. This is nuclear fusion, distinct from software/kernel fusion. |
+| Radiation transport and Cherenkov emission | Thermal graybody exchange is implemented; transported radiation and Cherenkov are missing. | Transport/deposition grids, ionization/radiolysis coupling, and Cherenkov source rows derived from particle speed, medium IOR, and spectrum. |
+| Electromagnetism and plasma | Missing; a `plasma` phase label and Schroeder far-field scalar proxy are not plasma dynamics. | Maxwell field evolution, charge/current transport, fluid MHD, kinetic PIC, and admitted coupling to material, chemistry, and thermal state. |
+| General self-gravity | Constant local gravity is active; Schroeder far-aggregate gravity is partial and admission-gated. | Long-range Newtonian N-body/Poisson or aggregate gravity with conservation, error control, and chart-aware coupling. |
+| Orbital and planetary dynamics | Missing as an authoritative solver; SOL-6 is a detailed plan. | Law-specific orbital root integration, spin/multipoles, body-fixed local charts, rebasing, and conservative exchange with refined surface/ocean/atmosphere lanes. |
+| Relativistic orbital/gravity and GRMHD | Missing. Atomic scalar-relativistic KH is unrelated to spacetime dynamics. | Relativistic law nodes, orbital/field validation domains, and GR/GRMHD coupling where the astrophysical problem requires it. |
+| Stellar and magnetar physics | No local ULG solver; Eshkol/MoonLab records are external readiness/reference artifacts. | Supervised closure/response services feeding admitted ULG law nodes for MHD/PIC/radiation/relativistic regimes without hidden state mutation. |
+| Galactic and supergalactic evolution | **Architectural scale target only.** The Schroeder plan requires atomic-to-supergalactic chart/scale representation, but does not yet specify or implement a validated cosmological evolution solver. | First close sparse multilevel state, chart rebasing, long-range gravity, and distributed authority. A future concrete plan must still define any expansion, large-scale-structure, boundary/initial-condition, and validation laws before this can be called a solver. |
+
+Primary plans are `plan/todo/webgpu-material-property-resolvers-plan.md` for
+nuclear/radiation rows and transport, `plan/todo/overarching-completion-plan.md`
+for frontier-law ordering, `plan/todo/sol-critic.md` for planetary/orbital
+bodies, and `plan/todo/SS/schroeder-tree-and-algorithm-plan.md` for the
+atomic-to-supergalactic representation target.
 
 ## Non-Solver Compute Paths
 

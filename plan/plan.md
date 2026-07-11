@@ -20,8 +20,17 @@ Branch goals: `plan/todo/gpu-resident-physics-refactor/README.md`.
   stabilization policies and metadata-only law graph nodes.
 - [x] Publish a deduplicated list of planned/missing solvers and laws without
   counting render, scheduler, cache, or external service contracts as physics.
+- [x] Add a property-by-property determination matrix that distinguishes
+  optical conduction-electron inputs from thermal/electrical conductivity,
+  viscosity, diffusion, surface-tension, and nuclear-property solvers.
+- [x] Classify fusion, radiation, plasma, gravity, orbital/planetary,
+  relativistic, stellar, galactic, and supergalactic work as implemented,
+  partial, planned, or architectural-only without overstating external
+  Eshkol/MoonLab artifacts.
 
-Authoritative snapshot: `plan/solver-law-inventory.md` at commit `c072c10`.
+Authoritative inventory: `plan/solver-law-inventory.md`; runtime evidence is
+based on source commit `c072c10` and later documentation clarifies the current
+property/frontier scope on `gpu-resident-physics-refactor`.
 
 ## Current Audit Target - 2026-07-10 Post-Fable Scenario Evidence
 

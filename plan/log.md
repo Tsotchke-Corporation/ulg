@@ -41321,3 +41321,81 @@ Finalization:
 - No runtime tests or visual matrix were run because this prompt changes only
   branch/routing documentation; all executable code is the already validated
   `33c3075` base.
+
+## 2026-07-10 20:38:56 AKDT - Clarify material-property and frontier solver coverage
+
+Prompt: "does your new document also include the solvers and laws used for
+determining material properties like optics and conductivity and what not?
+does it also include planned future solvers around fusion and space physics and
+supergalactic physics?"
+
+Assessment and decisions:
+
+- Re-read `plan/solver-law-inventory.md`, the material resolver manifest,
+  element/optical closures, thermal and mechanics consumers, the WebGPU
+  material resolver plan, the overarching completion plan, SOL-6, and the
+  Schroeder scale-independence contract.
+- Confirmed that optical, thermodynamic, phase, and mechanical property
+  derivations were present in the inventory, but conductivity status was
+  ambiguous. `conductionElectronDensityPerM3` and the derived Drude plasma
+  frequency are optical inputs, not electrical conductivity or charge
+  transport.
+- Confirmed that the resident thermal path implements reduced conservative
+  pair conduction, but does not derive general material-, phase-, and
+  temperature-dependent thermal conductivity. Viscosity coefficients are
+  consumed by mechanics with an artificial-viscosity addition, but general
+  viscosity/transport property derivation is also unfinished.
+- Confirmed that decay/fission/fusion/radiation, Maxwell/MHD/PIC, self-gravity,
+  relativistic, and astrophysical families are planned but not implemented.
+  SOL-6 specifies planetary/orbital roots and charts. The Schroeder plan names
+  atomic-to-supergalactic scale representation, but no concrete cosmological
+  evolution solver is implemented or fully specified.
+- Added a material-property determination matrix and a fusion-to-
+  supergalactic roadmap to `plan/solver-law-inventory.md`. The tables separate
+  derivation from coefficient consumption and executable solvers from planned
+  contracts, external artifacts, and architectural scale targets.
+- Updated `plan/plan.md` to make the expanded inventory an explicit completed
+  documentation objective. No README change is needed because it already
+  links the inventory.
+
+Files touched:
+
+- `plan/solver-law-inventory.md`
+- `plan/plan.md`
+- `plan/log.md`
+
+Commands run during assessment:
+
+- `sed` reads of `plan/solver-law-inventory.md`, `plan/plan.md`, and the tail
+  of `plan/log.md`.
+- `rg` searches for conductivity, viscosity, transport, fusion, fission,
+  decay, nuclear, MHD, PIC, Maxwell, gravity, orbital, planetary,
+  supergalactic, and cosmological work across `src/` and `plan/todo/`.
+- `sed` reads of `src/runtime/material/elementClosures.js`,
+  `src/runtime/material/materialResolverManifest.js`,
+  `plan/todo/webgpu-material-property-resolvers-plan.md`,
+  `plan/todo/overarching-completion-plan.md`,
+  `plan/todo/SS/schroeder-tree-and-algorithm-plan.md`, and SOL-6 in
+  `plan/todo/sol-critic.md`.
+- ICC status check found the index at `33c3075` and current branch at
+  `214c6e3`, so the index is stale and must be refreshed after the coherent
+  documentation commit.
+
+Validation/finalization pending:
+
+- Ran a focused Node live-import audit over element, optical, material-resolver,
+  thermal, mechanics-material, and MD property modules. All seven expected
+  exports were functions; the thermal default pair-conduction rate was `1500`;
+  mechanical properties reported
+  `mixed-webgpu-runtime-cpu-property-derived`; optics reported
+  `cpu-derived-gpu-lookup-consumed`; and radiation/nuclear reported
+  `cpu-emission-only-nuclear-planned`.
+- The same audit asserted eight required inventory headings/rows covering both
+  conductivities, fusion, planetary/orbital dynamics, and the explicitly
+  architectural-only supergalactic target. Result: PASS.
+- Ran `git diff --check`: PASS.
+- No unit, browser, performance, or visual-sequence test was run because this
+  prompt changes documentation only and does not alter runtime source, WGSL,
+  scenarios, or rendering.
+- Commit, upstream push, final ICC refresh, remote-head verification, and clean
+  worktree verification remain to be recorded in the publication follow-up.

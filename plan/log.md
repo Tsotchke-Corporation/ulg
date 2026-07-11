@@ -41303,3 +41303,21 @@ Validation/push status at this checkpoint:
   changed, so no unit or visual test is required for this checkpoint.
 - `git diff --check`, local commit, upstream push, remote-head verification,
   and final ICC refresh remain to be run and recorded below.
+
+Finalization:
+
+- Ran `git diff --check`: PASS.
+- Committed the branch setup with
+  `git commit -m "Define GPU-resident physics refactor branch"`; commit
+  `9428ab4ab8e20719b662659a104d609f9798d5f0` contains the four plan/routing
+  files above.
+- Ran `git push -u origin gpu-resident-physics-refactor`. The push process
+  completed and configured upstream tracking.
+- Verified with `git branch -vv` that the local branch tracks
+  `origin/gpu-resident-physics-refactor` with no ahead/behind marker.
+- Verified with
+  `git ls-remote --heads origin refs/heads/gpu-resident-physics-refactor` that
+  origin points to `9428ab4ab8e20719b662659a104d609f9798d5f0`.
+- No runtime tests or visual matrix were run because this prompt changes only
+  branch/routing documentation; all executable code is the already validated
+  `33c3075` base.

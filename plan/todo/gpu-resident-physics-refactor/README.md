@@ -87,5 +87,6 @@ authoritative mutations.
 
 ## Initial Status
 
-Planning/branch setup only. No runtime refactor has been started by creation of
-this branch.
+Branch setup was committed as `9428ab4` and published to
+`origin/gpu-resident-physics-refactor`. No runtime refactor has been started by
+creation of this branch.

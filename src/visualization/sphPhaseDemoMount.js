@@ -56,6 +56,10 @@ import {
   createSphLocalCachePersistence
 } from '../runtime/sph/sphLocalClosureCache.js';
 import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
+import {
+  SPH_PHASE_SCENARIO_PRESETS,
+  sphPhaseScenarioPresetById
+} from '../runtime/sphPhaseScenarioPresets.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
 import { deriveCompoundClosure } from '../runtime/material/compoundClosure.js';
 import { deriveElementProperties } from '../runtime/material/elementClosures.js';
@@ -160,6 +164,7 @@ export const SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA =
 export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sph',
   'sphPhase',
+  'scenario',
   'wxmin',
   'wxmax',
   'wymin',
@@ -1586,6 +1591,8 @@ function buildOverlayShell() {
         <button id="sph-reset" type="button">Reset</button>
         <button id="sph-clear-cache" type="button">Clear Cache</button>
       </div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">scenario preset - auto-applies</div>
+      <div id="sph-scenario-preset" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">mechanics integrator — auto-applies</div>
       <div id="sph-mechanics-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">physical law groups — auto-applies</div>
@@ -1793,6 +1800,22 @@ export async function mountSphPhaseDemoOverlay({
   }
   mechanicsModeEl.appendChild(mechanicsModeSelect);
 
+  const scenarioPresetEl = overlay.querySelector('#sph-scenario-preset');
+  const scenarioPresetSelect = document.createElement('select');
+  scenarioPresetSelect.title = 'Choose a standard physics scenario';
+  scenarioPresetSelect.setAttribute('aria-label', 'Choose scenario preset');
+  const customScenarioOption = document.createElement('option');
+  customScenarioOption.value = 'custom';
+  customScenarioOption.textContent = 'Custom controls';
+  scenarioPresetSelect.appendChild(customScenarioOption);
+  for (const entry of SPH_PHASE_SCENARIO_PRESETS) {
+    const option = document.createElement('option');
+    option.value = entry.id;
+    option.textContent = entry.label;
+    scenarioPresetSelect.appendChild(option);
+  }
+  scenarioPresetEl.appendChild(scenarioPresetSelect);
+
   const wallsEl = overlay.querySelector('#sph-walls');
   const lawsEl = overlay.querySelector('#sph-laws');
   const lawInputs = {};
@@ -1979,6 +2002,7 @@ export async function mountSphPhaseDemoOverlay({
   // URL state: every control is encoded in the location hash so a refresh restores the full setup.
   // Query params are also accepted for direct links, then normalized into the hash on first sync.
   const urlControls = {
+    scenario: scenarioPresetSelect,
     wxmin: wallInputs.xMin, wxmax: wallInputs.xMax, wymin: wallInputs.yMin, wymax: wallInputs.yMax, wzmin: wallInputs.zMin, wzmax: wallInputs.zMax,
     drop: elementSelects.drop, base: elementSelects.base,
     dropt: tempInputs.drop, baset: tempInputs.base,
@@ -2018,9 +2042,26 @@ export async function mountSphPhaseDemoOverlay({
   function applyUrlToControls() {
     const query = new URLSearchParams(window.location.search);
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const requestedPreset = sphPhaseScenarioPresetById(hash.get('scenario') ?? query.get('scenario'));
+    if (requestedPreset) {
+      scenarioPresetSelect.value = requestedPreset.id;
+      for (const [key, value] of Object.entries(requestedPreset.controls)) {
+        const el = urlControls[key];
+        if (el) applyUrlValueToControl(key, el, value);
+      }
+    }
     for (const [key, el] of Object.entries(urlControls)) {
       const v = hash.get(key) ?? query.get(key);
       if (v != null && v !== '') applyUrlValueToControl(key, el, v);
+    }
+    if (requestedPreset) {
+      const presetDiffers = Object.entries(requestedPreset.controls).some(([key, expected]) => {
+        const explicitValue = hash.get(key) ?? query.get(key);
+        const control = urlControls[key];
+        if (explicitValue == null || explicitValue === '' || !control) return false;
+        return urlValueForControl(control) !== String(expected);
+      });
+      if (presetDiffers) scenarioPresetSelect.value = 'custom';
     }
   }
   const initialQuery = new URLSearchParams(window.location.search);
@@ -7546,7 +7587,20 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   for (const [key, el] of Object.entries(urlControls)) {
-    if (key === 'blob') {
+    if (key === 'scenario') {
+      el.addEventListener('change', () => {
+        const entry = sphPhaseScenarioPresetById(el.value);
+        if (!entry) {
+          syncUrlFromControls();
+          return;
+        }
+        for (const [controlKey, value] of Object.entries(entry.controls)) {
+          const control = urlControls[controlKey];
+          if (control) applyUrlValueToControl(controlKey, control, value);
+        }
+        scheduleDemoRebuild();
+      });
+    } else if (key === 'blob') {
       el.addEventListener('change', syncUrlFromControls);
     } else if (key === 'bg') {
       el.addEventListener('change', () => applyBackgroundColorFromControl('background-color-control-change'));
@@ -7554,7 +7608,10 @@ export async function mountSphPhaseDemoOverlay({
       // Background image changes are render-only; the change listener added
       // at control creation already applies + syncs the URL. No demo rebuild.
     } else {
-      el.addEventListener('change', scheduleDemoRebuild);
+      el.addEventListener('change', () => {
+        scenarioPresetSelect.value = 'custom';
+        scheduleDemoRebuild();
+      });
     }
   }
 

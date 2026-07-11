@@ -650,6 +650,11 @@ test('native WebGPU browser probe analyzes captured frames without artifact outp
     /residentNoReadbackRenderSourceEvidenceAvailable[\s\S]*?residentRenderSourceTimeAdvanced/,
     'native no-full surface probes should not require CPU motion diagnostics when render-source evidence is current'
   );
+  assert.match(
+    probeSource,
+    /nativeSurfaceCaptureUiSuppressed[\s\S]*?#sph-phase-overlay #sph-panel[\s\S]*?#sph-phase-overlay #sph-warning-bar[\s\S]*?visibility:hidden!important/,
+    'native surface captures must suppress overlaid controls so UI pixels cannot satisfy surface validation'
+  );
 });
 
 test('direct resident plan-only probes use active-grid prediction as no-readback motion evidence', () => {
@@ -711,6 +716,59 @@ test('native WebGPU browser-frame validation publishes back into scene state', (
     probeSource,
     /lastMetric\.renderState = \{[\s\S]*?publishResult\.renderStatePatch/,
     'probe should patch final metric state after browser-frame validation publishes'
+  );
+  assert.match(
+    probeSource,
+    /Math\.max\(maxR - minR, maxG - minG, maxB - minB\)/,
+    'uniform colored canvases must not pass by comparing RGB components within one pixel'
+  );
+  assert.match(
+    probeSource,
+    /visibleCanvases\.find\(\(entry\) => entry\.sameAsNativeConsumerCanvas\)[\s\S]*?sameAsRenderBridgeCanvas/,
+    'native validation should prefer the actual consumer or render-bridge canvas over overlay order'
+  );
+});
+
+test('standard material matrix pins production native WebGPU visual evidence', () => {
+  const matrixSource = readRepoFile('scripts/sph-visual-sanity-matrix.mjs');
+
+  assert.match(matrixSource, /renderer: 'native-webgpu'/);
+  assert.match(matrixSource, /renderOwnership: 'main-thread-renderer'/);
+  assert.match(matrixSource, /surfaceDraw: 'native-webgpu-surface-consumer'/);
+  assert.match(matrixSource, /params\.set\('renderer', 'native-webgpu'\)/);
+  assert.match(matrixSource, /params\.set\('renderOwnership', 'main-thread-renderer'\)/);
+  assert.match(matrixSource, /params\.set\('surfaceDraw', 'native-webgpu-surface-consumer'\)/);
+  assert.match(matrixSource, /ULG_PROBE_VIEWPORT_WIDTH[\s\S]*?'1280'/);
+  assert.match(matrixSource, /ULG_PROBE_VIEWPORT_HEIGHT[\s\S]*?'800'/);
+  assert.match(
+    matrixSource,
+    /scenario\.visualRendererMode === 'native-webgpu-surface-consumer'[\s\S]*?ULG_PROBE_READBACK_MODE = 'no-full-readback'[\s\S]*?ULG_PROBE_RENDER_READBACK_MODE = 'no-full-readback'[\s\S]*?ULG_PROBE_RENDER_ROWS_READBACK_MODE = 'no-full-readback'/,
+    'native standard scenarios must retain render-field buffers without full particle readback'
+  );
+  assert.match(
+    matrixSource,
+    /effectiveRendererModes\.some\(\(mode\) => mode !== scenario\.visualRendererMode\)[\s\S]*?'visual-renderer-mode-mismatch'/,
+    'every standard visual interval must stay on the requested native surface bridge'
+  );
+  assert.match(
+    matrixSource,
+    /const checkpoint = metric\?\.authoritativeGpuCheckpoint\?\.status === 'captured'/,
+    'compact evolution records should consume retained GPU checkpoint evidence'
+  );
+  assert.match(
+    matrixSource,
+    /'initial-state-captured'[\s\S]*?simulation time zero/,
+    'initial-state claims should remain inconclusive without a time-zero GPU checkpoint'
+  );
+});
+
+test('native WebGPU offscreen validation binds transparent pipeline resources', () => {
+  const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
+
+  assert.match(
+    sceneSource,
+    /beginSphNativeWebGpuSurfaceConsumerOffscreenValidation[\s\S]*?validationPass\.setPipeline\(bridge\.opaquePipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);[\s\S]*?validationPass\.setPipeline\(bridge\.transparentPipeline\);[\s\S]*?validationPass\.setBindGroup\(1, bridge\.refractionDummyBindGroup\);/,
+    'opaque and transparent offscreen validation must satisfy the shared refraction and environment bind group layout'
   );
 });
 

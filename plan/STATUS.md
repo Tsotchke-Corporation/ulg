@@ -1,3 +1,25 @@
+# Audit status - 2026-07-10 18:13 AKDT
+
+Branch `SS`, reviewed at `d5319c2` plus the standard-scenario audit slice.
+
+- Fable's reaction/gas/radiation work is substantive, but SOL-0 through SOL-6
+  coherent-solid work remains unstarted. The third SS level remains on hold.
+- The SPH drawer now has shared water-cycle, molten-iron/ice, sodium/water, and
+  cesium/fluorine presets. The same immutable records drive the standard test.
+- Standard evidence is no-full resident WebGPU plus a fixed 5,184-byte GPU
+  reduction. No particle-state or thermo buffer is mapped.
+- The seven-scenario run fails production presentation: the native canvas is
+  surface-like initially and uniform after the first refresh; 109 destroyed
+  indirect-buffer submissions were recorded. A shared offscreen bind-group
+  defect was fixed, and offscreen validation passes, but that is not visible
+  acceptance.
+- Quantitative result: Cs/F is strongly exothermic and cools; water vapor does
+  not rise/condense; Fe cools too little and steam does not rise; Na/H2O forms
+  products and heats but misses the hydrogen-rise gate. Time-zero GPU capture
+  is still absent.
+- The reordered objectives and performance findings are in
+  `plan/todo/sol-critic.md`. No physics optimization was implemented.
+
 # Session status — 2026-07-10 (surface-lane + physics run)
 
 Branch `SS`, tip `0b0520c`. Full suite on tip: **993 pass / 0 fail**, all four

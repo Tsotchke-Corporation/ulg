@@ -41,6 +41,7 @@ npm run status:live -- --bridge
 npm test
 npm run build
 npm run test:e2e
+npm run test:sph-standard-visual
 ```
 
 The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
@@ -50,7 +51,16 @@ ingestion.
 Use the `SPH Phase` button for the two-material SPH/MLS-MPM evidence slice. The
 overlay reports separate render, physics, and resident FPS; warns when WebGPU or
 closure work falls back to CPU; and includes `Clear Cache` for ULG SPH
-localStorage cache families only.
+localStorage cache families only. Its scenario menu includes the standard
+`water-cycle`, `iron-ice-quench`, `sodium-water`, and `cesium-fluorine`
+setups; the same immutable preset records drive
+`npm run test:sph-standard-visual`. That command records interval compositor
+frames, authoritative GPU material/phase checkpoints, performance timing, and
+three deterministic seeded random element-pair checks. Visual acceptance is
+pinned to `renderer=native-webgpu` with the
+`native-webgpu-surface-consumer`; captures suppress overlay UI and fail on any
+blank, uniform, stale, wrong-canvas, or fallback interval. Particle spheres
+and offscreen draws are diagnostic-only.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

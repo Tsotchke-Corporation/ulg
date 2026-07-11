@@ -16049,6 +16049,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       || !drawState?.drawIndirectRowsBuffer
       || !bridge.opaquePipeline
       || !bridge.transparentPipeline
+      || ((opaqueDraws.length > 0 || transparentDraws.length > 0) && !bridge.refractionDummyBindGroup)
       || !encoder?.copyTextureToBuffer
       || !bridge.device?.createBuffer
     ) {
@@ -16102,6 +16103,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       if (opaqueDraws.length > 0) {
         validationPass.setPipeline(bridge.opaquePipeline);
         validationPass.setBindGroup(0, drawState.bindGroup);
+        validationPass.setBindGroup(1, bridge.refractionDummyBindGroup);
         for (const draw of opaqueDraws) {
           validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }
@@ -16109,6 +16111,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       if (transparentDraws.length > 0) {
         validationPass.setPipeline(bridge.transparentPipeline);
         validationPass.setBindGroup(0, drawState.bindGroup);
+        validationPass.setBindGroup(1, bridge.refractionDummyBindGroup);
         for (const draw of transparentDraws) {
           validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
         }

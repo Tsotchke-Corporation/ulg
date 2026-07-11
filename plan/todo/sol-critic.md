@@ -1,8 +1,327 @@
 # SOL Critique: Schroeder Simulation And Coherent Solids
 
-Date: 2026-07-09 AKDT
+Date: 2026-07-10 AKDT
 Status: active architecture correction and implementation todo
-Branch reviewed: `SS` at `61dfc3a`
+Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
+
+## 2026-07-10 Post-Fable Re-Audit
+
+### Executive finding
+
+The new physics work is substantive, but it does not implement the coherent-
+solid architecture in this document. SOL-0 through SOL-6 remain unstarted.
+
+The immediate two-level tiny-mass explosion is fixed by `3f5b2d9`; gas wall
+pinning, contact conduction, reaction-product placement, reaction-rate
+limiting, radiation, and surface appearance also advanced. Those changes make
+the requested reaction and phase scenarios worth testing again. They do not
+add a solid frame, body identity, orientation, inertia, angular momentum,
+connectivity, contact proxy, persistent shape carrier, fracture topology, or
+body-aware render key.
+
+The re-audit also finds that the current performance limit is not primarily a
+lack of a third SS level. Dense render-field construction, readback/reupload
+interface feedback, missing shared neighbor residency, un-compacted Schroeder
+nodes, serial event placement, and submission/fence bubbles must be addressed
+first. The user-held third level stays on hold.
+
+Production native-surface acceptance is failed. The selected main WebGPU
+canvas shows surface-like output initially, then becomes a uniform background
+after the first resident refresh. The same native pipeline passes its offscreen
+draw validation after the shared bind-group repair, but the seven-scenario run
+also reports 109 submissions that reference a destroyed indirect buffer. This
+narrows the blocker to the general presentation/resource-lifecycle boundary;
+offscreen success does not waive a failed production canvas sequence.
+
+No performance optimization is implemented by this audit. It adds selectable
+scenarios, fixed-size GPU checkpoint evidence, stricter UI-suppressed visual
+capture, and one general native validation bind-group repair. It has not fixed
+the main-canvas post-refresh failure or changed physics for a named scene,
+material pair, particle count, or expected result.
+
+### Progress against this todo
+
+| Area | Current result | Credit |
+| --- | --- | --- |
+| Immediate two-level stability | CFL-consistent pre-velocity clamp and mass-significance guard landed | immediate blocker closed |
+| Cross-level numerical contract | Still lacks affine/angular/reflux/extreme-ratio proofs and derived tolerances | partial only |
+| SOL-0 contracts/invariants | No solid frame/member/contact/shape schema or GPU invariant family | 0% |
+| SOL-1 coherent rigid body | No `SE(3)` body state or direct resident mesh transform | 0% |
+| SOL-2/3 contacts and liquid coupling | Particle/material interfaces exist, but no body wrench or separate solid velocity field | 0% |
+| SOL-4 persistent deformable surface | Solids still use particle spheres/density surfaces | 0% |
+| SOL-5 phase/fracture topology | Product placement is material-based, not body/component-aware topology admission | 0% |
+| SOL-6 planetary body/charts | No orbital root/body-fixed local chart implementation | 0% |
+| Standard GPU-only evidence | No-full resident MLS-MPM plus a fixed 5,184-byte GPU reduction; zero particle-state/thermo mapping | audit evidence form met |
+| Production native surface | Offscreen draw passes; main canvas becomes uniform after first refresh and submits destroyed indirect buffers | failed/blocking |
+| Legacy numerical tests | CPU-mirror feature tests remain elsewhere and cannot gate Schroeder acceptance | migration still open |
+
+### What the Fable work changes
+
+Keep and build on these landed pieces:
+
+- `3f5b2d9`: removes the immediate tiny-parent cross-level velocity explosion.
+- `3e89418`: replaces constant gas pressure with a gauge density response and
+  allows larger gas expansion, while retaining a documented temperature-ratio
+  approximation.
+- `885ef85`: bounds gas/phase wall clearance by half a mechanics grid cell.
+- `21dfa94`: derives pair thermal reach from both particles' rest-volume radii.
+- `7382e0b`: materializes reaction products into real mechanics rows with
+  reserved capacity and center-of-mass velocity.
+- `ef2d45e`: limits reaction extent by interface area, flux, and timestep.
+- `8b38c43`: adds pair and ambient gray-body radiation from closure-derived
+  emissivity.
+- The surface commits improve liquid/gas inspection and hot-material emission.
+
+Do not over-credit them:
+
+- The same reaction-extent law is copied across six WGSL modules. A partial
+  change already minted phantom mass during development. This is a maintenance
+  and redundant-computation boundary, not a stable single law node.
+- Product placement is one serial invocation that scans particles and spares.
+  Its terminal nearest-same-material merge ignores body/component identity,
+  phase, and distance. It cannot become SOL topology logic.
+- Ambient radiation gives every particle a full `4*pi*r^2` exposed surface.
+  Interior solid samples therefore radiate in proportion to discretization.
+- Splash-smear uses raw local velocity variance. Rigid rotation has nonzero
+  variance, so a coherently rotating solid is treated like diverging spray.
+- The new rendering work remains density-field/particle appearance; it does
+  not preserve solid shape or pose.
+
+### New coherent-solid gates required by the landed work
+
+Add these to SOL-0 before implementing SOL-1:
+
+1. **Rigid-motion objectivity.** A translated and rotating asymmetric body must
+   be visually and mechanically invariant after subtracting best-fit rigid
+   motion. Render smear may respond to objective strain/divergence, not raw
+   rotational velocity variance.
+2. **Exposed-area ownership.** Radiation, reaction, convection, and wet contact
+   consume admitted surface/contact quadrature weights. Interior members have
+   zero exposed area; changing member resolution cannot change total radiant
+   power.
+3. **Body-aware chemistry/topology.** Product placement, melt detachment,
+   solidification, and fracture carry `bodyId`/component generation. A product
+   cannot merge into an unrelated same-material body as a terminal fallback.
+4. **GPU numerical acceptance.** Stefan-Boltzmann, rigid transform, wrench,
+   angular momentum, and topology conservation gates execute the actual GPU
+   kernels with compact GPU reductions. A JS/CPU mirror is not acceptance.
+5. **No global serial body/event scan.** No SOL hot stage may use a single
+   invocation to walk every body, member, contact, product event, or particle.
+
+## Standard Scenario Evidence
+
+Artifact: `/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/summary.json`.
+All checkpoints reduce retained GPU state into a fixed 5,184-byte record and
+map zero particle-state or thermo bytes. A true retained time-zero checkpoint
+is still missing, so every named initial-state gate is correctly inconclusive.
+
+| Scenario | Quantitative result | Missing or failed behavior | Mean batch |
+| --- | --- | --- | ---: |
+| Water cycle | exact 1,216 kg span; liquid falls; 10.134 kg vapor forms | vapor center stays at 0.10 m and vapor mass never declines | 287.1 ms / 512 steps |
+| Molten Fe on ice | mass span `1.21e-6`; 344.339 kg Fe solidifies; 184.103 kg water and 0.482 kg steam form | Fe cools only 1.679 K and steam moves down 0.002 m | 307.1 ms / 512 steps |
+| Sodium/water | mass span `5.05e-7`; 3.856 kg NaOH and 0.0972 kg H2 form; peak 509.15 K | H2 rises 43.4 mm, below the 50 mm gate; violence and plume color cannot be accepted | 4,021.7 ms / 256 steps |
+| Cesium/fluorine | mass span `3.88e-7`; 5.739 kg CsF forms; peak 3,593.26 K then cools to 1,851.13 K | quantitative exotherm passes, but time-zero and visual acceptance remain unavailable | 2,549.1 ms / 256 steps |
+| Ba/Pb, Bk/Lr, Fr/Fe | three finite checkpoints each, zero invalid-mass rows, mass span at or below `1.04e-7` | all post-refresh visible frames fail | 570.5-583.7 ms / 64 steps |
+
+At 1280x800, captures suppress the control panel, warning bar, picker, and
+menu, then inspect the selected native canvas. Every scenario has a
+surface-like initial frame and uniform/background-only frames from the first
+resident refresh onward. Effective modes also include
+`resident-surface-buffers-no-overlay`; the standard classifier now requires
+every interval to remain `native-webgpu-surface-consumer`, not merely one
+matching sample. Physics checkpoints remain useful despite presentation
+failure, but overall visual acceptance is failed for all seven scenarios.
+
+## Performance And Redundancy Re-Audit
+
+### P0 - Render-field algorithm and memory model
+
+The native material surface refresh dispatches one invocation per surface cell
+and each invocation scans every particle. At the current 96-cubed ceiling that
+is `S * 884,736 * N` particle visits. A dispersing cell runs a second complete
+particle scan, then scans product events. At 10,000 particles, one surface is
+8.85 billion visits before the optional second pass.
+
+This is the largest clear redundant-calculation target. Replace dense gather
+with particle/source-local splats, spatial tiles, or sort-by-cell construction.
+The existing material-interface source-local splat is a local pattern to reuse.
+Do not optimize this by lowering scientific particle counts or hiding the cost
+behind render cadence.
+
+The memory budget is also wrong. The comment still budgets 16 bytes per field
+cell, while the field ABI is now eight floats/32 bytes. Four 96-cubed fields
+are about 108 MiB, not 57 MiB. Full scalar snapshots used for gradient normals
+can duplicate another roughly 108 MiB before extraction buffers. Correct the
+budget, remove unused reserved lanes, and derive normals during extraction or
+share/version field pages.
+
+Coherent solids must bypass this field entirely: render their persistent mesh,
+meshlets, or SDF from resident body/cluster frames.
+
+### P0 - Interface feedback leaves the resident lane
+
+The default mounted material/pressure interface refresh can perform a blocking
+GPU-to-CPU candidate compaction, build force rows in JavaScript, upload them,
+and then prevent the fused resident sequence from proceeding. The repo already
+contains a retained GPU force-row route; make candidate-to-force-to-grid
+feedback resident and publish CPU diagnostics only at an explicit cadence.
+
+### P0 - Thermal/radiation neighbor coverage
+
+Thermal WGSL uses shared bins only in a narrow fused path. Normal and sidecar-
+heavy scenes can reach the exhaustive `N*N` fallback. Radiation widens support
+to `4*(r_i+r_j)`; a binned particle can inspect up to 1,331 cells, and larger
+reach abandons bins for all-particle scans.
+
+The new radiation support bound also performs an `O(N)` CPU state/thermo scan
+while constructing each GPU stage. CPU mirrors may be stale, so this small CPU
+dependency can both serialize the graph and narrow neighbor coverage. Derive
+or reduce maximum support on GPU/immutable metadata and publish one persistent,
+multi-resolution neighbor artifact shared by mechanics, thermal, reaction, and
+contact consumers.
+
+### P0 - Schroeder storage is not yet hierarchical in cost
+
+The active-node list currently permits one active row per particle and reports
+an unsorted particle-tile range. The default neighbor budget then reserves 64
+candidate rows of 64 bytes for every queue row: 4 KiB per active particle, or
+about 4 GiB at one million particles before useful state.
+
+Build real unique-node compaction and byte-bounded sparse CSR/global candidate
+arenas with overflow telemetry. Planetary claims are blocked until cost scales
+with admitted active nodes/interactions rather than particle count times a
+fixed worst-case budget.
+
+### P1 - Rebuilt DAGs, bins, buffers, and fences
+
+- The Schroeder artifact chain is rebuilt and separately submitted each
+  substep; cross-level candidates can remain observational/unconsumed.
+- Two-level mode builds additional fine/coarse artifacts and unconditionally
+  requests a compact conservation readback.
+- Reaction and contact build their own bins and zero/upload large buffers even
+  when Schroeder candidates bypass those bins in WGSL.
+- Reaction tables and render rows are repacked/reuploaded; visual and interface
+  refreshes can independently derive the same 80-byte-per-particle render row.
+- Gas-product summaries map a compact buffer each reactive substep.
+- Product-event compaction and placement use one workgroup/invocation and scan
+  all particles/spares.
+- Surface submission completion is awaited before later compute even where
+  same-queue ordering and versioned resources should be sufficient.
+
+Use persistent workspaces, cached static tables/pipelines/bind groups, GPU
+clears, one resident neighbor generation, parallel prefix/sort/free lists, and
+versioned double-buffered render resources. These are future todos, not changes
+made during this audit.
+
+### P1 - Fused mechanics excludes the scenes that matter
+
+The fused mechanics path correctly retains grid and ping-pong state and encodes
+many substeps in one submission. Pressure, reaction, retained-product,
+Schroeder, and other sidecars disqualify it, so the requested mixed-material
+scenes fall back to repeated stage allocation/submission. Treat fully resident
+sidecar fusion as an end-to-end objective rather than optimizing isolated
+kernels whose orchestration still forces a fence.
+
+### P2 - Real but non-hot costs
+
+GGX environment prefiltering is CPU-heavy but only runs when a background image
+changes; it is startup/UI jank, not the first hot-loop target. Do not prioritize
+it ahead of dense field construction, readback feedback, neighbors, or event
+serialization.
+
+### Source anchors for the performance findings
+
+- Dense render gather and its conditional second particle scan:
+  `ulg-gpu-abi/src/wgsl.js:4693-4874`; native surface-table/build routing:
+  `src/visualization/sphPhaseScene.js:27456-27500` and `:27624-27660`.
+- Incorrect 16-byte field-budget comment versus the two-`vec4`/32-byte write:
+  `src/visualization/sphPhaseScene.js:6719-6723` and
+  `ulg-gpu-abi/src/wgsl.js:4869-4873`.
+- Default blocking interface cadence and CPU-built force-row reupload:
+  `src/visualization/sphPhaseDemoMount.js:5034-5047`, `:6671-6683`, and
+  `src/visualization/sphPhaseScene.js:12935-13004`, `:13199-13324`.
+- Thermal 1,331-cell bounded scan and exhaustive `N*N` fallback:
+  `ulg-gpu-abi/src/wgsl.js:921-1063`; CPU support-bound scan:
+  `src/runtime/sph/sphThermalGpuKernel.js:1542-1577` and `:1711-1753`.
+- One active-node row per particle and per-queue fixed candidate storage:
+  `src/runtime/sph/schroederHierarchyGpu.js:3840-3928`, `:4022-4077`, and
+  `:4080-4157`; candidate ABI is 16 floats/64 bytes at
+  `ulg-gpu-abi/src/index.js:893-910`.
+- Serial product compaction/placement and component-blind terminal merge:
+  `ulg-gpu-abi/src/wgsl.js:2315-2338` and `:2341-2500`.
+- Six copied reaction-extent law blocks begin at
+  `ulg-gpu-abi/src/wgsl.js:1554`, `:2706`, `:3340`, `:3658`, `:3990`, and
+  `:4262`.
+
+## Profiling Contract Before Optimization
+
+Current `stageMs` values are predominantly JavaScript/enqueue wall timing, not
+GPU execution time. The next performance slice must add:
+
+- checkpoint id, source step/time, resident generation, and render-refresh
+  sequence/generation;
+- GPU timestamp queries around mechanics, thermal, reaction, Schroeder,
+  render-field, and extraction passes;
+- command encoder and `queue.submit` counts per step/refresh;
+- `mapAsync` and `onSubmittedWorkDone` calls, bytes, wait time, and owner;
+- buffer create/destroy, peak live bytes per state family, `writeBuffer` bytes,
+  and GPU-copy bytes;
+- version/reuse/replacement identifiers for color/depth attachments, bridges,
+  bind groups, render fields, extracted rows, and indirect draw buffers;
+- neighbor candidate/exhaustive visits, overflows, and built-but-bypassed bins;
+- particle count versus unique SS nodes, dirty/rebuilt nodes, candidate bytes,
+  and admitted rows;
+- render `S/C/N/event` visits, field/snapshot/extraction bytes, and budget use;
+- selected canvas/bridge identity, UI-suppression flag, clip, CSS/backing size,
+  DPR, configure/resize count, frame count, device-lost state, and uncaptured
+  WebGPU errors;
+- side-by-side production-canvas and offscreen RGB span, distinct colors,
+  non-background pixel ratio, status, and reason at time zero, first refresh,
+  second refresh, and final checkpoint;
+- checkpoint reduction GPU time, mapped evidence bytes, map wait, allocation
+  bytes, and screenshot time, reported outside production physics timing;
+- pipeline/cache hits and misses;
+- p50/p95/p99 schedule and frame latency over `N=1e2/1e3/1e4/1e5` and
+  `S=1/4/16`.
+
+Do not use CPU/GPU parity or a CPU solver to obtain these measurements.
+
+### Measured performance evidence
+
+Artifacts:
+
+- `/tmp/ulg-standard-audit/perf-all-laws-native.json`
+- `/tmp/ulg-standard-audit/perf-mechanics-only-native.json`
+- `/tmp/ulg-standard-audit/perf-interface-native.json`
+
+The controlled native-surface A/B used two eight-step batches at 128, 1,024,
+and 8,192 particles with explicit queue-fence measurement. At 1,024 particles,
+thermal/reaction-enabled engine batch time was 169.6 ms versus 79.4 ms with
+those groups disabled (`2.14x`). At 8,192 it was 131.6 versus 63.1 ms
+(`2.09x`). The 128-particle pair was 109.9 versus 87.6 ms (`1.25x`). The
+water benchmark had no reaction events, so this isolates thermal and enabled-
+sidecar overhead, not reactive chemistry cost.
+
+The full scenarios show the larger end-to-end cliff: water and iron take about
+0.56-0.60 ms per step, while sodium/water takes 15.71 ms and Cs/F takes
+9.96 ms. That is consistent with reactive/thermal sidecars excluding the fast
+fused path, but it is not isolated GPU-kernel timing.
+
+Queue-fence and batch timings are non-monotonic across the three counts; native
+refresh timing stays around 27-34 ms while the canvas is visually failed and
+destroyed-buffer submissions occur. Do not use those numbers to claim surface
+scaling. `stageMs.thermalStep`/`reactionStep` measure host enqueue work,
+`residentGpuCompletedStageMs` is a max rather than a sum, and the benchmark's
+`residentStageStepsPerSecond` omits fused step count. Use
+`probeEngineStepsPerSecond` until GPU timestamps land.
+
+The interface diagnostic identifies a good reusable pattern. Its source-local
+GPU splat estimates 140,976 / 432,000 / 3,456,000 visits versus
+949,104 / 7,592,832 / 60,742,656 dense cell-particle pairs: 14.85%, 5.69%,
+and 5.69% of dense work, with 1.4-2.9 ms refresh wall time and zero readback.
+It still reports `gpu-resident-summary-pending` because the pressure consumer
+is not wired to consume the retained candidate rows. Finish that general
+GPU-to-GPU path; do not reintroduce CPU force-row construction.
 
 ## Decision
 
@@ -461,6 +780,15 @@ The default view must show coherent meshes/surfaces without particle-lattice
 faceting, metaball rounding, blinking, grid-axis wobble, or body identity loss.
 A diagnostic toggle may reveal contact/material particles underneath.
 
+For every native sequence, the same selected
+`native-webgpu-surface-consumer` canvas must show surface-like compositor
+variation at time zero, first resident refresh, second refresh, and the final
+fixed checkpoint. A passing offscreen texture, nonzero indirect args, or
+`ready` bridge status is insufficient. Record canvas identity, UI suppression,
+clip, CSS/backing dimensions, DPR, source step/time, resident generation, and
+render-refresh generation. Blank, uniform/background-only, UI-only,
+wrong-canvas, stale-generation, or mixed-bridge intervals fail.
+
 ## Performance And Residency Gates
 
 - Physics, contact, body reduction, pose integration, surface deformation, and
@@ -486,21 +814,124 @@ A diagnostic toggle may reveal contact/material particles underneath.
 - Do not force rigid, deformable, granular, liquid, and orbital motion through
   one integrator or one level decision.
 - Do not uniformly particle-fill planets.
+- Do not repair presentation by branching on scenario, material/phase,
+  particle count, surface/checkpoint index, or expected color; forcing a
+  particle/CPU fallback; hiding refreshes with cadence suppression; or treating
+  the offscreen harness as visible production output. A general repair must
+  pass one/many surfaces, opaque/transparent batches, reordered materials,
+  pause/play, resize, DPR 1/2, every named scene, and seeded random pairs.
 
 ## Plan Ordering Recommendation
 
-1. Close the current two-level cross-level impulse/stability defect.
-2. Land SOL-0 and SOL-1 before more solid rendering or mostly-solid scenes.
-3. Land SOL-2 and SOL-3 before claiming general mixed material support.
-4. Land SOL-4 before using current MLS-MPM solids as a visual-quality proof.
-5. Land SOL-5 before claiming phase-complete solid behavior.
-6. Resume broad distributed rematerialization and planetary claims only after
-   the local GPU-native solid invariants are green.
+### Priority 0A - Trustworthy GPU-native evidence
+
+Objective: make the real GPU execution and production WebGPU presentation
+observable without changing their authority. Add timestamp-query spans,
+submission/fence/byte counters, a retained time-zero checkpoint, fixed-size GPU
+material/phase reductions, and interval native-surface pixel evidence at an
+inspectable viewport. No full-state readback, CPU solver, or CPU parity gate is
+permitted. A uniform or UI-only frame is a visual failure.
+
+The fixed-size reduction and UI-suppressed interval capture are implemented;
+time-zero retention, GPU timestamps, and complete lifecycle counters remain.
+
+### Priority 0B - Production presentation liveness
+
+Objective: repair the general initial-to-refresh production lifecycle before
+optimizing field math. Preserve the passing offscreen draw as an isolation
+probe, then trace canvas configure/current-texture, color/depth generations,
+bridge/bind-group replacement, indirect-buffer readiness and reclamation,
+load/store ordering, submit ordering, and compositor handoff. The first and
+second refresh gates must be green without destroyed-buffer submissions.
+
+### Priority 1 - Dense-field algorithm and memory
+
+Objective: after production presentation is live, replace the
+`surface-cell x particle` gather and optional second particle scan with a
+sparse particle/source-local splat, tiled construction, or sorted cell ranges.
+Correct the field budget to eight floats/32 bytes per cell and remove or share
+the full scalar snapshot. Coherent solids bypass this density field entirely.
+
+### Priority 2 - One resident lane and one neighborhood authority
+
+Objective: remove default GPU-to-CPU-to-GPU material/pressure-interface
+feedback. Keep candidate-to-force-to-grid work on the ComputeManager-owned
+GPUHub lane. Build one persistent, versioned, multi-resolution neighborhood
+artifact for mechanics, thermal, radiation, reaction, and contact instead of
+building or bypassing independent bins and exhaustive scans.
+
+### Priority 3 - Make two-level SS actually sparse
+
+Objective: compact unique active nodes, replace the per-particle 4 KiB
+candidate reservation with byte-bounded CSR/global arenas, publish overflow
+evidence, consume cross-level candidates, and close affine/angular/reflux and
+extreme-ratio invariants. Do not resume the third level until these gates are
+green and measured.
+
+### Priority 4 - Land SOL-0 and SOL-1
+
+Objective: admit body/member/contact/shape contracts and implement an `SE(3)`
+rigid lane with direct resident mesh transforms. Include rigid-motion
+objectivity, exposed-area quadrature, body-aware product/topology identity, and
+GPU reductions for mass, linear/angular momentum, inertia, energy, and shape
+error. This is the minimum route to solids that cross a grid without becoming
+lattice blobs.
+
+### Priority 5 - Parallel resident sidecars
+
+Objective: make pressure, thermal, reaction, radiation, retained products, and
+SS work compatible with an end-to-end resident submission. Replace the serial
+product scan/merge with parallel prefix/sort/free-list placement, centralize the
+reaction extent law now copied into six WGSL modules, and remove per-step gas
+ledger and completion fences that do not cross an authority boundary.
+
+### Priority 6 - Coupling, deformable surfaces, topology, then scale
+
+Objective: land SOL-2/3 contact and liquid coupling, SOL-4 persistent
+material-space deformable surfaces, and SOL-5 melt/fracture topology in that
+order. Begin SOL-6 orbital/chart work and broad distributed rematerialization
+only after the local GPU-native solid invariants and mostly-solid scaling gate
+are green.
 
 The current append-only Schroeder plan should be split into a short active plan,
 a numerical contract, and a historical status ledger. This file supplies the
 solid and validation correction; implementation history should remain in
 `plan/log.md`, not accumulate inside the active mathematical contract.
+
+## Concrete Future Todos
+
+- **SURF-0:** deterministic time-zero/refresh-1/refresh-2/final liveness tracer
+  for the production main canvas.
+- **SURF-1:** general main-canvas lifecycle repair across surface count,
+  transparency, material order, resize/DPR, pause/play, and the whole matrix.
+- **SURF-2:** versioned or double-buffered presentation resources; use fences
+  for reclamation/backpressure, not routine same-queue stage ordering.
+- **PROF-0:** GPU timestamps plus submit/map/allocation/pixel-liveness evidence
+  under the profiling contract above.
+- **FIELD-0:** source-local/tiled sparse render-field rewrite and corrected
+  32-byte/cell peak budget after SURF-1 is green.
+- **LANE-0:** retained interface candidates consumed by a GPU pressure/force
+  stage on the ComputeManager/GPUHub lane.
+- **MATRIX-0:** publish separate physics-evidence and presentation statuses for
+  every named/random checkpoint, including an authoritative time-zero record.
+
+## Questions Up For Critique
+
+1. Should fluid render fields use source-local splats into one shared
+   material/phase atlas, or sorted sparse tiles with per-material indirection?
+2. Which interaction owns the persistent neighborhood build, and what exact
+   error/overflow policy lets thermal and radiation request wider support
+   without falling back to `N*N`?
+3. Should reaction products reserve mechanics rows immediately, or accumulate
+   a resident event ledger and enter state through one parallel admission pass?
+4. What byte budget and truncation/error rule replaces fixed candidates per SS
+   queue row, especially across extreme mass ratios and level boundaries?
+5. Are exposed radiation/reaction/wet-contact weights owned by the shape
+   carrier, the contact proxy, or a versioned shared surface quadrature graph?
+6. Which solids remain continuum MLS-MPM bodies, which use rigid frames, and
+   where is the measured switching/admission rule between them?
+7. What native WebGPU surface evidence is required before a physics sequence
+   can be called visually accepted when compositor and canvas capture disagree?
 
 ## Primary Technical Anchors
 

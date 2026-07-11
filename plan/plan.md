@@ -1,5 +1,43 @@
 # ULG Implementation Plan
 
+## Current Audit Target - 2026-07-10 Post-Fable Scenario Evidence
+
+- [x] Audit the Fable handoff and the `61dfc3a..d5319c2` landed range against
+  the Schroeder/coherent-solid goals.
+- [x] Add one shared immutable registry for the water-cycle, molten-iron/ice,
+  sodium/water, and cesium/fluorine standard scenes.
+- [x] Add a terminal-drawer scenario selector that applies a preset through one
+  rebuild and preserves explicit URL overrides.
+- [x] Add checkpoint-only retained-GPU diagnostics for per-material/phase mass,
+  vertical motion, temperature, internal energy, and kinetic energy; keep them
+  out of the normal hot loop and do not create a CPU physics oracle.
+- [x] Add compositor interval frames and deterministic seeded random-element
+  pairs to the standard visual matrix; pin acceptance to the production
+  `native-webgpu-surface-consumer` at an inspectable viewport.
+- [x] Complete and inspect the four-scene/random-pair matrix, scale benchmark,
+  and full regression suite; record observed failures rather than adjusting
+  physics to satisfy the test.
+- [x] Publish the measured redundancy/performance critique and reordered SOL
+  objectives in `plan/todo/sol-critic.md`. Do not implement the optimizations
+  in this audit slice.
+
+Measured checkpoint:
+
+- Physics evidence is compact and GPU-native: 5,184 mapped bytes per interval,
+  zero state/thermo mapping, finite mass in all seven scenes.
+- Production WebGPU presentation is blocking: surface-like initial frames turn
+  uniform after the first refresh, later modes include a no-overlay handoff,
+  and the matrix records 109 destroyed indirect-buffer submissions.
+- Quantitative behavior is partial: Cs/F passes its post-step exotherm/product
+  checks; water, Fe/ice, and Na/H2O retain specific rise/cooling/condensation
+  failures. All named time-zero checks remain inconclusive.
+- Thermal/reaction-enabled water is about `2.1x` slower than mechanics-only at
+  1,024 and 8,192 particles in the controlled native-surface A/B. GPU timestamp
+  attribution is still required before kernel-level optimization.
+
+The third SS grid level remains on user hold. The current audit may identify
+work that belongs before it, but must not resume that level.
+
 ## Clean-Break Routing - Adaptive MLS-MPM
 
 True adaptive MLS-MPM is carved out into

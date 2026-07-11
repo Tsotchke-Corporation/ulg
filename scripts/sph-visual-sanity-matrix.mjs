@@ -2,6 +2,12 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { ELEMENT_MATERIAL_OPTIONS } from '../src/visualization/sphMaterialOptions.js';
+import {
+  SPH_PHASE_SCENARIO_PRESETS,
+  sphPhaseScenarioPresetUrl
+} from '../src/runtime/sphPhaseScenarioPresets.js';
+
 const DEFAULT_BASE_PORT = 5310;
 const DEFAULT_OUTPUT_DIR = '/tmp/ulg-visual-sanity-matrix';
 const DEFAULT_BATCHES = 4;
@@ -9,7 +15,22 @@ const DEFAULT_BATCH_STEPS = 24;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_FRAME_MAX = 16;
 
-const SCENARIOS = [
+const STANDARD_SCENARIOS = SPH_PHASE_SCENARIO_PRESETS.map((entry) => ({
+  label: `standard-${entry.id}`,
+  presetId: entry.id,
+  url: sphPhaseScenarioPresetUrl(entry.id, {
+    renderer: 'native-webgpu',
+    renderOwnership: 'main-thread-renderer',
+    surfaceDraw: 'native-webgpu-surface-consumer'
+  }),
+  visualRendererMode: 'native-webgpu-surface-consumer',
+  ...entry.validation,
+  expectedCheckpoints: entry.validation.checkpoints,
+  standardEnabled: true,
+  defaultEnabled: false
+}));
+
+const LEGACY_SCENARIOS = [
   {
     label: 'liquid-liquid-h2o-mlsmpm',
     url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm',
@@ -137,6 +158,8 @@ const SCENARIOS = [
   }
 ];
 
+const SCENARIOS = [...STANDARD_SCENARIOS, ...LEGACY_SCENARIOS];
+
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
@@ -187,6 +210,15 @@ function inferMechanicsIntegrator(probe) {
   if (schemaText.includes('plain-sph')) return 'sph';
   if (schemaText.includes('mls-mpm')) return 'mlsmpm';
   return null;
+}
+
+function effectiveVisualRendererModes(probe) {
+  return uniqueStrings(arrayOf(probe?.timeline?.metrics).map((metric) => (
+    metric?.surfaceDraw?.visibleRendererBridge
+      ?? metric?.renderState?.surfaceDrawVisibleRendererBridge
+      ?? metric?.surfaceDraw?.rendererBridge
+      ?? null
+  )));
 }
 
 function visualSurfaceIssueKey(issue) {
@@ -250,9 +282,388 @@ function countBy(values, keyOf = (value) => value) {
 
 function selectedScenarios() {
   const filter = String(process.env.ULG_VISUAL_MATRIX_SCENARIOS || '').trim();
+  if (!filter && envFlagEnabled(process.env.ULG_VISUAL_MATRIX_STANDARD, false)) {
+    return [...STANDARD_SCENARIOS, ...deterministicRandomPairScenarios()];
+  }
   if (!filter) return SCENARIOS.filter((scenario) => scenario.defaultEnabled !== false);
   const wanted = new Set(filter.split(',').map((entry) => entry.trim()).filter(Boolean));
   return SCENARIOS.filter((scenario) => wanted.has(scenario.label));
+}
+
+function deterministicRandomPairScenarios() {
+  const count = positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_COUNT, 3);
+  const rawSeed = Number(process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? 0x7a11d2026);
+  let state = Number.isFinite(rawSeed) ? (Math.trunc(rawSeed) >>> 0) : 0x7a11d2026;
+  const nextIndex = (length) => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) % length;
+  };
+  const scenarios = [];
+  const used = new Set();
+  while (scenarios.length < count && used.size < ELEMENT_MATERIAL_OPTIONS.length ** 2) {
+    const drop = ELEMENT_MATERIAL_OPTIONS[nextIndex(ELEMENT_MATERIAL_OPTIONS.length)];
+    const base = ELEMENT_MATERIAL_OPTIONS[nextIndex(ELEMENT_MATERIAL_OPTIONS.length)];
+    if (!drop || !base || drop.key === base.key) continue;
+    const key = `${drop.key}:${base.key}`;
+    if (used.has(key)) continue;
+    used.add(key);
+    const params = new URLSearchParams({
+      drop: drop.key,
+      base: base.key,
+      dropt: '300',
+      baset: '300',
+      wxmin: '293.15',
+      wxmax: '293.15',
+      wymin: '293.15',
+      wymax: '293.15',
+      wzmin: '293.15',
+      wzmax: '293.15',
+      iceh: '0',
+      ironh: '1.01',
+      dropn: '2',
+      basen: '3',
+      boxx: '4',
+      boxy: '4',
+      boxz: '4',
+      mech: 'mlsmpm'
+    });
+    params.set('renderer', 'native-webgpu');
+    params.set('renderOwnership', 'main-thread-renderer');
+    params.set('surfaceDraw', 'native-webgpu-surface-consumer');
+    scenarios.push({
+      label: `random-elements-${drop.key.toLowerCase()}-${base.key.toLowerCase()}`,
+      randomPair: { drop: drop.key, base: base.key, seed: rawSeed },
+      url: `/?${params.toString()}`,
+      expectedMechanics: 'mlsmpm',
+      batches: positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCHES, 3),
+      batchSteps: positiveInteger(process.env.ULG_VISUAL_MATRIX_RANDOM_PAIR_BATCH_STEPS, 64),
+      visualRendererMode: 'native-webgpu-surface-consumer',
+      visualOnly: true,
+      standardEnabled: true,
+      defaultEnabled: false,
+      expectedCheckpoints: [
+        { id: 'initial', expectation: 'both derived element cohorts are visible and finite' },
+        { id: 'late', expectation: 'the scene advances without NaNs, mass loss, or frozen rendering' }
+      ]
+    });
+  }
+  return scenarios;
+}
+
+function compactEvolutionTimeline(probe) {
+  return arrayOf(probe?.timeline?.metrics).map((metric, index) => {
+    const step = metric?.residentStep || metric?.plainSphStepResult || null;
+    const diagnostics = step?.diagnostics || null;
+    const checkpoint = metric?.authoritativeGpuCheckpoint?.status === 'captured'
+      ? metric.authoritativeGpuCheckpoint
+      : null;
+    const checkpointRows = arrayOf(checkpoint?.materialPhases);
+    const checkpointMassByPhase = checkpointRows.reduce((result, row) => {
+      const phase = String(row?.phase || '').trim();
+      if (!phase) return result;
+      result[phase] = (result[phase] || 0) + (finiteOrNull(row?.massKg) || 0);
+      return result;
+    }, {});
+    const checkpointMassForTemperature = checkpointRows.reduce((sum, row) => (
+      sum + (finiteOrNull(row?.massKg) || 0)
+    ), 0);
+    const checkpointMeanTemperature = checkpointMassForTemperature > 0
+      ? checkpointRows.reduce((sum, row) => (
+          sum
+          + (finiteOrNull(row?.temperatureMassWeightedMeanK) || 0)
+            * (finiteOrNull(row?.massKg) || 0)
+        ), 0) / checkpointMassForTemperature
+      : null;
+    const checkpointTemperatures = checkpointRows.flatMap((row) => [
+      finiteOrNull(row?.temperatureMinK),
+      finiteOrNull(row?.temperatureMaxK)
+    ]).filter(Number.isFinite);
+    const checkpointParticlesByMaterial = checkpointRows.reduce((result, row) => {
+      const material = String(row?.material || '').trim();
+      if (!material) return result;
+      result[material] = (result[material] || 0) + Math.max(
+        0,
+        finiteOrNull(row?.phaseWeightedParticleCount) ?? finiteOrNull(row?.liveParticleCount) ?? 0
+      );
+      return result;
+    }, {});
+    return {
+      index,
+      batchIndex: finiteOrNull(metric?.batchIndex),
+      phase: metric?.phase || null,
+      batchMs: finiteOrNull(metric?.batchMs),
+      simulationTimeS: finiteOrNull(
+        checkpoint?.sourceTimeS
+          ?? step?.particlePingPong?.nextTime
+          ?? step?.time
+          ?? metric?.residentSteps?.finalStep?.particlePingPong?.nextTime
+      ),
+      phaseMassKg: diagnostics?.phaseMassKg || (checkpoint ? checkpointMassByPhase : null),
+      meanTemperatureK: finiteOrNull(diagnostics?.temperatureMassWeightedMeanK ?? checkpointMeanTemperature),
+      minTemperatureK: finiteOrNull(
+        diagnostics?.minTemperatureK
+          ?? (checkpointTemperatures.length ? Math.min(...checkpointTemperatures) : null)
+      ),
+      maxTemperatureK: finiteOrNull(
+        diagnostics?.maxTemperatureK
+          ?? (checkpointTemperatures.length ? Math.max(...checkpointTemperatures) : null)
+      ),
+      maxSpeedMPerS: finiteOrNull(diagnostics?.maxSpeedMPerS),
+      maxDisplacementM: finiteOrNull(diagnostics?.maxDisplacementM),
+      reactionEventsTotal: finiteOrNull(
+        step?.reactionEventsTotal ?? step?.reactionLedger?.eventCount
+      ),
+      particlesByMaterial: step?.particlesByMaterial || (checkpoint
+        ? Object.fromEntries(Object.entries(checkpointParticlesByMaterial).map(([material, count]) => [
+            material,
+            Math.round(count)
+          ]))
+        : null),
+      stageMs: step?.stageTiming?.stageMs || null,
+      queueFenceMs: step?.stageTiming?.queueFenceMs || null
+    };
+  });
+}
+
+function authoritativeCheckpointSeries(probe) {
+  return arrayOf(probe?.timeline?.metrics)
+    .map((metric) => metric?.authoritativeGpuCheckpoint)
+    .filter((checkpoint) => checkpoint?.status === 'captured');
+}
+
+function checkpointRows(checkpoint, material = null, phase = null) {
+  const wantedMaterial = material == null ? null : String(material).toLowerCase();
+  const wantedPhase = phase == null ? null : String(phase).toLowerCase();
+  return arrayOf(checkpoint?.materialPhases).filter((row) => (
+    (wantedMaterial == null || String(row?.material || '').toLowerCase() === wantedMaterial)
+    && (wantedPhase == null || String(row?.phase || '').toLowerCase() === wantedPhase)
+  ));
+}
+
+function checkpointMass(checkpoint, material = null, phase = null) {
+  return checkpointRows(checkpoint, material, phase)
+    .reduce((sum, row) => sum + (finiteOrNull(row?.massKg) || 0), 0);
+}
+
+function checkpointMaxTemperature(checkpoint, material = null, phase = null) {
+  const values = checkpointRows(checkpoint, material, phase)
+    .map((row) => finiteOrNull(row?.temperatureMaxK))
+    .filter(Number.isFinite);
+  return values.length ? Math.max(...values) : null;
+}
+
+function checkpointYCenter(checkpoint, material = null, phase = null) {
+  const rows = checkpointRows(checkpoint, material, phase);
+  const totalMass = rows.reduce((sum, row) => sum + (finiteOrNull(row?.massKg) || 0), 0);
+  if (!(totalMass > 0)) return null;
+  return rows.reduce((sum, row) => (
+    sum + (finiteOrNull(row?.yCenterMassWeightedM) || 0) * (finiteOrNull(row?.massKg) || 0)
+  ), 0) / totalMass;
+}
+
+function behaviorCheck(id, expectation, passed, observed, { inconclusive = false } = {}) {
+  return {
+    id,
+    expectation,
+    status: inconclusive ? 'inconclusive' : passed ? 'pass' : 'fail',
+    observed
+  };
+}
+
+function evaluateStandardScenarioBehavior(scenario, probe) {
+  if (!scenario.standardEnabled) return null;
+  const checkpoints = authoritativeCheckpointSeries(probe);
+  if (checkpoints.length < 2) {
+    return {
+      schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
+      status: 'inconclusive',
+      presetId: scenario.presetId || null,
+      checkpointCount: checkpoints.length,
+      checks: [behaviorCheck(
+        'authoritative-checkpoint-series',
+        'at least two authoritative GPU checkpoints are captured',
+        false,
+        { checkpointCount: checkpoints.length },
+        { inconclusive: true }
+      )]
+    };
+  }
+
+  const capturedInitial = checkpoints.find((checkpoint) => (
+    checkpoint?.phase === 'initial'
+    && Math.abs(finiteOrNull(checkpoint?.sourceTimeS) || 0) <= 1e-12
+  )) || null;
+  const first = capturedInitial || checkpoints[0];
+  const last = checkpoints[checkpoints.length - 1];
+  const masses = checkpoints.map((checkpoint) => finiteOrNull(checkpoint?.totals?.massKg)).filter(Number.isFinite);
+  const massMin = masses.length ? Math.min(...masses) : null;
+  const massMax = masses.length ? Math.max(...masses) : null;
+  const massScale = masses.length ? Math.max(Math.abs(masses[0]), 1e-9) : null;
+  const massRelativeSpan = massScale == null ? null : (massMax - massMin) / massScale;
+  const checks = [behaviorCheck(
+    'particle-mass-bounded',
+    'checkpoint particle mass stays conserved within 0.1%',
+    Number.isFinite(massRelativeSpan) && massRelativeSpan <= 1e-3,
+    { massMinKg: massMin, massMaxKg: massMax, relativeSpan: massRelativeSpan },
+    { inconclusive: !Number.isFinite(massRelativeSpan) }
+  )];
+  if (scenario.presetId) {
+    checks.push(behaviorCheck(
+      'initial-state-captured',
+      'a retained authoritative GPU checkpoint exists at simulation time zero',
+      capturedInitial != null,
+      {
+        captured: capturedInitial != null,
+        firstCapturedPhase: checkpoints[0]?.phase || null,
+        firstCapturedTimeS: finiteOrNull(checkpoints[0]?.sourceTimeS)
+      },
+      { inconclusive: capturedInitial == null }
+    ));
+  }
+
+  if (scenario.presetId === 'water-cycle') {
+    const gasMasses = checkpoints.map((checkpoint) => checkpointMass(checkpoint, 'h2o', 'gas'));
+    const gasY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2o', 'gas'));
+    const positiveGasY = gasY.filter(Number.isFinite);
+    const peakGasMass = Math.max(...gasMasses);
+    checks.push(
+      behaviorCheck('liquid-flow', 'liquid water changes position over the sequence', (
+        Math.abs((checkpointYCenter(last, 'h2o', 'liquid') || 0) - (checkpointYCenter(first, 'h2o', 'liquid') || 0)) > 0.02
+      ), {
+        initialYCenterM: checkpointYCenter(first, 'h2o', 'liquid'),
+        finalYCenterM: checkpointYCenter(last, 'h2o', 'liquid')
+      }),
+      behaviorCheck('steam-forms', 'the 400 K floor creates water vapor', peakGasMass > 0, { peakGasMassKg: peakGasMass }),
+      behaviorCheck('steam-rises', 'water vapor rises through the headspace', (
+        positiveGasY.length > 1 && Math.max(...positiveGasY) - positiveGasY[0] > 0.05
+      ), { gasYCentersM: gasY }),
+      behaviorCheck('steam-condenses', 'cold-ceiling vapor later condenses', (
+        peakGasMass > 0 && gasMasses.at(-1) < peakGasMass * 0.98
+      ), { gasMassesKg: gasMasses })
+    );
+  } else if (scenario.presetId === 'iron-ice-quench') {
+    const initialFeLiquid = checkpointMass(first, 'fe', 'liquid');
+    const finalFeLiquid = checkpointMass(last, 'fe', 'liquid');
+    const initialFeSolid = checkpointMass(first, 'fe', 'solid');
+    const finalFeSolid = checkpointMass(last, 'fe', 'solid');
+    const initialFeTemperature = checkpointMaxTemperature(first, 'fe');
+    const finalFeTemperature = checkpointMaxTemperature(last, 'fe');
+    const steamY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2o', 'gas'));
+    const positiveSteamY = steamY.filter(Number.isFinite);
+    checks.push(
+      behaviorCheck('iron-starts-molten', 'the falling iron begins liquid', initialFeLiquid > 0, { initialFeLiquidKg: initialFeLiquid }),
+      behaviorCheck('ice-melts', 'solid water creates a liquid-water population', checkpointMass(last, 'h2o', 'liquid') > 0, {
+        finalWaterLiquidKg: checkpointMass(last, 'h2o', 'liquid')
+      }),
+      behaviorCheck('steam-forms', 'iron quench creates water vapor', checkpointMass(last, 'h2o', 'gas') > 0, {
+        finalSteamMassKg: checkpointMass(last, 'h2o', 'gas')
+      }),
+      behaviorCheck('iron-solidifies', 'liquid iron decreases while solid iron grows', (
+        finalFeLiquid < initialFeLiquid && finalFeSolid > initialFeSolid
+      ), { initialFeLiquidKg: initialFeLiquid, finalFeLiquidKg: finalFeLiquid, initialFeSolidKg: initialFeSolid, finalFeSolidKg: finalFeSolid }),
+      behaviorCheck('iron-cools', 'iron peak temperature decreases by at least 10 K', (
+        Number.isFinite(initialFeTemperature) && Number.isFinite(finalFeTemperature)
+        && finalFeTemperature <= initialFeTemperature - 10
+      ), { initialMaxTemperatureK: initialFeTemperature, finalMaxTemperatureK: finalFeTemperature }),
+      behaviorCheck('steam-rises', 'quench steam rises into the container headspace', (
+        positiveSteamY.length > 1 && Math.max(...positiveSteamY) - positiveSteamY[0] > 0.05
+      ), { steamYCentersM: steamY })
+    );
+  } else if (scenario.presetId === 'sodium-water') {
+    const initialNaMass = checkpointMass(first, 'Na');
+    const finalNaMass = checkpointMass(last, 'Na');
+    const maxTemperatures = checkpoints.map((checkpoint) => checkpointMaxTemperature(checkpoint)).filter(Number.isFinite);
+    const initialMaxTemperature = finiteOrNull(scenario.initialMaxTemperatureK);
+    const minimumTemperatureRise = finiteOrNull(scenario.minimumReactionTemperatureRiseK) ?? 50;
+    const hydrogenY = checkpoints.map((checkpoint) => checkpointYCenter(checkpoint, 'h2'));
+    const positiveHydrogenY = hydrogenY.filter(Number.isFinite);
+    const minimumHydrogenRise = finiteOrNull(scenario.minimumHydrogenRiseM) ?? 0.05;
+    checks.push(
+      behaviorCheck('sodium-consumed', 'sodium mass decreases across the captured interval', finalNaMass < initialNaMass, {
+        firstCapturedNaKg: initialNaMass,
+        finalNaKg: finalNaMass
+      }),
+      behaviorCheck('sodium-products-form', 'NaOH and H2 become real particle populations', (
+        checkpointMass(last, 'naoh') > 0 && checkpointMass(last, 'h2') > 0
+      ), { finalNaohKg: checkpointMass(last, 'naoh'), finalH2Kg: checkpointMass(last, 'h2') }),
+      behaviorCheck('reaction-heats', `reaction temperature rises at least ${minimumTemperatureRise} K above the declared initial maximum`, (
+        Number.isFinite(initialMaxTemperature)
+        && maxTemperatures.length > 0
+        && Math.max(...maxTemperatures) >= initialMaxTemperature + minimumTemperatureRise
+      ), {
+        declaredInitialMaxTemperatureK: initialMaxTemperature,
+        requiredRiseK: minimumTemperatureRise,
+        maxTemperaturesK: maxTemperatures
+      }, { inconclusive: !Number.isFinite(initialMaxTemperature) || maxTemperatures.length === 0 }),
+      behaviorCheck('hydrogen-rises', 'hydrogen products move upward', (
+        positiveHydrogenY.length > 1
+        && Math.max(...positiveHydrogenY) - positiveHydrogenY[0] > minimumHydrogenRise
+      ), {
+        hydrogenYCentersM: hydrogenY,
+        requiredRiseM: minimumHydrogenRise
+      })
+    );
+  } else if (scenario.presetId === 'cesium-fluorine') {
+    const initialFluorineMass = checkpointMass(first, 'F');
+    const finalFluorineMass = checkpointMass(last, 'F');
+    const maxTemperatures = checkpoints.map((checkpoint) => checkpointMaxTemperature(checkpoint)).filter(Number.isFinite);
+    const csfTemperatures = checkpoints.map((checkpoint) => checkpointMaxTemperature(checkpoint, 'csf')).filter(Number.isFinite);
+    const initialMaxTemperature = finiteOrNull(scenario.initialMaxTemperatureK);
+    const minimumTemperatureRise = finiteOrNull(scenario.minimumReactionTemperatureRiseK) ?? 500;
+    checks.push(
+      behaviorCheck('fluorine-consumed', 'fluorine mass decreases across the captured interval', finalFluorineMass < initialFluorineMass, {
+        firstCapturedFluorineKg: initialFluorineMass,
+        finalFluorineKg: finalFluorineMass
+      }),
+      behaviorCheck('csf-forms', 'CsF becomes a real particle population', checkpointMass(last, 'csf') > 0, {
+        finalCsfKg: checkpointMass(last, 'csf')
+      }),
+      behaviorCheck('highly-exothermic', `reaction peak exceeds the declared initial maximum by at least ${minimumTemperatureRise} K`, (
+        Number.isFinite(initialMaxTemperature)
+        && maxTemperatures.length > 0
+        && Math.max(...maxTemperatures) >= initialMaxTemperature + minimumTemperatureRise
+      ), {
+        declaredInitialMaxTemperatureK: initialMaxTemperature,
+        requiredRiseK: minimumTemperatureRise,
+        maxTemperaturesK: maxTemperatures
+      }, { inconclusive: !Number.isFinite(initialMaxTemperature) || maxTemperatures.length === 0 }),
+      behaviorCheck('cesium-melts', 'cesium develops a liquid population', (
+        checkpoints.some((checkpoint) => checkpointMass(checkpoint, 'Cs', 'liquid') > 0)
+      ), { liquidCesiumMassesKg: checkpoints.map((checkpoint) => checkpointMass(checkpoint, 'Cs', 'liquid')) }),
+      behaviorCheck('products-cool', 'hot CsF products cool after their peak', (
+        csfTemperatures.length > 1 && csfTemperatures.at(-1) < Math.max(...csfTemperatures)
+      ), { csfMaxTemperaturesK: csfTemperatures })
+    );
+  } else if (scenario.randomPair) {
+    checks.push(behaviorCheck(
+      'random-pair-advances',
+      'the seeded pair advances through at least two finite checkpoints',
+      checkpoints.every((checkpoint) => (
+        Number(checkpoint?.invalidMassParticleCount || 0) === 0
+        && Number(checkpoint?.liveParticleCount || 0) > 0
+      )),
+      {
+        pair: scenario.randomPair,
+        liveParticleCounts: checkpoints.map((checkpoint) => checkpoint.liveParticleCount),
+        invalidMassParticleCounts: checkpoints.map((checkpoint) => checkpoint.invalidMassParticleCount)
+      }
+    ));
+  }
+
+  return {
+    schema: 'peercompute.ulg.sph-standard-scenario-behavior.v0',
+    status: checks.some((check) => check.status === 'fail')
+      ? 'fail'
+      : checks.some((check) => check.status === 'inconclusive')
+      ? 'inconclusive'
+      : 'pass',
+    presetId: scenario.presetId || null,
+    checkpointCount: checkpoints.length,
+    checkpoints,
+    checks
+  };
 }
 
 function timestampSlug(date = new Date()) {
@@ -338,16 +749,29 @@ function scenarioEnv({
     ULG_PROBE_TIMEOUT_MS: String(scenario.timeoutMs ?? timeoutMs),
     ULG_PROBE_FAIL_ON_BAD: '1'
   };
-  if (scenario.expectedH2oVisibleSurfaceCount != null) {
+  if (scenario.standardEnabled) {
+    env.ULG_PROBE_VIEWPORT_WIDTH = process.env.ULG_VISUAL_MATRIX_VIEWPORT_WIDTH || '1280';
+    env.ULG_PROBE_VIEWPORT_HEIGHT = process.env.ULG_VISUAL_MATRIX_VIEWPORT_HEIGHT || '800';
+    env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS =
+      process.env.ULG_VISUAL_MATRIX_NATIVE_SURFACE_VALIDATION_WAIT_MS || '1500';
+  }
+  if (scenario.visualRendererMode === 'native-webgpu-surface-consumer') {
+    env.ULG_PROBE_READBACK_MODE = 'no-full-readback';
+    env.ULG_PROBE_RENDER_READBACK_MODE = 'no-full-readback';
+    env.ULG_PROBE_RENDER_ROWS_READBACK_MODE = 'no-full-readback';
+    env.ULG_PROBE_COMPACT_SUMMARY_MODE = 'none';
+    env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE = 'native-webgpu-surface-consumer';
+  }
+  if (!scenario.standardEnabled && scenario.expectedH2oVisibleSurfaceCount != null) {
     env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT = String(scenario.expectedH2oVisibleSurfaceCount);
   }
-  if (Array.isArray(scenario.expectedMaterialPresent) && scenario.expectedMaterialPresent.length) {
+  if (!scenario.standardEnabled && Array.isArray(scenario.expectedMaterialPresent) && scenario.expectedMaterialPresent.length) {
     env.ULG_PROBE_EXPECT_MATERIAL_PRESENT = scenario.expectedMaterialPresent.join(',');
   }
   if (Array.isArray(scenario.expectedMaterialAbsent) && scenario.expectedMaterialAbsent.length) {
     env.ULG_PROBE_EXPECT_MATERIAL_ABSENT = scenario.expectedMaterialAbsent.join(',');
   }
-  if (scenario.minReactionEventsTotal != null) {
+  if (!scenario.standardEnabled && scenario.minReactionEventsTotal != null) {
     env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL = String(scenario.minReactionEventsTotal);
   }
   if (scenario.maxSpeedMPerS != null) {
@@ -400,6 +824,9 @@ function scenarioEnv({
   }
   if (scenario.minVisualFrameTimeSpanS != null) {
     env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S = String(scenario.minVisualFrameTimeSpanS);
+  }
+  if (scenario.visualOnly === true) {
+    env.ULG_PROBE_VISUAL_ONLY = '1';
   }
   if (process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES === '1') {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
@@ -481,13 +908,33 @@ async function main() {
       await writeFile(outputPath, `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
     }
     const analysis = probe?.analysis || {};
+    const expectedBehavior = evaluateStandardScenarioBehavior(scenario, probe);
     const mechanicsIntegrator = inferMechanicsIntegrator(probe);
+    const effectiveRendererModes = effectiveVisualRendererModes(probe);
     const mechanicsMismatchIssues = scenario.expectedMechanics
       && mechanicsIntegrator
       && mechanicsIntegrator !== scenario.expectedMechanics
       ? ['mechanics-integrator-mismatch']
       : [];
-    const issues = uniqueStrings(probe?.issues, probe?.analysis?.issues, mechanicsMismatchIssues);
+    const rendererMismatchIssues = scenario.visualRendererMode
+      && (
+        effectiveRendererModes.length === 0
+        || effectiveRendererModes.some((mode) => mode !== scenario.visualRendererMode)
+      )
+      ? ['visual-renderer-mode-mismatch']
+      : [];
+    const expectedBehaviorIssues = expectedBehavior?.status === 'pass'
+      ? []
+      : expectedBehavior?.checks
+        ?.filter((check) => check.status !== 'pass')
+        .map((check) => `expected-behavior:${check.id}`) || [];
+    const issues = uniqueStrings(
+      probe?.issues,
+      probe?.analysis?.issues,
+      mechanicsMismatchIssues,
+      rendererMismatchIssues,
+      expectedBehaviorIssues
+    );
     const visualSurfaceIssues = uniqueVisualSurfaceIssues(
       probe?.visualSurfaceIssues,
       probe?.analysis?.visualSurfaceIssues
@@ -495,6 +942,14 @@ async function main() {
     const failed = run.code !== 0 || probe?.status === 'bad' || issues.length > 0;
     results.push({
       label: scenario.label,
+      presetId: scenario.presetId || null,
+      randomPair: scenario.randomPair || null,
+      visualRendererMode: scenario.visualRendererMode || null,
+      effectiveVisualRendererModes: effectiveRendererModes,
+      visualRendererModeMatched: scenario.visualRendererMode
+        ? effectiveRendererModes.length > 0
+          && effectiveRendererModes.every((mode) => mode === scenario.visualRendererMode)
+        : null,
       url: scenario.url,
       expectedMechanics: scenario.expectedMechanics || null,
       mechanicsIntegrator,
@@ -540,6 +995,13 @@ async function main() {
       lastH2oLiquidSurfaceFootprintFillRatio: finiteOrNull(analysis.lastH2oLiquidSurfaceFootprintFillRatio),
       maxVisibleSurfaceOutsideM: finiteOrNull(analysis.maxVisibleSurfaceOutsideM),
       maxVisibleSurfaceOutsideParticleBoundsM: finiteOrNull(analysis.maxVisibleSurfaceOutsideParticleBoundsM),
+      meanBatchMs: finiteOrNull(analysis.meanBatchMs),
+      maxBatchMs: finiteOrNull(analysis.maxBatchMs),
+      meanCompactSummaryMs: finiteOrNull(analysis.meanCompactSummaryMs),
+      compactSummaryMeanBatchShare: finiteOrNull(analysis.compactSummaryMeanBatchShare),
+      expectedCheckpoints: scenario.expectedCheckpoints || [],
+      expectedBehavior,
+      evolutionTimeline: compactEvolutionTimeline(probe),
       outputPath,
       logPath,
       frameDir: captureFrames ? frameDir : null,
@@ -554,6 +1016,8 @@ async function main() {
     runId,
     outputRoot,
     scenarioCount: results.length,
+    standardMode: envFlagEnabled(process.env.ULG_VISUAL_MATRIX_STANDARD, false),
+    randomSeed: process.env.ULG_VISUAL_MATRIX_RANDOM_SEED ?? '0x7a11d2026',
     failedCount: results.filter((result) => result.failed).length,
     captureFrames,
     issueCounts: countBy(results.flatMap((result) => result.issues)),

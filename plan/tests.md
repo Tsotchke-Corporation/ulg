@@ -1,5 +1,78 @@
 # ULG Test Plan
 
+## Standard Material-Interaction Sequence - 2026-07-10
+
+`npm run test:sph-standard-visual` is the standard GPU visual/behavior matrix
+for material-interaction work. It runs the four named presets from
+`src/runtime/sphPhaseScenarioPresets.js` plus three deterministic random
+element pairs. The command pins headless Chromium to Vulkan ANGLE; artifacts
+record the browser launch flags and random seed.
+
+Required evidence per named scene:
+
+- compositor frames at the initial state and every simulation batch;
+- at least two captured authoritative-GPU checkpoints and one retained
+  checkpoint at simulation time zero. Later checkpoints may still be analyzed
+  when the time-zero buffer is unavailable, but initial-state behavior is then
+  explicitly inconclusive rather than inferred from the first post-step row;
+- per-material and phase-fraction-weighted mass, vertical extent/center,
+  temperature, internal energy, and kinetic energy;
+- total particle-mass span no greater than 0.1% over captured checkpoints;
+- browser console/WebGPU issue classification, surface bounds, simulation-time
+  span, and batch wall-time attribution;
+- human review of initial, intermediate, and final frames. Numeric telemetry
+  cannot certify plume color, emission, blinking, lattice artifacts, or visual
+  coherence by itself.
+
+The standard interval matrix explicitly selects `renderer=native-webgpu` and
+`surfaceDraw=native-webgpu-surface-consumer` for every named and random-pair
+scene, pins particle/render rows to `no-full-readback`, and maps only the fixed
+GPU reduction record. Captures suppress the control drawer, warning bar,
+picker, and menu so UI pixels cannot satisfy validation. Every captured
+interval must remain on the requested native bridge. Blank,
+uniform/background-only, UI-only, wrong-canvas, stale-generation, or fallback
+frames fail even when GPU checkpoints show correct resident state. Particle
+spheres and offscreen draw validation may be run as separate diagnostics, but
+neither counts toward the standard visible result.
+
+Named behavior gates:
+
+- `water-cycle`: liquid motion, vapor creation, rising steam, then declining
+  vapor mass under the 200 K ceiling.
+- `iron-ice-quench`: initially liquid/hot Fe and solid H2O, water/steam
+  creation, Fe cooling/solidification, and rising steam.
+- `sodium-water`: decreasing Na, real NaOH and H2 particle populations,
+  temperature rise, upward H2 motion, and visually evolving product plume.
+- `cesium-fluorine`: decreasing F, real CsF population, a large temperature
+  spike, molten Cs, and later product cooling.
+
+Random pairs use a recorded seed and do not have to react. They must produce a
+structured preflight, advance through finite authoritative checkpoints, keep
+mass bounded, and avoid browser/WebGPU errors. If a reaction is discovered,
+the same product/residual checks apply.
+
+Checkpoint readback is an explicit diagnostic cadence only. Particle state is
+reduced on the resident GPU into bounded material/phase evidence; only that
+fixed-size record may be mapped. It must never feed physics, become a CPU
+reference solver, or execute when visual capture is off.
+Current audit results and exact artifact paths are recorded in `plan/log.md`;
+failures remain open evidence rather than being relabeled as passes.
+
+Current standard run:
+
+- `/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/summary.json`
+  contains all four named scenes plus seeded Ba/Pb, Bk/Lr, and Fr/Fe.
+- All seven preserve finite, bounded mass with 5,184-byte GPU evidence and
+  zero particle-state/thermo mapping.
+- All seven fail visible production acceptance after the initial frame. The
+  main canvas becomes uniform, effective mode later includes
+  `resident-surface-buffers-no-overlay`, and the run records 109 destroyed
+  indirect-buffer submissions.
+- Water fails vapor rise/condensation; Fe/ice fails sufficient Fe cooling and
+  steam rise; Na/H2O fails the 50 mm hydrogen-rise gate; Cs/F passes all
+  post-step quantitative reaction checks but remains inconclusive without
+  time-zero evidence and failed visually.
+
 ## Current Focused Result - 2026-06-29 Retained Stage Output Render
 
 The presentation-worker mechanics stage chain now feeds worker-local

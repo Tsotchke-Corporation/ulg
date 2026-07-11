@@ -40912,3 +40912,284 @@ already carries the env-lit surround; only offscreen-UV rays lack it and those
 are exactly the miss case, which samples the env map since 4322286. The water
 env pair shows no dark-edge artifact. No code needed; recorded so the item
 stops reappearing on the follow-up list.
+
+## 2026-07-10 16:29:29 AKDT - Post-Fable four-scenario visual/performance audit (in progress)
+
+Prompt: inspect the new Fable handoff and landed work, add selectable standard
+scenes for (1) 300 K water over water with a 400 K floor and 200 K ceiling,
+(2) molten iron falling onto ice, (3) sodium and water, and (4) cesium and
+fluorine gas; capture expected evolution at several intervals, exercise random
+element pairs, make that process standard, profile performance/redundant work
+without optimizing it, and rewrite `plan/todo/sol-critic.md` with priorities.
+
+Initial evidence and approach:
+
+- Read `plan/plan.md`, `plan/log.md`, `plan/tests.md`, `plan/STATUS.md`,
+  `plan/todo/fable-handoff.md`, the existing `sol-critic.md`, recent commit
+  history/diffs, the SPH mount/menu, long-horizon probe, visual sanity matrix,
+  performance benchmark, relevant tests, recent scratch probes, and the latest
+  reaction/radiation/rendering log entries. `61dfc3a..d5319c2` contains 42
+  commits across 48 files (+4970/-243); the major new authority-path changes
+  are flux-limited reactions, real product placement, pair/ambient radiation,
+  wall-clearance repair, and the surface/render closeout. None of SOL-0..SOL-6
+  was implemented by that range.
+- Added `src/runtime/sphPhaseScenarioPresets.js`, a browser-neutral immutable
+  registry used by both UI and validation. The four preset IDs are
+  `water-cycle`, `iron-ice-quench`, `sodium-water`, and `cesium-fluorine`.
+  The water scene sets side walls to 300 K, floor to 400 K, and ceiling to
+  200 K. The iron scene uses the established 1850 K / 233.15 K phase pair and
+  a visible 2.5 m fall. All scenes use resident MLS-MPM.
+- Added a scenario selector to the existing retro-terminal drawer in
+  `src/visualization/sphPhaseDemoMount.js`. Startup applies the named preset
+  first and explicit URL controls second; selecting a preset assigns controls
+  directly and schedules one rebuild; editing a physical control switches the
+  selector to `custom`. `scenario` is now a recognized SPH URL key.
+- Extended `scripts/sph-visual-sanity-matrix.mjs` so standard scenarios come
+  from the shared registry, each result retains expected checkpoints and a
+  compact physics/performance timeline, and standard mode adds three
+  deterministic seeded random element pairs. Added
+  `npm run test:sph-standard-visual` and focused registry/menu coverage in
+  `tests/sphPhaseScenarioPresets.test.mjs` and `tests/demo.e2e.mjs`.
+- A readback is being added only at explicit validation checkpoints to expose
+  per-material/phase mass, vertical motion, and temperature evolution. It is
+  diagnostic evidence over authoritative GPU state, not a CPU solver, parity
+  oracle, or hot-loop dependency.
+
+Commands/results so far:
+
+- `node --check src/runtime/sphPhaseScenarioPresets.js` - PASS.
+- `node --check src/visualization/sphPhaseDemoMount.js` - PASS.
+- `node --check scripts/sph-visual-sanity-matrix.mjs` - PASS.
+- `node --check tests/sphPhaseScenarioPresets.test.mjs` - PASS.
+- `node --test tests/sphPhaseScenarioPresets.test.mjs` - PASS, 2/2.
+- `node scripts/sph-visual-sanity-matrix.mjs --list` - PASS; all four standard
+  scenario labels are present.
+- `npx playwright test --config tests/playwright.config.mjs --grep "SPH phase
+  scenario menu applies"` - infrastructure FAIL before test: configured HTTP
+  readiness timed out after 20 s because the existing Fable server on 5173 is
+  HTTPS (`curl http://127.0.0.1:5173` empty response; `curl -kI
+  https://127.0.0.1:5173` 200).
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173
+  PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config
+  tests/playwright.config.mjs --grep "SPH phase scenario menu applies"` - PASS,
+  1/1 in 3.8 s (10.6 s total). The Fable server was reused and not stopped.
+- A captured `standard-sodium-water` matrix run is currently executing against
+  the same HTTPS server. Full four-scene/random-pair results, frame inspection,
+  performance attribution, failures, and open questions will be appended when
+  those commands complete.
+
+## 2026-07-10 18:13:03 AKDT - Post-Fable audit completion evidence
+
+Prompt continuation timestamps:
+
+- The user required every visual check to use the WebGPU surface renderer. The
+  conversation UI did not expose an exact prompt timestamp; the first
+  post-prompt native artifact was created at 2026-07-10 17:17:29 AKDT.
+- The user required every applied fix to be general rather than a demo- or
+  material-pair patch. The UI did not expose an exact prompt timestamp; the
+  first post-prompt shared-registry edit was recorded at 2026-07-10 17:24:53
+  AKDT.
+
+Those instructions changed the acceptance boundary. Earlier sphere-renderer
+captures under `/tmp/ulg-standard-audit/final4-2026-07-10` remain useful only
+as physics diagnostics; none counts as standard visual evidence. No physics
+constant, reaction law, phase threshold, scene-specific branch, or material-
+pair special case was added in this audit.
+
+### General implementation work
+
+Files touched:
+
+- `src/runtime/sphPhaseScenarioPresets.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-authoritative-gpu-checkpoint.mjs`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `tests/sphAuthoritativeGpuCheckpoint.test.mjs`
+- `tests/sphPhaseScenarioPresets.test.mjs`
+- `tests/nativeSurfaceHarness.test.mjs`
+- `tests/demo.e2e.mjs`
+- `package.json`, `README.md`, `plan/plan.md`, `plan/tests.md`,
+  `plan/STATUS.md`, `plan/todo/sol-critic.md`, and this log.
+
+The immutable scenario registry owns the four requested configurations and all
+law toggles. Named selection restores the full preset; any explicit URL or
+manual physical control difference switches the selector to `custom`. The
+standard matrix derives from that same registry and adds seeded Ba/Pb, Bk/Lr,
+and Fr/Fe pairs (`0x7a11d2026`). This avoids test-only scene definitions.
+
+The checkpoint path is a fixed-capacity WebGPU reduction over retained
+authoritative state/thermo buffers. It emits a 64-slot material/phase table and
+global totals in 5,184 mapped bytes. It preserves raw phase fractions and
+publishes overflow, mapping, and phase-residual evidence. It maps zero particle
+state/thermo bytes, never feeds physics, and only executes at visual-validation
+checkpoints. A true retained time-zero checkpoint is not yet available; the
+matrix marks the initial-state claim inconclusive rather than substituting the
+first post-step sample.
+
+Native capture now pins no-full particle/render rows, selects the actual native
+consumer canvas, records an inner-60% clip, and suppresses the control drawer,
+warning bar, menu, and material picker. This was necessary because a 320x240
+probe initially appeared nonblank only because status text covered a uniform
+canvas. That result was inspected and rejected. The final classifier treats
+blank, uniform/background-only, UI-only, wrong-canvas, stale-generation, or
+fallback intervals as failures and requires every interval to remain on the
+native bridge.
+
+The first no-full native gate reached the shared surface renderer but WebGPU
+rejected its offscreen validation command: both opaque and transparent
+pipelines required bind group 1, while the validator bound only group 0. The
+general validator now binds the shared refraction/environment dummy group for
+both pipelines. Focused tests pass and the corrected offscreen draw validation
+passes with no invalid-command-buffer warnings. This repair is independent of
+scenario, material, phase, count, or checkpoint.
+
+The production main canvas still fails. At both 320x240 and 1280x800, a clean
+UI-suppressed capture is surface-like at time zero and becomes a uniform
+background after the first resident refresh. Offscreen validation remains
+passing, while the complete matrix records 109
+`webgpu-destroyed-buffer-submit` errors for
+`ulg-sph-extension-surface-draw-indirect`. Later effective modes include
+`resident-surface-buffers-no-overlay`. This is an open shared presentation /
+resource-generation / reclamation defect, not a shader-physics proof and not a
+reason to fall back to spheres.
+
+### Commands and focused results
+
+- `node --check src/visualization/sphPhaseScene.js` - PASS.
+- `node --check scripts/sph-long-horizon-probe.mjs` - PASS.
+- `node --check scripts/sph-visual-sanity-matrix.mjs` - PASS.
+- `node --test tests/nativeSurfaceHarness.test.mjs tests/sphAuthoritativeGpuCheckpoint.test.mjs tests/sphPhaseScenarioPresets.test.mjs`
+  - PASS, 24/24 after the shared bind-group and no-full matrix fixes.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase scenario menu applies"`
+  - PASS, 1/1. It verifies preset application, full law restoration, and
+    explicit URL/manual override to `custom`.
+- `/tmp/ulg-native-no-full-gate-fixed2.json`
+  - Native bridge selected, offscreen validation passed after the general
+    bind-group repair, browser console issue count 0; main canvas remained
+    uniform and browser-frame validation failed.
+- `/tmp/ulg-native-no-full-gate-320-clean.json`
+  - UI suppression recorded; the earlier small-viewport apparent pass became
+    an honest uniform-frame failure.
+
+### Standard native matrix
+
+Command:
+
+`ULG_VISUAL_MATRIX_STANDARD=1 ULG_VISUAL_MATRIX_OUTPUT_DIR=/tmp/ulg-standard-audit ULG_VISUAL_MATRIX_RUN_ID=native-authoritative-final-2026-07-10 ULG_VISUAL_MATRIX_BASE_PORT=5510 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_PROBE_CHROMIUM_ARGS='--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer' PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+
+Artifact:
+`/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/summary.json`.
+The command completed all seven scenarios and returned 0 only because audit
+mode explicitly allowed expected failures. Each individual scenario status is
+`bad`; visual acceptance failed in all seven. The run began before the final
+all-interval renderer classifier edit, so its legacy
+`visualRendererModeMatched=true` field means only that at least one metric was
+native. Current source requires all effective modes to match.
+
+Observed physics:
+
+- Water: 1,216 kg exactly conserved; liquid center 0.6393 -> 0.4338 m;
+  10.134 kg steam forms. Steam center stays at 0.10 m and vapor mass rises
+  monotonically, so rise and condensation fail.
+- Fe/ice: relative mass span `1.21e-6`; 344.339 kg Fe becomes solid;
+  184.103 kg liquid water and 0.482 kg steam form. Fe maximum temperature falls
+  only 1.679 K and steam center falls about 0.002 m, so cooling and rise fail.
+- Na/H2O: relative mass span `5.05e-7`; Na decreases by 1.996 kg; 3.856 kg NaOH
+  and 0.0972 kg H2 form; peak reaches 509.15 K. H2 rises 43.4 mm from the first
+  captured row, below the 50 mm gate. Violence and evolving plume color cannot
+  be judged because every post-refresh native frame is uniform.
+- Cs/F: relative mass span `3.88e-7`; fluorine decreases; 5.739 kg CsF forms;
+  temperature peaks at 3,593.26 K and falls to 1,851.13 K. All post-step
+  quantitative reaction checks pass. Overall result is still inconclusive
+  without time-zero evidence and failed visually.
+- Seeded Ba/Pb, Bk/Lr, and Fr/Fe: three finite checkpoints each, 35 live rows,
+  zero invalid-mass rows, relative mass span no greater than `1.04e-7`.
+
+Mean batch timings were 287.1 ms / 512 water steps, 307.1 ms / 512 Fe/ice
+steps, 4,021.7 ms / 256 Na/H2O steps, 2,549.1 ms / 256 Cs/F steps, and
+570.5-583.7 ms / 64 random-pair steps. These are end-to-end probe batches, not
+isolated GPU kernel timestamps.
+
+### Performance A/B and interface diagnostic
+
+Commands used identical native-surface 128/1,024/8,192-particle scenes, two
+eight-step batches, no-full readback, final-only active-grid planning, and
+explicit queue-fence measurement. The all-laws run set thermal/reactions/
+viscosity on; the mechanics comparison disabled thermal and reactions only.
+
+Artifacts:
+
+- `/tmp/ulg-standard-audit/perf-all-laws-native.json`
+- `/tmp/ulg-standard-audit/perf-mechanics-only-native.json`
+- `/tmp/ulg-standard-audit/perf-interface-native.json`
+
+Engine batch A/B results (all-laws vs mechanics-only):
+
+- 128: 109.9 vs 87.6 ms (`1.25x`).
+- 1,024: 169.6 vs 79.4 ms (`2.14x`).
+- 8,192: 131.6 vs 63.1 ms (`2.09x`).
+
+The water workload emits no reaction events, so this is primarily thermal and
+enabled-sidecar cost. Queue-fence timings are non-monotonic, and `stageMs`
+measures host enqueue. `residentGpuCompletedStageMs` is a max rather than a
+sum, while `residentStageStepsPerSecond` omits fused step count. No kernel-level
+optimization decision should use these numbers before GPU timestamps exist.
+
+The GPU-resident material-interface diagnostic is positive but incomplete.
+Source-local estimated visits were 140,976 / 432,000 / 3,456,000 versus dense
+949,104 / 7,592,832 / 60,742,656 pairs: 14.85%, 5.69%, and 5.69% of dense
+work. Refresh wall time was 1.4-2.9 ms, buffers were borrowed/reused, and
+readback was zero. Status remains `gpu-resident-summary-pending` because a GPU
+pressure consumer is not wired; returning to CPU force-row construction is not
+the solution.
+
+### Audit conclusions and open questions
+
+- SOL-0 through SOL-6 remain unstarted. The recent work improves material
+  physics and appearance but adds no coherent body frame, pose, inertia,
+  connectivity, shape carrier, contact proxy, topology, or planetary chart.
+- Dense render gather remains `surface cells x particles`, with an optional
+  second particle pass. The 8-float field is 32 bytes/cell despite a stale
+  16-byte budget comment. This is the clearest redundant computation after the
+  presentation lifecycle is repaired.
+- Thermal/radiation still have wide-bin and exhaustive-scan paths; SS active
+  nodes and candidates remain particle-proportional; reaction placement is
+  serial; the extent law is copied six times; reactive sidecars exclude the
+  fast fused path.
+- The next presentation investigation must version color/depth, bridge,
+  bind-group, extraction, and indirect-buffer generations and capture actual
+  submit/reclamation ordering. It must not branch on a demo or material.
+- The next evidence work needs a retained time-zero checkpoint and GPU
+  timestamp queries. The third SS level stays on hold.
+
+### Final verification - 2026-07-10 18:24:26 AKDT
+
+- Re-ran syntax checks for the two probes, the fixed GPU checkpoint helper,
+  scenario registry, demo mount, and scene renderer: all six passed.
+- Re-ran the focused Node gate:
+  `node --test tests/nativeSurfaceHarness.test.mjs tests/sphAuthoritativeGpuCheckpoint.test.mjs tests/sphPhaseScenarioPresets.test.mjs`.
+  Result: 24 passed, 0 failed.
+- Ran the complete `npm test` regression suite. Result: 1,005 passed, 3
+  intentional opt-in skips, 0 failed (1,008 total; 266,459.503 ms).
+- Re-ran the live selector check against the pre-existing HTTPS server with
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase scenario menu applies"`.
+  Result: 1 passed, 0 failed (10.3 s).
+- Ran `npm run build` with Node 24.17.0. Vite 8.0.16 transformed 136 modules
+  and completed in 1.89 s. The existing greater-than-500-kB chunk warning
+  remains; there was no build failure.
+- Ran `npm run icc:update`: PASS. ICC registered/refreshed `ulg`, indexed 403
+  files into 2,957 memory chunks, and refreshed `.icc/ulg_status.json` plus
+  `.icc/ulg_arch_summary.md` without adding tracked worktree changes.
+- Ran `git diff --check`: PASS. Inspected the final diff/stat/status and found
+  only the audit implementation, tests, and required plan/README files.
+- Inspected processes and listening ports for the audit matrix range
+  `5510-5602`: no probe, matrix, benchmark, Playwright, or audit Vite process
+  remained. The pre-existing server on 5173 was not stopped or changed.
+- Coherent-point local commit command after these gates:
+  `git add README.md package.json plan/STATUS.md plan/log.md plan/plan.md plan/tests.md plan/todo/sol-critic.md scripts/sph-authoritative-gpu-checkpoint.mjs scripts/sph-long-horizon-probe.mjs scripts/sph-visual-sanity-matrix.mjs src/runtime/sphPhaseScenarioPresets.js src/visualization/sphPhaseDemoMount.js src/visualization/sphPhaseScene.js tests/demo.e2e.mjs tests/nativeSurfaceHarness.test.mjs tests/sphAuthoritativeGpuCheckpoint.test.mjs tests/sphPhaseScenarioPresets.test.mjs && git commit -m "Add native material scenario audit and SOL critique"`.
+- No performance optimization or material/demo-specific physics adjustment was
+  made. The only production renderer correction is the shared native-surface
+  validation bind-group completion; the still-open presentation lifecycle
+  defect is documented rather than bypassed.

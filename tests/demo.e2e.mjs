@@ -3274,6 +3274,33 @@ test('SPH phase demo opens collapsed and starts from URL params', async ({ page 
   await expect(page.locator('#sph-status')).toContainText(/resident profile : submissions=[1-9]|worker-view-state|pending worker view-state/);
 });
 
+test('SPH phase scenario menu applies and serializes standard presets', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/?scenario=water-cycle');
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await expect(page.locator('#sph-scenario-preset select')).toHaveValue('water-cycle');
+  await expect(page.locator('#sph-elements select').nth(0)).toHaveValue('h2o');
+  await expect(page.locator('#sph-elements select').nth(1)).toHaveValue('h2o');
+  await expect(page.locator('#sph-temps input').nth(0)).toHaveValue('300');
+  await expect(page.locator('#sph-temps input').nth(1)).toHaveValue('300');
+  await expect(page.locator('#sph-walls input').nth(2)).toHaveValue('400');
+  await expect(page.locator('#sph-walls input').nth(3)).toHaveValue('200');
+  await expect(page.locator('#sph-laws input').nth(5)).toBeChecked();
+  await expect(page.locator('#sph-laws input').nth(7)).not.toBeChecked();
+
+  await page.locator('#sph-scenario-preset select').selectOption('cesium-fluorine');
+  await expect(page.locator('#sph-elements select').nth(0)).toHaveValue('Cs');
+  await expect(page.locator('#sph-elements select').nth(1)).toHaveValue('F');
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain('scenario=cesium-fluorine');
+
+  await page.goto('/?scenario=sodium-water&lawr=0');
+  await expect(page.locator('#sph-scenario-preset select')).toHaveValue('custom');
+  await expect(page.locator('#sph-laws input').nth(5)).not.toBeChecked();
+  await page.locator('#sph-scenario-preset select').selectOption('sodium-water');
+  await expect(page.locator('#sph-laws input').nth(5)).toBeChecked();
+  await expect(page.locator('#sph-laws input').nth(7)).not.toBeChecked();
+});
+
 test('SPH phase visual sequence captures dense H2O/H2O resident motion', async ({ page }, testInfo) => {
   test.skip(!SPH_VISUAL_CAPTURE_ENABLED, 'Set ULG_SPH_VISUAL_CAPTURE=1 to record SPH visual sequence artifacts.');
   test.setTimeout(envPositiveInteger('ULG_SPH_VISUAL_TIMEOUT_MS', 300_000));

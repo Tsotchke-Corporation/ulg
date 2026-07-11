@@ -542,6 +542,12 @@ function analyzePngFrame(bytes, { region = null } = {}) {
     let maxChannel = 0;
     let minRgbChannel = 255;
     let maxRgbChannel = 0;
+    let minR = 255;
+    let maxR = 0;
+    let minG = 255;
+    let maxG = 0;
+    let minB = 255;
+    let maxB = 0;
     let minAlpha = 255;
     let maxAlpha = 0;
     const distinctRgbColors = new Set();
@@ -609,6 +615,12 @@ function analyzePngFrame(bytes, { region = null } = {}) {
         maxChannel = Math.max(maxChannel, r, g, b, a);
         minRgbChannel = Math.min(minRgbChannel, r, g, b);
         maxRgbChannel = Math.max(maxRgbChannel, r, g, b);
+        minR = Math.min(minR, r);
+        maxR = Math.max(maxR, r);
+        minG = Math.min(minG, g);
+        maxG = Math.max(maxG, g);
+        minB = Math.min(minB, b);
+        maxB = Math.max(maxB, b);
         minAlpha = Math.min(minAlpha, a);
         maxAlpha = Math.max(maxAlpha, a);
         if (distinctRgbColors.size < distinctRgbColorLimit) {
@@ -618,7 +630,7 @@ function analyzePngFrame(bytes, { region = null } = {}) {
       previous = row;
     }
     const pixelCount = sampleWidth * sampleHeight;
-    const rgbChannelSpan = maxRgbChannel - minRgbChannel;
+    const rgbChannelSpan = Math.max(maxR - minR, maxG - minG, maxB - minB);
     const distinctRgbColorCount = distinctRgbColors.size;
     return {
       status: 'ready',
@@ -771,6 +783,7 @@ async function persistCapturedFrames({ frames, frameDir }) {
       canvasDevicePixelRatio: frame.canvasDevicePixelRatio ?? null,
       canvasSelection: frame.canvasSelection ?? null,
       canvasElementFallback: frame.canvasElementFallback ?? null,
+      compositorCaptureRegion: frame.compositorCaptureRegion ?? null,
       validationPng: frame.validationPng ?? null,
       validationRegion: frame.validationRegion ?? null,
       reason: frame.reason ?? null,
@@ -897,9 +910,16 @@ async function capturePlaywrightCanvasCenterFrame({
           };
         })
         .filter((entry) => entry.visible);
+      const requestedSurfaceDraw = String(
+        new URL(window.location.href).searchParams.get('surfaceDraw') || ''
+      ).toLowerCase();
+      const nativeSurfaceRequested = requestedSurfaceDraw === 'native-webgpu-surface-consumer';
       const fallbackCanvas = canvases.at(-1) || null;
       const fallbackRect = fallbackCanvas?.getBoundingClientRect?.() || null;
-      const selected = visibleCanvases.at(-1) || (fallbackCanvas
+      const selected = visibleCanvases.find((entry) => entry.sameAsNativeConsumerCanvas)
+        || visibleCanvases.find((entry) => entry.sameAsRenderBridgeCanvas)
+        || (nativeSurfaceRequested ? visibleCanvases[0] : visibleCanvases.at(-1))
+        || (fallbackCanvas
         ? {
             index: canvases.length - 1,
             visible: false,
@@ -1321,6 +1341,46 @@ async function runBrowserProbe({
   page.on('pageerror', (error) => {
     consoleCapture.recordPageError(error);
   });
+  await page.exposeFunction('__ulgCaptureSphProbeCompositedFrame', async ({ clip = null } = {}) => {
+    const viewport = page.viewportSize();
+    const requested = clip && typeof clip === 'object'
+      ? {
+          x: Math.max(0, Number(clip.x) || 0),
+          y: Math.max(0, Number(clip.y) || 0),
+          width: Math.max(1, Number(clip.width) || 1),
+          height: Math.max(1, Number(clip.height) || 1)
+        }
+      : null;
+    const boundedClip = requested && viewport
+      ? {
+          x: Math.min(requested.x, Math.max(0, viewport.width - 1)),
+          y: Math.min(requested.y, Math.max(0, viewport.height - 1)),
+          width: Math.max(1, Math.min(requested.width, viewport.width - requested.x)),
+          height: Math.max(1, Math.min(requested.height, viewport.height - requested.y))
+        }
+      : requested;
+    try {
+      const png = await page.screenshot({
+        type: 'png',
+        animations: 'disabled',
+        ...(boundedClip ? { clip: boundedClip } : {})
+      });
+      return {
+        status: 'captured',
+        captureSource: 'playwright-compositor-screenshot',
+        width: boundedClip?.width ?? viewport?.width ?? null,
+        height: boundedClip?.height ?? viewport?.height ?? null,
+        dataUrl: `data:image/png;base64,${png.toString('base64')}`
+      };
+    } catch (error) {
+      return {
+        status: 'capture-error',
+        captureSource: 'playwright-compositor-screenshot',
+        reason: error instanceof Error ? error.message : String(error),
+        dataUrl: null
+      };
+    }
+  });
   try {
     if (nativeSurfaceDebugMode !== 'none') {
       await page.addInitScript((mode) => {
@@ -1357,6 +1417,20 @@ async function runBrowserProbe({
       return !overlay?.__mlsMpmResidentStepsPending;
     }, null, { timeout: residentWaitMs }).catch(() => null);
     preProbeSnapshots.push(await collectBrowserSnapshot(page, 'before-in-page-probe'));
+    const nativeSurfaceCaptureUiSuppressed = Boolean(
+      captureFrames
+      && surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+    );
+    if (nativeSurfaceCaptureUiSuppressed) {
+      await page.addStyleTag({
+        content: [
+          '#sph-phase-overlay #sph-panel',
+          '#sph-phase-overlay #sph-toggle',
+          '#sph-phase-overlay #sph-warning-bar',
+          '#sph-phase-overlay .sph-element-picker-overlay'
+        ].join(',') + '{visibility:hidden!important;}'
+      });
+    }
 
     const inPageProbe = page.evaluate(async ({
       batches: requestedBatches,
@@ -1387,7 +1461,8 @@ async function runBrowserProbe({
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
       preProbeSnapshots: requestedPreProbeSnapshots,
-      pageConsole: requestedPageConsole
+      pageConsole: requestedPageConsole,
+      nativeSurfaceCaptureUiSuppressed: requestedNativeSurfaceCaptureUiSuppressed
     }) => {
       const overlay = document.querySelector('#sph-phase-overlay');
       const sceneApi = overlay?.__sphScene || null;
@@ -2187,9 +2262,15 @@ async function runBrowserProbe({
         if (String(phase || '').includes('error') || String(phase || '').includes('anomaly')) return true;
         return batchIndex % requestedCaptureFrameEvery === 0;
       };
-      const captureFrame = (batchIndex, phase, sampleIndex) => {
+      const captureFrame = async (batchIndex, phase, sampleIndex) => {
         if (!shouldCaptureFrame(batchIndex, phase)) return;
         const canvases = Array.from(document.querySelectorAll('canvas'));
+        const renderBridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.()
+          || sceneApi?.scene?.userData?.sphResidentSurfaceDrawRenderBridge
+          || null;
+        const nativeConsumer = sceneApi?.scene?.userData?.sphNativeWebGpuSurfaceConsumer
+          || renderBridge?.nativeConsumer
+          || null;
         const visibleCanvases = canvases.filter((candidate) => {
           const rect = candidate.getBoundingClientRect?.();
           const style = window.getComputedStyle?.(candidate);
@@ -2200,7 +2281,12 @@ async function runBrowserProbe({
             && style?.visibility !== 'hidden'
             && Number(style?.opacity ?? 1) !== 0;
         });
-        const canvas = visibleCanvases.at(-1) || canvases.at(-1) || canvases[0] || null;
+        const canvas = visibleCanvases.find((candidate) => candidate === nativeConsumer?.canvas)
+          || visibleCanvases.find((candidate) => candidate === renderBridge?.canvas)
+          || (requestedSurfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+            ? visibleCanvases[0]
+            : visibleCanvases.at(-1))
+          || null;
         const canvasRect = canvas?.getBoundingClientRect?.() || null;
         const base = {
           schema: 'peercompute.ulg.sph-probe-visual-frame.v0',
@@ -2215,9 +2301,83 @@ async function runBrowserProbe({
           canvasCssWidth: canvasRect?.width ?? null,
           canvasCssHeight: canvasRect?.height ?? null
         };
+        const renderState = sceneApi.getSphResidentRenderState?.()
+          || overlay.__sphResidentRenderState
+          || null;
+        const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.()
+          || overlay.__sphResidentSurfaceDraw
+          || null;
+        const presentationBridge = surfaceDraw?.visibleRendererBridge
+          || renderState?.surfaceDrawVisibleRendererBridge
+          || null;
+        const presentationSource = surfaceDraw?.visibleRenderSource
+          || surfaceDraw?.source
+          || renderState?.source
+          || null;
+        const presentationIdentity = `${presentationBridge || ''} ${presentationSource || ''}`.toLowerCase();
+        const nativeWebGpuPresented = requestedSurfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+          || presentationIdentity.includes('native-webgpu');
+        const workerPresented = presentationIdentity.includes('worker-owned-presented-canvas')
+          || presentationIdentity.includes('presentation-worker-retained-output')
+          || presentationIdentity.includes('worker-offscreen');
+        // The active presentation canvas can change ownership without leaving
+        // bridge metadata on the sampled render state. The browser compositor
+        // is therefore the validation authority for every visual checkpoint;
+        // canvas readback remains only a fallback if screenshot capture fails.
+        const compositorCaptureRequired = true;
+        let compositorFallbackReason = null;
         if (!canvas) {
-          visualFrames.push({ ...base, status: 'missing-canvas', reason: 'no-canvas-element' });
+          visualFrames.push({
+            ...base,
+            status: 'missing-canvas',
+            reason: 'no-visible-canvas-element',
+            presentationBridge,
+            presentationSource,
+            nativeWebGpuPresented,
+            workerPresented,
+            compositorCaptureRequired
+          });
           return;
+        }
+        const nativeInnerRegionRequested = (
+          requestedSurfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
+        );
+        const compositorClip = canvasRect ? {
+          x: canvasRect.x + canvasRect.width * (nativeInnerRegionRequested ? 0.2 : 0),
+          y: canvasRect.y + canvasRect.height * (nativeInnerRegionRequested ? 0.2 : 0),
+          width: canvasRect.width * (nativeInnerRegionRequested ? 0.6 : 1),
+          height: canvasRect.height * (nativeInnerRegionRequested ? 0.6 : 1)
+        } : null;
+        const compositorCaptureRegion = {
+          mode: nativeInnerRegionRequested ? 'inner-60-percent' : 'full-canvas',
+          normalizedCanvasRegion: nativeInnerRegionRequested
+            ? { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }
+            : { x: 0, y: 0, width: 1, height: 1 },
+          clip: compositorClip
+        };
+        if (
+          compositorCaptureRequired
+          && typeof globalThis.__ulgCaptureSphProbeCompositedFrame === 'function'
+        ) {
+          const composited = await globalThis.__ulgCaptureSphProbeCompositedFrame({
+            clip: compositorClip
+          });
+          if (composited?.status === 'captured' && composited.dataUrl) {
+            visualFrames.push({
+              ...base,
+              ...composited,
+              presentationBridge,
+              presentationSource,
+              nativeWebGpuPresented,
+              workerPresented,
+              compositorCaptureRequired: true,
+              compositorCaptureRegion,
+              canvasToDataUrlSkipped: true,
+              canvasToDataUrlSkipReason: 'gpu-or-worker-presentation-requires-compositor-capture'
+            });
+            return;
+          }
+          compositorFallbackReason = composited?.reason || composited?.status || 'compositor-capture-failed';
         }
         try {
           visualFrames.push({
@@ -2225,7 +2385,18 @@ async function runBrowserProbe({
             status: 'captured',
             width: canvas.width ?? null,
             height: canvas.height ?? null,
-            dataUrl: canvas.toDataURL('image/png')
+            dataUrl: canvas.toDataURL('image/png'),
+            presentationBridge,
+            presentationSource,
+            nativeWebGpuPresented,
+            workerPresented,
+            compositorCaptureRequired,
+            compositorCaptureRegion: {
+              mode: 'full-canvas-data-url-fallback',
+              normalizedCanvasRegion: { x: 0, y: 0, width: 1, height: 1 },
+              clip: null
+            },
+            compositorFallbackReason
           });
         } catch (error) {
           visualFrames.push({
@@ -2235,6 +2406,178 @@ async function runBrowserProbe({
             height: canvas.height ?? null,
             error: error instanceof Error ? error.message : String(error)
           });
+        }
+      };
+      let authoritativeGpuCheckpointModulePromise = null;
+      const loadAuthoritativeGpuCheckpointModule = () => {
+        if (!authoritativeGpuCheckpointModulePromise) {
+          authoritativeGpuCheckpointModulePromise = import('/scripts/sph-authoritative-gpu-checkpoint.mjs');
+        }
+        return authoritativeGpuCheckpointModulePromise;
+      };
+      const captureAuthoritativeGpuCheckpoint = async ({ batchIndex, phase, sampleIndex }) => {
+        const checkpointBase = {
+          schema: 'peercompute.ulg.sph-authoritative-gpu-material-phase-checkpoint.v1',
+          status: 'not-run',
+          batchIndex,
+          phase,
+          sampleIndex,
+          capturedAtMs: performance.now(),
+          source: 'retained-resident-particle-buffers',
+          authority: 'gpu-resident-retained-state',
+          diagnosticOnly: true,
+          physicsReference: false,
+          sourceBufferMutation: false,
+          hotLoopParticipation: false,
+          readbackCadence: 'visual-validation-checkpoint-only'
+        };
+        if (!requestedCaptureFrames) {
+          return {
+            ...checkpointBase,
+            status: 'disabled',
+            reason: 'visual validation capture is disabled'
+          };
+        }
+
+        const currentSteps = sceneApi.getMlsMpmResidentSteps?.()
+          || overlay.__mlsMpmResidentSteps
+          || execution
+          || null;
+        const currentStep = sceneApi.getMlsMpmResidentStep?.()
+          || overlay.__mlsMpmResidentStep
+          || currentSteps?.finalStep
+          || null;
+        const mechanicsIntegrator = String(
+          overlay.__sphPhaseViewState?.gpuMechanics?.integrator
+          || overlay.__sphDriver?.demo?.gpuMechanics?.integrator
+          || ''
+        ).trim().toLowerCase();
+        const executionBackend = String(currentSteps?.backend || currentStep?.backend || '').toLowerCase();
+        if (
+          (mechanicsIntegrator && mechanicsIntegrator !== 'mlsmpm')
+          || executionBackend.includes('cpu-reference')
+        ) {
+          return {
+            ...checkpointBase,
+            status: 'not-run-non-resident-authority',
+            reason: 'the selected mechanics lane is not authoritative resident MLS-MPM'
+          };
+        }
+
+        const uploadCandidates = [
+          ['resident-steps-next-particle-uploads', currentSteps?.nextParticleUploads?.sphParticleUpload],
+          ['resident-steps-final-step-next-particle-uploads', currentSteps?.finalStep?.nextParticleUploads?.sphParticleUpload],
+          ['resident-step-next-particle-uploads', currentStep?.nextParticleUploads?.sphParticleUpload]
+        ];
+        const [uploadSource, sphParticleUpload] = uploadCandidates.find(([, upload]) => (
+          upload?.stateBuffer && upload?.thermoBuffer
+        )) || [];
+        if (!sphParticleUpload) {
+          return {
+            ...checkpointBase,
+            status: 'unavailable',
+            reason: 'retained resident state and thermo GPUBuffer pair is unavailable'
+          };
+        }
+
+        const stateBuffer = sphParticleUpload.stateBuffer;
+        const thermoBuffer = sphParticleUpload.thermoBuffer;
+        const stateStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.stateStrideBytes) || 32));
+        const thermoStrideBytes = Math.max(4, Math.round(Number(sphParticleUpload.thermoStrideBytes) || 48));
+        const stateCapacity = Math.floor(Number(stateBuffer.size) / stateStrideBytes);
+        const thermoCapacity = Math.floor(Number(thermoBuffer.size) / thermoStrideBytes);
+        const bufferParticleCapacity = Math.min(stateCapacity, thermoCapacity);
+        const requestedParticleCount = Math.round(Number(
+          currentSteps?.nextParticleCount
+          ?? currentStep?.nextParticleCount
+          ?? sphParticleUpload.authoritativeParticleCount
+          ?? sphParticleUpload.particleCount
+          ?? bufferParticleCapacity
+        ));
+        const particleCount = Math.min(
+          bufferParticleCapacity,
+          Number.isInteger(requestedParticleCount) && requestedParticleCount > 0
+            ? requestedParticleCount
+            : bufferParticleCapacity
+        );
+        if (!(particleCount > 0)) {
+          return {
+            ...checkpointBase,
+            status: 'unavailable',
+            reason: 'retained resident particle count is empty or invalid',
+            uploadSource,
+            bufferParticleCapacity
+          };
+        }
+
+        const renderBridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.()
+          || sceneApi?.scene?.userData?.sphResidentSurfaceDrawRenderBridge
+          || null;
+        const deviceResult = renderBridge?.device
+          ? { device: renderBridge.device, status: 'resident-render-bridge-device' }
+          : await sceneApi.requestOpticalGpuDevice?.();
+        const device = deviceResult?.device || null;
+        if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.submit) {
+          return {
+            ...checkpointBase,
+            status: 'unavailable',
+            reason: deviceResult?.reason || 'resident GPUDevice is unavailable',
+            uploadSource,
+            particleCount
+          };
+        }
+
+        const stateInputByteLength = particleCount * stateStrideBytes;
+        const thermoInputByteLength = particleCount * thermoStrideBytes;
+        try {
+          const checkpointModule = await loadAuthoritativeGpuCheckpointModule();
+          const viewState = overlay.__sphPhaseViewState || null;
+          const reduction = await checkpointModule.reduceAuthoritativeGpuMaterialPhaseEvidence({
+            device,
+            stateBuffer,
+            thermoBuffer,
+            particleCount,
+            stateStrideBytes,
+            thermoStrideBytes,
+            materialKeyById: checkpointModule.materialKeyByIdFromSphViewState(viewState),
+            label: `ulg-sph-authoritative-checkpoint-${batchIndex}`
+          });
+          return {
+            ...checkpointBase,
+            uploadSource,
+            sourceStep: currentStep?.particlePingPong?.nextStep
+              ?? currentSteps?.nextSphParticleState?.step
+              ?? null,
+            sourceTimeS: finiteOrNull(
+              currentStep?.particlePingPong?.nextTime
+              ?? currentSteps?.nextSphParticleState?.time
+            ),
+            sourceBufferLabels: {
+              state: stateBuffer.label || null,
+              thermo: thermoBuffer.label || null
+            },
+            retainedInput: {
+              stateByteLength: stateInputByteLength,
+              thermoByteLength: thermoInputByteLength,
+              totalByteLength: stateInputByteLength + thermoInputByteLength,
+              mappedByteLength: 0
+            },
+            ...reduction
+          };
+        } catch (error) {
+          return {
+            ...checkpointBase,
+            status: 'error',
+            reason: error instanceof Error ? error.message : String(error),
+            uploadSource,
+            particleCount,
+            retainedInput: {
+              stateByteLength: stateInputByteLength,
+              thermoByteLength: thermoInputByteLength,
+              totalByteLength: stateInputByteLength + thermoInputByteLength,
+              mappedByteLength: 0
+            }
+          };
         }
       };
       const nativeSurfaceValidationSnapshot = () => {
@@ -3832,6 +4175,65 @@ async function runBrowserProbe({
           surfaces: surfaceSnapshot(sceneApi)
         };
       };
+      const appendMetricWithValidationCapture = async (metric) => {
+        const sampleIndex = metrics.length;
+        if (!shouldCaptureFrame(metric.batchIndex, metric.phase)) {
+          metrics.push(metric);
+          return metric;
+        }
+        markProbeProgress('authoritative-gpu-checkpoint-started', {
+          batchIndex: metric.batchIndex,
+          phase: metric.phase,
+          sampleIndex
+        });
+        metric.authoritativeGpuCheckpoint = await captureAuthoritativeGpuCheckpoint({
+          batchIndex: metric.batchIndex,
+          phase: metric.phase,
+          sampleIndex
+        });
+        metrics.push(metric);
+        await captureFrame(metric.batchIndex, metric.phase, sampleIndex);
+        markProbeProgress('authoritative-gpu-checkpoint-completed', {
+          batchIndex: metric.batchIndex,
+          phase: metric.phase,
+          sampleIndex,
+          status: metric.authoritativeGpuCheckpoint?.status ?? null,
+          materialPhaseCount: metric.authoritativeGpuCheckpoint?.materialPhaseCount ?? null
+        });
+        return metric;
+      };
+      const authoritativeGpuCheckpointCaptureSummary = () => {
+        const checkpoints = metrics
+          .map((metric) => metric?.authoritativeGpuCheckpoint)
+          .filter(Boolean);
+        const capturedCount = checkpoints.filter((checkpoint) => checkpoint.status === 'captured').length;
+        const errorCount = checkpoints.filter((checkpoint) => checkpoint.status === 'error').length;
+        const unavailableCount = checkpoints.filter((checkpoint) => (
+          checkpoint.status !== 'captured' && checkpoint.status !== 'error'
+        )).length;
+        return {
+          schema: 'peercompute.ulg.sph-authoritative-gpu-checkpoint-capture.v1',
+          status: !requestedCaptureFrames
+            ? 'disabled'
+            : checkpoints.length === 0
+            ? 'no-checkpoints'
+            : capturedCount === checkpoints.length
+            ? 'captured'
+            : capturedCount > 0
+            ? 'captured-with-gaps'
+            : 'unavailable',
+          enabled: Boolean(requestedCaptureFrames),
+          trigger: 'visual-validation-checkpoint',
+          diagnosticOnly: true,
+          physicsReference: false,
+          sourceBufferMutation: false,
+          normalHotLoopReadbackFree: true,
+          checkpointCount: checkpoints.length,
+          capturedCount,
+          unavailableCount,
+          errorCount
+        };
+      };
       if (requestedCaptureFrames) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       }
@@ -3873,8 +4275,7 @@ async function runBrowserProbe({
         }
       }
       markProbeProgress('sampling-initial-state');
-      metrics.push(sample(0, 'initial', 0));
-      captureFrame(0, 'initial', metrics.length - 1);
+      await appendMetricWithValidationCapture(sample(0, 'initial', 0));
       const waitForWorkerOffscreenRetainedStateContinuation = async () => {
         const status = sceneApi.getWorkerOffscreenRetainedStateContinuationStatus?.()
           || overlay.__sphPhaseScene?.userData?.sphWorkerOffscreenRetainedStateContinuation
@@ -4029,8 +4430,7 @@ async function runBrowserProbe({
               maxDisplacementM: finalStep.diagnostics?.maxDisplacementM ?? null
             });
             const metric = sample(batchIndex, 'plain-sph-cpu-reference-batch', performance.now() - started);
-            metrics.push(metric);
-            captureFrame(batchIndex, 'plain-sph-cpu-reference-batch', metrics.length - 1);
+            await appendMetricWithValidationCapture(metric);
             previousState = nextState;
           } catch (error) {
             markProbeProgress('plain-sph-batch-error', {
@@ -4039,8 +4439,9 @@ async function runBrowserProbe({
               error: error instanceof Error ? error.message : String(error)
             });
             errors.push({ batchIndex, message: error instanceof Error ? error.message : String(error) });
-            metrics.push(sample(batchIndex, 'plain-sph-cpu-reference-error', performance.now() - started));
-            captureFrame(batchIndex, 'plain-sph-cpu-reference-error', metrics.length - 1);
+            await appendMetricWithValidationCapture(
+              sample(batchIndex, 'plain-sph-cpu-reference-error', performance.now() - started)
+            );
             break;
           }
         }
@@ -4067,6 +4468,7 @@ async function runBrowserProbe({
             maxFrames: requestedCaptureFrameMax,
             frameCount: visualFrames.length
           },
+          authoritativeGpuCheckpointCapture: authoritativeGpuCheckpointCaptureSummary(),
           visualFrames,
           errors,
           metrics,
@@ -4248,8 +4650,7 @@ async function runBrowserProbe({
           overlay.__sphProbeResidentBatchTiming = probeResidentBatchTiming;
           markProbeProgress('resident-batch-sampling-started', { batchIndex });
           const metric = sample(batchIndex, 'resident-batch', performance.now() - started);
-          metrics.push(metric);
-          captureFrame(batchIndex, 'resident-batch', metrics.length - 1);
+          await appendMetricWithValidationCapture(metric);
           if (shouldRunAnomalyRowReadback(metric)) {
             overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
               preferWebGpu: true,
@@ -4273,8 +4674,9 @@ async function runBrowserProbe({
             overlay.__sphResidentSurfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || null;
             sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-anomaly-render-refresh' });
             await new Promise((resolve) => requestAnimationFrame(resolve));
-            metrics.push(sample(batchIndex, 'resident-batch-anomaly-row-readback', performance.now() - started));
-            captureFrame(batchIndex, 'resident-batch-anomaly-row-readback', metrics.length - 1);
+            await appendMetricWithValidationCapture(
+              sample(batchIndex, 'resident-batch-anomaly-row-readback', performance.now() - started)
+            );
           }
         } catch (error) {
           markProbeProgress('resident-batch-error', {
@@ -4283,8 +4685,9 @@ async function runBrowserProbe({
             error: error instanceof Error ? error.message : String(error)
           });
           errors.push({ batchIndex, message: error instanceof Error ? error.message : String(error) });
-          metrics.push(sample(batchIndex, 'resident-batch-error', performance.now() - started));
-          captureFrame(batchIndex, 'resident-batch-error', metrics.length - 1);
+          await appendMetricWithValidationCapture(
+            sample(batchIndex, 'resident-batch-error', performance.now() - started)
+          );
           break;
         }
       }
@@ -4343,8 +4746,10 @@ async function runBrowserProbe({
           enabled: Boolean(requestedCaptureFrames),
           frameEveryBatches: requestedCaptureFrameEvery,
           maxFrames: requestedCaptureFrameMax,
-          frameCount: visualFrames.length
+          frameCount: visualFrames.length,
+          uiSuppressedForSurfaceEvidence: requestedNativeSurfaceCaptureUiSuppressed
         },
+        authoritativeGpuCheckpointCapture: authoritativeGpuCheckpointCaptureSummary(),
         visualFrames,
         errors,
         metrics,
@@ -4382,7 +4787,8 @@ async function runBrowserProbe({
       captureFrameEvery,
       captureFrameMax,
       preProbeSnapshots,
-      pageConsole
+      pageConsole,
+      nativeSurfaceCaptureUiSuppressed
     });
     let timeoutProbeTimer = null;
     const timeoutProbe = new Promise((resolve) => {
@@ -4416,6 +4822,20 @@ async function runBrowserProbe({
             frameEveryBatches: captureFrameEvery,
             maxFrames: captureFrameMax,
             frameCount: 0
+          },
+          authoritativeGpuCheckpointCapture: {
+            schema: 'peercompute.ulg.sph-authoritative-gpu-checkpoint-capture.v1',
+            status: captureFrames ? 'probe-timeout-before-checkpoint-return' : 'disabled',
+            enabled: Boolean(captureFrames),
+            trigger: 'visual-validation-checkpoint',
+            diagnosticOnly: true,
+            physicsReference: false,
+            sourceBufferMutation: false,
+            normalHotLoopReadbackFree: true,
+            checkpointCount: 0,
+            capturedCount: 0,
+            unavailableCount: 0,
+            errorCount: 0
           },
           visualFrames: [],
           errors: [{ batchIndex: null, message: `browser probe timed out after ${timeoutMs}ms` }],
@@ -6334,13 +6754,19 @@ function analyzeTimeline(timeline, {
     .filter((frame) => frame.blankFrame === true || frame.png?.hasVisiblePixels === false)
     .length;
   const blankCanvasFrameCount = pngAnalyzedCanvasFrames
-    .filter((frame) => frame.blankFrame === true || frame.png?.hasVisiblePixels === false)
+    .filter((frame) => !(
+      frame.png?.hasVisiblePixels === true
+      && frame.png?.hasSurfaceLikeVariation === true
+    ))
     .length;
   const nonblankVisualFrameCount = pngAnalyzedVisualFrames
     .filter((frame) => frame.png?.hasVisiblePixels === true)
     .length;
   const nonblankCanvasFrameCount = pngAnalyzedCanvasFrames
-    .filter((frame) => frame.png?.hasVisiblePixels === true)
+    .filter((frame) => (
+      frame.png?.hasVisiblePixels === true
+      && frame.png?.hasSurfaceLikeVariation === true
+    ))
     .length;
   const browserCanvasPixelValidated = nonblankCanvasFrameCount > 0;
   const nativeBrowserFrameValidation = timeline?.nativeSurfaceBrowserFrameValidation || null;
@@ -7075,16 +7501,71 @@ function analyzeTimeline(timeline, {
   const lastH2oVisibleSurfaceCount = h2oVisibleSurfaceCountSeries.length
     ? h2oVisibleSurfaceCountSeries[h2oVisibleSurfaceCountSeries.length - 1]
     : null;
-  const materialCountSnapshots = metrics
-    .map((metric) => (
-      metric?.plainSphStepResult?.particlesByMaterial
-      ?? metric?.residentStep?.particlesByMaterial
-      ?? null
-    ))
-    .filter((counts) => counts && typeof counts === 'object');
+  const capturedMaterialPhaseCheckpoints = metrics
+    .map((metric) => metric?.authoritativeGpuCheckpoint)
+    .filter((checkpoint) => (
+      checkpoint?.status === 'captured'
+      && Array.isArray(checkpoint.materialPhases)
+    ));
+  const authoritativeGpuCheckpointCapacityOverflowCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => checkpoint.materialPhaseCapacityStatus === 'overflow')
+    .length;
+  const authoritativeGpuCheckpointMappingIncompleteCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => checkpoint.materialMappingStatus !== 'complete')
+    .length;
+  const authoritativeGpuCheckpointPhaseFractionProblemCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => Number(checkpoint.phaseFractionProblemParticleCount) > 0)
+    .length;
+  const authoritativeGpuCheckpointUnclassifiedCount = capturedMaterialPhaseCheckpoints
+    .filter((checkpoint) => Number(checkpoint.unclassifiedMassKg) > 0)
+    .length;
+  const checkpointMaterialEvidenceComplete = (checkpoint) => (
+    checkpoint?.status === 'captured'
+    && checkpoint.materialPhaseCapacityStatus === 'within-capacity'
+    && checkpoint.materialMappingStatus === 'complete'
+    && Number(checkpoint.phaseFractionProblemParticleCount || 0) === 0
+    && Number(checkpoint.unclassifiedMassKg || 0) === 0
+  );
+  const checkpointMaterialCounts = (checkpoint) => {
+    if (!checkpointMaterialEvidenceComplete(checkpoint) || !Array.isArray(checkpoint.materialPhases)) {
+      return null;
+    }
+    const counts = {};
+    for (const row of checkpoint.materialPhases) {
+      const material = String(row?.material || '').trim();
+      if (!material) continue;
+      const weightedCount = Number(row?.phaseWeightedParticleCount);
+      counts[material] = (counts[material] || 0) + Math.max(0, (
+        Number.isFinite(weightedCount)
+          ? weightedCount
+          : Number(row?.liveParticleCount) || 0
+      ));
+    }
+    return Object.fromEntries(Object.entries(counts).map(([material, count]) => [
+      material,
+      Math.round(count)
+    ]));
+  };
+  const materialCountSnapshotRecords = metrics
+    .map((metric) => {
+      const plain = metric?.plainSphStepResult?.particlesByMaterial;
+      if (plain && typeof plain === 'object') return { source: 'plain-sph-step', counts: plain };
+      const resident = metric?.residentStep?.particlesByMaterial;
+      if (resident && typeof resident === 'object') return { source: 'resident-step', counts: resident };
+      const checkpoint = checkpointMaterialCounts(metric?.authoritativeGpuCheckpoint);
+      return checkpoint ? { source: 'authoritative-gpu-checkpoint', counts: checkpoint } : null;
+    })
+    .filter(Boolean);
+  const materialCountSnapshots = materialCountSnapshotRecords.map((record) => record.counts);
   const finalParticlesByMaterial = materialCountSnapshots.length
     ? materialCountSnapshots[materialCountSnapshots.length - 1]
     : null;
+  const finalParticlesByMaterialSource = materialCountSnapshotRecords.length
+    ? materialCountSnapshotRecords[materialCountSnapshotRecords.length - 1].source
+    : null;
+  const finalMaterialPhases = capturedMaterialPhaseCheckpoints.length
+    ? capturedMaterialPhaseCheckpoints[capturedMaterialPhaseCheckpoints.length - 1].materialPhases
+    : [];
   const materialCountFor = (counts, material) => {
     if (!counts || !material) return 0;
     const wanted = String(material).toLowerCase();
@@ -7487,6 +7968,18 @@ function analyzeTimeline(timeline, {
   }
   const issues = [];
   if (timeline?.status !== 'complete') issues.push(`probe-status:${timeline?.status || 'missing'}`);
+  if (authoritativeGpuCheckpointCapacityOverflowCount > 0) {
+    issues.push('authoritative-gpu-checkpoint-capacity-overflow');
+  }
+  if (authoritativeGpuCheckpointMappingIncompleteCount > 0) {
+    issues.push('authoritative-gpu-checkpoint-material-mapping-incomplete');
+  }
+  if (authoritativeGpuCheckpointPhaseFractionProblemCount > 0) {
+    issues.push('authoritative-gpu-checkpoint-phase-fraction-incomplete');
+  }
+  if (authoritativeGpuCheckpointUnclassifiedCount > 0) {
+    issues.push('authoritative-gpu-checkpoint-unclassified-mass');
+  }
   const initialPreflightStatus = String(initialPreflight?.status || '');
   const preflightFeasible = initialPreflight?.feasibility?.feasible;
   if (
@@ -7831,6 +8324,13 @@ function analyzeTimeline(timeline, {
     firstH2oVisibleSurfaceCount,
     lastH2oVisibleSurfaceCount,
     finalParticlesByMaterial,
+    finalParticlesByMaterialSource,
+    authoritativeGpuCheckpointCapturedCount: capturedMaterialPhaseCheckpoints.length,
+    authoritativeGpuCheckpointCapacityOverflowCount,
+    authoritativeGpuCheckpointMappingIncompleteCount,
+    authoritativeGpuCheckpointPhaseFractionProblemCount,
+    authoritativeGpuCheckpointUnclassifiedCount,
+    finalMaterialPhases,
     maxReactionEventsTotal,
     capturedVisualFrameCount: capturedVisualFrames.length,
     pngAnalyzedVisualFrameCount: pngAnalyzedVisualFrames.length,

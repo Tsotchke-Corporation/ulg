@@ -323,6 +323,38 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
   assert.equal(result.adapterLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
 });
 
+test('requestOpticalGpuDevice enables timestamp queries only when the adapter exposes them', async () => {
+  const device = {
+    features: new Set(['timestamp-query']),
+    lost: new Promise(() => {})
+  };
+  let requestDescriptor = null;
+  const result = await requestOpticalGpuDevice({
+    gpu: {
+      async requestAdapter() {
+        return {
+          features: new Set(['timestamp-query', 'shader-f16']),
+          limits: {},
+          async requestDevice(descriptor) {
+            requestDescriptor = descriptor;
+            return device;
+          }
+        };
+      }
+    }
+  }, { profilingRequested: true });
+
+  assert.deepEqual(requestDescriptor, {
+    requiredFeatures: ['timestamp-query']
+  });
+  assert.deepEqual(result.requiredFeatures, ['timestamp-query']);
+  assert.deepEqual(result.requestedFeatures, ['timestamp-query']);
+  assert.deepEqual(result.missingRequestedFeatures, []);
+  assert.deepEqual(result.enabledFeatures, ['timestamp-query']);
+  assert.deepEqual(result.adapterFeatures, ['timestamp-query', 'shader-f16']);
+  assert.equal(result.timestampQueryStatus, 'supported-and-requested');
+});
+
 test('requestOpticalGpuDevice asks for adapter-scale resident buffer limits', async () => {
   const device = { lost: new Promise(() => {}) };
   const adapterLimit = (4 * 1024 * 1024 * 1024) - 4;

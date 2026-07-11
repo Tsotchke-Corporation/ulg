@@ -137,6 +137,10 @@ const measureGpuQueueFence = booleanEnv(
   'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',
   false
 );
+const gpuProfilingRequested = booleanEnv(
+  'ULG_BENCH_GPU_PROFILE',
+  booleanEnv('ULG_BENCH_MEASURE_GPU_TIMESTAMPS', false)
+);
 const materialInterfaceDiagnosticRequested =
   booleanEnv('ULG_BENCH_MATERIAL_INTERFACE_DIAGNOSTIC', false)
   || booleanEnv('ULG_BENCH_FORCE_MATERIAL_INTERFACE_REFRESH', false);
@@ -159,6 +163,10 @@ const requireActiveGridGate = booleanEnv(
 const requireQueueFenceGate = booleanEnv(
   'ULG_BENCH_REQUIRE_QUEUE_FENCE',
   measureGpuQueueFence
+);
+const requireGpuTimestampsGate = booleanEnv(
+  'ULG_BENCH_REQUIRE_GPU_TIMESTAMPS',
+  gpuProfilingRequested
 );
 const minResidentStageStepsPerSecond = Number.isFinite(Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND))
   && Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND) > 0
@@ -213,6 +221,7 @@ function scenarioUrlForCount(targetCount) {
       ? { residentInterfaceRefreshWarmupFrames: String(residentInterfaceRefreshWarmupFrames) }
       : {}),
     ...(measureGpuQueueFence ? { residentQueueFence: '1' } : {}),
+    ...(gpuProfilingRequested ? { gpuProfile: '1' } : {}),
     lawt: lawThermal ? '1' : '0',
     lawr: lawReactions ? '1' : '0',
     lawv: lawViscosity ? '1' : '0',
@@ -365,18 +374,40 @@ function scenarioPerformanceGate({
   estimatedReadbackBytesPerStep,
   activeGridDispatch,
   residentStageTiming,
+  residentGpuTimestampProfile,
   fusedResidentSequenceBlockedForSidecars = false
 }) {
   const blockers = [];
+  const queueFenceStatuses = Object.entries(residentStageTiming?.queueFenceStatus || {})
+    .filter(([, status]) => status != null);
+  const queueFenceSatisfied = queueFenceStatuses.length > 0
+    && queueFenceStatuses.every(([, status]) => status === 'complete');
+  const gpuTimestampStatus = residentGpuTimestampProfile?.status ?? 'not-requested';
+  const gpuTimestampUnsupported = [
+    'unsupported',
+    'unsupported-api',
+    'allocation-failed'
+  ].includes(gpuTimestampStatus);
+  if (requireGpuTimestampsGate && gpuTimestampUnsupported) {
+    blockers.push('gpu-timestamps-unsupported');
+  } else if (
+    requireGpuTimestampsGate
+    && (
+      !['timestamp-profile-complete', 'timestamp-profile-partial'].includes(gpuTimestampStatus)
+      || !(residentGpuTimestampProfile?.validSpanCount > 0)
+    )
+  ) {
+    blockers.push('valid-gpu-timestamps-required');
+  }
   if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
     blockers.push('active-grid-dispatch-required');
   }
   if (
     requireQueueFenceGate
     && fusedResidentSequenceBlockedForSidecars !== true
-    && residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence !== 'complete'
+    && !queueFenceSatisfied
   ) {
-    blockers.push('queue-fenced-resident-sequence-required');
+    blockers.push('queue-fenced-resident-stages-required');
   }
   if (
     minResidentStageStepsPerSecond !== null
@@ -407,10 +438,13 @@ function scenarioPerformanceGate({
   }
   return {
     schema: 'peercompute.ulg.sph-performance-benchmark-gate.v0',
-    status: blockers.length === 0 ? 'pass' : 'fail',
+    status: blockers.length === 0
+      ? 'pass'
+      : (gpuTimestampUnsupported ? 'inconclusive-unsupported' : 'fail'),
     blockers,
     requireActiveGrid: requireActiveGridGate,
     requireQueueFence: requireQueueFenceGate,
+    requireGpuTimestamps: requireGpuTimestampsGate,
     thresholds: {
       minResidentStageStepsPerSecond,
       maxResidentGpuCompletedStageMs,
@@ -421,7 +455,10 @@ function scenarioPerformanceGate({
       residentStageStepsPerSecond,
       estimatedReadbackBytesPerStep,
       activeGridUsed: activeGridDispatch?.useActiveGrid === true,
-      queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null,
+      gpuTimestampStatus,
+      gpuTimestampValidSpanCount: residentGpuTimestampProfile?.validSpanCount ?? 0,
+      queueFenceStatuses: Object.fromEntries(queueFenceStatuses),
+      queueFenceSatisfied,
       queueFenceBypassedBySidecarFallback: fusedResidentSequenceBlockedForSidecars === true
     }
   };
@@ -575,16 +612,37 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const residentDiagnostics = residentStep?.diagnostics ?? null;
   const meanBatchMs = Number.isFinite(Number(analysis.meanBatchMs)) ? Number(analysis.meanBatchMs) : null;
   const residentStageMs = numberOrNull(residentStageTiming?.totalMs);
-  const residentGpuQueueFenceMs = numberOrNull(residentStageTiming?.queueFenceMs?.fusedMechanicsSequence);
-  const residentGpuCompletedStageMs = residentGpuQueueFenceMs !== null
+  const residentGpuQueueFenceMs = Object.entries(residentStageTiming?.queueFenceMs || {})
+    .filter(([name]) => name !== 'compactSummaryMapAsync')
+    .map(([, value]) => numberOrNull(value))
+    .filter((value) => value !== null)
+    .reduce((sum, value) => sum + value, 0) || null;
+  const residentHostCompletedStageMs = residentGpuQueueFenceMs !== null
     ? Math.max(residentStageMs ?? 0, residentGpuQueueFenceMs)
     : residentStageMs;
+  const residentGpuTimestampProfile = residentStageTiming?.gpuTimestampProfile ?? null;
+  const residentGpuTimestampProfiles = {
+    ...(residentStageTiming?.gpuTimestampProfiles || {})
+  };
+  if (!Object.values(residentGpuTimestampProfiles).includes(residentGpuTimestampProfile)) {
+    residentGpuTimestampProfiles.mechanics = residentGpuTimestampProfile;
+  }
+  const residentGpuTimestampCaptures = [...new Set(
+    Object.values(residentGpuTimestampProfiles).filter(Boolean)
+  )];
+  const residentGpuCompletedStageMs = residentGpuTimestampCaptures
+    .flatMap((profile) => Object.values(profile?.stageTotals || {}))
+    .map((stage) => numberOrNull(stage?.totalMs))
+    .filter((value) => value !== null)
+    .reduce((sum, value) => sum + value, 0) || null;
+  const residentGpuTimestampValidSpanCount = residentGpuTimestampCaptures
+    .reduce((sum, profile) => sum + Math.max(0, Number(profile?.validSpanCount) || 0), 0);
   const completedStepCount = Number.isFinite(Number(metric?.residentSteps?.completedStepCount))
     ? Number(metric.residentSteps.completedStepCount)
     : batchSteps;
   const browserConsoleIssueCount = analysis.browserConsoleIssueCount ?? null;
   const residentStageStepsPerSecond = residentGpuCompletedStageMs && residentGpuCompletedStageMs > 0
-    ? 1000 / residentGpuCompletedStageMs
+    ? (completedStepCount * 1000) / residentGpuCompletedStageMs
     : null;
   const probeBatchWallMs = probeResidentBatchTotalBeforeSampleMs ?? meanBatchMs;
   const probeWallStepsPerSecond = probeBatchWallMs && probeBatchWallMs > 0
@@ -1675,6 +1733,14 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ?? surfaceDraw?.nativeMarchingCubesTotalElapsedMs
       ?? surfaceDraw?.surfaceDrawNativeMarchingCubesTotalElapsedMs
   );
+  const nativeMarchingCubesGpuTimestampProfile =
+    renderState?.surfaceDrawNativeMarchingCubesGpuTimestampProfile
+    ?? surfaceDraw?.nativeMarchingCubesGpuTimestampProfile
+    ?? null;
+  const surfaceTranslationGpuTimestampProfile =
+    renderState?.surfaceDrawSurfaceTranslationGpuTimestampProfile
+    ?? surfaceDraw?.surfaceTranslationGpuTimestampProfile
+    ?? null;
   const surfaceDrawNativeMarchingCubesAdapterCacheStatus =
     renderState?.surfaceDrawNativeMarchingCubesAdapterCacheStatus
       ?? surfaceDraw?.nativeMarchingCubesAdapterCacheStatus
@@ -1893,6 +1959,19 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const renderRefreshRenderStateAssemblyMs = numberOrNull(
     renderState?.renderRefreshRenderStateAssemblyMs
       ?? renderRefreshStageMs?.renderStateAssemblyMs
+  );
+  const renderFieldGpuTimestampProfile = renderState?.renderFieldGpuTimestampProfile ?? null;
+  const renderFieldGpuTimestampMs = numberOrNull(
+    renderFieldGpuTimestampProfile?.stageTotals?.renderFieldDenseEvaluation?.totalMs
+  );
+  const renderFieldGpuAllocationEvidence = renderState?.renderFieldGpuAllocationEvidence ?? null;
+  const nativeSurfaceResourceGeneration = numberOrNull(
+    surfaceDraw?.renderBridgeNativeSurfaceResourceGeneration
+      ?? renderState?.surfaceDrawRenderBridgeNativeSurfaceResourceGeneration
+  );
+  const nativeSurfaceRetiredGenerationCount = numberOrNull(
+    surfaceDraw?.renderBridgeNativeSurfaceRetiredGenerationCount
+      ?? renderState?.surfaceDrawRenderBridgeNativeSurfaceRetiredGenerationCount
   );
   const materialInterfaceStatus = firstDefinedMetricValue(
     ownMetricValue(materialInterfaceField, 'status'),
@@ -2201,8 +2280,68 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     estimatedReadbackBytesPerStep,
     activeGridDispatch,
     residentStageTiming,
+    residentGpuTimestampProfile,
     fusedResidentSequenceBlockedForSidecars
   });
+  const profilingEvidence = {
+    schema: 'peercompute.ulg.sph-gpu-performance-attribution.v0',
+    requested: gpuProfilingRequested,
+    status: !gpuProfilingRequested
+      ? 'not-requested'
+      : (['unsupported', 'unsupported-api', 'allocation-failed'].includes(
+        residentGpuTimestampProfile?.status
+      )
+        ? 'inconclusive-unsupported'
+        : (residentGpuTimestampValidSpanCount > 0
+          ? 'gpu-attribution-ready'
+          : 'gpu-attribution-incomplete')),
+    residentStages: {
+      profiles: residentGpuTimestampProfiles,
+      gpuPassMs: residentGpuCompletedStageMs,
+      validSpanCount: residentGpuTimestampValidSpanCount,
+      hostStageMs: residentStageMs,
+      hostCompletedStageMs: residentHostCompletedStageMs,
+      queueSubmitMs: Object.values(residentStageTiming?.queueSubmitMs || {})
+        .map((value) => numberOrNull(value))
+        .filter((value) => value !== null)
+        .reduce((sum, value) => sum + value, 0) || null,
+      queueFenceMs: residentGpuQueueFenceMs,
+      mappedByteLength: residentGpuTimestampProfile?.mappedByteLength ?? 0,
+      allocationEvidence: residentStageTiming?.gpuAllocationEvidence ?? null
+    },
+    renderField: {
+      profile: renderFieldGpuTimestampProfile,
+      gpuPassMs: renderFieldGpuTimestampMs,
+      queueSubmitMs: numberOrNull(renderState?.renderFieldQueueSubmitMs),
+      queueFenceMs: numberOrNull(renderState?.renderFieldQueueFenceMs),
+      mappedByteLength: renderFieldGpuTimestampProfile?.mappedByteLength ?? 0,
+      allocationEvidence: renderFieldGpuAllocationEvidence
+    },
+    presentation: {
+      nativeSurfaceResourceGeneration,
+      nativeSurfaceRetiredGenerationCount,
+      marchingCubesExtraction: {
+        profile: nativeMarchingCubesGpuTimestampProfile,
+        queueSubmitMs: numberOrNull(
+          renderState?.surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueSubmitMs
+        ),
+        queueFenceMs: numberOrNull(
+          renderState?.surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueFenceMs
+        ),
+        allocationEvidence:
+          renderState?.surfaceDrawNativeMarchingCubesGpuAllocationEvidence ?? null
+      },
+      surfaceTranslation: {
+        profile: surfaceTranslationGpuTimestampProfile,
+        queueSubmitMs: numberOrNull(renderState?.surfaceDrawSurfaceTranslationQueueSubmitMs),
+        queueFenceMs: numberOrNull(renderState?.surfaceDrawSurfaceTranslationQueueFenceMs),
+        allocationEvidence:
+          renderState?.surfaceDrawSurfaceTranslationGpuAllocationEvidence ?? null
+      },
+      pixelValidationStatus: surfaceDrawVisibleGpuConsumerPixelValidationStatus,
+      visibleConsumerValidated: surfaceDrawVisibleGpuConsumerValidated
+    }
+  };
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
     && residentSteps?.status === 'resident-steps-executed'
     && residentStep?.status === 'resident-step-webgpu-executed'
@@ -2262,8 +2401,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     probeWallRefreshHz,
     probeWallTimeAttribution,
     residentStageMs,
+    residentHostCompletedStageMs,
     residentGpuQueueFenceMs,
     residentGpuCompletedStageMs,
+    residentGpuTimestampProfile,
+    residentGpuTimestampProfiles,
+    profilingEvidence,
     residentStageStepsPerSecond,
     performanceGate,
     probeResidentBatchTiming,
@@ -2308,6 +2451,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderRefreshPressureInterfaceMs,
     renderRefreshWorkerOffscreenRenderRowsMs,
     renderRefreshRenderStateAssemblyMs,
+    renderFieldGpuTimestampProfile,
+    renderFieldGpuTimestampMs,
+    renderFieldGpuAllocationEvidence,
     materialInterfaceSourceField,
     dispatchTopologyStatus: dispatchTopology?.status ?? null,
     dispatchesPerSubstep: dispatchTopology?.dispatchesPerSubstep ?? null,
@@ -2829,6 +2975,7 @@ async function main() {
       ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID: fuseResidentMechanicsActiveGrid ? '1' : '0',
       ULG_PROBE_ACTIVE_GRID_PLAN_REFRESH_MODE: activeGridDispatchPlanRefreshMode,
       ULG_PROBE_MEASURE_GPU_QUEUE_FENCE: measureGpuQueueFence ? '1' : '0',
+      ULG_PROBE_GPU_PROFILE: gpuProfilingRequested ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_DIAGNOSTIC: materialInterfaceDiagnosticRequested ? '1' : '0',
       ULG_PROBE_MATERIAL_INTERFACE_CANDIDATE_READBACK_MODE: materialInterfaceCandidateReadbackMode,
       ...(fusedActiveGridSafetyCells ? {
@@ -2904,12 +3051,18 @@ async function main() {
     activeGridDispatchPlanRefreshMode,
     fusedActiveGridSafetyCells,
     measureGpuQueueFence,
+    gpuProfilingRequested,
     performanceGate: {
       schema: 'peercompute.ulg.sph-performance-benchmark-suite-gate.v0',
-      status: scenarios.every((scenario) => scenario.performanceGate?.status === 'pass') ? 'pass' : 'fail',
+      status: scenarios.every((scenario) => scenario.performanceGate?.status === 'pass')
+        ? 'pass'
+        : (scenarios.some(
+          (scenario) => scenario.performanceGate?.status === 'inconclusive-unsupported'
+        ) ? 'inconclusive-unsupported' : 'fail'),
       failedScenarioCount: scenarios.filter((scenario) => scenario.performanceGate?.status !== 'pass').length,
       requireActiveGrid: requireActiveGridGate,
       requireQueueFence: requireQueueFenceGate,
+      requireGpuTimestamps: requireGpuTimestampsGate,
       thresholds: {
         minResidentStageStepsPerSecond,
         maxResidentGpuCompletedStageMs,

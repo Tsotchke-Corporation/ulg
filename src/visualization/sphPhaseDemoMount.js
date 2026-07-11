@@ -2129,6 +2129,15 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('residentGpuQueueFence'),
     false
   );
+  const initialResidentGpuProfilingEnabled = booleanUrlParam(
+    initialHash.get('gpuProfile')
+      ?? initialQuery.get('gpuProfile')
+      ?? initialHash.get('residentGpuProfile')
+      ?? initialQuery.get('residentGpuProfile')
+      ?? initialHash.get('residentGpuTimestamps')
+      ?? initialQuery.get('residentGpuTimestamps'),
+    false
+  );
   const initialContactBinMetadataReadbackEnabled = booleanUrlParam(
     initialHash.get('contactBinMetadataReadback')
       ?? initialQuery.get('contactBinMetadataReadback')
@@ -2417,6 +2426,7 @@ export async function mountSphPhaseDemoOverlay({
       fuseNoFullResidentMechanicsActiveGrid: initialResidentActiveGridEnabled,
       activeGridSafetyCells: initialResidentActiveGridSafetyCells,
       measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled,
+      measureGpuTimestamps: initialResidentGpuProfilingEnabled,
       contactKinematicsParticleBinMetadataReadback:
         initialContactBinMetadataReadbackEnabled,
       reactionParticleBinMetadataReadback:
@@ -2750,7 +2760,9 @@ export async function mountSphPhaseDemoOverlay({
   let initialRendererWebGpuDeviceResult = null;
   if (acquireInitialRendererWebGpuDevice) {
     statusEl.textContent = 'acquiring shared WebGPU resident/render device...';
-    initialRendererWebGpuDeviceResult = await requestOpticalGpuDevice(globalThis.navigator).catch((error) => ({
+    initialRendererWebGpuDeviceResult = await requestOpticalGpuDevice(globalThis.navigator, {
+      profilingRequested: initialResidentGpuProfilingEnabled
+    }).catch((error) => ({
       status: 'webgpu-error-fallback',
       reason: error instanceof Error ? error.message : String(error),
       device: null
@@ -2762,6 +2774,8 @@ export async function mountSphPhaseDemoOverlay({
       appOwnedDeviceReady: Boolean(initialRendererWebGpuDeviceResult?.device),
       requiredLimits: initialRendererWebGpuDeviceResult?.requiredLimits || null,
       adapterLimits: initialRendererWebGpuDeviceResult?.adapterLimits || null,
+      requiredFeatures: initialRendererWebGpuDeviceResult?.requiredFeatures || [],
+      timestampQueryStatus: initialRendererWebGpuDeviceResult?.timestampQueryStatus ?? null,
       updatedAtMs: performance.now()
     };
   }
@@ -4003,7 +4017,8 @@ export async function mountSphPhaseDemoOverlay({
     workerOffscreenPresentation: workerOffscreenPresentationEnabled,
     renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
     materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
-    residentAuthorityHost: currentResidentAuthorityHostForScene()
+    residentAuthorityHost: currentResidentAuthorityHostForScene(),
+    gpuProfilingRequested: initialResidentGpuProfilingEnabled
   });
   applySchroederRenderProxyOverlayFlag(scene);
   overlay.__sphScene = scene;
@@ -4946,6 +4961,7 @@ export async function mountSphPhaseDemoOverlay({
     fuseNoFullResidentMechanicsActiveGrid = false,
     activeGridSafetyCells = null,
     measureFusedSequenceQueueFence = false,
+    measureGpuTimestamps = initialResidentGpuProfilingEnabled,
     schroederSimulation = false,
     schroederSelectedLevel = 0,
     schroederBaseGridSpacingM = null,
@@ -4989,6 +5005,7 @@ export async function mountSphPhaseDemoOverlay({
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid) ? 1 : 0}`,
       `activeGridSafety=${activeGridSafetyCells ?? 'default'}`,
       `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`,
+      `gpuTimestamps=${Boolean(measureGpuTimestamps) ? 1 : 0}`,
       `ss=${Boolean(schroederSimulation) ? 1 : 0}`,
       `ssLevel=${schroederSelectedLevel ?? 0}`,
       `ssBaseDx=${schroederBaseGridSpacingM ?? 'auto'}`,
@@ -7207,7 +7224,8 @@ export async function mountSphPhaseDemoOverlay({
       workerOffscreenPresentation: workerOffscreenPresentationEnabled,
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
-      residentAuthorityHost: currentResidentAuthorityHostForScene()
+      residentAuthorityHost: currentResidentAuthorityHostForScene(),
+      gpuProfilingRequested: initialResidentGpuProfilingEnabled
     });
     applySchroederRenderProxyOverlayFlag(scene);
     overlay.__sphScene = scene;

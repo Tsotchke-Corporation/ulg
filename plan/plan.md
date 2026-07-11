@@ -11,10 +11,23 @@
   reject fallback/no-overlay frames.
 - [x] SURF-2: retire replaced primary and additional surface resources only
   after the relevant native submit fence and validation work settle.
-- [ ] Add GPU timestamps and lifecycle/per-pass evidence.
-- [ ] Replace dense render-field construction with a general sparse algorithm.
-- [ ] Unify resident neighborhood authority and pressure/interface GPU
-  consumption before further Schroeder levels or solid implementation.
+- [x] PROF-0: add optional GPU timestamp-query spans and explicit submit,
+  allocation, map, fence, byte, generation, and pixel-liveness evidence.
+- [ ] FIELD-0: replace dense render-field construction with a general sparse
+  algorithm and prove bounded memory/work across the standard matrix.
+- [ ] NEIGH-0: establish one persistent resident multiresolution neighborhood
+  authority shared by mechanics, thermal, radiation, reaction,
+  pressure/interface, and future solid contact.
+- [ ] LANE-0: consume pressure/interface candidates and forces on the same
+  ComputeManager/GPUHub lane without default readback/reupload feedback.
+- [ ] SS-0: compact unique active nodes and byte-bound the two-level Schroeder
+  arenas with explicit overflow evidence; keep the third level on hold.
+- [ ] SOL-0: land coherent-solid schemas, authority contracts, and compact
+  invariant reductions without a CPU mirror solver.
+- [ ] SOL-1: add objective GPU-resident rigid frames and direct visible-shape
+  transforms that do not reduce solids to a deforming particle lattice.
+- [ ] Re-run the production native-surface scenario matrix, focused and full
+  regression suites, build, diff checks, ICC refresh, and branch audit.
 
 Branch goals: `plan/todo/gpu-resident-physics-refactor/README.md`.
 
@@ -113,14 +126,20 @@ and mass/momentum/volume/energy continuity tests.
   Validation is GPU-native through manufactured states, metamorphic runs, and
   compact invariant reductions; do not add a CPU mirror solver or parity gate.
 
-## Current Target - GPU Timestamp Attribution
+## Current Target - Sparse Render Field
 
-The production native WebGPU surface lifecycle is accepted through initial,
-refresh-1, refresh-2, intermediate, final, random-pair, and mobile DPR-2
-sequences. The next branch target is `PROF-0`: add GPU timestamp-query spans
-and explicit submit, allocation, map, fence, byte, generation, and
-pixel-liveness evidence. No render-field or law kernel optimization should be
-credited from host enqueue time before those measurements exist.
+`PROF-0` is accepted. Optional same-device timestamp-query spans now cover
+resident mechanics and separation, thermal, reaction, mechanics refresh,
+dense render-field evaluation, native marching-cubes count/clamp/emission, and
+ULG surface translation. The benchmark keeps host, submit, fence, map,
+allocation, generation, and pixel-liveness evidence separate and refuses a
+host-timing substitute when GPU timestamps are unsupported.
+
+The active target is `FIELD-0`. Its u32 sparse-brick ABI and fail-closed
+capacity/admission planner are landed, but GPU route fanout, radix/scan/unique,
+brick evaluation, sparse native extraction, and production scene integration
+remain open. The same sort/scan/unique backbone must also serve `NEIGH-0` and
+`SS-0`; do not create independent hash or serial-prefix implementations.
 
 ## Previous Target - 2026-06-29
 

@@ -368,7 +368,8 @@ function appendQueryParam(url, key, value) {
 
 function withBrowserProbeParams(url, {
   contactBinMetadataReadback = false,
-  reactionBinMetadataReadback = false
+  reactionBinMetadataReadback = false,
+  gpuProfiling = false
 } = {}) {
   const value = String(url || DEFAULT_URL);
   let next = value;
@@ -379,6 +380,9 @@ function withBrowserProbeParams(url, {
   }
   if (reactionBinMetadataReadback && !/[?&#]reactionBinMetadataReadback=/.test(next)) {
     next = appendQueryParam(next, 'reactionBinMetadataReadback', '1');
+  }
+  if (gpuProfiling && !/[?&#](gpuProfile|residentGpuProfile|residentGpuTimestamps)=/.test(next)) {
+    next = appendQueryParam(next, 'gpuProfile', '1');
   }
   return next;
 }
@@ -1324,6 +1328,7 @@ async function runBrowserProbe({
   compactSummaryScope,
   thermalWallRate,
   measureGpuQueueFence = false,
+  measureGpuTimestamps = false,
   materialInterfaceDiagnostic = false,
   materialInterfaceCandidateReadbackMode = 'compact-active-readback',
   nativeSurfaceDebugMode = 'none',
@@ -1399,7 +1404,8 @@ async function runBrowserProbe({
     }
     const target = new URL(withBrowserProbeParams(scenarioUrl, {
       contactBinMetadataReadback,
-      reactionBinMetadataReadback
+      reactionBinMetadataReadback,
+      gpuProfiling: measureGpuTimestamps
     }), baseUrl).toString();
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     await ensureProbeSphPhaseOverlay(page, { timeoutMs });
@@ -1797,6 +1803,13 @@ async function runBrowserProbe({
         queueFenceMs: { ...(stageTiming.queueFenceMs || {}) },
         queueFenceStatus: { ...(stageTiming.queueFenceStatus || {}) },
         queueFenceMethod: { ...(stageTiming.queueFenceMethod || {}) },
+        queueSubmitMs: { ...(stageTiming.queueSubmitMs || {}) },
+        gpuTimestampProfile: stageTiming.gpuTimestampProfile || null,
+        gpuTimestampProfiles: { ...(stageTiming.gpuTimestampProfiles || {}) },
+        gpuTimestampRequested: stageTiming.gpuTimestampRequested ?? null,
+        gpuTimestampStatus: stageTiming.gpuTimestampStatus ?? null,
+        gpuTimestampMappedByteLength: stageTiming.gpuTimestampMappedByteLength ?? 0,
+        gpuAllocationEvidence: stageTiming.gpuAllocationEvidence || null,
         compactSummaryTiming: stageTiming.compactSummaryTiming ? {
           ...stageTiming.compactSummaryTiming,
           totalMs: finiteOrNull(stageTiming.compactSummaryTiming.totalMs),
@@ -3405,6 +3418,14 @@ async function runBrowserProbe({
             renderFieldReason: renderState.renderFieldReason ?? null,
             renderFieldBackend: renderState.renderFieldBackend ?? null,
             renderFieldInputSource: renderState.renderFieldInputSource ?? null,
+            renderFieldQueueSubmitMs: finiteOrNull(renderState.renderFieldQueueSubmitMs),
+            renderFieldQueueFenceMs: finiteOrNull(renderState.renderFieldQueueFenceMs),
+            renderFieldGpuTimestampProfile: renderState.renderFieldGpuTimestampProfile || null,
+            renderFieldGpuTimestampRequested: renderState.renderFieldGpuTimestampRequested ?? null,
+            renderFieldGpuTimestampStatus: renderState.renderFieldGpuTimestampStatus ?? null,
+            renderFieldGpuTimestampMappedByteLength:
+              renderState.renderFieldGpuTimestampMappedByteLength ?? 0,
+            renderFieldGpuAllocationEvidence: renderState.renderFieldGpuAllocationEvidence || null,
             renderFieldCpuFallbackGeometryAvailable: renderState.renderFieldCpuFallbackGeometryAvailable ?? null,
             renderFieldSurfaceCount: renderState.renderFieldSurfaceCount ?? null,
             renderFieldTotalCells: renderState.renderFieldTotalCells ?? null,
@@ -3580,6 +3601,30 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesExtractionReason ?? null,
             surfaceDrawNativeMarchingCubesExtractionElapsedMs:
               renderState.surfaceDrawNativeMarchingCubesExtractionElapsedMs ?? null,
+            surfaceDrawNativeMarchingCubesGpuTimestampProfile:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampProfile || null,
+            surfaceDrawNativeMarchingCubesGpuTimestampRequested:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampRequested ?? null,
+            surfaceDrawNativeMarchingCubesGpuTimestampStatus:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampStatus ?? null,
+            surfaceDrawNativeMarchingCubesGpuTimestampMappedByteLength:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampMappedByteLength ?? 0,
+            surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueSubmitMs:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueSubmitMs ?? null,
+            surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueFenceMs:
+              renderState.surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueFenceMs ?? null,
+            surfaceDrawNativeMarchingCubesGpuAllocationEvidence:
+              renderState.surfaceDrawNativeMarchingCubesGpuAllocationEvidence || null,
+            surfaceDrawSurfaceTranslationGpuTimestampProfile:
+              renderState.surfaceDrawSurfaceTranslationGpuTimestampProfile || null,
+            surfaceDrawSurfaceTranslationGpuTimestampStatus:
+              renderState.surfaceDrawSurfaceTranslationGpuTimestampStatus ?? null,
+            surfaceDrawSurfaceTranslationQueueSubmitMs:
+              renderState.surfaceDrawSurfaceTranslationQueueSubmitMs ?? null,
+            surfaceDrawSurfaceTranslationQueueFenceMs:
+              renderState.surfaceDrawSurfaceTranslationQueueFenceMs ?? null,
+            surfaceDrawSurfaceTranslationGpuAllocationEvidence:
+              renderState.surfaceDrawSurfaceTranslationGpuAllocationEvidence || null,
             surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs:
               renderState.surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs ?? null,
             surfaceDrawNativeMarchingCubesTotalElapsedMs:
@@ -5272,6 +5317,7 @@ async function runDirectResidentProbe({
   fusedActiveGridSafetyCells = null,
   activeGridDispatchPlanRefreshMode = 'final-only',
   measureGpuQueueFence = false,
+  measureGpuTimestamps = false,
   contactBinMetadataReadback = false,
   reactionBinMetadataReadback = false
 }) {
@@ -5305,6 +5351,7 @@ async function runDirectResidentProbe({
       fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       measureGpuQueueFence: requestedMeasureGpuQueueFence,
+      measureGpuTimestamps: requestedMeasureGpuTimestamps,
       contactBinMetadataReadback: requestedContactBinMetadataReadback,
       reactionBinMetadataReadback: requestedReactionBinMetadataReadback,
       defaults
@@ -6030,6 +6077,13 @@ async function runDirectResidentProbe({
           queueFenceMs: { ...(step.stageTiming.queueFenceMs || {}) },
           queueFenceStatus: { ...(step.stageTiming.queueFenceStatus || {}) },
           queueFenceMethod: { ...(step.stageTiming.queueFenceMethod || {}) },
+          queueSubmitMs: { ...(step.stageTiming.queueSubmitMs || {}) },
+          gpuTimestampProfile: step.stageTiming.gpuTimestampProfile || null,
+          gpuTimestampProfiles: { ...(step.stageTiming.gpuTimestampProfiles || {}) },
+          gpuTimestampRequested: step.stageTiming.gpuTimestampRequested ?? null,
+          gpuTimestampStatus: step.stageTiming.gpuTimestampStatus ?? null,
+          gpuTimestampMappedByteLength: step.stageTiming.gpuTimestampMappedByteLength ?? 0,
+          gpuAllocationEvidence: step.stageTiming.gpuAllocationEvidence || null,
           compactSummaryTiming: step.stageTiming.compactSummaryTiming ? {
             ...step.stageTiming.compactSummaryTiming,
             totalMs: finiteOrNull(step.stageTiming.compactSummaryTiming.totalMs),
@@ -6285,7 +6339,9 @@ async function runDirectResidentProbe({
           viscosityLengthM: viewState.gpuMechanics?.gridSpacingM ?? viewState.sphGpuParticleState?.smoothingLengthM,
           surfaceTensionEnabled: viewState.physicalLawGroups?.surfaceTension
         });
-        const deviceResult = await requestOpticalGpuDevice(navigator);
+        const deviceResult = await requestOpticalGpuDevice(navigator, {
+          profilingRequested: requestedMeasureGpuTimestamps
+        });
         progress('device-request-complete', {
           status: deviceResult?.status ?? null,
           hasDevice: Boolean(deviceResult?.device)
@@ -6345,7 +6401,13 @@ async function runDirectResidentProbe({
             deviceResult: {
               status: deviceResult.status,
               requiredLimits: deviceResult.requiredLimits || null,
-              adapterLimits: deviceResult.adapterLimits || null
+              adapterLimits: deviceResult.adapterLimits || null,
+              profilingRequested: deviceResult.profilingRequested ?? null,
+              requiredFeatures: deviceResult.requiredFeatures || [],
+              adapterFeatures: deviceResult.adapterFeatures || [],
+              enabledFeatures: deviceResult.enabledFeatures || [],
+              missingRequestedFeatures: deviceResult.missingRequestedFeatures || [],
+              timestampQueryStatus: deviceResult.timestampQueryStatus ?? null
             }
           }
         }));
@@ -6539,6 +6601,7 @@ async function runDirectResidentProbe({
               activeGridSafetyCells: requestedFusedActiveGridSafetyCells,
               activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
               measureFusedSequenceQueueFence: requestedMeasureGpuQueueFence,
+              measureGpuTimestamps: requestedMeasureGpuTimestamps,
               contactKinematicsParticleBinMetadataReadback:
                 Boolean(requestedContactBinMetadataReadback),
               reactionParticleBinMetadataReadback:
@@ -6639,6 +6702,7 @@ async function runDirectResidentProbe({
         fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells ?? null,
         activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
         measureGpuQueueFence: requestedMeasureGpuQueueFence,
+        measureGpuTimestamps: requestedMeasureGpuTimestamps,
         directResidentCleanupQueueFence,
         directResidentCleanupGpuResourceDestroySkipped,
         contactBinMetadataReadback: Boolean(requestedContactBinMetadataReadback),
@@ -6669,6 +6733,7 @@ async function runDirectResidentProbe({
       fusedActiveGridSafetyCells,
       activeGridDispatchPlanRefreshMode,
       measureGpuQueueFence,
+      measureGpuTimestamps,
       contactBinMetadataReadback,
       reactionBinMetadataReadback,
       defaults: {
@@ -8483,6 +8548,11 @@ async function main() {
     ?? process.env.ULG_PROBE_MEASURE_FUSED_SEQUENCE_QUEUE_FENCE,
     false
   );
+  const measureGpuTimestamps = booleanEnv(
+    process.env.ULG_PROBE_GPU_PROFILE
+      ?? process.env.ULG_PROBE_MEASURE_GPU_TIMESTAMPS,
+    false
+  );
   const renderReadbackModeEnv = String(process.env.ULG_PROBE_RENDER_READBACK_MODE || '').toLowerCase();
   const renderReadbackMode = renderReadbackModeEnv === 'no-full-readback'
     ? 'no-full-readback'
@@ -8679,6 +8749,7 @@ async function main() {
         fusedActiveGridSafetyCells,
         activeGridDispatchPlanRefreshMode,
         measureGpuQueueFence,
+        measureGpuTimestamps,
         contactBinMetadataReadback,
         reactionBinMetadataReadback
       })
@@ -8706,6 +8777,7 @@ async function main() {
         compactSummaryScope,
 	        thermalWallRate,
       measureGpuQueueFence,
+      measureGpuTimestamps,
       materialInterfaceDiagnostic,
       materialInterfaceCandidateReadbackMode,
       nativeSurfaceDebugMode,

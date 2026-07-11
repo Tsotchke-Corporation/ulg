@@ -42,10 +42,33 @@ Production evidence:
   Cs/F visibly expands into a bright orange product cloud and passes all
   post-step quantitative gates. Random pairs remain finite and visible.
 
-Presentation liveness is no longer the performance blocker. `PROF-0` is now
-the active prerequisite: add GPU timestamp queries and lifecycle/per-pass
-attribution before changing dense field or law kernels. Missing authoritative
-time-zero evidence remains part of `MATRIX-0`.
+Presentation liveness is no longer the performance blocker, and `PROF-0` is
+now accepted. Same-device timestamp-query evidence separates actual pass time
+from host setup, queue fences, diagnostic maps, and compositor validation.
+Missing authoritative time-zero evidence remains part of `MATRIX-0`.
+
+The accepted 2026-07-11 captures materially reorder the performance evidence:
+
+- Small water/thermal measured about 0.838 ms for mechanics plus separation,
+  0.884 ms thermal, and 0.079 ms mechanics refresh. The dense render field was
+  6.384 ms and native marching-cubes count/clamp/emission was 3.681 ms.
+- Small Cs/F measured about 0.646 ms mechanics plus separation, 1.327 ms
+  thermal, and 0.497 ms reaction. The dense render field was 13.393 ms and
+  native extraction was 3.368 ms.
+- The accepted 100-target benchmark artifact (144 actual particles) reports
+  2.557 ms across ten resident GPU spans but 252 ms of host-visible stage time;
+  the dense field alone costs 13.600 ms. Host/fence duration is therefore not
+  a kernel optimization metric.
+- Allocation evidence exposes an 84,934,656-byte dense field pool, a
+  22,369,616-byte conservative position output for one native surface, and a
+  fixed 2,080,000-byte separation-bin allocation at this tiny particle count.
+
+These results make `FIELD-0` the first optimization priority and confirm that
+the shared neighborhood must replace fixed-capacity bins. Structural u32
+sparse-field and neighborhood capacity/admission contracts now exist, but no
+production GPU execution credit is assigned until route fanout,
+radix/scan/unique, sparse evaluation, consumer migration, and native visual
+gates pass.
 
 ## 2026-07-10 Post-Fable Pre-Refactor Audit
 
@@ -949,8 +972,9 @@ solid and validation correction; implementation history should remain in
   transparency, material order, resize/DPR, pause/play, and the whole matrix.
 - **SURF-2 - complete:** versioned presentation resources; use fences
   for reclamation/backpressure, not routine same-queue stage ordering.
-- **PROF-0 - next:** GPU timestamps plus submit/map/allocation/pixel-liveness evidence
-  under the profiling contract above.
+- **PROF-0 - complete:** same-device GPU timestamps plus separate
+  submit/map/fence/allocation/generation/pixel-liveness evidence; unsupported
+  profiling is explicitly inconclusive.
 - **FIELD-0:** source-local/tiled sparse render-field rewrite and corrected
   32-byte/cell peak budget after SURF-1 is green.
 - **LANE-0:** retained interface candidates consumed by a GPU pressure/force

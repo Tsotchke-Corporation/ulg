@@ -1,4 +1,6 @@
 export * from './sphPhaseContracts.js';
+export * from './sparseRenderField.js';
+export * from './residentNeighborhood.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';

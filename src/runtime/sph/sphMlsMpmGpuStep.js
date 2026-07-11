@@ -37,6 +37,10 @@ import {
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
+import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -3283,7 +3287,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER,
   schroederLevelAssignment = null,
   schroederSelectedLevel = null,
-  schroederActiveNodeList = null
+  schroederActiveNodeList = null,
+  measureGpuTimestamps = false
 }) {
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -3462,6 +3467,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     ...(schroederActiveNodeFilter.ownsActiveNodeBuffer ? [schroederActiveNodeFilter.activeNodeBuffer] : []),
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
+  const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-mls-mpm-fused-resident-step',
+    maxSpans: activeGridDispatch.useActiveGrid ? 8 : 7
+  });
   let retained = false;
   try {
     const p2gBindings = [
@@ -3592,7 +3602,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
     if (activeGridDispatch.useActiveGrid) {
-      const accumulatorClearPass = encoder.beginComputePass();
+      const accumulatorClearPass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('activeGridAccumulatorClear', {
+          substepIndex: 0
+        })
+      );
       accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
       accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
       dispatchActiveGridComputePass(
@@ -3604,12 +3618,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     } else {
       encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
     }
-    const p2gPass = encoder.beginComputePass();
+    const p2gPass = encoder.beginComputePass(
+      gpuTimestampProfiler.beginComputePassDescriptor('p2gGridProjection', {
+        substepIndex: 0
+      })
+    );
     p2gPass.setPipeline(p2gPipeline);
     p2gPass.setBindGroup(0, p2gBindGroup);
     p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
     p2gPass.end();
-    const p2gFinalizePass = encoder.beginComputePass();
+    const p2gFinalizePass = encoder.beginComputePass(
+      gpuTimestampProfiler.beginComputePassDescriptor('p2gGridFinalize', {
+        substepIndex: 0
+      })
+    );
     p2gFinalizePass.setPipeline(p2gFinalizePipeline);
     p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
     dispatchActiveGridComputePass(
@@ -3618,7 +3640,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       activeGridIndirectDispatchArgs
     );
     p2gFinalizePass.end();
-    const gridUpdatePass = encoder.beginComputePass();
+    const gridUpdatePass = encoder.beginComputePass(
+      gpuTimestampProfiler.beginComputePassDescriptor('gridUpdate', {
+        substepIndex: 0
+      })
+    );
     gridUpdatePass.setPipeline(gridUpdatePipeline);
     gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
     dispatchActiveGridComputePass(
@@ -3627,7 +3653,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       activeGridIndirectDispatchArgs
     );
     gridUpdatePass.end();
-    const g2pPass = encoder.beginComputePass();
+    const g2pPass = encoder.beginComputePass(
+      gpuTimestampProfiler.beginComputePassDescriptor('g2pReconstruction', {
+        substepIndex: 0
+      })
+    );
     g2pPass.setPipeline(g2pPipeline);
     g2pPass.setBindGroup(0, g2pBindGroup);
     g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
@@ -3640,9 +3670,43 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       relaxation: mlsMpmParticleState?.particleSeparationRelaxation
         ?? MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
       maxPairRestDistanceM: maxSeparationRestDistanceM(mlsMpmParticleState?.mechanics, particleCount),
-      gridSpacingM: gridSpec.gridSpacingM
+      gridSpacingM: gridSpec.gridSpacingM,
+      timestampProfiler: gpuTimestampProfiler,
+      timestampMetadata: { substepIndex: 0 }
     });
+    gpuTimestampProfiler.encodeResolve(encoder);
+    const queueSubmitStartedAtMs = nowMs();
     device.queue.submit([encoder.finish()]);
+    const queueSubmitMs = Math.max(0, nowMs() - queueSubmitStartedAtMs);
+    const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+      ...tempBuffers.map((buffer) => ({ buffer, owned: true })),
+      { role: 'grid-output', buffer: gridBuffer, owned: true },
+      { role: 'updated-grid-output', buffer: updatedGridBuffer, owned: true },
+      { role: 'particle-state-output', buffer: outStateBuffer, owned: true },
+      { role: 'particle-mechanics-output', buffer: outMechanicsBuffer, owned: true },
+      ...separation.transientBuffers.map((buffer) => ({ buffer, owned: true })),
+      ...gpuTimestampProfiler.allocationEntries(),
+      { role: 'source-particle-state', buffer: sphParticleUpload.stateBuffer, owned: false },
+      { role: 'source-particle-thermo', buffer: sphParticleUpload.thermoBuffer, owned: false },
+      { role: 'source-particle-mechanics', buffer: mlsMpmParticleUpload.mechanicsBuffer, owned: false }
+    ], {
+      scope: 'mls-mpm-fused-resident-step'
+    });
+    let queueFenceMs = null;
+    let queueFenceStatus = gpuTimestampProfiler.active ? 'requested' : 'not-requested';
+    let queueFenceMethod = null;
+    if (gpuTimestampProfiler.active) {
+      if (typeof device.queue?.onSubmittedWorkDone === 'function') {
+        const queueFenceStartedAtMs = nowMs();
+        await device.queue.onSubmittedWorkDone();
+        queueFenceMs = Math.max(0, nowMs() - queueFenceStartedAtMs);
+        queueFenceStatus = 'complete';
+        queueFenceMethod = 'queue.onSubmittedWorkDone';
+      } else {
+        queueFenceStatus = 'unavailable';
+      }
+    }
+    const gpuTimestampProfile = await gpuTimestampProfiler.read();
     // Only read within this submitted sequence; WebGPU defers actual release.
     for (const transientBuffer of separation.transientBuffers) transientBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
@@ -3794,11 +3858,21 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       activeGridDispatch,
       activeGridIndirectDispatch,
       dispatchTopology,
+      queueSubmitMs,
+      queueFenceMs,
+      queueFenceStatus,
+      queueFenceMethod,
+      gpuTimestampProfile,
+      gpuTimestampRequested: Boolean(measureGpuTimestamps),
+      gpuTimestampStatus: gpuTimestampProfile.status,
+      gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+      gpuAllocationEvidence,
       p2gGridProjection,
       gridUpdate,
       g2pReconstruction
     };
   } finally {
+    gpuTimestampProfiler.destroy();
     const cleanup = () => {
       for (const buffer of tempBuffers) buffer.destroy?.();
       if (!retained) {
@@ -3837,6 +3911,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   schroederSelectedLevel = null,
   schroederActiveNodeList = null,
   measureQueueFence = false,
+  measureGpuTimestamps = false,
   sidecarFusionPlan = null,
   thermalMaterialTable = null,
   thermalStepOptions = {},
@@ -4065,6 +4140,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     pressureRowsBuffer,
     ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
+  const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-mls-mpm-fused-resident-sequence',
+    maxSpans: count * (
+      (activeGridDispatch.useActiveGrid ? 8 : 7)
+      + (useThermalSidecarFusion ? 2 : 0)
+    )
+  });
   let finalStateBuffer = null;
   let finalThermoBuffer = sphParticleUpload.thermoBuffer;
   let finalMechanicsBuffer = null;
@@ -4223,7 +4306,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         })
         : null;
       if (activeGridDispatch.useActiveGrid) {
-        const accumulatorClearPass = encoder.beginComputePass();
+        const accumulatorClearPass = encoder.beginComputePass(
+          gpuTimestampProfiler.beginComputePassDescriptor('activeGridAccumulatorClear', {
+            substepIndex: index
+          })
+        );
         accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
         accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
         dispatchActiveGridComputePass(
@@ -4235,12 +4322,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       } else {
         encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
       }
-      const p2gPass = encoder.beginComputePass();
+      const p2gPass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('p2gGridProjection', {
+          substepIndex: index
+        })
+      );
       p2gPass.setPipeline(p2gPipeline);
       p2gPass.setBindGroup(0, p2gBindGroup);
       p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
       p2gPass.end();
-      const p2gFinalizePass = encoder.beginComputePass();
+      const p2gFinalizePass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('p2gGridFinalize', {
+          substepIndex: index
+        })
+      );
       p2gFinalizePass.setPipeline(p2gFinalizePipeline);
       p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
       dispatchActiveGridComputePass(
@@ -4259,7 +4354,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 3, resource: { buffer: pressureRowsBuffer } }
         ]
       });
-      const gridUpdatePass = encoder.beginComputePass();
+      const gridUpdatePass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('gridUpdate', {
+          substepIndex: index
+        })
+      );
       gridUpdatePass.setPipeline(gridUpdatePipeline);
       gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
       dispatchActiveGridComputePass(
@@ -4284,7 +4383,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           { binding: 7, resource: { buffer: schroederAssignmentBuffer } }
         ]
       });
-      const g2pPass = encoder.beginComputePass();
+      const g2pPass = encoder.beginComputePass(
+        gpuTimestampProfiler.beginComputePassDescriptor('g2pReconstruction', {
+          substepIndex: index
+        })
+      );
       g2pPass.setPipeline(g2pPipeline);
       g2pPass.setBindGroup(0, g2pBindGroup);
       g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
@@ -4301,7 +4404,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         // must cover the 2h support, so cells are at least 2h/3.
         minCellSizeM: (2 / 3) * Math.max(finiteNumber(sphParticleState?.smoothingLengthM, 0), 0),
         gridSpacingM: gridSpec.gridSpacingM,
-        scratch: separationScratch
+        scratch: separationScratch,
+        timestampProfiler: gpuTimestampProfiler,
+        timestampMetadata: { substepIndex: index }
       });
       separationScratch = separation.scratch;
       currentStateBuffer = outStateBuffer;
@@ -4324,7 +4429,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           // Reuse the separation pass's per-substep neighbor bins for pair
           // conduction instead of the exhaustive particle scan.
           neighborBins: separation.enabled ? separation.scratch?.neighborBins ?? null : null,
-          ...thermalStepOptions
+          ...thermalStepOptions,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: { substepIndex: index }
         });
         thermalStage.encode(encoder);
         stageMs.thermalStep += Math.max(0, nowMs() - thermalStartMs);
@@ -4348,7 +4455,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           sourceMechanicsBuffer: outMechanicsBuffer,
           retainOutputParticleBuffers: true,
           readbackMode: NO_FULL_READBACK_MODE,
-          ...mechanicsRefreshOptions
+          ...mechanicsRefreshOptions,
+          timestampProfiler: gpuTimestampProfiler,
+          timestampMetadata: { substepIndex: index }
         });
         mechanicsRefreshStage.encode(encoder);
         stageMs.mechanicsRefresh += Math.max(0, nowMs() - mechanicsRefreshStartMs);
@@ -4358,15 +4467,31 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         currentMechanicsBuffer = mechanicsRefreshStage.mechanicsBuffer;
       }
     }
+    gpuTimestampProfiler.encodeResolve(encoder);
+    const queueSubmitStartMs = nowMs();
     device.queue.submit([encoder.finish()]);
+    const fusedMechanicsSequenceQueueSubmitMs = Math.max(0, nowMs() - queueSubmitStartMs);
+    const fusedMechanicsSequenceAllocationEvidence = summarizeWebGpuBufferAllocations([
+      ...allCreatedBuffers.map((buffer) => ({ buffer, owned: true })),
+      ...(separationScratch?.transientBuffers || []).map((buffer) => ({ buffer, owned: true })),
+      ...sidecarOutputBuffers.map((buffer) => ({ buffer, owned: true })),
+      ...gpuTimestampProfiler.allocationEntries(),
+      { role: 'source-particle-state', buffer: sphParticleUpload.stateBuffer, owned: false },
+      { role: 'source-particle-thermo', buffer: sphParticleUpload.thermoBuffer, owned: false },
+      { role: 'source-particle-mechanics', buffer: mlsMpmParticleUpload.mechanicsBuffer, owned: false }
+    ], {
+      scope: 'mls-mpm-fused-resident-sequence'
+    });
     for (const transientBuffer of separationScratch?.transientBuffers || []) transientBuffer.destroy?.();
     attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
     const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);
     let fusedMechanicsSequenceQueueFenceMs = null;
-    let fusedMechanicsSequenceQueueFenceStatus = measureQueueFence ? 'requested' : 'not-requested';
+    const timestampReadbackRequiresFence = gpuTimestampProfiler.active;
+    const shouldMeasureQueueFence = measureQueueFence || timestampReadbackRequiresFence;
+    let fusedMechanicsSequenceQueueFenceStatus = shouldMeasureQueueFence ? 'requested' : 'not-requested';
     let fusedMechanicsSequenceQueueFenceMethod = null;
-    if (measureQueueFence) {
+    if (shouldMeasureQueueFence) {
       if (typeof device.queue?.onSubmittedWorkDone === 'function') {
         const queueFenceStartMs = nowMs();
         await device.queue.onSubmittedWorkDone();
@@ -4377,6 +4502,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         fusedMechanicsSequenceQueueFenceStatus = 'unavailable';
       }
     }
+    const gpuTimestampProfile = await gpuTimestampProfiler.read();
     const webgpuStatus = {
       status: 'webgpu-executed-no-full-readback',
       reason: `Fused WebGPU MLS-MPM mechanics sequence executed ${count} substeps without full readback`
@@ -4669,6 +4795,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       queueFenceMethod: {
         fusedMechanicsSequence: fusedMechanicsSequenceQueueFenceMethod
       },
+      queueSubmitMs: {
+        fusedMechanicsSequence: fusedMechanicsSequenceQueueSubmitMs
+      },
+      gpuTimestampProfile,
+      gpuTimestampProfiles: {
+        residentSequence: gpuTimestampProfile
+      },
+      gpuTimestampRequested: Boolean(measureGpuTimestamps),
+      gpuTimestampStatus: gpuTimestampProfile.status,
+      gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+      gpuAllocationEvidence: fusedMechanicsSequenceAllocationEvidence,
       compactSummaryTiming: compactGpuSummary?.timing ?? null,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
@@ -4750,9 +4887,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       sidecarFusionStageOrder: useThermalSidecarFusion ? ['thermal-phase', 'mechanics-refresh'] : [],
       thermalSidecarFused: useThermalSidecarFusion,
       queueFenceRequested: measureQueueFence,
+      queueFenceRequiredByTimestampReadback: timestampReadbackRequiresFence,
       queueFenceMs: fusedMechanicsSequenceQueueFenceMs,
       queueFenceStatus: fusedMechanicsSequenceQueueFenceStatus,
       queueFenceMethod: fusedMechanicsSequenceQueueFenceMethod,
+      queueSubmitMs: fusedMechanicsSequenceQueueSubmitMs,
+      gpuTimestampProfile,
+      gpuTimestampRequested: Boolean(measureGpuTimestamps),
+      gpuTimestampStatus: gpuTimestampProfile.status,
+      gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+      gpuAllocationEvidence: fusedMechanicsSequenceAllocationEvidence,
       dispatchTopology,
       activeGridDispatch,
       schroederLevelFilter: fusedSchroederLevelFilterMetadata(schroederLevelFilter),
@@ -4792,6 +4936,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     return finalStep;
   } finally {
     if (!returned) {
+      gpuTimestampProfiler.destroy();
       for (const stage of sidecarEncoderStages) {
         stage.cleanupSubmittedWork?.();
       }
@@ -15985,6 +16130,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   fuseNoFullResidentMechanics = false,
   fuseNoFullResidentMechanicsActiveGrid = false,
   fuseNoFullResidentActiveGrid = false,
+  measureGpuTimestamps = false,
   activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   activeGridSafetyCells = undefined,
   fusedActiveGridSafetyCells = undefined,
@@ -16087,6 +16233,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
+          profilingRequested: Boolean(measureGpuTimestamps),
           onDeviceLost(info) {
             lostInfo = info;
             if (typeof onDeviceLost === 'function') onDeviceLost(info);
@@ -16130,6 +16277,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         internalPressureScale,
         fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
         activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
+        measureGpuTimestamps,
         p2gBackend,
         schroederLevelAssignment,
         schroederSelectedLevel,
@@ -16263,7 +16411,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         dtS: dtSeconds,
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
-        ...thermalStepOptions
+        ...thermalStepOptions,
+        measureGpuTimestamps
       }));
     }
   }
@@ -16323,7 +16472,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         ...reactionStepOptions,
         reactionParticleBinMetadataReadback:
           reactionParticleBinMetadataReadback === true
-          || reactionStepOptions.reactionParticleBinMetadataReadback === true
+          || reactionStepOptions.reactionParticleBinMetadataReadback === true,
+        measureGpuTimestamps
       }));
     }
   }
@@ -16365,7 +16515,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         preferWebGpu: preferWebGpu && !lostInfo,
         retainOutputParticleBuffers: true,
         readbackMode: requestedReadbackMode,
-        ...mechanicsRefreshOptions
+        ...mechanicsRefreshOptions,
+        measureGpuTimestamps
       }));
     }
   }
@@ -16481,8 +16632,38 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
     queueFenceMs: {
-      compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
+      compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
+      fusedMechanics: fusedMechanics?.queueFenceMs ?? null,
+      thermalStep: thermalStep?.queueFenceMs ?? null,
+      reactionStep: reactionStep?.queueFenceMs ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueFenceMs ?? null
     },
+    queueFenceStatus: {
+      fusedMechanics: fusedMechanics?.queueFenceStatus ?? null,
+      thermalStep: thermalStep?.queueFenceStatus ?? null,
+      reactionStep: reactionStep?.queueFenceStatus ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueFenceStatus ?? null
+    },
+    queueFenceMethod: {
+      fusedMechanics: fusedMechanics?.queueFenceMethod ?? null
+    },
+    queueSubmitMs: {
+      fusedMechanics: fusedMechanics?.queueSubmitMs ?? null,
+      thermalStep: thermalStep?.queueSubmitMs ?? null,
+      reactionStep: reactionStep?.queueSubmitMs ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueSubmitMs ?? null
+    },
+    gpuTimestampProfile: fusedMechanics?.gpuTimestampProfile ?? null,
+    gpuTimestampProfiles: {
+      mechanics: fusedMechanics?.gpuTimestampProfile ?? null,
+      thermal: thermalStep?.gpuTimestampProfile ?? null,
+      reaction: reactionStep?.gpuTimestampProfile ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.gpuTimestampProfile ?? null
+    },
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: fusedMechanics?.gpuTimestampStatus ?? null,
+    gpuTimestampMappedByteLength: fusedMechanics?.gpuTimestampMappedByteLength ?? 0,
+    gpuAllocationEvidence: fusedMechanics?.gpuAllocationEvidence ?? null,
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     fusedResidentMechanics: Boolean(fusedMechanics),
     dispatchTopology: fusedMechanics?.dispatchTopology
@@ -17192,6 +17373,7 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   sequenceStepCount = null,
   fuseNoFullResidentMechanicsActiveGrid = false,
   fuseNoFullResidentActiveGrid = false,
+  measureGpuTimestamps = false,
   activeGridDispatchPlanRefreshMode = MLS_MPM_ACTIVE_GRID_PLAN_REFRESH_MODE_EVERY_STEP,
   activeGridSafetyCells = undefined,
   fusedActiveGridSafetyCells = undefined,
@@ -17285,6 +17467,7 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     internalPressureScale,
     fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
     activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells,
+    measureGpuTimestamps,
     p2gBackend,
     schroederLevelAssignment,
     schroederSelectedLevel,
@@ -17312,7 +17495,8 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     dtS: dtSeconds,
     retainOutputParticleBuffers: true,
     readbackMode: requestedReadbackMode,
-    ...thermalStepOptions
+    ...thermalStepOptions,
+    measureGpuTimestamps
   }));
 
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
@@ -17332,7 +17516,8 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     preferWebGpu,
     retainOutputParticleBuffers: true,
     readbackMode: requestedReadbackMode,
-    ...mechanicsRefreshOptions
+    ...mechanicsRefreshOptions,
+    measureGpuTimestamps
   }));
 
   const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
@@ -17444,8 +17629,35 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
     totalMs: Math.max(0, nowMs() - stageTimingStartMs),
     stageMs: { ...stageMs },
     queueFenceMs: {
-      compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
+      compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
+      fusedMechanics: fusedMechanics.queueFenceMs ?? null,
+      thermalStep: thermalStep?.queueFenceMs ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueFenceMs ?? null
     },
+    queueFenceStatus: {
+      fusedMechanics: fusedMechanics.queueFenceStatus ?? null,
+      thermalStep: thermalStep?.queueFenceStatus ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueFenceStatus ?? null
+    },
+    queueFenceMethod: {
+      fusedMechanics: fusedMechanics.queueFenceMethod ?? null
+    },
+    queueSubmitMs: {
+      fusedMechanics: fusedMechanics.queueSubmitMs ?? null,
+      thermalStep: thermalStep?.queueSubmitMs ?? null,
+      mechanicsRefresh: mechanicsRefreshStep?.queueSubmitMs ?? null
+    },
+    gpuTimestampProfile: fusedMechanics.gpuTimestampProfile ?? null,
+    gpuTimestampProfiles: {
+      mechanics: fusedMechanics.gpuTimestampProfile ?? null,
+      thermal: thermalStep?.gpuTimestampProfile ?? null,
+      reaction: null,
+      mechanicsRefresh: mechanicsRefreshStep?.gpuTimestampProfile ?? null
+    },
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: fusedMechanics.gpuTimestampStatus ?? null,
+    gpuTimestampMappedByteLength: fusedMechanics.gpuTimestampMappedByteLength ?? 0,
+    gpuAllocationEvidence: fusedMechanics.gpuAllocationEvidence ?? null,
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     fusedResidentMechanics: true,
     thermalSidecarDirectRunner: true,
@@ -17949,6 +18161,11 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.measureFusedSequenceQueueFence
         || args.measureGpuQueueFence
         || args.benchmarkQueueFence
+      ),
+      measureGpuTimestamps: Boolean(
+        args.measureGpuTimestamps
+        || args.profileGpuTimestamps
+        || args.benchmarkGpuTimestamps
       ),
       sidecarFusionPlan: fusedResidentSequencePreflight.sidecarFusionPlan,
       thermalMaterialTable: args.thermalMaterialTable,

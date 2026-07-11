@@ -13942,3 +13942,62 @@ Direct-resident queue-fence split, 2026-06-30 19:25 AKDT:
     progress event was emitted, and Chromium entered uninterruptible sleep
     before page-evaluate code ran. Reset the headless-browser/GPU state before
     trusting live WebGPU benchmark results from this host.
+
+GPU timestamp attribution (`PROF-0`), 2026-07-11 11:29 AKDT:
+
+- Focused timestamp/orchestration/render regression:
+  `node --test tests/webgpuTimestampProfiler.test.mjs tests/sphKernelTimestampHooks.test.mjs tests/opticalGpuBuffers.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `154/154`.
+- Focused reaction/resident regression:
+  `node --test tests/sphReactionGpuKernel.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `105/105`.
+- Marching-cubes dependency regression, from
+  `/home/cos/projects/webgpu-marching-cubes`:
+  `node --test test/webgpu-marching-cubes.test.js`
+  - Passed: `20/20` on dependency branch
+    `gpu-resident-physics-refactor`, commit `dca2457`.
+- Native water timestamp/surface probe:
+  `ULG_PROBE_SCENARIO=water-cycle ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_TIMESTAMPS=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-thermal-native.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  - Passed: status `good`; four of four native frames were nonblank and
+    surface-varying; browser/WebGPU issue count was zero.
+  - Timestamp-query evidence was valid for eight mechanics/separation spans
+    (`0.837632 ms` total), thermal (`0.883712 ms`), mechanics refresh
+    (`0.078848 ms`), dense field evaluation (`6.383616 ms`), marching-cubes
+    count/clamp/emission (`3.681280 ms`), and ULG translation (`0.034816 ms`).
+  - The allocation evidence reports the dense field source as `84,934,656`
+    bytes and marching-cubes position output as `22,369,616` bytes.
+- Native reaction timestamp/surface probe:
+  `ULG_PROBE_SCENARIO=cesium-fluorine ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_PROFILE=1 ULG_PROBE_RESIDENT_GPU_TIMESTAMPS=1 ULG_PROBE_OUTPUT=/tmp/ulg-prof0-reaction-native2.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  - Presentation passed: four of four native frames were nonblank and
+    surface-varying with zero browser issues. GPU spans measured mechanics
+    `0.646144 ms`, thermal `1.327104 ms`, reaction `0.496640 ms`, dense field
+    `13.392896 ms`, marching cubes `3.367936 ms`, and translation
+    `0.034816 ms`.
+  - Overall scenario status remained `bad` only because the one-step
+    authoritative checkpoint reported the known phase-fraction/unclassified-
+    mass behavior failure. This is not relabeled as a profiling or
+    presentation failure.
+- Required timestamp benchmark:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_COMPACT_SUMMARY_MODE=plan-only ULG_BENCH_LAW_THERMAL=1 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_VISCOSITY=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_BENCH_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_BENCH_REQUIRE_GPU_TIMESTAMPS=1 ULG_BENCH_GPU_PROFILE=1 ULG_BENCH_OUTPUT=/tmp/ulg-prof0-benchmark-final2.json ULG_PROBE_BASE_URL=https://127.0.0.1:5173 NODE_TLS_REJECT_UNAUTHORIZED=0 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run bench:sph-performance`
+  - Passed: suite status `complete`, suite gate `pass`, scenario `good`, ten
+    valid resident spans, timestamp-derived GPU total `2.556928 ms`, host-
+    visible stage duration about `252 ms`, timestamp-derived throughput
+    `391.09 steps/s`, and zero step-state readback bytes.
+  - Dense field evaluation measured `13.599744 ms`; marching-cubes
+    count/clamp/emission measured `1.573888/0.030720/2.069504 ms`.
+  - Queue completion evidence remained separately named and complete for
+    mechanics, thermal, and refresh; host/fence values never satisfy the GPU
+    timestamp requirement.
+- Unsupported timestamp-query behavior is a required explicit outcome:
+  profiling reports `inconclusive-unsupported` and never substitutes a CPU or
+  queue-fence duration. Normal non-profiled execution does not allocate query
+  or readback buffers.
+- Combined PROF/sparse-contract checkpoint:
+  `node --test tests/webgpuTimestampProfiler.test.mjs tests/sphKernelTimestampHooks.test.mjs tests/opticalGpuBuffers.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphSparseRenderFieldPlan.test.mjs tests/residentNeighborhoodGpu.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs`
+  - Passed: `190/190`.
+- Full regression: `npm test`
+  - Passed: `1,041/1,044`, zero failures, with the three documented opt-in
+    long-liquid tests skipped; duration `274,617.522 ms`.
+- Production build: `npm run build`
+  - Passed with Vite `8.0.16`, `140` modules transformed, and only the existing
+    large-chunk warning (`index` `5,314.95 kB`, gzip `1,158.75 kB`).

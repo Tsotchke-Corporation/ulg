@@ -44,8 +44,9 @@ Current routing note, 2026-07-10 AKDT: branch
 Its goals and non-goals live in
 `plan/todo/gpu-resident-physics-refactor/README.md`. The general native WebGPU
 presentation lifecycle is now accepted through the named/random matrix and
-mobile DPR-2 gate. `PROF-0` GPU timestamp evidence is next, before optimizing
-dense fields, resident law lanes, Schroeder sparsity, or coherent solids. No
+mobile DPR-2 gate. `PROF-0` GPU timestamp evidence is accepted; `FIELD-0`
+sparse render-field execution is active, with shared radix/scan/unique work
+then feeding `NEIGH-0` and two-level Schroeder sparsity. No
 demo/material-pair patches, CPU production oracle, or third SS level belong in
 this branch.
 

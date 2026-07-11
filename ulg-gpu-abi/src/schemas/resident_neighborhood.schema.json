@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peercompute.ulg.resident-neighborhood-descriptor.v0",
+  "title": "ULG GPU-Resident Neighborhood Descriptor v0",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "authority",
+    "generation",
+    "lease",
+    "supportClasses",
+    "layouts",
+    "capacityEvidence",
+    "admission"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "peercompute.ulg.resident-neighborhood-descriptor.v0" },
+    "status": {
+      "enum": [
+        "resident-neighborhood-descriptor-ready",
+        "resident-neighborhood-capacity-overflow-fail-closed"
+      ]
+    },
+    "generation": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "authority": {
+      "type": "object",
+      "required": ["laneOwner", "resourceOwner", "mutationAdmission", "sceneLocalScheduler"],
+      "properties": {
+        "laneOwner": { "const": "peercompute-compute-manager" },
+        "resourceOwner": { "const": "peercompute-gpu-hub" },
+        "mutationAdmission": { "const": "peercompute-state-manager" },
+        "sceneLocalScheduler": { "const": false }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "required": ["leaseId", "laneId", "stateKey", "tokenLow", "tokenHigh"],
+      "properties": {
+        "leaseId": { "type": "string", "minLength": 1 },
+        "laneId": { "type": "string", "minLength": 1 },
+        "stateKey": { "type": "string", "minLength": 1 },
+        "deviceId": { "type": "string" },
+        "tokenLow": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "tokenHigh": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "supportClasses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "supportClassId",
+          "consumerMask",
+          "minLevelDelta",
+          "maxLevelDelta",
+          "cellRadius",
+          "maxCandidatesPerSource",
+          "flags"
+        ],
+        "properties": {
+          "supportClassId": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "consumerMask": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+          "minLevelDelta": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+          "maxLevelDelta": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+          "cellRadius": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "maxCandidatesPerSource": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "flags": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        }
+      }
+    },
+    "layouts": {
+      "type": "object",
+      "required": ["cellKey", "supportClass", "sourceSpan", "candidate", "capacityEvidence"]
+    },
+    "capacityEvidence": {
+      "type": "object",
+      "required": ["schema", "required", "admitted", "capacity", "overflow", "statusFlags"]
+    },
+    "admission": {
+      "type": "object",
+      "required": ["failClosed", "consumerDispatchAllowed", "stateMutationAllowed"],
+      "properties": {
+        "failClosed": { "type": "boolean" },
+        "consumerDispatchAllowed": { "type": "boolean" },
+        "stateMutationAllowed": { "type": "boolean" }
+      }
+    }
+  }
+}

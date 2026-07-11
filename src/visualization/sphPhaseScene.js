@@ -153,6 +153,11 @@ import {
 } from '../runtime/peercomputeRenderOwnershipPolicy.js';
 import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
 import {
+  ULG_WEBGPU_TIMESTAMP_PROFILE_SCHEMA,
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../runtime/webgpuTimestampProfiler.js';
+import {
   createUlgWorkerOffscreenPresentationBridge
 } from './offscreenPresentationBridge.js';
 import {
@@ -9640,6 +9645,7 @@ export function createSphPhaseScene(container, {
   renderOwnershipPolicy = null,
   materialInterfaceSurfaceTablePolicy = null,
   residentAuthorityHost = null,
+  gpuProfilingRequested = false,
   navigatorRef = globalThis.navigator
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
@@ -9650,6 +9656,7 @@ export function createSphPhaseScene(container, {
   const requestedRendererBackend = normalizeSphRendererBackend(rendererBackend);
   const useNativeWebGpuRenderer = requestedRendererBackend === 'native-webgpu';
   const enableNativeSurfacePixelValidation = Boolean(nativeSurfacePixelValidation);
+  const enableGpuProfiling = Boolean(gpuProfilingRequested);
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
   const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
@@ -12375,7 +12382,9 @@ export function createSphPhaseScene(container, {
       });
     }
     if (!opticalGpuDeviceResultPromise) {
-      opticalGpuDeviceResultPromise = requestOpticalGpuDevice(ref).then((result) => {
+      opticalGpuDeviceResultPromise = requestOpticalGpuDevice(ref, {
+        profilingRequested: enableGpuProfiling
+      }).then((result) => {
         result.rendererBackend = rendererBackendName();
         result.rendererOwnedDevice = false;
         result.rendererOwnedResidentDevicePolicy = scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy
@@ -13945,6 +13954,7 @@ export function createSphPhaseScene(container, {
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
     measureFusedSequenceQueueFence = false,
+    measureGpuTimestamps = enableGpuProfiling,
     contactKinematicsParticleBinMetadataReadback = false,
     reactionParticleBinMetadataReadback = false,
     activeGridDispatchPlanRefreshMode = null,
@@ -13983,6 +13993,7 @@ export function createSphPhaseScene(container, {
       `activeGridPlanRefresh=${normalizedActiveGridDispatchPlanRefreshMode}`,
       `activeGridSafety=${normalizedActiveGridSafetyCells}`,
       `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`,
+      `gpuTimestamps=${Boolean(measureGpuTimestamps) ? 1 : 0}`,
       `contactBinMetadataReadback=${Boolean(contactKinematicsParticleBinMetadataReadback) ? 1 : 0}`,
       `reactionBinMetadataReadback=${Boolean(reactionParticleBinMetadataReadback) ? 1 : 0}`
     ].join('|');
@@ -21095,6 +21106,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
     measureFusedSequenceQueueFence = false,
+    measureGpuTimestamps = enableGpuProfiling,
     activeGridDispatchPlanRefreshMode = null,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined,
@@ -21182,6 +21194,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
     );
     const requestedMeasureFusedSequenceQueueFence = Boolean(measureFusedSequenceQueueFence);
+    const requestedMeasureGpuTimestamps = Boolean(measureGpuTimestamps);
     const requestedSchroederSimulation = Boolean(schroederSimulation);
     const requestedSchroederSelectedLevel = Math.round(Number(schroederSelectedLevel) || 0);
     const requestedSchroederBaseGridSpacingM = Number.isFinite(Number(schroederBaseGridSpacingM))
@@ -21753,6 +21766,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+      measureGpuTimestamps: requestedMeasureGpuTimestamps,
       activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
       activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
       compactSummaryMode: requestedCompactSummaryMode,
@@ -21918,6 +21932,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
       measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+      measureGpuTimestamps: requestedMeasureGpuTimestamps,
       contactKinematicsParticleBinMetadataReadback:
         requestedContactKinematicsParticleBinMetadataReadback,
       reactionParticleBinMetadataReadback:
@@ -22209,6 +22224,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
           fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
           measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+          measureGpuTimestamps: requestedMeasureGpuTimestamps,
           activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
           activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
@@ -22929,6 +22945,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
             fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
             measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+            measureGpuTimestamps: requestedMeasureGpuTimestamps,
             contactKinematicsParticleBinMetadataReadback:
               requestedContactKinematicsParticleBinMetadataReadback,
             reactionParticleBinMetadataReadback:
@@ -25655,7 +25672,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     materialPayload = null,
     pbrPayload = null,
     readbackMode = 'gpu-conservative-no-readback',
-    vertexRowsBudget = 0
+    vertexRowsBudget = 0,
+    measureGpuTimestamps = enableGpuProfiling,
+    timestampMetadata = null
   } = {}) {
     if (!descriptor?.ok) {
       return {
@@ -25678,17 +25697,91 @@ fn fs_main() -> @location(0) vec4<f32> {
       device,
       descriptor
     });
-    const extractionStartedMs = nowMs();
-    const extensionExecution = await wrapper.extractSurface({
-      volume,
-      isovalue: isovalue ?? descriptor.isovalue ?? 0,
-      materialPayload,
-      pbrPayload,
-      ownsBuffer: true,
-      readbackMode,
-      vertexRowsBudget: vertexRowsBudget > 0 ? vertexRowsBudget : undefined
+    const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
+      requested: Boolean(measureGpuTimestamps),
+      label: 'ulg-native-marching-cubes-extraction',
+      maxSpans: 3
     });
+    const extractionStartedMs = nowMs();
+    let extensionExecution;
+    try {
+      extensionExecution = await wrapper.extractSurface({
+        volume,
+        isovalue: isovalue ?? descriptor.isovalue ?? 0,
+        materialPayload,
+        pbrPayload,
+        ownsBuffer: true,
+        readbackMode,
+        vertexRowsBudget: vertexRowsBudget > 0 ? vertexRowsBudget : undefined,
+        timestampProfiler: gpuTimestampProfiler.active ? gpuTimestampProfiler : undefined,
+        timestampMetadata: {
+          surfaceMaterial: descriptor.surfaceExtractionPolicyMaterial ?? null,
+          surfacePhase: descriptor.surfaceExtractionPolicyPhase ?? null,
+          ...(timestampMetadata || {})
+        }
+      });
+    } catch (error) {
+      gpuTimestampProfiler.destroy();
+      throw error;
+    }
     const extractionElapsedMs = Math.max(0, nowMs() - extractionStartedMs);
+    let gpuTimestampResolveQueueSubmitMs = null;
+    let gpuTimestampResolveQueueFenceMs = null;
+    let gpuTimestampResolveQueueFenceStatus = gpuTimestampProfiler.active
+      ? 'requested'
+      : 'not-requested';
+    let gpuTimestampProfile;
+    try {
+      if (gpuTimestampProfiler.active) {
+        const timestampEncoder = device.createCommandEncoder();
+        gpuTimestampProfiler.encodeResolve(timestampEncoder);
+        const submitStartedMs = nowMs();
+        device.queue.submit([timestampEncoder.finish()]);
+        gpuTimestampResolveQueueSubmitMs = Math.max(0, nowMs() - submitStartedMs);
+        if (typeof device.queue?.onSubmittedWorkDone === 'function') {
+          const fenceStartedMs = nowMs();
+          await device.queue.onSubmittedWorkDone();
+          gpuTimestampResolveQueueFenceMs = Math.max(0, nowMs() - fenceStartedMs);
+          gpuTimestampResolveQueueFenceStatus = 'complete';
+        } else {
+          gpuTimestampResolveQueueFenceStatus = 'unavailable';
+        }
+      }
+      gpuTimestampProfile = await gpuTimestampProfiler.read();
+    } catch (error) {
+      gpuTimestampProfiler.destroy();
+      gpuTimestampProfile = {
+        schema: ULG_WEBGPU_TIMESTAMP_PROFILE_SCHEMA,
+        requested: Boolean(measureGpuTimestamps),
+        label: 'ulg-native-marching-cubes-extraction',
+        status: 'timestamp-profile-encode-failed',
+        reason: error instanceof Error ? error.message : String(error),
+        spanCount: 0,
+        validSpanCount: 0,
+        invalidSpanCount: 0,
+        skippedSpanCount: 0,
+        mappedByteLength: 0,
+        mapAsyncWaitMs: null,
+        spans: [],
+        stageTotals: {}
+      };
+    }
+    const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+      ...gpuTimestampProfiler.allocationEntries(),
+      { role: 'render-field-scalar-source', buffer: descriptor.scalarBuffer, owned: false },
+      {
+        role: 'marching-cubes-position-output',
+        buffer: extensionExecution?.extensionExecution?.result?.buffer
+          ?? extensionExecution?.result?.buffer,
+        owned: false
+      },
+      {
+        role: 'marching-cubes-indirect-output',
+        buffer: extensionExecution?.extensionExecution?.result?.drawIndirectBuffer
+          ?? extensionExecution?.result?.drawIndirectBuffer,
+        owned: false
+      }
+    ], { scope: 'native-marching-cubes-extraction' });
     const extensionError = extensionExecution?.errors?.[0]
       || extensionExecution?.webgpuStatus?.error
       || null;
@@ -25721,6 +25814,14 @@ fn fs_main() -> @location(0) vec4<f32> {
       surfaceExtractionPolicyNormalScaleM: descriptor.surfaceExtractionPolicyNormalScaleM ?? null,
       elapsedMs: extractionElapsedMs,
       extensionExecutionElapsedMs: extractionElapsedMs,
+      gpuTimestampProfile,
+      gpuTimestampRequested: Boolean(measureGpuTimestamps),
+      gpuTimestampStatus: gpuTimestampProfile?.status ?? null,
+      gpuTimestampMappedByteLength: gpuTimestampProfile?.mappedByteLength ?? 0,
+      gpuTimestampResolveQueueSubmitMs,
+      gpuTimestampResolveQueueFenceMs,
+      gpuTimestampResolveQueueFenceStatus,
+      gpuAllocationEvidence,
       adapterCacheStatus: cacheStatus,
       adapterCacheReason: cacheReason,
       adapterCacheHit: Boolean(cacheHit),
@@ -26639,6 +26740,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         retainDrawRowsBuffer: true,
         retainDrawIndirectRowsBuffer: true,
         waitForQueueCompletion: Boolean(waitForQueueCompletion && !resolvedDeviceResult.rendererOwnedDevice),
+        measureGpuTimestamps: enableGpuProfiling,
         onProgress(progress = {}) {
           markSphResidentRenderProgress(progress.status || 'extension-surface-draw-progress', {
             ...progress,
@@ -26748,6 +26850,14 @@ fn fs_main() -> @location(0) vec4<f32> {
         residentBufferLeaseActiveLeaseCount: translation.residentBufferLeaseActiveLeaseCount ?? 0,
         residentBufferLeaseSummary: translation.residentBufferLeaseSummary ?? null,
         readbackMode: translation.readbackMode,
+        surfaceTranslationQueueSubmitMs: translation.queueSubmitMs ?? null,
+        surfaceTranslationQueueFenceMs: translation.queueFenceMs ?? null,
+        surfaceTranslationGpuTimestampProfile: translation.gpuTimestampProfile ?? null,
+        surfaceTranslationGpuTimestampRequested: translation.gpuTimestampRequested === true,
+        surfaceTranslationGpuTimestampStatus: translation.gpuTimestampStatus ?? null,
+        surfaceTranslationGpuTimestampMappedByteLength:
+          translation.gpuTimestampMappedByteLength ?? 0,
+        surfaceTranslationGpuAllocationEvidence: translation.gpuAllocationEvidence ?? null,
         surfaceDrawReadback: Boolean(surfaceDrawExecution.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
@@ -27099,7 +27209,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
     pressureInterfaceGasCellFieldImportStateKey = null,
     skipPressureInterfaceRefresh = false,
-    allowNativeSurfaceExtraction = true
+    allowNativeSurfaceExtraction = true,
+    measureGpuTimestamps = enableGpuProfiling
   } = {}) {
     const nativeBridgeFailure = nativeSurfaceBridgeFailureReason(
       sphResidentSurfaceDrawRenderBridge
@@ -28128,7 +28239,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
             useQueueFenceForCleanup: false,
             targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
-            targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null
+            targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null,
+            measureGpuTimestamps
             });
           };
           const timedBuildRenderFieldForRows = async () => {
@@ -28975,6 +29087,20 @@ fn fs_main() -> @location(0) vec4<f32> {
                     nativeMarchingCubesExtractionElapsedMs: nativeExtraction.elapsedMs ?? null,
                     nativeMarchingCubesExtensionExecutionElapsedMs:
                       nativeExtraction.extensionExecutionElapsedMs ?? null,
+                    nativeMarchingCubesGpuTimestampProfile:
+                      nativeExtraction.gpuTimestampProfile ?? null,
+                    nativeMarchingCubesGpuTimestampRequested:
+                      nativeExtraction.gpuTimestampRequested === true,
+                    nativeMarchingCubesGpuTimestampStatus:
+                      nativeExtraction.gpuTimestampStatus ?? null,
+                    nativeMarchingCubesGpuTimestampMappedByteLength:
+                      nativeExtraction.gpuTimestampMappedByteLength ?? 0,
+                    nativeMarchingCubesGpuTimestampResolveQueueSubmitMs:
+                      nativeExtraction.gpuTimestampResolveQueueSubmitMs ?? null,
+                    nativeMarchingCubesGpuTimestampResolveQueueFenceMs:
+                      nativeExtraction.gpuTimestampResolveQueueFenceMs ?? null,
+                    nativeMarchingCubesGpuAllocationEvidence:
+                      nativeExtraction.gpuAllocationEvidence ?? null,
                     nativeMarchingCubesTotalElapsedMs: finiteNumberOrNull(nativeExtraction.elapsedMs)
                       != null && finiteNumberOrNull(nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs) != null
                       ? finiteNumberOrNull(nativeExtraction.elapsedMs)
@@ -29877,6 +30003,14 @@ fn fs_main() -> @location(0) vec4<f32> {
         renderFieldReason: renderFieldExecution?.reason ?? null,
         renderFieldBackend: renderFieldExecution?.backend ?? null,
         renderFieldInputSource: renderFieldExecution?.renderFieldInputSource ?? null,
+        renderFieldQueueSubmitMs: renderFieldExecution?.queueSubmitMs ?? null,
+        renderFieldQueueFenceMs: renderFieldExecution?.queueFenceMs ?? null,
+        renderFieldGpuTimestampProfile: renderFieldExecution?.gpuTimestampProfile ?? null,
+        renderFieldGpuTimestampRequested: renderFieldExecution?.gpuTimestampRequested === true,
+        renderFieldGpuTimestampStatus: renderFieldExecution?.gpuTimestampStatus ?? null,
+        renderFieldGpuTimestampMappedByteLength:
+          renderFieldExecution?.gpuTimestampMappedByteLength ?? 0,
+        renderFieldGpuAllocationEvidence: renderFieldExecution?.gpuAllocationEvidence ?? null,
         renderFieldCpuFallbackGeometryAvailable: renderFieldExecution?.cpuFallbackGeometryAvailable ?? null,
         renderFieldCpuParitySummary,
         renderFieldEmptyRetryReadback: Boolean(renderFieldExecution?.emptyFieldRetryReadback),
@@ -29990,6 +30124,30 @@ fn fs_main() -> @location(0) vec4<f32> {
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionElapsedMs ?? null,
         surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtensionExecutionElapsedMs ?? null,
+        surfaceDrawNativeMarchingCubesGpuTimestampProfile:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampProfile ?? null,
+        surfaceDrawNativeMarchingCubesGpuTimestampRequested:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampRequested ?? null,
+        surfaceDrawNativeMarchingCubesGpuTimestampStatus:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampStatus ?? null,
+        surfaceDrawNativeMarchingCubesGpuTimestampMappedByteLength:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampMappedByteLength ?? 0,
+        surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueSubmitMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampResolveQueueSubmitMs ?? null,
+        surfaceDrawNativeMarchingCubesGpuTimestampResolveQueueFenceMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuTimestampResolveQueueFenceMs ?? null,
+        surfaceDrawNativeMarchingCubesGpuAllocationEvidence:
+          sphResidentSurfaceDraw?.nativeMarchingCubesGpuAllocationEvidence ?? null,
+        surfaceDrawSurfaceTranslationGpuTimestampProfile:
+          sphResidentSurfaceDraw?.surfaceTranslationGpuTimestampProfile ?? null,
+        surfaceDrawSurfaceTranslationGpuTimestampStatus:
+          sphResidentSurfaceDraw?.surfaceTranslationGpuTimestampStatus ?? null,
+        surfaceDrawSurfaceTranslationQueueSubmitMs:
+          sphResidentSurfaceDraw?.surfaceTranslationQueueSubmitMs ?? null,
+        surfaceDrawSurfaceTranslationQueueFenceMs:
+          sphResidentSurfaceDraw?.surfaceTranslationQueueFenceMs ?? null,
+        surfaceDrawSurfaceTranslationGpuAllocationEvidence:
+          sphResidentSurfaceDraw?.surfaceTranslationGpuAllocationEvidence ?? null,
         surfaceDrawNativeMarchingCubesTotalElapsedMs:
           sphResidentSurfaceDraw?.nativeMarchingCubesTotalElapsedMs ?? null,
         surfaceDrawNativeMarchingCubesExtractionErrorName:

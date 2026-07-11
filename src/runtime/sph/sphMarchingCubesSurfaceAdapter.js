@@ -18,6 +18,10 @@ import {
   summarizeResidentBufferLeaseLedger
 } from '../residentBufferLease.js';
 import { ULG_ALGORITHM_SURFACE_EXTRACTION_ROWS_SCHEMA } from '../material/algorithmMaterialRows.js';
+import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
 
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-adapter.v0';
@@ -1740,6 +1744,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   retainDrawRowsBuffer = true,
   retainDrawIndirectRowsBuffer = true,
   waitForQueueCompletion = true,
+  measureGpuTimestamps = false,
   onProgress = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -1862,6 +1867,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       }
     }
     : () => {};
+  const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-marching-cubes-surface-translation',
+    maxSpans: 1
+  });
   markProgress('extension-surface-translation-kernel-started');
 
   let vertexRowsBuffer = null;
@@ -2043,7 +2053,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
           ]
     });
     encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
+    const timestampPassDescriptor = gpuTimestampProfiler.active
+      ? gpuTimestampProfiler.beginComputePassDescriptor('marchingCubesSurfaceTranslation', {
+          surfaceIndex: resolvedSurfaceIndex,
+          directCompactPositionDraw
+        })
+      : null;
+    const pass = timestampPassDescriptor
+      ? encoder.beginComputePass(timestampPassDescriptor)
+      : encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     workgroupCountX = directCompactPositionDraw
@@ -2051,6 +2069,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       : Math.max(1, Math.ceil(Math.max(1, triangleCount) / EXTENSION_SURFACE_TRANSLATION_WORKGROUP_SIZE));
     pass.dispatchWorkgroups(workgroupCountX);
     pass.end();
+    gpuTimestampProfiler.encodeResolve(encoder);
     markProgress('extension-surface-translation-command-encoded', { workgroupCountX });
   }
 
@@ -2061,9 +2080,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   let summaryReadbackByteLength = 0;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
+  let queueSubmitMs = null;
+  let queueFenceMs = null;
   let deferNoFullCleanup = false;
   if (!noFullReadback) {
+    const submitStartedMs = performance.now();
     device.queue.submit([encoder.finish()]);
+    queueSubmitMs = Math.max(0, performance.now() - submitStartedMs);
     queueCompletionStatus = 'queue-submitted';
     queueCompletionMethod = 'queue.submit';
     if (vertexRowsByteLength > 0) {
@@ -2094,14 +2117,20 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       queueCompletionStatus = 'queue-work-not-required';
       queueCompletionMethod = 'extension-owned-draw-indirect-buffer';
     } else if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
+      const submitStartedMs = performance.now();
       device.queue.submit([encoder.finish()]);
+      queueSubmitMs = Math.max(0, performance.now() - submitStartedMs);
       queueCompletionStatus = 'queue-submitted';
       queueCompletionMethod = 'queue.submit';
+      const fenceStartedMs = performance.now();
       await device.queue.onSubmittedWorkDone();
+      queueFenceMs = Math.max(0, performance.now() - fenceStartedMs);
       queueCompletionStatus = 'queue-work-completed';
       queueCompletionMethod = 'queue.onSubmittedWorkDone';
     } else {
+      const submitStartedMs = performance.now();
       device.queue.submit([encoder.finish()]);
+      queueSubmitMs = Math.max(0, performance.now() - submitStartedMs);
       queueCompletionStatus = device.queue?.onSubmittedWorkDone && !compactSummaryReadback
         ? 'queue-submitted-cleanup-deferred'
         : 'queue-submitted-no-explicit-completion';
@@ -2123,6 +2152,25 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       queueCompletionMethod = 'mapAsync(compact-summary-readback-buffer)';
     }
   }
+
+  const gpuTimestampProfile = await gpuTimestampProfiler.read();
+  const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+    ...gpuTimestampProfiler.allocationEntries(),
+    { role: 'extension-position-source', buffer: sourceBuffer, owned: false },
+    { role: 'translated-vertex-rows', buffer: vertexRowsBuffer, owned: true },
+    { role: 'surface-draw-rows', buffer: drawRowsBuffer, owned: true },
+    {
+      role: 'surface-draw-indirect',
+      buffer: drawIndirectRowsBuffer,
+      owned: !useExtensionDrawIndirectBuffer
+    },
+    { role: 'translation-params', buffer: paramsBuffer, owned: true },
+    {
+      role: 'field-gradient',
+      buffer: resolvedFieldGradient?.buffer,
+      owned: false
+    }
+  ], { scope: 'marching-cubes-surface-translation' });
 
   const cleanup = () => {
     paramsBuffer?.destroy?.();
@@ -2243,6 +2291,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    queueSubmitMs,
+    queueFenceMs,
+    gpuTimestampProfile,
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: gpuTimestampProfile.status,
+    gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+    gpuAllocationEvidence,
     surfaceVertexReadback: !noFullReadback,
     surfaces: [surface],
     scientificValidation: false,
@@ -2319,6 +2374,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    queueSubmitMs,
+    queueFenceMs,
+    gpuTimestampProfile,
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: gpuTimestampProfile.status,
+    gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+    gpuAllocationEvidence,
     surfaceDrawReadback: !noFullReadback,
     surfaceDrawSummaryReadback: summaryReadback,
     surfaceDrawSummaryReadbackByteLength: summaryReadbackByteLength,
@@ -2458,6 +2520,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    queueSubmitMs,
+    queueFenceMs,
+    gpuTimestampProfile,
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: gpuTimestampProfile.status,
+    gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+    gpuAllocationEvidence,
     hotLoopGpuTranslationRequired: false,
     hotLoopUlgVertexRowExpansionSkipped: directCompactPositionDraw,
     residentBufferLeaseLedger: leaseLedger,

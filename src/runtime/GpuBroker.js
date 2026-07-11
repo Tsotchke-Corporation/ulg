@@ -49,8 +49,17 @@ export class GpuBroker {
     return this.capabilities;
   }
 
-  async getDevice({ required = false } = {}) {
+  async getDevice({ required = false, profilingRequested = false } = {}) {
     if (this.device && this.capabilities.deviceStatus === 'ready') {
+      const timestampQueryEnabled = Boolean(this.device.features?.has?.('timestamp-query'));
+      this.capabilities = {
+        ...this.capabilities,
+        profilingRequested: Boolean(profilingRequested),
+        timestampQueryEnabled,
+        timestampQueryStatus: profilingRequested
+          ? (timestampQueryEnabled ? 'enabled' : 'unavailable-on-existing-device')
+          : (timestampQueryEnabled ? 'enabled-not-requested' : 'not-requested')
+      };
       return this.device;
     }
     if (!this.capabilities.supported || !this.adapterHandle) {
@@ -60,7 +69,9 @@ export class GpuBroker {
       return null;
     }
     try {
-      const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(this.adapterHandle);
+      const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(this.adapterHandle, {
+        profilingRequested
+      });
       const device = await this.adapterHandle.requestDevice(deviceDescriptor);
       this.device = device;
       this.capabilities = {
@@ -68,7 +79,13 @@ export class GpuBroker {
         deviceStatus: 'ready',
         fallback: null,
         reason: 'device acquired',
-        requiredLimits: deviceDescriptor?.requiredLimits || {}
+        requiredLimits: deviceDescriptor?.requiredLimits || {},
+        requiredFeatures: deviceDescriptor?.requiredFeatures || [],
+        profilingRequested: Boolean(profilingRequested),
+        timestampQueryEnabled: Boolean(device.features?.has?.('timestamp-query')),
+        timestampQueryStatus: profilingRequested
+          ? (device.features?.has?.('timestamp-query') ? 'enabled' : 'unsupported')
+          : 'not-requested'
       };
       if (device?.lost?.then) {
         device.lost.then((info) => this.markDeviceLost(info)).catch((error) => this.markDeviceLost(error));

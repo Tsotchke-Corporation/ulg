@@ -207,6 +207,33 @@ test('direct resident throughput benchmark does not default to per-batch queue f
   );
 });
 
+test('GPU profiling keeps host, fence, and timestamp attribution distinct', () => {
+  const probeSource = readRepoFile('scripts/sph-long-horizon-probe.mjs');
+  const benchmarkSource = readRepoFile('scripts/sph-performance-benchmark.mjs');
+
+  assert.match(probeSource, /ULG_PROBE_GPU_PROFILE/);
+  assert.match(benchmarkSource, /ULG_BENCH_GPU_PROFILE/);
+  assert.match(benchmarkSource, /ULG_BENCH_REQUIRE_GPU_TIMESTAMPS/);
+  assert.match(
+    benchmarkSource,
+    /const residentHostCompletedStageMs = residentGpuQueueFenceMs !== null/,
+    'host and queue-fence completion should remain explicitly host-visible timing'
+  );
+  assert.match(
+    benchmarkSource,
+    /const residentGpuCompletedStageMs = residentGpuTimestampCaptures[\s\S]*?\.flatMap\(\(profile\) => Object\.values\(profile\?\.stageTotals \|\| \{\}\)\)/,
+    'GPU-completed stage time must be derived from timestamp-query totals'
+  );
+  assert.doesNotMatch(
+    benchmarkSource,
+    /const residentGpuCompletedStageMs = residentGpuQueueFenceMs/,
+    'queue-fence wall time must never be relabeled as GPU execution time'
+  );
+  assert.match(benchmarkSource, /inconclusive-unsupported/);
+  assert.match(benchmarkSource, /gpuTimestampValidSpanCount/);
+  assert.match(benchmarkSource, /peercompute\.ulg\.sph-gpu-performance-attribution\.v0/);
+});
+
 test('resident material interface seeds surface table before full render-row readback fallback', () => {
   const sceneSource = readRepoFile('src/visualization/sphPhaseScene.js');
 

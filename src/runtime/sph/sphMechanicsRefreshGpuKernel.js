@@ -5,6 +5,10 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -40,6 +44,18 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function nowMs() {
+  return typeof globalThis.performance?.now === 'function'
+    ? globalThis.performance.now()
+    : Date.now();
+}
+
+function profiledComputePassDescriptor(timestampProfiler, label, timestampMetadata) {
+  return timestampProfiler?.beginComputePassDescriptor
+    ? timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})
+    : { label };
 }
 
 function resetMechanicsDeformation(mechanics, mechanicsOffset) {
@@ -428,7 +444,9 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   sourceThermoBuffer = null,
   sourceMechanicsBuffer = null,
   retainOutputParticleBuffers = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  timestampProfiler = null,
+  timestampMetadata = null
 } = {}) {
   assertRefreshInputs({ sphParticleState, mlsMpmParticleState, mechanicsMaterialTable });
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -549,7 +567,9 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     mechanicsBuffer: outMechanicsBuffer,
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     encode(encoder) {
-      const pass = encoder.beginComputePass();
+      const pass = encoder.beginComputePass(
+        profiledComputePassDescriptor(timestampProfiler, 'mechanicsRefresh', timestampMetadata)
+      );
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
@@ -560,12 +580,42 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
 }
 
 export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
-  const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage(args);
-  const { device, mlsMpmParticleState, retainOutputParticleBuffers = false } = args;
+  const {
+    device,
+    mlsMpmParticleState,
+    retainOutputParticleBuffers = false,
+    measureGpuTimestamps = false,
+    timestampProfiler: sharedTimestampProfiler = null
+  } = args;
+  const ownsTimestampProfiler = sharedTimestampProfiler == null;
+  const timestampProfiler = sharedTimestampProfiler || createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-mls-mpm-mechanics-refresh',
+    maxSpans: 1
+  });
+  const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+    ...args,
+    timestampProfiler
+  });
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
   const encoder = device.createCommandEncoder();
   stage.encode(encoder);
+  if (ownsTimestampProfiler) timestampProfiler.encodeResolve(encoder);
+  const queueSubmitStartedMs = nowMs();
   device.queue.submit([encoder.finish()]);
+  const queueSubmitMs = Math.max(0, nowMs() - queueSubmitStartedMs);
+  let queueFenceMs = null;
+  let queueFenceStatus = timestampProfiler.active && ownsTimestampProfiler
+    ? 'requested'
+    : 'not-requested';
+  if (timestampProfiler.active && ownsTimestampProfiler && device.queue?.onSubmittedWorkDone) {
+    const queueFenceStartedMs = nowMs();
+    await device.queue.onSubmittedWorkDone();
+    queueFenceMs = Math.max(0, nowMs() - queueFenceStartedMs);
+    queueFenceStatus = 'complete';
+  } else if (timestampProfiler.active && ownsTimestampProfiler) {
+    queueFenceStatus = 'unavailable';
+  }
   if (!noFullReadback) {
     stage.result.mechanics = new Float32Array(
       await readBuffer(device, stage.mechanicsBuffer, mlsMpmParticleState.mechanics.byteLength)
@@ -579,6 +629,22 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   if (!retainOutputParticleBuffers) {
     stage.result.mechanicsBuffer = null;
   }
+  const gpuTimestampProfile = ownsTimestampProfiler
+    ? await timestampProfiler.read()
+    : null;
+  stage.result.queueSubmitMs = queueSubmitMs;
+  stage.result.queueFenceMs = queueFenceMs;
+  stage.result.queueFenceStatus = queueFenceStatus;
+  stage.result.gpuTimestampProfile = gpuTimestampProfile;
+  stage.result.gpuTimestampRequested = Boolean(measureGpuTimestamps || sharedTimestampProfiler);
+  stage.result.gpuTimestampStatus = ownsTimestampProfiler
+    ? gpuTimestampProfile?.status ?? null
+    : 'shared-profiler-deferred';
+  stage.result.gpuTimestampMappedByteLength = gpuTimestampProfile?.mappedByteLength ?? 0;
+  stage.result.gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+    ...timestampProfiler.allocationEntries(),
+    { role: 'mechanics-refresh-output', buffer: stage.mechanicsBuffer, owned: true }
+  ], { scope: 'mls-mpm-mechanics-refresh' });
   return stage.result;
 }
 

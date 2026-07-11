@@ -58,6 +58,10 @@ import {
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
 import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
+import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -162,6 +166,12 @@ function assertPackedSphParticleState(sphParticleState) {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function nowMs() {
+  return typeof globalThis.performance?.now === 'function'
+    ? globalThis.performance.now()
+    : Date.now();
 }
 
 function clamp(value, min, max) {
@@ -6043,7 +6053,8 @@ export async function buildSphRenderFieldWebGpu({
   deferCleanup = true,
   useQueueFenceForCleanup = true,
   targetFieldRowsBuffer = null,
-  targetFieldRowsBufferByteLength = null
+  targetFieldRowsBufferByteLength = null,
+  measureGpuTimestamps = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
@@ -6152,20 +6163,54 @@ export async function buildSphRenderFieldWebGpu({
       { binding: 4, resource: { buffer: sourceProductEventBuffer } }
     ]
   });
+  const gpuTimestampProfiler = createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-sph-render-field',
+    maxSpans: 1
+  });
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass(
+    gpuTimestampProfiler.beginComputePassDescriptor('renderFieldDenseEvaluation', {
+      particleCount: resolvedParticleCount,
+      surfaceCount: surfaceTable.surfaceCount,
+      totalFieldCells: surfaceTable.totalFieldCells
+    })
+  );
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64), Math.max(1, surfaceTable.surfaceCount));
   pass.end();
+  gpuTimestampProfiler.encodeResolve(encoder);
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
+  let queueSubmitMs = null;
+  let queueFenceMs = null;
   let fieldRows;
   let deferNoFullCleanup = false;
+  const queueSubmitStartedAtMs = nowMs();
+  device.queue.submit([encoder.finish()]);
+  queueSubmitMs = Math.max(0, nowMs() - queueSubmitStartedAtMs);
+  queueCompletionStatus = 'queue-submitted';
+  queueCompletionMethod = 'queue.submit';
+  if (gpuTimestampProfiler.active && typeof device.queue?.onSubmittedWorkDone === 'function') {
+    const queueFenceStartedAtMs = nowMs();
+    await device.queue.onSubmittedWorkDone();
+    queueFenceMs = Math.max(0, nowMs() - queueFenceStartedAtMs);
+    queueCompletionStatus = 'queue-work-completed-for-timestamp-readback';
+    queueCompletionMethod = 'queue.onSubmittedWorkDone -> timestamp mapAsync';
+  }
+  const gpuTimestampProfile = await gpuTimestampProfiler.read();
+  const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+    { role: 'render-rows-source', buffer: sourceRowsBuffer, owned: !borrowedRenderRowsBuffer },
+    { role: 'product-events-source', buffer: sourceProductEventBuffer, owned: !borrowedProductEventBuffer },
+    { role: 'surface-table', buffer: surfaceBuffer, owned: true },
+    { role: 'field-rows', buffer: fieldRowsBuffer, owned: !fieldRowsBufferBorrowed },
+    { role: 'params', buffer: paramsBuffer, owned: true },
+    ...gpuTimestampProfiler.allocationEntries()
+  ], {
+    scope: 'sph-render-field'
+  });
   if (!noFullReadback) {
-    device.queue.submit([encoder.finish()]);
-    queueCompletionStatus = 'queue-submitted';
-    queueCompletionMethod = 'queue.submit';
     const fieldBytes = await readBuffer(
       device,
       fieldRowsBuffer,
@@ -6176,15 +6221,13 @@ export async function buildSphRenderFieldWebGpu({
     queueCompletionMethod = 'mapAsync(readback-buffer)';
     fieldRows = new Float32Array(fieldBytes);
   } else {
-    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
-      device.queue.submit([encoder.finish()]);
-      queueCompletionStatus = 'queue-submitted';
-      queueCompletionMethod = 'queue.submit';
+    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone && !gpuTimestampProfiler.active) {
+      const queueFenceStartedAtMs = nowMs();
       await device.queue.onSubmittedWorkDone();
+      queueFenceMs = Math.max(0, nowMs() - queueFenceStartedAtMs);
       queueCompletionStatus = 'queue-work-completed';
       queueCompletionMethod = 'queue.onSubmittedWorkDone';
-    } else {
-      device.queue.submit([encoder.finish()]);
+    } else if (!gpuTimestampProfiler.active) {
       queueCompletionStatus = device.queue?.onSubmittedWorkDone
         ? 'queue-submitted-gpu-handoff-no-cpu-fence'
         : 'queue-submitted-no-explicit-completion';
@@ -6299,6 +6342,13 @@ export async function buildSphRenderFieldWebGpu({
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
+    queueSubmitMs,
+    queueFenceMs,
+    gpuTimestampProfile,
+    gpuTimestampRequested: Boolean(measureGpuTimestamps),
+    gpuTimestampStatus: gpuTimestampProfile.status,
+    gpuTimestampMappedByteLength: gpuTimestampProfile.mappedByteLength,
+    gpuAllocationEvidence,
     pipelineCacheStatus,
     renderFieldDeferredCleanup,
     renderFieldReadback: !noFullReadback,

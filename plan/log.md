@@ -41676,3 +41676,311 @@ Index refresh:
 - Ran `npm run icc:update` after source and plan updates. Result: PASS with
   407 indexed files and 2,978 memory chunks; refreshed
   `.icc/ulg_status.json` and `.icc/ulg_arch_summary.md`.
+
+## 2026-07-11 10:43:48 AKDT - Resume the complete GPU-resident physics refactor
+
+Exact prompt:
+
+> alright I'd like you to keep going don't stop until the whole refactor is complete
+
+Starting state and interpretation:
+
+- Resumed branch `gpu-resident-physics-refactor` at clean local commit
+  `f0f0f56` (`Fix native WebGPU surface generation lifecycle`), one commit
+  ahead of `origin/gpu-resident-physics-refactor`.
+- Interpreted "the whole refactor" as the branch's documented required order:
+  `PROF-0`, sparse render-field construction, shared resident neighborhood
+  authority, same-lane pressure/interface consumption, genuinely sparse
+  two-level Schroeder storage, `SOL-0` contracts/invariants, and `SOL-1`
+  objective rigid frames, followed by the full validation and documentation
+  gates. The user hold on a third Schroeder level remains in force.
+- Re-read `plan/plan.md`, this log, the branch README, the active critique, and
+  the repo-local ICC workflow before source edits. Expanded the top-level
+  checklist so every required branch slice is explicit and independently
+  closable.
+- Started three read-only parallel audits for `PROF-0`, sparse render-field
+  seams, and the dependency order from neighborhood authority through
+  coherent solids. Their findings will be reconciled against live source
+  before implementation.
+
+Commands run so far:
+
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+- `git status --short --branch`
+- `git log -5 --oneline --decorate`
+- targeted `sed`, `tail`, and `rg` reads of `plan/plan.md`, `plan/log.md`,
+  `plan/todo/gpu-resident-physics-refactor/README.md`, the ICC instructions,
+  and the existing timestamp/host-stage telemetry call sites
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+
+Current evidence and validation status:
+
+- ICC reports the index current at `f0f0f56`, with `is_stale: false`.
+- Live-source search found host `stageMs` telemetry but no implemented
+  `timestamp-query`, `GPUQuerySet`, `writeTimestamp`, or `resolveQuerySet`
+  path. This confirms that host enqueue time is still the only stage timing
+  and that `PROF-0` remains the first implementation target.
+- No runtime source has been changed and no test has been run yet for this
+  prompt. The accepted SURF-0 through SURF-2 matrix and full-suite results from
+  the preceding entry remain the starting validation baseline.
+
+Files touched so far:
+
+- `plan/plan.md`
+- `plan/log.md`
+
+Open questions to resolve from source and focused probes:
+
+- Which shared device-request boundary can negotiate optional
+  `timestamp-query` without creating a second GPU authority or changing
+  non-profiling execution?
+- Which compute/render submissions define useful spans without introducing
+  diagnostic map/readback work into the normal hot path?
+- Whether the installed Chromium/Vulkan adapter exposes timestamp queries;
+  unsupported hardware must produce explicit unavailable evidence, never a
+  CPU timing value labeled as GPU time.
+
+### 2026-07-11 11:10:45 AKDT - PROF-0 implementation checkpoint
+
+This section supersedes the initial "no runtime source changed" statement
+above for the same prompt. The implementation is still in progress; PROF-0 is
+not yet marked complete.
+
+Concrete actions and files touched:
+
+- Added `src/runtime/webgpuTimestampProfiler.js`, an opt-in, bounded
+  `timestamp-query` capture with pass descriptors, one deferred query resolve
+  and map, nanosecond spans, aggregate stage totals, invalid/reset and capacity
+  overflow evidence, and owned-versus-borrowed buffer allocation summaries.
+- Updated `src/runtime/webgpuDeviceLimits.js`,
+  `src/runtime/material/opticalGpuBuffers.js`, and `src/runtime/GpuBroker.js`
+  so the optional feature is requested only when profiling is explicit and the
+  adapter exposes it. A previously acquired shared device is retained even if
+  it lacks the feature; no profiling sibling device or CPU timing substitute is
+  created.
+- Routed `gpuProfile=1` through `src/visualization/sphPhaseDemoMount.js` and
+  `src/visualization/sphPhaseScene.js` into the same resident/render device and
+  resident step policy.
+- Instrumented the core fused mechanics sequence, single-step fallback, three
+  separation passes, and dense render-field evaluation in
+  `src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `src/runtime/sph/sphG2pGpuKernel.js`, and
+  `src/runtime/sph/sphRenderGpuKernel.js`. Queue submit, queue fence, profiler
+  map bytes/wait, and buffer allocation evidence remain separate fields.
+- Updated `scripts/sph-long-horizon-probe.mjs` and
+  `scripts/sph-performance-benchmark.mjs`. The old host/fence completion value
+  is now named `residentHostCompletedStageMs`; only timestamp stage totals feed
+  `residentGpuCompletedStageMs` and GPU step rate. Required unsupported
+  timestamps produce `inconclusive-unsupported`; zero-valid-span captures fail
+  the attribution gate.
+- Added `tests/webgpuTimestampProfiler.test.mjs`, extended
+  `tests/opticalGpuBuffers.test.mjs`, and extended
+  `tests/nativeSurfaceHarness.test.mjs`. Equal nonzero timestamp endpoints are
+  accepted as quantized zero-duration passes, reset `0/0` pairs are rejected,
+  and query-capacity overflow makes a capture partial rather than complete.
+
+Commands and current results:
+
+- `node --test tests/webgpuTimestampProfiler.test.mjs tests/opticalGpuBuffers.test.mjs`
+  passed 26/26.
+- `node --test tests/webgpuTimestampProfiler.test.mjs tests/nativeSurfaceHarness.test.mjs`
+  passed 24/24.
+- `node --check src/runtime/webgpuTimestampProfiler.js`
+- `node --check scripts/sph-performance-benchmark.mjs`
+- `node --check scripts/sph-long-horizon-probe.mjs`
+- `git diff --check`
+  - All syntax and diff checks passed.
+- Earlier focused orchestration/mechanics/render runs during this prompt passed
+  179/179 and 147/147 after the instrumentation changes.
+
+Live WebGPU evidence captured against the existing HTTPS server:
+
+- `/tmp/ulg-prof0-direct-smoke.json`: timestamp feature supported; 10/10 core
+  mechanics spans valid before separation spans were added; 160 bytes mapped;
+  about 0.142 ms measured core GPU time versus about 149.8 ms queue-fence wait.
+  The allocation report found 3.35 MB owned and 12.9 KB borrowed; the fixed
+  separation-bin allocation alone was about 2.08 MB.
+- `/tmp/ulg-prof0-scene-smoke2.json`: production native surface remained
+  nonblank and surface-varying with zero issues; the single-step fallback
+  produced 5/5 valid core mechanics spans and about 0.383 ms measured GPU time.
+- The same scene measured dense render-field evaluation at about 6.40 ms for
+  3 surfaces and 2,654,208 cells. The render allocation report exposed an
+  84,934,656-byte borrowed dense field pool.
+- `/tmp/ulg-prof0-benchmark-smoke.json`: the required profiling gate passed and
+  reported about 0.134 ms timestamp-derived core GPU time for two steps versus
+  about 155.6 ms host stage time. This was a characterization smoke, not a
+  performance acceptance claim, because thermal/reaction/refresh and the newly
+  added separation spans were not yet all included.
+
+Interpretation and remaining PROF-0 work:
+
+- The first measurements invalidate the previous habit of treating host stage
+  or queue-fence duration as kernel execution. At smoke scale, compilation,
+  command setup, other queued work, fence wait, and diagnostic mapping dominate
+  wall time; the timed core kernels are much smaller.
+- Thermal, reaction, mechanics refresh, and Schroeder pass-local hooks are now
+  being added. The fused sequence must enlarge its bounded query arena and pass
+  the shared profiler into those encoder stages before a whole-step profile is
+  accepted.
+- Native marching-cubes extraction still needs compatible same-device stage
+  attribution. Normal presentation must retain its no-readback path; profiling
+  cannot restore per-extraction vertex or timestamp maps.
+
+### 2026-07-11 11:29:11 AKDT - PROF-0 accepted; sparse shared contracts started
+
+This section closes the remaining work described in the 11:10 checkpoint for
+the same 10:43:48 prompt. `PROF-0` is accepted; `FIELD-0` is now active.
+
+Final PROF-0 implementation actions:
+
+- Added shared-profiler forwarding and pass-local labels to
+  `src/runtime/sph/sphThermalGpuKernel.js`,
+  `src/runtime/sph/sphReactionGpuKernel.js`, and
+  `src/runtime/sph/sphMechanicsRefreshGpuKernel.js`; extended the bounded
+  fused-sequence query arena and resolve ownership in
+  `src/runtime/sph/sphMlsMpmGpuStep.js`.
+- Added same-device native extraction attribution in
+  `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js` and
+  `src/visualization/sphPhaseScene.js`. ULG still owns the single deferred
+  resolve/map. The ordinary non-profile path performs no timestamp map or
+  query allocation.
+- Extended the local file dependency at
+  `/home/cos/projects/webgpu-marching-cubes` with caller-owned pass-descriptor
+  hooks for count, clamp, and emission. Created its local branch
+  `gpu-resident-physics-refactor` and committed the clean dependency slice as
+  `dca2457` (`Add caller-owned no-readback timestamp hooks`). It was not
+  pushed.
+- Added `tests/sphKernelTimestampHooks.test.mjs`; extended timestamp, device
+  feature-negotiation, benchmark-source, and native-surface harness coverage.
+- `scripts/sph-performance-benchmark.mjs` now sums unique resident timestamp
+  profiles, requires actual valid query spans when requested, and applies the
+  queue-fence completeness gate to multi-stage resident paths. CPU-visible
+  host and fence values are retained under their own names only.
+
+Final commands and results:
+
+- `node --test tests/webgpuTimestampProfiler.test.mjs tests/sphKernelTimestampHooks.test.mjs tests/opticalGpuBuffers.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  passed `154/154`.
+- `node --test tests/sphReactionGpuKernel.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  passed `105/105`.
+- From `/home/cos/projects/webgpu-marching-cubes`,
+  `node --test test/webgpu-marching-cubes.test.js` passed `20/20`.
+- `/tmp/ulg-prof0-thermal-native.json`: status `good`, four of four nonblank
+  surface-varying native frames, zero browser issues; mechanics/separation
+  `0.837632 ms`, thermal `0.883712 ms`, refresh `0.078848 ms`, dense field
+  `6.383616 ms`, marching cubes `3.681280 ms`, translation `0.034816 ms`.
+- `/tmp/ulg-prof0-reaction-native2.json`: four of four nonblank
+  surface-varying frames and zero browser issues; mechanics `0.646144 ms`,
+  thermal `1.327104 ms`, reaction `0.496640 ms`, dense field `13.392896 ms`,
+  marching cubes `3.367936 ms`, translation `0.034816 ms`. Overall scenario
+  status was `bad` only for the existing one-step phase-fraction and
+  unclassified-mass behavior gate.
+- `/tmp/ulg-prof0-benchmark-final2.json`: suite `complete`, gate `pass`,
+  scenario `good`, ten valid resident spans totaling `2.556928 ms`,
+  timestamp-derived `391.09 steps/s`, about `252 ms` host-visible duration,
+  zero step-state readback, and complete mechanics/thermal/refresh queue
+  evidence.
+
+Failures found and corrected during validation:
+
+- Two focused assertions initially failed because source-regex tests assumed
+  the old direct pass-descriptor spelling. The tests were updated to validate
+  the profiler-owned descriptor contract; the combined suite then passed
+  `154/154`.
+- The first reaction native artifact lost profiling telemetry because
+  `outputEnvelope()` used a property whitelist. The whitelist was extended
+  generically for timestamp/submit/allocation evidence, and the second
+  artifact contains valid reaction spans.
+- The first required benchmark failed because its fence gate recognized only
+  the old `fusedSequence` key. The gate now validates every executed resident
+  stage rather than special-casing one runner; `final2` passes.
+
+Measured interpretation and next priority:
+
+- The timestamp evidence confirms the dense render field is the immediate
+  dominant measured GPU stage in both native probes: `6.38-13.60 ms`, versus
+  about `3.37-3.68 ms` for marching cubes and sub-`1.4 ms` individual
+  resident law stages at these samples.
+- The dense field source alone is `84,934,656` bytes. This directly supports
+  `FIELD-0`; host enqueue/fence values are no longer admissible evidence for
+  choosing a kernel optimization.
+- Added `ulg-gpu-abi/src/sparseRenderField.js`,
+  `src/runtime/sph/sphSparseRenderFieldPlan.js`, and
+  `tests/sphSparseRenderFieldPlan.test.mjs`. The structural slice defines
+  configurable 8-cube bricks, exact non-multiple grid math, surface/home route
+  keys, predecessor marching-cubes halo coverage, byte budgets, generation
+  admission, and fail-closed overflow evidence. Combined focused ABI tests
+  passed `29/29`.
+- Added `ulg-gpu-abi/src/residentNeighborhood.js`,
+  `ulg-gpu-abi/src/schemas/resident_neighborhood.schema.json`,
+  `src/runtime/sph/residentNeighborhoodGpu.js`, and
+  `tests/residentNeighborhoodGpu.test.mjs`. This establishes signed structural
+  keys, consumer/support masks, CSR/capacity/admission/lease/generation
+  evidence, and fail-closed counts for mechanics, contact, thermal, radiation,
+  reaction, pressure/interface, solid kinematics, and later SS compaction.
+  Combined neighborhood/buffer/Schroeder tests passed `142/142`.
+- These two additions are contracts and planners only. No claim is made that
+  GPU route generation, stable radix sort, scan/unique, sparse field
+  evaluation, sparse extraction, or consumer migration is complete. One
+  reusable GPU radix/scan/unique backbone must serve `FIELD-0`, `NEIGH-0`, and
+  `SS-0`; independent hash tables or serial-prefix passes are prohibited.
+
+Files touched in the accepted PROF/contract checkpoint:
+
+- `README.md`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-physics-refactor/README.md`
+- `plan/todo/sol-critic.md`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-performance-benchmark.mjs`
+- `src/runtime/GpuBroker.js`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/runtime/sph/residentNeighborhoodGpu.js`
+- `src/runtime/sph/sphG2pGpuKernel.js`
+- `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+- `src/runtime/sph/sphMechanicsRefreshGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `src/runtime/sph/sphSparseRenderFieldPlan.js`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/runtime/webgpuDeviceLimits.js`
+- `src/runtime/webgpuTimestampProfiler.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/nativeSurfaceHarness.test.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/residentNeighborhoodGpu.test.mjs`
+- `tests/sphKernelTimestampHooks.test.mjs`
+- `tests/sphSparseRenderFieldPlan.test.mjs`
+- `tests/webgpuTimestampProfiler.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/residentNeighborhood.js`
+- `ulg-gpu-abi/src/schemas/resident_neighborhood.schema.json`
+- `ulg-gpu-abi/src/sparseRenderField.js`
+
+Open work after this checkpoint:
+
+- Implement and validate the reusable GPU stable radix/scan/unique/CSR
+  backbone, then use it for truly sparse route fanout and brick evaluation.
+- Extend native marching cubes to consume sparse active bricks without a full
+  dense field materialization; a dense scatter may be used only as a temporary
+  validation bridge, not as `FIELD-0` acceptance.
+- Build and admit the resident neighborhood on the ComputeManager/GPUHub lane,
+  migrate consumers, then close same-lane pressure/interface and genuinely
+  sparse two-level Schroeder storage before SOL-0/SOL-1.
+
+Clean-point validation added after the implementation summary:
+
+- `node --test tests/webgpuTimestampProfiler.test.mjs tests/sphKernelTimestampHooks.test.mjs tests/opticalGpuBuffers.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphSparseRenderFieldPlan.test.mjs tests/residentNeighborhoodGpu.test.mjs tests/abi.test.mjs tests/webgpuKernelAbi.test.mjs`
+  passed `190/190`.
+- `npm test` passed `1,041/1,044` with zero failures and the three documented
+  opt-in long-liquid skips; duration `274,617.522 ms`.
+- `npm run build` passed with Vite `8.0.16`, `140` transformed modules, and
+  only the existing large-chunk warning (`5,314.95 kB`, gzip `1,158.75 kB`).
+- `git diff --check` passed.
+- `npm run icc:update` passed with `417` indexed files and `3,015` memory
+  chunks; `.icc/ulg_status.json` and `.icc/ulg_arch_summary.md` were refreshed.

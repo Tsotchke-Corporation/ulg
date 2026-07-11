@@ -32,6 +32,10 @@ import {
 } from '../material/thermoState.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
+import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
@@ -144,6 +148,18 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function nowMs() {
+  return typeof globalThis.performance?.now === 'function'
+    ? globalThis.performance.now()
+    : Date.now();
+}
+
+function profiledComputePassDescriptor(timestampProfiler, label, timestampMetadata) {
+  return timestampProfiler?.beginComputePassDescriptor
+    ? timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})
+    : { label };
 }
 
 function finiteVector3(value, fallback) {
@@ -1671,7 +1687,9 @@ export function createSphThermalStepWebGpuEncoderStage({
   // Shared per-substep neighbor bins (from the separation bin-fill pass):
   // { countsBuffer, entriesBuffer, capacity, nx, ny, nz, cellSizeM }.
   // Absent bins fall back to the exhaustive pair scan.
-  neighborBins = null
+  neighborBins = null,
+  timestampProfiler = null,
+  timestampMetadata = null
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
@@ -1865,7 +1883,9 @@ export function createSphThermalStepWebGpuEncoderStage({
     stateBufferByteLength: outStateByteLength,
     thermoBufferByteLength: outThermoByteLength,
     encode(encoder) {
-      const pass = encoder.beginComputePass();
+      const pass = encoder.beginComputePass(
+        profiledComputePassDescriptor(timestampProfiler, 'thermalStep', timestampMetadata)
+      );
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
@@ -1876,12 +1896,42 @@ export function createSphThermalStepWebGpuEncoderStage({
 }
 
 export async function runSphThermalStepWebGpu(args = {}) {
-  const stage = createSphThermalStepWebGpuEncoderStage(args);
-  const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
+  const {
+    device,
+    sphParticleState,
+    retainOutputParticleBuffers = false,
+    measureGpuTimestamps = false,
+    timestampProfiler: sharedTimestampProfiler = null
+  } = args;
+  const ownsTimestampProfiler = sharedTimestampProfiler == null;
+  const timestampProfiler = sharedTimestampProfiler || createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-sph-thermal-step',
+    maxSpans: 1
+  });
+  const stage = createSphThermalStepWebGpuEncoderStage({
+    ...args,
+    timestampProfiler
+  });
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
   const encoder = device.createCommandEncoder();
   stage.encode(encoder);
+  if (ownsTimestampProfiler) timestampProfiler.encodeResolve(encoder);
+  const queueSubmitStartedMs = nowMs();
   device.queue.submit([encoder.finish()]);
+  const queueSubmitMs = Math.max(0, nowMs() - queueSubmitStartedMs);
+  let queueFenceMs = null;
+  let queueFenceStatus = timestampProfiler.active && ownsTimestampProfiler
+    ? 'requested'
+    : 'not-requested';
+  if (timestampProfiler.active && ownsTimestampProfiler && device.queue?.onSubmittedWorkDone) {
+    const queueFenceStartedMs = nowMs();
+    await device.queue.onSubmittedWorkDone();
+    queueFenceMs = Math.max(0, nowMs() - queueFenceStartedMs);
+    queueFenceStatus = 'complete';
+  } else if (timestampProfiler.active && ownsTimestampProfiler) {
+    queueFenceStatus = 'unavailable';
+  }
   if (!noFullReadback) {
     const [stateBytes, thermoBytes] = await Promise.all([
       readBuffer(device, stage.stateBuffer, sphParticleState.state.byteLength),
@@ -1899,6 +1949,23 @@ export async function runSphThermalStepWebGpu(args = {}) {
     stage.result.stateBuffer = null;
     stage.result.thermoBuffer = null;
   }
+  const gpuTimestampProfile = ownsTimestampProfiler
+    ? await timestampProfiler.read()
+    : null;
+  stage.result.queueSubmitMs = queueSubmitMs;
+  stage.result.queueFenceMs = queueFenceMs;
+  stage.result.queueFenceStatus = queueFenceStatus;
+  stage.result.gpuTimestampProfile = gpuTimestampProfile;
+  stage.result.gpuTimestampRequested = Boolean(measureGpuTimestamps || sharedTimestampProfiler);
+  stage.result.gpuTimestampStatus = ownsTimestampProfiler
+    ? gpuTimestampProfile?.status ?? null
+    : 'shared-profiler-deferred';
+  stage.result.gpuTimestampMappedByteLength = gpuTimestampProfile?.mappedByteLength ?? 0;
+  stage.result.gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+    ...timestampProfiler.allocationEntries(),
+    { role: 'thermal-state-output', buffer: stage.stateBuffer, owned: true },
+    { role: 'thermal-thermo-output', buffer: stage.thermoBuffer, owned: true }
+  ], { scope: 'sph-thermal-step' });
   return stage.result;
 }
 

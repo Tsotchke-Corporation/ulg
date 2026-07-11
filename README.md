@@ -69,8 +69,10 @@ The `gpu-resident-physics-refactor` branch now keeps native surface generations
 alive through submit/validation retirement and has passed the production
 initial-to-final seven-scene matrix plus mobile DPR-2 validation. This closes
 presentation-resource liveness only; water-cycle, iron/ice, and sodium/water
-behavior gates remain open, and GPU timestamp attribution is the next
-performance prerequisite.
+behavior gates remain open. Optional same-device GPU timestamp attribution is
+now available with `gpuProfile=1` / `ULG_PROBE_GPU_PROFILE=1`; benchmark GPU
+time is derived only from query spans and never from host enqueue or queue
+fence time. The measured next target is the sparse render field.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

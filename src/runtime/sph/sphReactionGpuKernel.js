@@ -29,6 +29,10 @@ import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
+  createWebGpuTimestampProfiler,
+  summarizeWebGpuBufferAllocations
+} from '../webgpuTimestampProfiler.js';
+import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -111,6 +115,18 @@ const GPU_MAP_MODE = {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function nowMs() {
+  return typeof globalThis.performance?.now === 'function'
+    ? globalThis.performance.now()
+    : Date.now();
+}
+
+function profiledComputePassDescriptor(timestampProfiler, label, timestampMetadata) {
+  return timestampProfiler?.beginComputePassDescriptor
+    ? timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})
+    : { label };
 }
 
 function clampPositive(value, fallback = 0) {
@@ -1587,7 +1603,15 @@ function outputEnvelope({
   reactionParticleBinOverflowCount = null,
   queueCompletionStatus = null,
   queueCompletionMethod = null,
-  scratchBufferCleanupStatus = null
+  scratchBufferCleanupStatus = null,
+  queueSubmitMs = null,
+  queueFenceMs = null,
+  queueFenceStatus = null,
+  gpuTimestampProfile = null,
+  gpuTimestampRequested = false,
+  gpuTimestampStatus = null,
+  gpuTimestampMappedByteLength = 0,
+  gpuAllocationEvidence = null
 }) {
   return {
     schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
@@ -1673,6 +1697,14 @@ function outputEnvelope({
     queueCompletionStatus,
     queueCompletionMethod,
     scratchBufferCleanupStatus,
+    queueSubmitMs,
+    queueFenceMs,
+    queueFenceStatus,
+    gpuTimestampProfile,
+    gpuTimestampRequested,
+    gpuTimestampStatus,
+    gpuTimestampMappedByteLength,
+    gpuAllocationEvidence,
     readbackMode,
     sourceParticlePackMode,
     reactionProposalNeighborMode,
@@ -2357,7 +2389,10 @@ export async function runSphReactionStepWebGpu({
   readReactionProductInventory = true,
   readReactionAtomResidual = true,
   schroederLawQueue = null,
-  schroederLawNeighborCandidates = null
+  schroederLawNeighborCandidates = null,
+  measureGpuTimestamps = false,
+  timestampProfiler = null,
+  timestampMetadata = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
@@ -2678,8 +2713,16 @@ export async function runSphReactionStepWebGpu({
   const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
+  const ownsTimestampProfiler = timestampProfiler == null;
+  const resolvedTimestampProfiler = timestampProfiler || createWebGpuTimestampProfiler(device, {
+    requested: Boolean(measureGpuTimestamps),
+    label: 'ulg-sph-reaction-step',
+    maxSpans: 1
+  });
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass(
+    profiledComputePassDescriptor(resolvedTimestampProfiler, 'reactionStep', timestampMetadata)
+  );
   if (packPipelineInfo && packBindGroup) {
     pass.setPipeline(packPipelineInfo.pipeline);
     pass.setBindGroup(0, packBindGroup);
@@ -2703,7 +2746,34 @@ export async function runSphReactionStepWebGpu({
   if (reactionParticleBins.metadataReadbackBuffer) {
     encoder.copyBufferToBuffer(reactionParticleBins.metadataBuffer, 0, reactionParticleBins.metadataReadbackBuffer, 0, 16);
   }
+  if (ownsTimestampProfiler) resolvedTimestampProfiler.encodeResolve(encoder);
+  const queueSubmitStartedMs = nowMs();
   device.queue.submit([encoder.finish()]);
+  const queueSubmitMs = Math.max(0, nowMs() - queueSubmitStartedMs);
+  let queueFenceMs = null;
+  let queueFenceStatus = resolvedTimestampProfiler.active && ownsTimestampProfiler
+    ? 'requested'
+    : 'not-requested';
+  if (resolvedTimestampProfiler.active && ownsTimestampProfiler && device.queue?.onSubmittedWorkDone) {
+    const queueFenceStartedMs = nowMs();
+    await device.queue.onSubmittedWorkDone();
+    queueFenceMs = Math.max(0, nowMs() - queueFenceStartedMs);
+    queueFenceStatus = 'complete';
+  } else if (resolvedTimestampProfiler.active && ownsTimestampProfiler) {
+    queueFenceStatus = 'unavailable';
+  }
+  const gpuTimestampProfile = ownsTimestampProfiler
+    ? await resolvedTimestampProfiler.read()
+    : null;
+  const gpuAllocationEvidence = summarizeWebGpuBufferAllocations([
+    ...resolvedTimestampProfiler.allocationEntries(),
+    { role: 'reaction-packed-source', buffer: packedParticleRecordBuffer, owned: true },
+    { role: 'reaction-packed-output', buffer: outPackedParticleRecordBuffer, owned: true },
+    { role: 'reaction-proposals', buffer: proposalBuffer, owned: true },
+    { role: 'reaction-state-output', buffer: outStateBuffer, owned: true },
+    { role: 'reaction-thermo-output', buffer: outThermoBuffer, owned: true },
+    { role: 'reaction-mechanics-output', buffer: outMechanicsBuffer, owned: true }
+  ], { scope: 'sph-reaction-step' });
 
   let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
   let reactionParticleBinOverflowCount = null;
@@ -2876,6 +2946,16 @@ export async function runSphReactionStepWebGpu({
 	    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     queueCompletionStatus,
     queueCompletionMethod,
+    queueSubmitMs,
+    queueFenceMs,
+    queueFenceStatus,
+    gpuTimestampProfile,
+    gpuTimestampRequested: Boolean(measureGpuTimestamps || timestampProfiler),
+    gpuTimestampStatus: ownsTimestampProfiler
+      ? gpuTimestampProfile?.status ?? null
+      : 'shared-profiler-deferred',
+    gpuTimestampMappedByteLength: gpuTimestampProfile?.mappedByteLength ?? 0,
+    gpuAllocationEvidence,
     scratchBufferCleanupStatus,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',

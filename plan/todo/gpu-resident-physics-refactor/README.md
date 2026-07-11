@@ -103,6 +103,21 @@ scene, and zero browser/WebGPU issues or warnings. The mobile DPR-2 gate also
 passes. These results close SURF-0 through SURF-2; named physics-behavior
 failures remain open and are not presentation failures.
 
-The next branch slice is `PROF-0` GPU timestamp attribution. The new coherent
-checkpoint remains local after commit; do not push it without an explicit
-request.
+`PROF-0` is complete. Same-device optional timestamp queries cover mechanics,
+separation, thermal, reaction, mechanics refresh, dense render fields, native
+marching-cubes extraction, and surface translation. Required profiling is
+explicitly inconclusive when unsupported and never substitutes host or fence
+time. `/tmp/ulg-prof0-benchmark-final2.json` passes its required timestamp and
+stage-fence gates with 10 valid resident spans, 2.557 ms GPU time versus 252 ms
+host-visible stage time, 13.600 ms dense render-field GPU time, and zero
+estimated per-step readback bytes.
+
+The active branch slice is `FIELD-0`. Structural u32 sparse-brick layouts,
+generation admission, exact non-multiple resolution planning, predecessor
+marching-cubes halo expansion, and fail-closed capacity evidence are present.
+They are not yet production execution: route fanout, shared radix/scan/unique,
+brick atlas evaluation, sparse native extraction, and scene generation swaps
+remain open. The matching neighborhood ABI/planner is also present so the
+shared compaction backbone can serve FIELD, NEIGH, and SS instead of creating
+three competing indexes. The next coherent checkpoint remains local; do not
+push it without an explicit request.

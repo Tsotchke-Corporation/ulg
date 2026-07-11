@@ -838,7 +838,9 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   maxPairRestDistanceM = 0,
   minCellSizeM = 0,
   gridSpacingM = 0,
-  scratch = null
+  scratch = null,
+  timestampProfiler = null,
+  timestampMetadata = null
 } = {}) {
   const alpha = finiteNumber(relaxation, 0);
   if (!(alpha > 0) || !(particleCount > 1) || !stateBuffer || !mechanicsBuffer) {
@@ -974,17 +976,26 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   });
   encoder.clearBuffer(activeScratch.binsBuffer, 0, Math.max(4, activeScratch.cellCount * 4));
   const workgroups = Math.max(1, Math.ceil(particleCount / 64));
-  const binFillPass = encoder.beginComputePass();
+  const profiledPassDescriptor = (label) => timestampProfiler?.beginComputePassDescriptor
+    ? timestampProfiler.beginComputePassDescriptor(label, timestampMetadata || {})
+    : { label };
+  const binFillPass = encoder.beginComputePass(
+    profiledPassDescriptor('particleSeparationBinFill')
+  );
   binFillPass.setPipeline(binFillPipelineInfo.pipeline);
   binFillPass.setBindGroup(0, binFillBindGroup);
   binFillPass.dispatchWorkgroups(workgroups);
   binFillPass.end();
-  const computePass = encoder.beginComputePass();
+  const computePass = encoder.beginComputePass(
+    profiledPassDescriptor('particleSeparationCorrection')
+  );
   computePass.setPipeline(computePipelineInfo.pipeline);
   computePass.setBindGroup(0, computeBindGroup);
   computePass.dispatchWorkgroups(workgroups);
   computePass.end();
-  const applyPass = encoder.beginComputePass();
+  const applyPass = encoder.beginComputePass(
+    profiledPassDescriptor('particleSeparationApply')
+  );
   applyPass.setPipeline(applyPipelineInfo.pipeline);
   applyPass.setBindGroup(0, applyBindGroup);
   applyPass.dispatchWorkgroups(workgroups);

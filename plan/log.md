@@ -41193,3 +41193,72 @@ the solution.
   made. The only production renderer correction is the shared native-surface
   validation bind-group completion; the still-open presentation lifecycle
   defect is documented rather than bypassed.
+
+## 2026-07-10 20:28:42 AKDT - Solver and physical-law inventory
+
+Prompt: "can you generate a list of every currently implemented solver and law
+in ulg and a list of ones es yet to be implemented"
+
+Approach and decisions:
+
+- Re-read `plan/plan.md`, the latest `plan/log.md` checkpoint, `README.md`,
+  `plan/Agents.md`, the active SS handoff/plan, `sol-critic.md`, the adaptive
+  MLS-MPM plan, material resolver plans, and the first-principles frontier.
+- Refreshed ICC with `npm run icc:update`; it indexed 403 files into 2,957
+  chunks at `c072c10`.
+- Audited live exports, WGSL runners, explicit pending statuses, law toggles,
+  resident law-family descriptors, and their focused tests. A descriptor,
+  ABI, plan builder, renderer, cache, scheduler, or service probe was not
+  counted as a physics solver merely because its name includes `solver` or
+  `law`.
+- Classified executable implementations as runtime, oracle, reduced, or
+  partial kernel suites. Kept numerical stabilization policies separate from
+  physical laws. Recorded that `implemented` does not imply scientific or
+  full-physics validation.
+- Added `plan/solver-law-inventory.md`, linked it from `README.md`, and added
+  this completed documentation target to `plan/plan.md`. No runtime source,
+  scenario, material, or physics behavior was changed.
+
+Principal commands:
+
+- `npm run icc:update`
+- `rg --files src | sort`
+- `rg --files tests | sort`
+- `rg -n "^export (async )?(function|class|const)" src/runtime/...`
+- `rg -n "physicalLawGroups|lawGraphNode|solverId|not implemented|unimplemented|planned|pending" src tests plan/todo`
+- `sed` reads of the solver, material, SPH/MLS-MPM, thermal, reaction,
+  pressure/interface, Schroeder, resident-authority, and active plan modules
+  cited by the inventory.
+
+Open questions:
+
+- The inventory treats the many executable Schroeder stages as one partial
+  kernel suite rather than claiming a completed scale-independent solver.
+- The four resident law-family descriptors remain metadata-only children even
+  though their underlying stages execute inside the parent pass DAG.
+- External MoonLab/Eshkol reference and handler artifacts are not counted as
+  local ULG MHD/PIC/radiation/relativistic solvers.
+
+Validation and review:
+
+- Ran a `node --input-type=module` live-export/status audit importing the
+  radial atomic, molecular, resident MLS-MPM, thermal, reaction,
+  pressure/interface, Schroeder, resident law-descriptor, law-toggle, and
+  material-resolver modules. Result: no expected export was missing; the live
+  toggle set was seven default-on groups plus default-off `surfaceTension`;
+  `pendingSphPhysicalLawGroups()` returned only `surfaceTension`; all four
+  resident child descriptors were metadata-only; resolver-family statuses
+  matched the inventory.
+- Cross-checked the inventory with three independent read-only audits covering
+  solver exports, physical laws, and missing/partial planned work. Incorporated
+  the distinctions for CPU-only steam buoyancy, policy-only Ocean tiled P2G,
+  proxy Schroeder far-law consumers, two-level thermal/reaction sidecars, and
+  missing two-level pressure continuation.
+- Ran `git diff --check`: PASS. Final tracked changes are documentation-only:
+  `README.md`, `plan/plan.md`, `plan/log.md`, and the new
+  `plan/solver-law-inventory.md`.
+- No unit, browser, or visual sequence test was run because no executable
+  source, shader, scenario, renderer, or test behavior changed. The live
+  import/status audit is the focused validation for this documentation slice.
+- Planned coherent-point commit command:
+  `git add README.md plan/plan.md plan/log.md plan/solver-law-inventory.md && git commit -m "Document ULG solver and law inventory"`.

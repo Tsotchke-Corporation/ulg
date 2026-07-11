@@ -30,6 +30,10 @@ This repo currently implements the first executable slice:
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
+The current executable solver/law inventory, maturity classifications, and
+explicitly missing physics are maintained in
+[`plan/solver-law-inventory.md`](plan/solver-law-inventory.md).
+
 ## Commands
 
 ```bash

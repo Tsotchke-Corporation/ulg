@@ -1,5 +1,16 @@
 # ULG Implementation Plan
 
+## Current Documentation Target - 2026-07-10 Solver/Law Inventory
+
+- [x] Inventory executable ULG solvers by backend and maturity from live source
+  and tests.
+- [x] Inventory implemented physical laws/closures separately from numerical
+  stabilization policies and metadata-only law graph nodes.
+- [x] Publish a deduplicated list of planned/missing solvers and laws without
+  counting render, scheduler, cache, or external service contracts as physics.
+
+Authoritative snapshot: `plan/solver-law-inventory.md` at commit `c072c10`.
+
 ## Current Audit Target - 2026-07-10 Post-Fable Scenario Evidence
 
 - [x] Audit the Fable handoff and the `61dfc3a..d5319c2` landed range against

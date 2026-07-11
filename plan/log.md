@@ -41262,3 +41262,44 @@ Validation and review:
   import/status audit is the focused validation for this documentation slice.
 - Planned coherent-point commit command:
   `git add README.md plan/plan.md plan/log.md plan/solver-law-inventory.md && git commit -m "Document ULG solver and law inventory"`.
+
+## 2026-07-10 20:35:36 AKDT - Create and publish refactor branch
+
+Prompt: "next I'd like you to create a new branch for this upcoming refactor
+of yours and push to origin"
+
+Actions and decisions:
+
+- Confirmed the starting worktree was clean on `SS` at
+  `33c30757409c7739d927decc7f25a671ed65aa7e`.
+- Inspected local/remote branch names and the repository's current SS-specific
+  todo routing. There was no existing general branch-goal folder.
+- Chose `gpu-resident-physics-refactor` because the upcoming work spans the
+  production GPU surface lifecycle, resident law execution, shared spatial
+  work, Schroeder sparsity, and the coherent-solid entry contracts. The name
+  does not bind the work to one demo or material pair.
+- Ran
+  `git ls-remote --heads origin refs/heads/gpu-resident-physics-refactor`;
+  it returned no row, confirming that the branch name was unused on origin.
+- Ran `git switch -c gpu-resident-physics-refactor`; it created and checked out
+  the new branch at the clean SS checkpoint.
+- Added branch goals in
+  `plan/todo/gpu-resident-physics-refactor/README.md` and routed them through
+  `plan/plan.md` plus `plan/todo/README.md`.
+- The branch contract requires general GPU-native fixes, production WebGPU
+  surface validation, PeerCompute-owned residency/admission, and no CPU oracle,
+  material-pair patch, or third SS level.
+
+Files touched:
+
+- `plan/todo/gpu-resident-physics-refactor/README.md`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/log.md`
+
+Validation/push status at this checkpoint:
+
+- Documentation-only branch setup; no runtime source or physics behavior was
+  changed, so no unit or visual test is required for this checkpoint.
+- `git diff --check`, local commit, upstream push, remote-head verification,
+  and final ICC refresh remain to be run and recorded below.

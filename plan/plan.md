@@ -1,5 +1,17 @@
 # ULG Implementation Plan
 
+## Active Branch - GPU-Resident Physics Refactor
+
+- [x] Create `gpu-resident-physics-refactor` from the clean SS checkpoint
+  `33c3075` and record its general-fix scope.
+- [ ] Repair shared native WebGPU presentation-resource liveness.
+- [ ] Add GPU timestamps and lifecycle/per-pass evidence.
+- [ ] Replace dense render-field construction with a general sparse algorithm.
+- [ ] Unify resident neighborhood authority and pressure/interface GPU
+  consumption before further Schroeder levels or solid implementation.
+
+Branch goals: `plan/todo/gpu-resident-physics-refactor/README.md`.
+
 ## Current Documentation Target - 2026-07-10 Solver/Law Inventory
 
 - [x] Inventory executable ULG solvers by backend and maturity from live source

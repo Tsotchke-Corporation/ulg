@@ -39,6 +39,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-07-10 AKDT: branch
+`gpu-resident-physics-refactor` starts from the clean SS checkpoint `33c3075`.
+Its goals and non-goals live in
+`plan/todo/gpu-resident-physics-refactor/README.md`. Repair the general native
+WebGPU presentation lifecycle and add GPU timestamp evidence before optimizing
+dense fields, resident law lanes, Schroeder sparsity, or coherent solids. No
+demo/material-pair patches, CPU production oracle, or third SS level belong in
+this branch.
+
 Current routing note, 2026-07-09 AKDT: `plan/todo/sol-critic.md` is the required
 Schroeder coherent-solid architecture correction. A solid needs an authoritative
 body/material frame, body-local members, independently refinable contact

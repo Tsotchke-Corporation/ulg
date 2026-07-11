@@ -40878,3 +40878,37 @@ dispersion exceeds the fp guard — coherent scenes pay only the moment FMAs.
 Honest note: the correction thins bridges between diverging droplets; it
 does not (and should not) split a genuinely connected fast sheet — true
 sheet breakup is sub-resolution physics (the on-hold finer SS level).
+
+## Round 16 — surface-lane closeout polish: GGX env prefilter, T^4 sphere emissive, refraction-tint assessment
+
+**GGX-exact env prefiltering.** The background-image environment's mip chain
+was box-filtered (4322286 noted it as the follow-up). New pure exported
+`buildGgxPrefilteredLatlongMips`: split-sum prefilter (Karis N=V=R), Hammersley
+GGX importance sampling (64/texel), filtering in linear light with re-encode to
+the display gamma `env_latlong_sample` decodes; mip 0 stays the base image
+byte-identical, and the no-image analytic path is untouched. 256x128x9 mips
+builds in ~176 ms (marker now reports prefilter/sampleCount/prefilterMs). Unit
+test asserts the invariants: mip-0 identity, constant-image invariance,
+point-source peak monotone in roughness with substantial dilution at broad
+lobes. Evidence: /tmp/fork-polish-shots/water-env-{before,after}.png,
+iron-env-{before,after}.png (structured sky gradient vs flat smear).
+
+**Sphere/CPU-mesh emissive follows the surface T^4 law.** The particle bridge
+and CPU surface meshes drove emissive at a fixed 1.8 regardless of
+temperature while the surface WGSL follows Stefan-Boltzmann above its 2200 K
+anchor (4a51364) — the lanes disagreed above ~2760 K. New
+`sphereEmissiveIntensityForTemperature`: 1.8 at/below the anchor (exact legacy
+behavior, also for callers without a temperature), 1.8·(T/2200)^4 above,
+capped at the WGSL's relative ceiling (60/2.1). Temperature source: new
+luminance-weighted incandescent mean per material
+(`emissiveTemperatureByMaterialFromSphRenderRows` + CPU
+`surfaceEmissiveTemperature`), plumbed through decode/viewState/mount/scene.
+Evidence: csf-spheres-{before,after}.png — hot product spheres bloom toward
+white at equal sim time; cool scenes byte-equivalent (intensity 1.8 preserved).
+
+**Refraction hit-case env tinting: assessed, skipped.** The screen-copy the
+refraction samples is taken AFTER the background image draws, so the hit case
+already carries the env-lit surround; only offscreen-UV rays lack it and those
+are exactly the miss case, which samples the env map since 4322286. The water
+env pair shows no dark-edge artifact. No code needed; recorded so the item
+stops reappearing on the follow-up list.

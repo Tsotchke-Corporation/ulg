@@ -58,7 +58,7 @@ reference solver, or execute when visual capture is off.
 Current audit results and exact artifact paths are recorded in `plan/log.md`;
 failures remain open evidence rather than being relabeled as passes.
 
-Current standard run:
+Pre-refactor standard run:
 
 - `/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/summary.json`
   contains all four named scenes plus seeded Ba/Pb, Bk/Lr, and Fr/Fe.
@@ -72,6 +72,40 @@ Current standard run:
   steam rise; Na/H2O fails the 50 mm hydrogen-rise gate; Cs/F passes all
   post-step quantitative reaction checks but remains inconclusive without
   time-zero evidence and failed visually.
+
+Current native-surface result, 2026-07-10:
+
+- Standard matrix:
+  `/tmp/ulg-standard-refactor/surface-generation-final4-2026-07-10/summary.json`.
+  It contains the four named presets and seeded Ba/Pb, Bk/Lr, and Fr/Fe.
+- Presentation gate: pass. All 72 frames are nonblank and have surface-like
+  variation; every interval reports only `native-webgpu-surface-consumer`;
+  native browser-frame validation passes in all seven scenes; and console,
+  WebGPU, warning, destroyed-buffer, and visual-surface issue counts are zero.
+- Lifecycle gate: pass. Water advances generations 1-13, each other named
+  scene 1-11, and each random pair 1-4. Every scene records one canvas context
+  configuration, no unchanged-refresh resize, no context reconfiguration, and
+  zero retired-generation backlog at the captured checkpoints.
+- Mobile/DPR gate:
+  `/tmp/ulg-native-generation-refactor-mobile-dpr2.json` is good at 390x844,
+  DPR 2, generations 1-3, with five nonblank surface-varying frames, one
+  canvas configuration, no refresh resize, and zero browser issues/warnings.
+- Human sequence review: water visibly flows/settles but has no rising or
+  returning steam; Fe contacts/deforms on ice but does not visibly cool enough
+  or emit an escaping plume; Na/H2O forms products and moves but lacks the
+  requested violent colored plume; Cs/F expands into a bright orange exothermic
+  product cloud; all three random pairs remain visible and finite.
+- Behavior gate remains separate: matrix `failedCount=4` because water fails
+  steam rise/condensation, Fe/ice fails Fe cooling and steam rise, Na/H2O
+  misses the 50 mm H2-rise threshold, and all named scenes still lack a
+  retained time-zero checkpoint. Cs/F passes every post-step quantitative
+  gate; the three random pairs pass.
+- Focused lifecycle/renderer suite:
+  `node --test tests/nativeSurfaceResourceLifecycle.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphPhaseRenderer.test.mjs`
+  passed 125/125.
+- Full suite: `npm test` passed 1,016/1,019 with zero failures and three
+  intentional opt-in skips. `npm run build` passed under Vite 8.0.16 with the
+  existing large-chunk warning. `git diff --check` passed.
 
 ## Current Focused Result - 2026-06-29 Retained Stage Output Render
 

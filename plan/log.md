@@ -41418,3 +41418,261 @@ Publication follow-up, 2026-07-10 20:44:24 AKDT:
 - This publication record is the only follow-up documentation change. It will
   be committed and pushed, followed by one final ICC refresh and clean
   local/remote verification.
+
+## 2026-07-10 22:13:17 AKDT - Start GPU-resident surface lifecycle refactor
+
+Prompt: "om now get to work on your refactor."
+
+Scope and order:
+
+- Started the first required branch slice rather than moving directly to
+  kernel optimization: production native WebGPU surface liveness across the
+  initial, refresh-1, refresh-2, and final frames.
+- Kept the general-fix boundary. The implementation target is resource
+  generation/ownership and validation cadence across every material and
+  scenario, not a water-cycle or named-pair condition.
+- Re-read `plan/plan.md`, the branch goals, `plan/tests.md`, the latest
+  `plan/log.md` tail, SURF-0 through SURF-2 in `plan/todo/sol-critic.md`, and
+  the current standard-run artifacts before source edits.
+- ICC was current at `23f4d9f` with 405 indexed files and 2,964 memory chunks.
+
+Root-cause evidence:
+
+- The standard water-cycle artifact records
+  `[Buffer "ulg-sph-extension-surface-draw-indirect"] used in submit while destroyed`
+  after a debug destruction record whose reason is
+  `surface-draw-metadata-swapped-engine-bridge-retained`.
+- `releasePreviousSphResidentSurfaceDrawResources()` retains the current
+  native bridge object when metadata changes, but still destroys the previous
+  `surfaceDraw`. The retained bridge's `drawState` continues to reference that
+  execution's indirect and vertex buffers, so its next RAF submits a dangling
+  resource.
+- `scripts/sph-long-horizon-probe.mjs` passes
+  `allowNativeSurfaceExtraction: batchIndex === requestedBatches`. Captured
+  non-final intervals therefore intentionally publish a
+  `resident-surface-buffers-no-overlay` handoff instead of refreshing the
+  requested production native surface. This makes the standard interval
+  visual gate fail by construction and obscures runtime lifecycle evidence.
+- Replacement resources are also released according to validation-pending
+  state only. Submit-fence pending/timeout state is not part of the reclamation
+  gate, and additional multi-material surface translations are destroyed
+  immediately on replacement.
+
+Planned implementation for this slice:
+
+- Add a small pure ES module for native surface generation identity, release
+  policy, and visual extraction cadence.
+- Tag each native bridge `drawState` with its owning surface execution. Retain
+  an active generation, defer inactive generations while a submit fence or
+  validation is pending, and flush retirement only after the queue fence
+  resolves.
+- Route additional multi-material surface retirement through the same gate.
+- Make captured native visual intervals perform native extraction while
+  keeping non-visual performance probes final-only.
+- Add focused policy tests before running live browser validation.
+
+Files expected to change:
+
+- `src/visualization/nativeSurfaceResourceLifecycle.js`
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- focused tests under `tests/`
+- `plan/plan.md`, `plan/tests.md`, and `plan/log.md`
+
+Commands run so far:
+
+- `git status --short --branch`
+- ICC `status --repo ulg --check-staleness`
+- targeted `sed`, `rg`, `jq`, and `nl` reads over the active plans, native
+  bridge creation/render/release path, probe cadence, tests, and
+  `/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/` evidence.
+
+Validation status:
+
+- Root cause is reproduced from the existing artifact and source ordering.
+- No code has been changed and no test has been run yet for this prompt.
+
+Implementation continuation, completed 2026-07-10 23:46:30 AKDT:
+
+### General lifecycle repair
+
+- Added `src/visualization/nativeSurfaceResourceLifecycle.js` as a pure ES
+  module for native resource owners, generation attempt ordering, active draw
+  identity, deferred/forced release policy, bridge failure state, canvas
+  resize policy, and probe extraction cadence. The policy contains no scene,
+  material, phase, element, or reaction-pair branches.
+- Each native primary extraction now installs an explicit owner generation.
+  The owner retains the translated draw execution and the raw
+  `three-webgpu-marching-cubes` result, including the compact position,
+  counter, and indirect buffers, until exact-once retirement. Cached
+  adapter/device objects are not released per generation.
+- Reusing a bridge atomically installs the new owner and moves the previous
+  owner to a retired list. Non-extracting performance refreshes retain the
+  active generation instead of destroying the buffers still bound by
+  `drawState`.
+- Additional material surfaces now use a monotonically increasing attempted
+  generation watermark. A late older extraction is discarded even if a newer
+  candidate failed. Candidate bind groups and camera buffers are built before
+  the draw-state swap; construction failure or a nonempty all-invalid
+  candidate retains the previous valid draws and releases only candidate
+  resources.
+- Replaced primary and additional generations retire behind actual queue
+  completion and pending pixel/offscreen validation. A submit-fence timeout is
+  telemetry only; the real `queue.onSubmittedWorkDone()` promise remains the
+  liveness authority and a late completion resumes the native draw loop.
+- Queue rejection is sticky. Later mechanics, resident render refresh, and the
+  public direct extension-refresh API reject before installing another
+  generation. Failed, lost, or released bridges cannot be reused. Explicit
+  scene teardown force-drains deferred primary/additional owners and marks
+  pending validation abandoned so a failed fence cannot leak the bridge.
+- Native scene rendering delegates the shared main canvas to the native
+  consumer instead of letting Three clear it first. The custom native renderer
+  now exposes `getPixelRatio()`. Native main-canvas sizing remains renderer
+  owned; overlay sizing no longer rewrites it from the deliberately one-pixel
+  smaller compositor CSS box. Unchanged refreshes therefore do not call
+  `setSize()`, clear the canvas, or reconfigure the WebGPU context.
+- Environment resources now obey scene/bridge generations. Pending native
+  `Image` callbacks and Three `TextureLoader` callbacks become inert after
+  replacement/disposal; late textures are disposed. Native candidate textures
+  are allocated after CPU prefilter work, destroyed on upload/bind failure,
+  and failed URLs are not retried every frame. Teardown also destroys the
+  field-gradient, refraction, environment, wireframe, and additional-camera
+  resources that were previously omitted.
+- The long-horizon probe now separates requested interval capture from forced
+  final validation. Native visual captures perform extraction only at actual
+  capture cadence; performance-only probes remain final-extraction-only. The
+  artifact now retains generation, retired-owner, submit-fence, and additional
+  attachment diagnostics.
+
+### Tests added or extended
+
+- Added `tests/nativeSurfaceResourceLifecycle.test.mjs` with behavioral policy
+  coverage for active execution retention, exact-once owner swaps, distinct
+  owners sharing one execution, submit/validation release classification,
+  generation watermark ordering, invalid-candidate rollback, forced disposal,
+  stable resize, and visual-versus-performance extraction cadence.
+- Extended `tests/nativeSurfaceHarness.test.mjs` to require generation/fence
+  telemetry in the probe and quarantine at both public render-refresh entry
+  points.
+- Extended `tests/sphPhaseRenderer.test.mjs` with a real custom-native-renderer
+  DPR/backing-size test.
+
+### Commands and validation results
+
+- Syntax and patch hygiene, repeatedly during the slice:
+  `node --check src/visualization/sphPhaseScene.js`
+  `node --check src/visualization/nativeSurfaceResourceLifecycle.js`
+  `node --check scripts/sph-long-horizon-probe.mjs`
+  `git diff --check`
+  - All passed.
+- Focused final command:
+  `node --test tests/nativeSurfaceResourceLifecycle.test.mjs tests/nativeSurfaceHarness.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed 125/125.
+- Short native generation gate used the standard 300 K H2O/H2O scene against
+  the existing HTTPS server with `ULG_PROBE_BATCHES=2`,
+  `ULG_PROBE_BATCH_STEPS=2`, capture every batch, no-full readback, and
+  `surfaceDraw=native-webgpu-surface-consumer`.
+  Artifact: `/tmp/ulg-native-generation-refactor-final-gate3.json`.
+  - Status good; generations `1,2,3`; five nonblank surface-varying frames;
+    context configure count stayed `1`; viewport resize/reconfigure stayed
+    false; indirect/browser-frame validation passed; zero console issues.
+- Final standard matrix command:
+  `NODE_TLS_REJECT_UNAUTHORIZED=0 ULG_PROBE_BASE_URL='https://127.0.0.1:5173/' ULG_VISUAL_MATRIX_STANDARD=1 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_FRAME_MAX=16 ULG_VISUAL_MATRIX_OUTPUT_DIR=/tmp/ulg-standard-refactor ULG_VISUAL_MATRIX_RUN_ID=surface-generation-final4-2026-07-10 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_VISUAL_MATRIX_BASE_PORT=5810 ULG_PROBE_CHROMIUM_ARGS='--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer' PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+  - Completed all four named scenes and seeded Ba/Pb, Bk/Lr, and Fr/Fe.
+    Summary:
+    `/tmp/ulg-standard-refactor/surface-generation-final4-2026-07-10/summary.json`.
+  - Presentation passed: 72/72 frames nonblank and surface-varying; effective
+    mode only `native-webgpu-surface-consumer`; native browser validation
+    passed in all seven; browser/WebGPU issue, warning, destroyed-buffer, and
+    visual-surface issue counts all zero.
+  - Lifecycle passed: water generations 1-13, other named scenes 1-11, random
+    pairs 1-4; context configure count `1` in every scene; no unchanged-refresh
+    resize/reconfigure.
+- Mobile command used the same short water gate with
+  `ULG_PROBE_VIEWPORT_WIDTH=390`, `ULG_PROBE_VIEWPORT_HEIGHT=844`,
+  `ULG_PROBE_DEVICE_SCALE_FACTOR=2`, `ULG_PROBE_IS_MOBILE=1`, and
+  `ULG_PROBE_HAS_TOUCH=1`.
+  Artifact: `/tmp/ulg-native-generation-refactor-mobile-dpr2.json`.
+  - Status good; generations 1-3; five nonblank surface-varying frames; one
+    context configuration; no refresh resize; zero issues/warnings.
+- Used ImageMagick `montage` plus local image inspection for water batches
+  0/3/6/9/12, Fe/ice 0/2/5/8/10, Na/H2O 0/2/5/8/10, Cs/F 0/2/5/8/10,
+  and initial/mid/final frames for all random pairs.
+- `npm test` passed 1,016 of 1,019 tests with zero failures and three
+  intentional opt-in long-liquid skips; duration 271,010 ms.
+- `npm run build` passed with Vite 8.0.16, 137 modules transformed, and only
+  the existing large-chunk warning (`index` 5,285.59 kB, gzip 1,150.30 kB).
+
+### Visual and physical outcome
+
+- Water stays visibly live and flows/settles. GPU evidence conserves exactly
+  1,216 kg and forms 10.134 kg vapor, but vapor remains at about 0.10 m and
+  monotonically grows. Steam rise and condensation fail.
+- Molten Fe visibly drops onto and deforms over the ice. It creates 184.103 kg
+  liquid water, 0.482 kg steam, and 344.339 kg solid Fe, but Fe peak
+  temperature falls only 1.679 K and the steam center moves downward. Cooling
+  and escaping-steam gates fail.
+- Na/H2O visibly remains present and forms 3.856 kg NaOH plus 0.0972 kg H2;
+  the peak reaches 509.15 K. H2 rises about 43.4 mm rather than the required
+  50 mm, and inspection does not show the requested violent color-changing
+  smoke plume.
+- Cs/F visibly expands into a bright orange product cloud. CsF reaches
+  5.739 kg, the peak reaches 3,593.26 K, and products later cool to about
+  1,851.13 K. All post-step behavior checks pass.
+- All named scenes remain inconclusive on initial-state behavior because the
+  authoritative GPU reduction still starts after the first batch rather than
+  at simulation time zero. The three random pairs pass their finite/mass/
+  presentation gates.
+
+### Failed attempts and corrections
+
+- The first full-matrix attempt reused the HTTPS server without
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`. Node readiness fetches failed until the
+  420 s water timeout. The run was interrupted and its orphan probe was
+  terminated; no result was accepted.
+- A four-batch cadence probe once timed out waiting for particle state during
+  transient startup. A direct readiness check immediately succeeded, and the
+  two-batch cadence gate then passed. This was treated as harness startup
+  evidence, not a renderer result.
+- Matrix runs `final2` and `final3` were deliberately interrupted when
+  concurrent reviews found, respectively, repeated native canvas resizing and
+  a direct extension-refresh quarantine bypass. Their orphan probe process
+  groups were explicitly terminated. Only `final4` is accepted.
+- The pre-existing Vite server at `https://127.0.0.1:5173/` was reused and was
+  not stopped or modified. No new server remains running from this prompt.
+
+### Files touched
+
+- `src/visualization/nativeSurfaceResourceLifecycle.js`
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `tests/nativeSurfaceResourceLifecycle.test.mjs`
+- `tests/nativeSurfaceHarness.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `README.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-physics-refactor/README.md`
+- `plan/todo/sol-critic.md`
+- `plan/log.md`
+
+Open questions and next objective:
+
+- SURF-0 through SURF-2 are closed for this branch checkpoint. The next
+  objective is `PROF-0`: GPU timestamp-query spans plus submit/allocation/map/
+  fence/byte/generation/pixel-liveness attribution.
+- Do not begin dense-field or law-kernel optimization from the current host
+  batch timings. The final run still shows mean batches around 1.67 s for
+  water/Fe, 5.19 s for Na/H2O, and 3.89 s for Cs/F, but those include multiple
+  stages and visual extraction without GPU timestamp attribution.
+- `MATRIX-0` must add a retained authoritative time-zero record. Physics work
+  must then address steam transport/condensation, Fe quench heat transfer, and
+  reaction-gas/plume dynamics as general law/transport fixes, not scenario
+  patches.
+
+Index refresh:
+
+- Ran `npm run icc:update` after source and plan updates. Result: PASS with
+  407 indexed files and 2,978 memory chunks; refreshed
+  `.icc/ulg_status.json` and `.icc/ulg_arch_summary.md`.

@@ -4,7 +4,13 @@
 
 - [x] Create `gpu-resident-physics-refactor` from the clean SS checkpoint
   `33c3075` and record its general-fix scope.
-- [ ] Repair shared native WebGPU presentation-resource liveness.
+- [x] Repair shared native WebGPU presentation-resource liveness.
+- [x] SURF-0: keep the native bridge's active surface generation alive across
+  non-extracting refreshes and trace initial/refresh-1/refresh-2/final state.
+- [x] SURF-1: require real native extraction at captured visual intervals and
+  reject fallback/no-overlay frames.
+- [x] SURF-2: retire replaced primary and additional surface resources only
+  after the relevant native submit fence and validation work settle.
 - [ ] Add GPU timestamps and lifecycle/per-pass evidence.
 - [ ] Replace dense render-field construction with a general sparse algorithm.
 - [ ] Unify resident neighborhood authority and pressure/interface GPU
@@ -53,7 +59,7 @@ property/frontier scope on `gpu-resident-physics-refactor`.
   objectives in `plan/todo/sol-critic.md`. Do not implement the optimizations
   in this audit slice.
 
-Measured checkpoint:
+Measured pre-refactor checkpoint:
 
 - Physics evidence is compact and GPU-native: 5,184 mapped bytes per interval,
   zero state/thermo mapping, finite mass in all seven scenes.
@@ -66,6 +72,23 @@ Measured checkpoint:
 - Thermal/reaction-enabled water is about `2.1x` slower than mechanics-only at
   1,024 and 8,192 particles in the controlled native-surface A/B. GPU timestamp
   attribution is still required before kernel-level optimization.
+
+Replacement presentation checkpoint, 2026-07-10:
+
+- `/tmp/ulg-standard-refactor/surface-generation-final4-2026-07-10/summary.json`
+  contains all four named scenes plus seeded Ba/Pb, Bk/Lr, and Fr/Fe.
+- All 72 interval frames are nonblank and surface-varying, all samples remain
+  on `native-webgpu-surface-consumer`, and all seven browser/WebGPU issue and
+  warning counts are zero. Native resource generations advance from initial
+  through every captured batch without fallback or stale buffers.
+- Every scenario configures its canvas once; unchanged refreshes apply no
+  canvas resize or context reconfiguration. A separate 390x844 mobile DPR-2
+  run preserves the same one-configure policy through generations 1-3.
+- Presentation liveness is green, but physics is not relabeled: water still
+  fails steam rise/condensation, Fe/ice still fails sufficient Fe cooling and
+  steam rise, Na/H2O still misses the 50 mm H2-rise gate, and all named scenes
+  still lack a retained authoritative time-zero checkpoint. Cs/F passes every
+  post-step behavior gate and is visually exothermic.
 
 The third SS grid level remains on user hold. The current audit may identify
 work that belongs before it, but must not resume that level.
@@ -90,7 +113,16 @@ and mass/momentum/volume/energy continuity tests.
   Validation is GPU-native through manufactured states, metamorphic runs, and
   compact invariant reductions; do not add a CPU mirror solver or parity gate.
 
-## Current Target
+## Current Target - GPU Timestamp Attribution
+
+The production native WebGPU surface lifecycle is accepted through initial,
+refresh-1, refresh-2, intermediate, final, random-pair, and mobile DPR-2
+sequences. The next branch target is `PROF-0`: add GPU timestamp-query spans
+and explicit submit, allocation, map, fence, byte, generation, and
+pixel-liveness evidence. No render-field or law kernel optimization should be
+credited from host enqueue time before those measurements exist.
+
+## Previous Target - 2026-06-29
 
 Current checkpoint, 2026-06-29 AKDT: the worker-owned presentation worker can
 now execute mechanics resident stages on its own WebGPU presentation device.

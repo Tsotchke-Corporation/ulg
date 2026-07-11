@@ -38,6 +38,7 @@ import {
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
   createContinuousSurfaceBatches,
+  createNativeWebGpuCanvasRenderer,
   createResidentMaterialSeedSurfaceBatches,
   resolveSphScenePixelRatio,
   resolveSphSceneViewportSize,
@@ -648,6 +649,26 @@ test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layou
   assert.equal(recovered.width, 390);
   assert.equal(recovered.height, 844);
   assert.equal(recovered.aspect, 390 / 844);
+});
+
+test('native WebGPU canvas renderer exposes stable pixel-ratio and backing-size state', () => {
+  const canvas = { width: 0, height: 0, style: {} };
+  const renderer = createNativeWebGpuCanvasRenderer({
+    documentRef: { createElement: () => canvas },
+    width: 320,
+    height: 240
+  });
+
+  assert.equal(renderer.getPixelRatio(), 1);
+  assert.equal(canvas.width, 320);
+  assert.equal(canvas.height, 240);
+  renderer.setPixelRatio(2);
+  assert.equal(renderer.getPixelRatio(), 2);
+  assert.equal(canvas.width, 640);
+  assert.equal(canvas.height, 480);
+  renderer.setSize(320, 240, false);
+  assert.equal(canvas.width, 640);
+  assert.equal(canvas.height, 480);
 });
 
 test('SPH native marching-cubes surface resolution budgets conservative vertex rows', () => {

@@ -65,6 +65,12 @@ pinned to `renderer=native-webgpu` with the
 `native-webgpu-surface-consumer`; captures suppress overlay UI and fail on any
 blank, uniform, stale, wrong-canvas, or fallback interval. Particle spheres
 and offscreen draws are diagnostic-only.
+The `gpu-resident-physics-refactor` branch now keeps native surface generations
+alive through submit/validation retirement and has passed the production
+initial-to-final seven-scene matrix plus mobile DPR-2 validation. This closes
+presentation-resource liveness only; water-cycle, iron/ice, and sodium/water
+behavior gates remain open, and GPU timestamp attribution is the next
+performance prerequisite.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

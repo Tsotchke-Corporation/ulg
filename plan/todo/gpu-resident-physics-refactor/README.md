@@ -23,10 +23,10 @@ authoritative mutations.
 
 ## Required Order
 
-1. Repair production WebGPU surface-resource liveness across initial,
+1. **Complete 2026-07-10.** Repair production WebGPU surface-resource liveness across initial,
    refresh-1, refresh-2, and final frames. Version or double-buffer resources
    and reclaim them only after the relevant submission fence.
-2. Add GPU timestamp-query spans plus submit, allocation, map, fence, byte,
+2. **Next.** Add GPU timestamp-query spans plus submit, allocation, map, fence, byte,
    and pixel-liveness evidence. Do not optimize from host enqueue timings.
 3. Replace dense `surface-cell x particle` render-field construction with a
    source-local, tiled, sorted-range, or otherwise sparse general algorithm.
@@ -73,7 +73,8 @@ authoritative mutations.
   green.
 - No kernel micro-optimization before GPU timestamp attribution exists.
 - No scene-local scheduler competing with ComputeManager.
-- No performance claim from the currently blank post-refresh main canvas.
+- No kernel performance claim before GPU timestamp attribution; the repaired
+  production canvas is now presentation evidence, not a timing oracle.
 
 ## Source Plans
 
@@ -85,8 +86,23 @@ authoritative mutations.
 - `plan/todo/peercompute-law-graph-authority-plan.md`
 - `plan/tests.md`
 
-## Initial Status
+## Current Status
 
-Branch setup was committed as `9428ab4` and published to
-`origin/gpu-resident-physics-refactor`. No runtime refactor has been started by
-creation of this branch.
+The first runtime slice is complete. Native surface generations now own their
+primary and additional extension results until submit-fence and validation
+liveness permits exact-once retirement. Failed/device-lost bridges are
+quarantined from both render-refresh entry points and can be force-drained on
+explicit teardown. Captured visual intervals perform real native extraction;
+performance-only probes remain final-extraction-only. Unchanged native canvas
+dimensions no longer trigger resize, reconfigure, or a destructive clear.
+
+Focused tests pass 125/125. The seven-scene production matrix at
+`/tmp/ulg-standard-refactor/surface-generation-final4-2026-07-10/summary.json`
+has 72/72 nonblank surface-varying frames, one context configuration per
+scene, and zero browser/WebGPU issues or warnings. The mobile DPR-2 gate also
+passes. These results close SURF-0 through SURF-2; named physics-behavior
+failures remain open and are not presentation failures.
+
+The next branch slice is `PROF-0` GPU timestamp attribution. The new coherent
+checkpoint remains local after commit; do not push it without an explicit
+request.

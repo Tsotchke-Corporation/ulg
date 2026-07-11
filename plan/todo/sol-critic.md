@@ -2,9 +2,52 @@
 
 Date: 2026-07-10 AKDT
 Status: active architecture correction and implementation todo
-Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
+Branch reviewed: `gpu-resident-physics-refactor` at `23f4d9f` plus the current
+native-surface lifecycle worktree
 
-## 2026-07-10 Post-Fable Re-Audit
+## 2026-07-10 Native-Surface Refactor Checkpoint
+
+SURF-0 through SURF-2 are implemented and accepted. The production bridge now
+owns each primary and additional native extraction as an explicit generation,
+keeps the active generation bound across non-extracting performance refreshes,
+and retires replaced generations only after actual queue completion and
+validation liveness. Submit-fence timeout is telemetry, not false completion;
+late completion resumes presentation. Fence rejection/device loss is sticky,
+blocks both public refresh entry points, prevents failed-bridge reuse, and has
+an explicit force-disposal path for scene teardown.
+
+The same general lifecycle also fixes previously unowned extension results,
+transactional additional-surface attachment, stale generation overtakes,
+pending environment-map callbacks, failed candidate texture cleanup, and
+unchanged canvas resize/reconfigure clears. No condition selects a named
+scenario, material, phase, or expected result.
+
+Production evidence:
+
+- `/tmp/ulg-standard-refactor/surface-generation-final4-2026-07-10/summary.json`
+  covers water cycle, Fe/ice, Na/H2O, Cs/F, and seeded Ba/Pb, Bk/Lr, Fr/Fe.
+- All 72 captured initial/intermediate/final frames are nonblank and
+  surface-varying. Every interval uses `native-webgpu-surface-consumer`; no
+  fallback/no-overlay frame occurs. Browser/WebGPU issue, warning,
+  destroyed-buffer, and visual-surface issue counts are all zero.
+- Resource generations advance 1-13 for water, 1-11 for each other named
+  scene, and 1-4 for each random pair. Each scenario configures its canvas
+  once and applies no unchanged-refresh resize or context reconfiguration.
+- `/tmp/ulg-native-generation-refactor-mobile-dpr2.json` independently passes
+  generations 1-3 at mobile DPR 2 with the same one-configure policy.
+- Human sequence review confirms persistent geometry and motion. It also
+  confirms that presentation repair does not repair physics: water lacks a
+  rising/condensing steam cycle; Fe/ice lacks sufficient cooling and escaping
+  steam; Na/H2O lacks the requested violent colored plume and 50 mm H2 rise.
+  Cs/F visibly expands into a bright orange product cloud and passes all
+  post-step quantitative gates. Random pairs remain finite and visible.
+
+Presentation liveness is no longer the performance blocker. `PROF-0` is now
+the active prerequisite: add GPU timestamp queries and lifecycle/per-pass
+attribution before changing dense field or law kernels. Missing authoritative
+time-zero evidence remains part of `MATRIX-0`.
+
+## 2026-07-10 Post-Fable Pre-Refactor Audit
 
 ### Executive finding
 
@@ -108,7 +151,7 @@ Add these to SOL-0 before implementing SOL-1:
 5. **No global serial body/event scan.** No SOL hot stage may use a single
    invocation to walk every body, member, contact, product event, or particle.
 
-## Standard Scenario Evidence
+## Pre-Refactor Standard Scenario Evidence
 
 Artifact: `/tmp/ulg-standard-audit/native-authoritative-final-2026-07-10/summary.json`.
 All checkpoints reduce retained GPU state into a fixed 5,184-byte record and
@@ -832,12 +875,12 @@ material/phase reductions, and interval native-surface pixel evidence at an
 inspectable viewport. No full-state readback, CPU solver, or CPU parity gate is
 permitted. A uniform or UI-only frame is a visual failure.
 
-The fixed-size reduction and UI-suppressed interval capture are implemented;
-time-zero retention, GPU timestamps, and complete lifecycle counters remain.
+The fixed-size reduction, UI-suppressed interval capture, and surface lifecycle
+counters are implemented; time-zero retention and GPU timestamps remain.
 
 ### Priority 0B - Production presentation liveness
 
-Objective: repair the general initial-to-refresh production lifecycle before
+**Complete 2026-07-10.** Objective: repair the general initial-to-refresh production lifecycle before
 optimizing field math. Preserve the passing offscreen draw as an isolation
 probe, then trace canvas configure/current-texture, color/depth generations,
 bridge/bind-group replacement, indirect-buffer readiness and reclamation,
@@ -900,13 +943,13 @@ solid and validation correction; implementation history should remain in
 
 ## Concrete Future Todos
 
-- **SURF-0:** deterministic time-zero/refresh-1/refresh-2/final liveness tracer
+- **SURF-0 - complete:** deterministic time-zero/refresh-1/refresh-2/final liveness tracer
   for the production main canvas.
-- **SURF-1:** general main-canvas lifecycle repair across surface count,
+- **SURF-1 - complete:** general main-canvas lifecycle repair across surface count,
   transparency, material order, resize/DPR, pause/play, and the whole matrix.
-- **SURF-2:** versioned or double-buffered presentation resources; use fences
+- **SURF-2 - complete:** versioned presentation resources; use fences
   for reclamation/backpressure, not routine same-queue stage ordering.
-- **PROF-0:** GPU timestamps plus submit/map/allocation/pixel-liveness evidence
+- **PROF-0 - next:** GPU timestamps plus submit/map/allocation/pixel-liveness evidence
   under the profiling contract above.
 - **FIELD-0:** source-local/tiled sparse render-field rewrite and corrected
   32-byte/cell peak budget after SURF-1 is green.

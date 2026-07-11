@@ -155,6 +155,18 @@ import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
 import {
   createUlgWorkerOffscreenPresentationBridge
 } from './offscreenPresentationBridge.js';
+import {
+  createNativeSurfaceResourceOwner,
+  installNativeSurfaceResourceOwner,
+  nativeSurfaceBridgeFailureReason,
+  nativeSurfaceDrawStateUsesExecution,
+  prepareNativeSurfaceBridgeForForcedDisposal,
+  rendererCanvasResizeRequired,
+  resolveAdditionalNativeSurfaceGenerationAttempt,
+  resolveNativeSurfaceResourceReleaseAction,
+  shouldCommitAdditionalNativeSurfaceCandidate,
+  takeNativeSurfaceResourceOwners
+} from './nativeSurfaceResourceLifecycle.js';
 
 // Matches the native WebGPU surface consumer's historical clear color so the
 // default look is consistent across the webgl and native renderer backends
@@ -2256,7 +2268,7 @@ export function normalizeSphRendererBackend(value, fallback = 'webgl') {
   return normalizeSphRendererBackend(fallback, 'webgl');
 }
 
-function createNativeWebGpuCanvasRenderer({
+export function createNativeWebGpuCanvasRenderer({
   documentRef = globalThis.document,
   width = 1,
   height = 1,
@@ -2283,6 +2295,9 @@ function createNativeWebGpuCanvasRenderer({
       const ratio = Number(pixelRatio);
       this._pixelRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
       this.setSize(this._width, this._height, false);
+    },
+    getPixelRatio() {
+      return this._pixelRatio;
     },
     setSize(nextWidth = this._width, nextHeight = this._height, updateStyle = true) {
       this._width = Math.max(1, Math.round(Number(nextWidth) || 1));
@@ -7893,6 +7908,20 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.nativeSurfaceConsumerSubmitFenceElapsedMs ?? null;
   target.renderBridgeNativeSurfaceConsumerSubmitFenceTimedOut =
     bridge.nativeSurfaceConsumerSubmitFenceTimedOut ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceFailed =
+    bridge.nativeSurfaceConsumerSubmitFenceFailed ?? null;
+  target.renderBridgeNativeSurfaceConsumerSubmitFenceExceededBudget =
+    bridge.nativeSurfaceConsumerSubmitFenceExceededBudget ?? null;
+  target.renderBridgeNativeSurfaceResourceGeneration =
+    bridge.activeSurfaceResourceOwner?.generation ?? bridge.nativeSurfaceResourceGeneration ?? null;
+  target.renderBridgeNativeSurfaceRetiredGenerationCount = Array.isArray(
+    bridge.retiredSurfaceResourceOwners
+  ) ? bridge.retiredSurfaceResourceOwners.length : 0;
+  target.renderBridgeAdditionalSurfaceAttachStatus = bridge.additionalSurfaceAttachStatus ?? null;
+  target.renderBridgeAdditionalSurfaceAttachReason = bridge.additionalSurfaceAttachReason ?? null;
+  target.renderBridgeAdditionalSurfaceDrawCount = Array.isArray(
+    bridge.drawState?.additionalSurfaceDraws
+  ) ? bridge.drawState.additionalSurfaceDraws.length : 0;
   target.renderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.renderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
   target.renderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
@@ -11424,7 +11453,10 @@ export function createSphPhaseScene(container, {
   // MeshPhysicalMaterial reflections carry the same image; clearing restores
   // the RoomEnvironment stand-in.
   let backgroundEnvironmentTexture = null;
+  let backgroundEnvironmentLoadGeneration = 0;
   function applySceneEnvironmentFromBackgroundImage(url) {
+    backgroundEnvironmentLoadGeneration += 1;
+    const loadGeneration = backgroundEnvironmentLoadGeneration;
     try {
       if (!url) {
         if (backgroundEnvironmentTexture) {
@@ -11435,7 +11467,11 @@ export function createSphPhaseScene(container, {
         return;
       }
       new THREE.TextureLoader().load(url, (texture) => {
-        if (sceneBackgroundImageUrl !== url) {
+        if (
+          !running
+          || backgroundEnvironmentLoadGeneration !== loadGeneration
+          || sceneBackgroundImageUrl !== url
+        ) {
           texture.dispose?.();
           return;
         }
@@ -11551,6 +11587,8 @@ export function createSphPhaseScene(container, {
   let sphResidentPressureInterfaceState = null;
   let sphResidentSurfaceDraw = null;
   let sphResidentSurfaceDrawRenderBridge = null;
+  let sphResidentNativeSurfaceResourceGeneration = 0;
+  const releasedSphResidentSurfaceResourceObjects = new WeakSet();
   let sphResidentRenderSurfaceState = null;
   let sphResidentRenderFieldRowsBufferPool = null;
   // Double-buffered snapshots of the render-field scalars for the native
@@ -11594,103 +11632,240 @@ export function createSphPhaseScene(container, {
   // bind group, and indirect draw. Attached to the primary bridge's drawState
   // so the ONE native render pass draws all materials - no overlay.
   let sphResidentAdditionalNativeSurfaceTranslations = [];
+  let sphResidentAdditionalNativeSurfaceTranslationBridge = null;
+  function nextNativeSurfaceResourceGeneration() {
+    sphResidentNativeSurfaceResourceGeneration += 1;
+    return sphResidentNativeSurfaceResourceGeneration;
+  }
+  function releaseExtensionSurfaceResultOnce(extensionSurfaceResult) {
+    if (!extensionSurfaceResult || typeof extensionSurfaceResult !== 'object') return;
+    if (releasedSphResidentSurfaceResourceObjects.has(extensionSurfaceResult)) return;
+    releasedSphResidentSurfaceResourceObjects.add(extensionSurfaceResult);
+    extensionSurfaceResult.release?.();
+  }
+  function destroyExtensionSurfaceTranslationOnce(translation, reason) {
+    if (!translation || typeof translation !== 'object') return;
+    if (releasedSphResidentSurfaceResourceObjects.has(translation)) return;
+    releasedSphResidentSurfaceResourceObjects.add(translation);
+    translation.releaseExtensionSurfaceBufferLeases?.({ status: reason });
+    translation.destroyExtensionSurfaceBuffers?.({ releaseLeases: true, reason });
+  }
+  function releaseUncommittedNativeSurfaceResources({
+    device = null,
+    translation = null,
+    extensionSurfaceResult = null,
+    reason = 'uncommitted-native-surface-resources-released'
+  } = {}) {
+    const release = () => {
+      destroyExtensionSurfaceTranslationOnce(translation, reason);
+      releaseExtensionSurfaceResultOnce(extensionSurfaceResult);
+    };
+    if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
+      deferSubmittedWorkCleanup(device, release);
+      return;
+    }
+    release();
+  }
   let sphResidentAdditionalNativeSurfaceGenerationCounter = 0;
   let sphResidentAdditionalNativeSurfaceAttachedGeneration = 0;
+  let sphResidentAdditionalNativeSurfaceHighestAttemptedGeneration = 0;
   function nextAdditionalNativeSurfaceGeneration() {
     sphResidentAdditionalNativeSurfaceGenerationCounter += 1;
     return sphResidentAdditionalNativeSurfaceGenerationCounter;
   }
   function destroyAdditionalNativeSurfaceTranslationList(list, reason) {
-    for (const translation of list) {
-      translation?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
-      translation?.surfaceDraw?.destroySurfaceDrawBuffers?.({ releaseLeases: true, reason });
-      translation?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({ status: reason });
-      translation?.surfaceVertices?.destroySurfaceVertexBuffers?.({ releaseLeases: true, reason });
+    for (const item of list) {
+      const translation = item?.translation || item;
+      destroyExtensionSurfaceTranslationOnce(translation, reason);
+      releaseExtensionSurfaceResultOnce(item?.extensionSurfaceResult ?? null);
     }
   }
-  function releaseAdditionalNativeSurfaceTranslations(reason = 'additional-native-surface-draw-swapped') {
-    destroyAdditionalNativeSurfaceTranslationList(sphResidentAdditionalNativeSurfaceTranslations, reason);
+  function retireAdditionalNativeSurfaceTranslationList(
+    list,
+    bridge,
+    reason = 'additional-native-surface-draw-swapped'
+  ) {
+    if (!list.length) return;
+    const release = () => destroyAdditionalNativeSurfaceTranslationList(list, reason);
+    if (deferSphNativeWebGpuSurfaceResourceRelease(bridge, { release, status: reason })) return;
+    release();
+  }
+  function discardAdditionalNativeSurfaceEntries(
+    entries,
+    device,
+    reason = 'additional-native-surface-draw-discarded'
+  ) {
+    if (!entries.length) return;
+    const release = () => destroyAdditionalNativeSurfaceTranslationList(entries, reason);
+    if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
+      deferSubmittedWorkCleanup(device, release);
+      return;
+    }
+    release();
+  }
+  function releaseAdditionalNativeSurfaceTranslations(
+    reason = 'additional-native-surface-draw-swapped',
+    bridge = sphResidentSurfaceDrawRenderBridge
+  ) {
+    const retired = sphResidentAdditionalNativeSurfaceTranslations;
+    const retirementBridge = sphResidentAdditionalNativeSurfaceTranslationBridge || bridge;
     sphResidentAdditionalNativeSurfaceTranslations = [];
+    sphResidentAdditionalNativeSurfaceTranslationBridge = null;
+    retireAdditionalNativeSurfaceTranslationList(retired, retirementBridge, reason);
   }
   function attachAdditionalNativeSurfaceDraws({ device, bridge, entries = [], generation = null }) {
     // Render refreshes overlap (each awaits per-surface extractions while the
     // next refresh starts); a stale refresh attaching late must not destroy
     // the buffers a newer attach just installed. Late attaches discard their
     // own translations and leave the newer state in place.
-    if (
-      Number.isFinite(generation)
-      && generation < sphResidentAdditionalNativeSurfaceAttachedGeneration
-    ) {
-      destroyAdditionalNativeSurfaceTranslationList(
-        entries.map((entry) => entry?.translation).filter(Boolean),
+    const generationAttempt = resolveAdditionalNativeSurfaceGenerationAttempt({
+      highestAttemptedGeneration: sphResidentAdditionalNativeSurfaceHighestAttemptedGeneration,
+      generation
+    });
+    if (generationAttempt.stale) {
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
         'additional-native-surface-draw-stale-generation-discarded'
       );
       return bridge?.drawState?.additionalSurfaceDraws || [];
     }
-    if (Number.isFinite(generation)) {
-      sphResidentAdditionalNativeSurfaceAttachedGeneration = generation;
+    sphResidentAdditionalNativeSurfaceHighestAttemptedGeneration =
+      generationAttempt.highestAttemptedGeneration;
+    const previousDraws = bridge?.drawState?.additionalSurfaceDraws || [];
+    if (!bridge?.drawState) {
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-draw-discarded-no-active-draw-state'
+      );
+      return previousDraws;
     }
-    releaseAdditionalNativeSurfaceTranslations();
-    if (!bridge?.drawState) return [];
     if (!device?.createBindGroup || !bridge.bindGroupLayout || !bridge.opticalGpuBuffers?.recordsBuffer) {
-      bridge.drawState.additionalSurfaceDraws = [];
-      return [];
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-draw-discarded-bridge-incomplete'
+      );
+      return previousDraws;
     }
     bridge.additionalSurfaceCameraBuffers = bridge.additionalSurfaceCameraBuffers || new Map();
     const draws = [];
-    for (const entry of entries) {
-      const execution = entry?.translation?.surfaceDraw || null;
-      if (!execution?.drawIndirectRowsBuffer) continue;
-      const nativeDrawInput = resolveNativeSurfaceDrawInput(execution);
-      if (
-        nativeDrawInput.layout !== 'webgpu-marching-cubes-compact-position-rows'
-        || !nativeDrawInput.buffer
-        || !nativeDrawInput.compactPositionDrawState
-      ) {
-        continue;
-      }
-      const surfaceKey = String(entry.surfaceKey || `surface:${entry.surfaceIndex ?? draws.length}`);
-      let cameraBuffer = bridge.additionalSurfaceCameraBuffers.get(surfaceKey);
-      if (!cameraBuffer) {
-        cameraBuffer = device.createBuffer({
-          label: `ulg-sph-additional-surface-camera-${surfaceKey}`,
-          size: SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
-          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-        });
-        bridge.additionalSurfaceCameraBuffers.set(surfaceKey, cameraBuffer);
-      }
-      const bindGroup = device.createBindGroup({
-        label: `ulg-sph-additional-surface-bind-group-${surfaceKey}`,
-        layout: bridge.bindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: nativeDrawInput.buffer } },
-          { binding: 1, resource: { buffer: cameraBuffer } },
-          { binding: 2, resource: { buffer: bridge.opticalGpuBuffers.recordsBuffer } },
-          { binding: 3, resource: { buffer: bridge.opticalGpuBuffers.spectralSamplesBuffer } },
-          {
-            binding: 4,
-            resource: {
-              buffer: execution.renderFieldGradientVolume?.buffer
-                || bridge.fieldGradientDummyBuffer
+    const acceptedEntries = [];
+    const discardedEntries = [];
+    const createdCameraBuffers = [];
+    try {
+      for (const entry of entries) {
+        const execution = entry?.translation?.surfaceDraw || null;
+        if (!execution?.drawIndirectRowsBuffer) {
+          discardedEntries.push(entry);
+          continue;
+        }
+        const nativeDrawInput = resolveNativeSurfaceDrawInput(execution);
+        if (
+          nativeDrawInput.layout !== 'webgpu-marching-cubes-compact-position-rows'
+          || !nativeDrawInput.buffer
+          || !nativeDrawInput.compactPositionDrawState
+        ) {
+          discardedEntries.push(entry);
+          continue;
+        }
+        const surfaceKey = String(entry.surfaceKey || `surface:${entry.surfaceIndex ?? draws.length}`);
+        let cameraBuffer = bridge.additionalSurfaceCameraBuffers.get(surfaceKey);
+        if (!cameraBuffer) {
+          cameraBuffer = device.createBuffer({
+            label: `ulg-sph-additional-surface-camera-${surfaceKey}`,
+            size: SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_CAMERA_UNIFORM_BYTE_LENGTH,
+            usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+          });
+          bridge.additionalSurfaceCameraBuffers.set(surfaceKey, cameraBuffer);
+          createdCameraBuffers.push({ surfaceKey, cameraBuffer });
+        }
+        const bindGroup = device.createBindGroup({
+          label: `ulg-sph-additional-surface-bind-group-${surfaceKey}`,
+          layout: bridge.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: nativeDrawInput.buffer } },
+            { binding: 1, resource: { buffer: cameraBuffer } },
+            { binding: 2, resource: { buffer: bridge.opticalGpuBuffers.recordsBuffer } },
+            { binding: 3, resource: { buffer: bridge.opticalGpuBuffers.spectralSamplesBuffer } },
+            {
+              binding: 4,
+              resource: {
+                buffer: execution.renderFieldGradientVolume?.buffer
+                  || bridge.fieldGradientDummyBuffer
+              }
             }
-          }
-        ]
-      });
-      const surface = (Array.isArray(execution.surfaces) ? execution.surfaces[0] : null) || {};
-      draws.push({
-        surfaceKey,
-        bindGroup,
-        cameraBuffer,
-        drawIndirectRowsBuffer: execution.drawIndirectRowsBuffer,
-        compactPositionDrawState: nativeDrawInput.compactPositionDrawState,
-        depthWriteFlag: Number(surface.depthWriteFlag ?? entry.depthWriteFlag ?? 1),
-        transparencyClassId: Number(surface.transparencyClassId ?? entry.transparencyClassId ?? 0),
-        renderOrder: Number(surface.renderOrder ?? entry.renderOrder ?? 0)
-      });
-      sphResidentAdditionalNativeSurfaceTranslations.push(entry.translation);
+          ]
+        });
+        const surface = (Array.isArray(execution.surfaces) ? execution.surfaces[0] : null) || {};
+        draws.push({
+          surfaceKey,
+          bindGroup,
+          cameraBuffer,
+          drawIndirectRowsBuffer: execution.drawIndirectRowsBuffer,
+          compactPositionDrawState: nativeDrawInput.compactPositionDrawState,
+          depthWriteFlag: Number(surface.depthWriteFlag ?? entry.depthWriteFlag ?? 1),
+          transparencyClassId: Number(surface.transparencyClassId ?? entry.transparencyClassId ?? 0),
+          renderOrder: Number(surface.renderOrder ?? entry.renderOrder ?? 0)
+        });
+        acceptedEntries.push({
+          translation: entry.translation,
+          extensionSurfaceResult: entry.extensionSurfaceResult ?? null
+        });
+      }
+    } catch (error) {
+      for (const { surfaceKey, cameraBuffer } of createdCameraBuffers) {
+        if (bridge.additionalSurfaceCameraBuffers.get(surfaceKey) === cameraBuffer) {
+          bridge.additionalSurfaceCameraBuffers.delete(surfaceKey);
+        }
+        cameraBuffer?.destroy?.();
+      }
+      discardAdditionalNativeSurfaceEntries(
+        entries.filter((entry) => entry?.translation),
+        device,
+        'additional-native-surface-draw-candidate-build-error'
+      );
+      bridge.additionalSurfaceAttachStatus = 'additional-native-surface-draw-candidate-build-error';
+      bridge.additionalSurfaceAttachReason = error instanceof Error ? error.message : String(error);
+      return previousDraws;
     }
     draws.sort((a, b) => a.renderOrder - b.renderOrder);
+    if (!shouldCommitAdditionalNativeSurfaceCandidate({
+      inputCount: entries.length,
+      acceptedCount: acceptedEntries.length
+    })) {
+      discardAdditionalNativeSurfaceEntries(
+        discardedEntries,
+        device,
+        'additional-native-surface-draw-candidate-empty-after-validation'
+      );
+      bridge.additionalSurfaceAttachStatus =
+        'additional-native-surface-draw-candidate-empty-after-validation';
+      bridge.additionalSurfaceAttachReason =
+        'nonempty candidate contained no valid native surface draws';
+      return previousDraws;
+    }
+    const retiredTranslations = sphResidentAdditionalNativeSurfaceTranslations;
+    const retirementBridge = sphResidentAdditionalNativeSurfaceTranslationBridge || bridge;
     bridge.drawState.additionalSurfaceDraws = draws;
+    sphResidentAdditionalNativeSurfaceTranslations = acceptedEntries;
+    sphResidentAdditionalNativeSurfaceTranslationBridge = acceptedEntries.length ? bridge : null;
+    if (Number.isFinite(generation)) {
+      sphResidentAdditionalNativeSurfaceAttachedGeneration = generation;
+    }
+    retireAdditionalNativeSurfaceTranslationList(
+      retiredTranslations,
+      retirementBridge,
+      'additional-native-surface-draw-swapped'
+    );
+    discardAdditionalNativeSurfaceEntries(
+      discardedEntries,
+      device,
+      'additional-native-surface-draw-discarded-invalid-input'
+    );
+    bridge.additionalSurfaceAttachStatus = 'additional-native-surface-draws-attached';
+    bridge.additionalSurfaceAttachReason = null;
     return draws;
   }
   let sphResidentMaterialInterfaceSourceFieldRowsBufferPool = null;
@@ -14090,6 +14265,51 @@ export function createSphPhaseScene(container, {
     );
   }
 
+  function installSphNativeWebGpuSurfaceResourceOwner(renderBridge, {
+    surfaceDraw = null,
+    surfaceDrawExecution = surfaceDraw?.surfaceDraw ?? null,
+    surfaceVerticesExecution = surfaceDraw?.surfaceVertices ?? null,
+    translation = surfaceDraw?.extensionSurfaceTranslation ?? null,
+    extensionSurfaceResult = surfaceDraw?.extensionSurfaceResult ?? null
+  } = {}) {
+    if (
+      renderBridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      || !surfaceDrawExecution
+    ) {
+      return null;
+    }
+    const owner = createNativeSurfaceResourceOwner({
+      generation: nextNativeSurfaceResourceGeneration(),
+      surfaceDraw,
+      surfaceDrawExecution,
+      surfaceVerticesExecution,
+      translation,
+      extensionSurfaceResult
+    });
+    installNativeSurfaceResourceOwner(renderBridge, owner);
+    surfaceDraw.nativeSurfaceResourceGeneration = owner.generation;
+    surfaceDraw.renderBridgeNativeSurfaceResourceGeneration = owner.generation;
+    renderBridge.nativeSurfaceActiveGenerationRetained = false;
+    renderBridge.nativeSurfaceActiveGenerationRetentionReason = null;
+    return owner;
+  }
+
+  function sphNativeWebGpuSurfaceReleaseAction(renderBridge, surfaceDrawExecution = null) {
+    return resolveNativeSurfaceResourceReleaseAction({
+      drawState: renderBridge?.drawState ?? null,
+      surfaceDrawExecution,
+      validationPending: sphNativeWebGpuSurfaceValidationPending(renderBridge),
+      submitFencePending: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFencePending),
+      submitFenceTimedOut: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFenceTimedOut),
+      submitFenceFailed: Boolean(renderBridge?.nativeSurfaceConsumerSubmitFenceFailed)
+    });
+  }
+
+  function sphNativeWebGpuSurfaceResourceReleaseBlocked(renderBridge) {
+    if (renderBridge?.nativeSurfaceForceDisposing) return false;
+    return sphNativeWebGpuSurfaceReleaseAction(renderBridge).defer;
+  }
+
   function publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
     status = 'native-webgpu-surface-resource-release-idle',
     reason = null
@@ -14101,19 +14321,29 @@ export function createSphPhaseScene(container, {
     renderBridge.nativeSurfaceDeferredResourceReleaseStatus = status;
     renderBridge.nativeSurfaceDeferredResourceReleaseReason = reason;
     renderBridge.nativeSurfaceDeferredResourceReleasePending = queue.length;
-    scene.userData.sphNativeWebGpuSurfaceDeferredResourceRelease = {
+    const telemetry = {
       schema: 'peercompute.ulg.sph-native-webgpu-surface-deferred-resource-release.v0',
       status,
       reason,
       pendingReleaseCount: queue.length,
       pixelValidationPending: Boolean(renderBridge.pixelValidationPending),
       offscreenValidationPending: Boolean(renderBridge.offscreenValidationPending),
+      submitFencePending: Boolean(renderBridge.nativeSurfaceConsumerSubmitFencePending),
+      submitFenceTimedOut: Boolean(renderBridge.nativeSurfaceConsumerSubmitFenceTimedOut),
+      submitFenceFailed: Boolean(renderBridge.nativeSurfaceConsumerSubmitFenceFailed),
+      submitFenceSerial: renderBridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
+      activeGeneration: renderBridge.activeSurfaceResourceOwner?.generation ?? null,
+      retiringGenerationCount: Array.isArray(renderBridge.retiredSurfaceResourceOwners)
+        ? renderBridge.retiredSurfaceResourceOwners.length
+        : 0,
       rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
       updatedAtMs: nowMs(),
       scientificValidation: false,
       sphValidation: false,
       fullPhysicsValidation: false
     };
+    if (renderBridge !== sphResidentSurfaceDrawRenderBridge) return telemetry;
+    scene.userData.sphNativeWebGpuSurfaceDeferredResourceRelease = telemetry;
     if (sphResidentSurfaceDraw) {
       sphResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseStatus = status;
       sphResidentSurfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseReason = reason;
@@ -14124,10 +14354,11 @@ export function createSphPhaseScene(container, {
       sphResidentRenderState.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseReason = reason;
       sphResidentRenderState.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending = queue.length;
     }
+    return telemetry;
   }
 
   function deferSphNativeWebGpuSurfaceResourceRelease(renderBridge, releaseRequest) {
-    if (!sphNativeWebGpuSurfaceValidationPending(renderBridge)) return false;
+    if (!sphNativeWebGpuSurfaceResourceReleaseBlocked(renderBridge)) return false;
     const queue = Array.isArray(renderBridge.nativeSurfaceDeferredResourceReleases)
       ? renderBridge.nativeSurfaceDeferredResourceReleases
       : [];
@@ -14139,7 +14370,7 @@ export function createSphPhaseScene(container, {
     renderBridge.nativeSurfaceDeferredResourceReleaseSerial =
       Math.max(0, Math.round(Number(renderBridge.nativeSurfaceDeferredResourceReleaseSerial) || 0)) + 1;
     publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
-      status: 'native-webgpu-surface-resource-release-deferred-validation-pending',
+      status: 'native-webgpu-surface-resource-release-deferred-liveness-pending',
       reason: releaseRequest?.status ?? null
     });
     return true;
@@ -14149,9 +14380,9 @@ export function createSphPhaseScene(container, {
     reason = 'native-webgpu-surface-validation-settled'
   } = {}) {
     if (!renderBridge || renderBridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
-    if (sphNativeWebGpuSurfaceValidationPending(renderBridge)) {
+    if (sphNativeWebGpuSurfaceResourceReleaseBlocked(renderBridge)) {
       publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
-        status: 'native-webgpu-surface-resource-release-waiting-validation',
+        status: 'native-webgpu-surface-resource-release-waiting-liveness',
         reason
       });
       return;
@@ -14172,6 +14403,10 @@ export function createSphPhaseScene(container, {
       reason
     });
     for (const request of queue) {
+      if (typeof request.release === 'function') {
+        request.release();
+        continue;
+      }
       releaseSphResidentSurfaceDrawResources({
         surfaceDraw: request.surfaceDraw ?? null,
         renderBridge: request.renderBridge ?? null,
@@ -14187,6 +14422,31 @@ export function createSphPhaseScene(container, {
     });
   }
 
+  function forceDrainSphNativeWebGpuSurfaceDeferredResourceReleases(renderBridge, reason) {
+    if (renderBridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
+    const queue = prepareNativeSurfaceBridgeForForcedDisposal(renderBridge);
+    publishSphNativeWebGpuSurfaceDeferredResourceRelease(renderBridge, {
+      status: 'native-webgpu-surface-resource-release-force-disposing',
+      reason
+    });
+    for (const request of queue) {
+      if (typeof request.release === 'function') {
+        request.release();
+        continue;
+      }
+      releaseSphResidentSurfaceDrawResources({
+        surfaceDraw: request.surfaceDraw ?? null,
+        renderBridge: request.renderBridge === renderBridge
+          ? null
+          : (request.renderBridge ?? null),
+        clearOverlay: false,
+        removeCanvas: false,
+        status: request.status ?? 'native-webgpu-surface-forced-deferred-resource-release',
+        deferNativeValidationRelease: false
+      });
+    }
+  }
+
   function releaseSphResidentSurfaceDrawResources({
     surfaceDraw = null,
     renderBridge = null,
@@ -14194,12 +14454,16 @@ export function createSphPhaseScene(container, {
     clearOverlay = false,
     removeCanvas = false,
     status = 'surface-draw-overlay-resources-released',
-    deferNativeValidationRelease = true
+    deferNativeValidationRelease = true,
+    forceNativeRelease = false
   } = {}) {
     const nativeValidationBridge = renderBridge || validationBridge;
+    if (forceNativeRelease) {
+      forceDrainSphNativeWebGpuSurfaceDeferredResourceReleases(nativeValidationBridge, status);
+    }
     if (
       deferNativeValidationRelease
-      && sphNativeWebGpuSurfaceValidationPending(nativeValidationBridge)
+      && sphNativeWebGpuSurfaceResourceReleaseBlocked(nativeValidationBridge)
       && deferSphNativeWebGpuSurfaceResourceRelease(nativeValidationBridge, {
         surfaceDraw,
         renderBridge,
@@ -14210,7 +14474,51 @@ export function createSphPhaseScene(container, {
     ) {
       return;
     }
+    const releaseResourceObjectOnce = (resource, release) => {
+      if (!resource || typeof resource !== 'object') return;
+      if (releasedSphResidentSurfaceResourceObjects.has(resource)) return;
+      releasedSphResidentSurfaceResourceObjects.add(resource);
+      release(resource);
+    };
+    const releaseSurfaceDrawBundle = (bundle) => {
+      if (!bundle) return;
+      if (bundle.extensionSurfaceTranslation) {
+        destroyExtensionSurfaceTranslationOnce(bundle.extensionSurfaceTranslation, status);
+      } else {
+        releaseResourceObjectOnce(bundle.surfaceDraw, (execution) => {
+          execution.releaseSurfaceDrawBufferLeases?.({ status });
+          execution.destroySurfaceDrawBuffers?.({ releaseLeases: true, reason: status });
+        });
+        releaseResourceObjectOnce(bundle.surfaceVertices, (execution) => {
+          execution.releaseSurfaceVertexBufferLeases?.({ status });
+          execution.destroySurfaceVertexBuffers?.({ releaseLeases: true, reason: status });
+        });
+      }
+      releaseResourceObjectOnce(bundle.renderFieldExecution, (execution) => {
+        execution.releaseRenderFieldBufferLeases?.({ status });
+        execution.destroyRenderFieldBuffers?.({ releaseLeases: true, reason: status });
+      });
+      releaseExtensionSurfaceResultOnce(bundle.extensionSurfaceResult);
+    };
+    const releaseOwner = (owner) => {
+      if (!owner || typeof owner !== 'object') return;
+      if (releasedSphResidentSurfaceResourceObjects.has(owner)) return;
+      releasedSphResidentSurfaceResourceObjects.add(owner);
+      releaseSurfaceDrawBundle(owner.surfaceDraw);
+      if (!owner.surfaceDraw) {
+        destroyExtensionSurfaceTranslationOnce(owner.translation, status);
+      }
+      releaseExtensionSurfaceResultOnce(owner.extensionSurfaceResult);
+    };
+    const bridgeOwners = renderBridge
+      ? takeNativeSurfaceResourceOwners(renderBridge, { includeActive: true })
+      : [];
     if (renderBridge) {
+      renderBridge.released = true;
+      renderBridge.envMapPendingUrl = null;
+      if (sphResidentAdditionalNativeSurfaceTranslationBridge === renderBridge) {
+        releaseAdditionalNativeSurfaceTranslations(status, renderBridge);
+      }
       if (renderBridge.threeSurfaceGroup) {
         scene.remove(renderBridge.threeSurfaceGroup);
         renderBridge.threeSurfaceGroup.traverse?.((object) => {
@@ -14231,6 +14539,16 @@ export function createSphPhaseScene(container, {
       renderBridge.cameraBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.recordsBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.spectralSamplesBuffer?.destroy?.();
+      renderBridge.fieldGradientDummyBuffer?.destroy?.();
+      renderBridge.refractionDummyTexture?.destroy?.();
+      renderBridge.refractionCopyTexture?.destroy?.();
+      renderBridge.envDummyTexture?.destroy?.();
+      renderBridge.envMapTexture?.destroy?.();
+      renderBridge.boxWireframe?.uniformBuffer?.destroy?.();
+      for (const buffer of renderBridge.additionalSurfaceCameraBuffers?.values?.() || []) {
+        buffer?.destroy?.();
+      }
+      renderBridge.additionalSurfaceCameraBuffers?.clear?.();
       renderBridge.depthTexture?.destroy?.();
       renderBridge.oitAccumTexture?.destroy?.();
       renderBridge.oitRevealTexture?.destroy?.();
@@ -14254,6 +14572,15 @@ export function createSphPhaseScene(container, {
       renderBridge.renderRowDrawState = null;
       renderBridge.cameraBuffer = null;
       renderBridge.opticalGpuBuffers = null;
+      renderBridge.fieldGradientDummyBuffer = null;
+      renderBridge.refractionDummyTexture = null;
+      renderBridge.refractionCopyTexture = null;
+      renderBridge.envDummyTexture = null;
+      renderBridge.envMapTexture = null;
+      renderBridge.envMapView = null;
+      renderBridge.envMapFailedUrl = null;
+      renderBridge.boxWireframe = null;
+      renderBridge.additionalSurfaceCameraBuffers = null;
       renderBridge.depthTexture = null;
       renderBridge.oitAccumTexture = null;
       renderBridge.oitRevealTexture = null;
@@ -14264,6 +14591,7 @@ export function createSphPhaseScene(container, {
       renderBridge.offscreenValidationReadbackBuffer = null;
       renderBridge.renderRowsBuffer = null;
       renderBridge.renderRowsBufferOwned = false;
+      renderBridge.device = null;
       renderBridge.status = status;
       renderBridge.lastRenderStatus = status;
       if (removeCanvas && renderBridge.canvas?.parentNode) {
@@ -14272,31 +14600,59 @@ export function createSphPhaseScene(container, {
       if (renderBridge === sphResidentSurfaceDrawRenderBridge) {
         scene.userData.sphResidentSurfaceDrawRenderBridge = renderBridge;
       }
-      }
-      surfaceDraw?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
-      surfaceDraw?.surfaceDraw?.destroySurfaceDrawBuffers?.({
-        releaseLeases: true,
-        reason: status
-      });
-      surfaceDraw?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({
-        status
-      });
-      surfaceDraw?.surfaceVertices?.destroySurfaceVertexBuffers?.({
-        releaseLeases: true,
-        reason: status
-      });
-    surfaceDraw?.renderFieldExecution?.releaseRenderFieldBufferLeases?.({
-      status
-    });
-    surfaceDraw?.renderFieldExecution?.destroyRenderFieldBuffers?.({
-      releaseLeases: true,
-      reason: status
-    });
     }
+    for (const owner of bridgeOwners) releaseOwner(owner);
+    releaseSurfaceDrawBundle(surfaceDraw);
+  }
+
+  function retireSphNativeWebGpuSurfaceResourceOwner(renderBridge, owner, status) {
+    if (!owner) return;
+    const release = () => releaseSphResidentSurfaceDrawResources({
+      surfaceDraw: owner.surfaceDraw,
+      renderBridge: null,
+      clearOverlay: false,
+      status,
+      deferNativeValidationRelease: false
+    });
+    if (deferSphNativeWebGpuSurfaceResourceRelease(renderBridge, { release, status })) return;
+    release();
+  }
 
   function releasePreviousSphResidentSurfaceDrawResources(previousSurfaceDraw, previousRenderBridge) {
     if (!previousSurfaceDraw && !previousRenderBridge) return;
     if (previousRenderBridge && previousRenderBridge === sphResidentSurfaceDrawRenderBridge) {
+      const previousSurfaceDrawExecution = previousSurfaceDraw?.surfaceDraw ?? null;
+      const retiredOwners = takeNativeSurfaceResourceOwners(previousRenderBridge);
+      const retiredExecutions = new Set(retiredOwners.map((owner) => owner.surfaceDrawExecution));
+      for (const owner of retiredOwners) {
+        retireSphNativeWebGpuSurfaceResourceOwner(
+          previousRenderBridge,
+          owner,
+          'native-webgpu-surface-generation-retired-after-bridge-swap'
+        );
+      }
+      const activeOwner = previousRenderBridge.activeSurfaceResourceOwner ?? null;
+      if (
+        previousRenderBridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && previousSurfaceDrawExecution
+        && (
+          activeOwner?.surfaceDrawExecution === previousSurfaceDrawExecution
+          || nativeSurfaceDrawStateUsesExecution(
+            previousRenderBridge.drawState,
+            previousSurfaceDrawExecution
+          )
+        )
+      ) {
+        previousRenderBridge.nativeSurfaceActiveGenerationRetained = true;
+        previousRenderBridge.nativeSurfaceActiveGenerationRetentionReason =
+          'surface-draw-metadata-swapped-engine-bridge-active-generation';
+        publishSphNativeWebGpuSurfaceDeferredResourceRelease(previousRenderBridge, {
+          status: 'native-webgpu-surface-active-generation-retained',
+          reason: previousRenderBridge.nativeSurfaceActiveGenerationRetentionReason
+        });
+        return;
+      }
+      if (retiredExecutions.has(previousSurfaceDrawExecution)) return;
       releaseSphResidentSurfaceDrawResources({
         surfaceDraw: previousSurfaceDraw,
         renderBridge: null,
@@ -14563,12 +14919,16 @@ export function createSphPhaseScene(container, {
 
   function clearSphResidentSurfaceDrawArtifacts({ clearOverlay = true, removeCanvas = false } = {}) {
     cancelSphNativeWebGpuSurfaceConsumerFrame();
+    const forceNativeRelease = Boolean(
+      nativeSurfaceBridgeFailureReason(sphResidentSurfaceDrawRenderBridge)
+    );
     releaseSphResidentSurfaceDrawResources({
       surfaceDraw: sphResidentSurfaceDraw,
       renderBridge: sphResidentSurfaceDrawRenderBridge,
       clearOverlay,
       removeCanvas,
-      status: clearOverlay ? 'surface-draw-overlay-cleared' : 'surface-draw-overlay-resources-released'
+      status: clearOverlay ? 'surface-draw-overlay-cleared' : 'surface-draw-overlay-resources-released',
+      forceNativeRelease
     });
     sphResidentSurfaceDraw = null;
     scene.userData.sphResidentSurfaceDraw = null;
@@ -14671,8 +15031,14 @@ export function createSphPhaseScene(container, {
     const pixelRatio = resolveSphScenePixelRatio(ownerWindow.devicePixelRatio ?? globalThis.devicePixelRatio);
     const pixelWidth = Math.max(1, Math.floor(w * pixelRatio));
     const pixelHeight = Math.max(1, Math.floor(h * pixelRatio));
-    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const nativeMainCanvas = Boolean(
+      bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && canvas === renderer.domElement
+    );
+    if (!nativeMainCanvas) {
+      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    }
     bridge.lastCanvasCssWidth = w;
     bridge.lastCanvasCssHeight = h;
     bridge.lastCanvasResizePixelRatio = pixelRatio;
@@ -14752,8 +15118,26 @@ export function createSphPhaseScene(container, {
       const format = previous?.format || gpu.getPreferredCanvasFormat();
       const ownerWindow = canvas.ownerDocument?.defaultView || container.ownerDocument?.defaultView || globalThis;
       const pixelRatio = resolveSphScenePixelRatio(ownerWindow.devicePixelRatio ?? globalThis.devicePixelRatio);
-      renderer.setPixelRatio(pixelRatio);
-      renderer.setSize(container.clientWidth || width, container.clientHeight || height, false);
+      const cssWidth = container.clientWidth || width;
+      const cssHeight = container.clientHeight || height;
+      const currentPixelRatio = renderer.getPixelRatio?.() ?? null;
+      const rendererResizeRequired = rendererCanvasResizeRequired({
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        width: cssWidth,
+        height: cssHeight,
+        pixelRatio,
+        currentPixelRatio
+      });
+      if (rendererResizeRequired) {
+        if (
+          !Number.isFinite(Number(currentPixelRatio))
+          || Math.abs(Number(currentPixelRatio) - pixelRatio) > 1e-6
+        ) {
+          renderer.setPixelRatio(pixelRatio);
+        }
+        renderer.setSize(cssWidth, cssHeight, false);
+      }
       const needsConfigure = Boolean(
         previous?.device !== device
         || previous?.format !== format
@@ -14947,10 +15331,15 @@ export function createSphPhaseScene(container, {
   function ensureSphResidentSurfaceEnvMap(bridge) {
     if (!bridge?.device || !bridge.envSampler) return;
     const url = sceneBackgroundImageUrl;
-    if (bridge.envMapUrl === url || bridge.envMapPendingUrl === url) return;
+    if (
+      bridge.envMapUrl === url
+      || bridge.envMapPendingUrl === url
+      || bridge.envMapFailedUrl === url
+    ) return;
     if (!url) {
       bridge.envMapUrl = null;
       bridge.envMapPendingUrl = null;
+      bridge.envMapFailedUrl = null;
       try { bridge.envMapTexture?.destroy?.(); } catch { /* device teardown */ }
       bridge.envMapTexture = null;
       bridge.envMapView = null;
@@ -14962,21 +15351,19 @@ export function createSphPhaseScene(container, {
     const image = new Image();
     image.crossOrigin = 'anonymous';
     image.onload = () => {
-      if (bridge.envMapPendingUrl !== url) return;
+      if (
+        bridge.released
+        || bridge !== sphResidentSurfaceDrawRenderBridge
+        || bridge.envMapPendingUrl !== url
+      ) return;
       bridge.envMapPendingUrl = null;
       if (sceneBackgroundImageUrl !== url || !bridge.device) return;
+      let texture = null;
       try {
         const baseWidth = 256;
         const baseHeight = 128;
         const mipLevelCount = 9; // 256 -> 1 in halvings; height clamps at 1
         const envSampleCount = 64;
-        const texture = bridge.device.createTexture({
-          label: 'ulg-sph-resident-surface-draw-env-map',
-          size: [baseWidth, baseHeight, 1],
-          format: 'rgba8unorm',
-          mipLevelCount,
-          usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
-        });
         const canvas2d = document.createElement('canvas');
         canvas2d.width = baseWidth;
         canvas2d.height = baseHeight;
@@ -14992,6 +15379,13 @@ export function createSphPhaseScene(container, {
           sampleCount: envSampleCount
         });
         const prefilterMs = Math.max(0, nowMs() - prefilterStartMs);
+        texture = bridge.device.createTexture({
+          label: 'ulg-sph-resident-surface-draw-env-map',
+          size: [baseWidth, baseHeight, 1],
+          format: 'rgba8unorm',
+          mipLevelCount,
+          usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+        });
         for (let level = 0; level < levels.length; level += 1) {
           bridge.device.queue.writeTexture(
             { texture, mipLevel: level },
@@ -15004,7 +15398,9 @@ export function createSphPhaseScene(container, {
         bridge.envMapTexture = texture;
         bridge.envMapView = texture.createView();
         bridge.envMapUrl = url;
+        bridge.envMapFailedUrl = null;
         rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
+        texture = null;
         markSphResidentRenderProgress('surface-env-map-built', {
           stage: 'surface-env-map',
           url,
@@ -15016,6 +15412,18 @@ export function createSphPhaseScene(container, {
           prefilterMs
         });
       } catch (error) {
+        if (texture) {
+          if (bridge.envMapTexture === texture) {
+            bridge.envMapTexture = null;
+            bridge.envMapView = null;
+            bridge.envMapUrl = null;
+          }
+          try { texture.destroy?.(); } catch { /* failed candidate cleanup */ }
+        }
+        bridge.envMapFailedUrl = url;
+        try {
+          rebuildSphResidentSurfaceRefractionDummyBindGroup(bridge);
+        } catch { /* keep the analytic fallback after a failed candidate */ }
         markSphResidentRenderProgress('surface-env-map-build-failed', {
           stage: 'surface-env-map',
           url,
@@ -15024,7 +15432,9 @@ export function createSphPhaseScene(container, {
       }
     };
     image.onerror = () => {
+      if (bridge.released || bridge !== sphResidentSurfaceDrawRenderBridge) return;
       if (bridge.envMapPendingUrl === url) bridge.envMapPendingUrl = null;
+      bridge.envMapFailedUrl = url;
       markSphResidentRenderProgress('surface-env-map-image-load-failed', {
         stage: 'surface-env-map',
         url
@@ -17054,7 +17464,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         };
       }
       const format = gpu.getPreferredCanvasFormat();
-      resizeSphResidentSurfaceDrawOverlayCanvas({ canvas });
+      if (!useNativeConsumer) resizeSphResidentSurfaceDrawOverlayCanvas({ canvas });
       context.configure({
         device,
         format,
@@ -17921,7 +18331,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         return { status: 'surface-draw-overlay-unavailable', reason: 'WebGPU canvas context unavailable' };
       }
       const format = nativeConsumer?.format || gpu.getPreferredCanvasFormat();
-      resizeSphResidentSurfaceDrawOverlayCanvas({ canvas });
+      if (!useNativeConsumer) resizeSphResidentSurfaceDrawOverlayCanvas({ canvas });
       if (!useNativeConsumer) {
         context.configure({
           device,
@@ -17945,6 +18355,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       const canReuseNativeBridge = Boolean(
         useNativeConsumer
         && previousBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && !nativeSurfaceBridgeFailureReason(previousBridge)
         && previousBridge.device === device
         && previousBridge.context === context
         && previousBridge.format === format
@@ -17997,6 +18408,8 @@ fn fs_main() -> @location(0) vec4<f32> {
         const updateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
         const drawState = {
           bindGroup,
+          surfaceDrawExecution,
+          surfaceInputBuffer,
           // Carry the additional (multi-material) surface draws across the
           // per-refresh drawState swap; their translations are only destroyed
           // when the next attach atomically replaces them. Without the carry,
@@ -18030,6 +18443,7 @@ fn fs_main() -> @location(0) vec4<f32> {
           compactPositionDrawState: nativeDrawInput.compactPositionDrawState
         };
         Object.assign(previousBridge, {
+          released: false,
           status: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS,
           rendererBridge: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE,
           visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
@@ -18405,7 +18819,8 @@ fn fs_main() -> @location(0) vec4<f32> {
           ? resolveSphNativeWebGpuSurfaceConsumerDebugMode()
           : 'none';
         const bridge = {
-        schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
+          released: false,
+          schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
         status: useNativeConsumer
           ? SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS
           : 'webgpu-storage-indirect-overlay-ready',
@@ -18517,6 +18932,8 @@ fn fs_main() -> @location(0) vec4<f32> {
         surfaceInputRowStrideFloats: nativeDrawInput.rowStrideFloats,
         drawState: {
           bindGroup,
+          surfaceDrawExecution,
+          surfaceInputBuffer,
           // Fresh bridge: old bind groups reference the replaced bridge's
           // optical buffers, so nothing safe to carry - the attach at the end
           // of this refresh repopulates. (The hot path is the reuse branch,
@@ -18720,6 +19137,29 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
     if (
       bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      && bridge.nativeSurfaceConsumerSubmitFenceFailed === true
+    ) {
+      const status = 'resident-surface-draw-skipped-native-submit-fence-error';
+      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
+      bridge.lastRenderSkipStatus = status;
+      bridge.lastRenderSkipReason =
+        'native WebGPU queue completion failed; presentation and retirement remain quarantined';
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-error';
+      scene.userData.sphResidentSurfaceDrawRenderSkip = {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
+        status,
+        reason: bridge.lastRenderSkipReason,
+        submitFenceSerial: bridge.nativeSurfaceConsumerSubmitFenceSerial ?? null,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      return;
+    }
+    if (
+      bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
       && bridge.nativeSurfaceConsumerSubmitFenceTimedOut === true
       && isAutomaticSphNativeWebGpuSurfaceConsumerRenderReason(reason)
     ) {
@@ -18729,8 +19169,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
       bridge.lastRenderSkipStatus = status;
       bridge.lastRenderSkipReason =
-        'native WebGPU surface submit fence timed out; automatic native redraw is paused until a fresh resident draw is ready';
-      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-timeout';
+        'native WebGPU surface submit fence exceeded its budget; the prior canvas remains presented while actual queue completion is pending';
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending-after-timeout';
       scene.userData.sphResidentSurfaceDrawRenderSkip = {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
         status,
@@ -26001,6 +26441,16 @@ fn fs_main() -> @location(0) vec4<f32> {
           renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
         }
       }
+      if (
+        renderBridgeReady
+        && renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      ) {
+        installSphNativeWebGpuSurfaceResourceOwner(renderBridge, {
+          surfaceDraw: residentDraw,
+          surfaceDrawExecution,
+          surfaceVerticesExecution
+        });
+      }
       return residentDraw;
     } catch (error) {
       markSphResidentRenderProgress('surface-draw-bridge-error', {
@@ -26080,6 +26530,13 @@ fn fs_main() -> @location(0) vec4<f32> {
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
+    const suppliedRawExtensionExecution = extensionExecution?.extensionExecution || extensionExecution;
+    let extensionSurfaceResult = suppliedRawExtensionExecution?.result ?? null;
+    const nativeBridgeFailure = nativeSurfaceBridgeFailureReason(previousResidentRenderBridge);
+    if (nativeBridgeFailure) {
+      releaseExtensionSurfaceResultOnce(extensionSurfaceResult);
+      throw new Error(`resident extension surface refresh blocked: ${nativeBridgeFailure}`);
+    }
     const resolvedDeviceResult = device
       ? {
         status: 'webgpu-device-ready',
@@ -26089,6 +26546,7 @@ fn fs_main() -> @location(0) vec4<f32> {
       }
       : (deviceResult || null);
     if (!resolvedDeviceResult?.device) {
+      releaseExtensionSurfaceResultOnce(extensionSurfaceResult);
       const unavailable = residentSurfaceDrawUnavailable(
         resolvedDeviceResult?.reason || 'caller-owned GPUDevice required for extension surface translation',
         { overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy() }
@@ -26110,6 +26568,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         ? extensionExecution
         : null;
       const rawExtensionExecution = wrappedExtensionExecution?.extensionExecution || extensionExecution;
+      extensionSurfaceResult = rawExtensionExecution?.result ?? extensionSurfaceResult;
       markSphResidentRenderProgress('extension-surface-draw-translation-started', {
         stage: 'extension-surface-draw',
         extensionStatus: rawExtensionExecution?.status ?? null,
@@ -26502,6 +26961,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         extensionSurfaceRenderBridgeBuildElapsedMs,
         extensionSurfaceRefreshElapsedMs,
         extensionSurfaceTranslation: translation,
+        extensionSurfaceResult,
         surfaceVertices: surfaceVerticesExecution,
         surfaceDraw: surfaceDrawExecution,
         scientificValidation: false,
@@ -26547,6 +27007,18 @@ fn fs_main() -> @location(0) vec4<f32> {
           renderer.userData.schroederRenderProxyBackendSelection = reselectedProxyBackend;
         }
       }
+      if (
+        renderBridgeReady
+        && renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+      ) {
+        installSphNativeWebGpuSurfaceResourceOwner(renderBridge, {
+          surfaceDraw: residentDraw,
+          surfaceDrawExecution,
+          surfaceVerticesExecution,
+          translation,
+          extensionSurfaceResult
+        });
+      }
       sphResidentSurfaceDraw = residentDraw;
       scene.userData.sphResidentSurfaceDraw = residentDraw;
       if (!renderBridgeReady) {
@@ -26579,11 +27051,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       });
       return residentDraw;
     } catch (error) {
-      translation?.releaseExtensionSurfaceBufferLeases?.({
-        status: 'released-after-extension-surface-draw-error'
-      });
-      translation?.destroyExtensionSurfaceBuffers?.({
-        releaseLeases: true,
+      releaseUncommittedNativeSurfaceResources({
+        device: resolvedDeviceResult.device,
+        translation,
+        extensionSurfaceResult,
         reason: 'extension-surface-draw-error-cleanup'
       });
       const unavailable = residentSurfaceDrawUnavailable(error instanceof Error ? error.message : String(error), {
@@ -26630,6 +27101,12 @@ fn fs_main() -> @location(0) vec4<f32> {
     skipPressureInterfaceRefresh = false,
     allowNativeSurfaceExtraction = true
   } = {}) {
+    const nativeBridgeFailure = nativeSurfaceBridgeFailureReason(
+      sphResidentSurfaceDrawRenderBridge
+    );
+    if (nativeBridgeFailure) {
+      throw new Error(`resident render refresh blocked: ${nativeBridgeFailure}`);
+    }
     const renderRefreshStartedAtMs = nowMs();
     const renderRefreshStageMs = {};
     const renderRefreshIncrementStage = (key, elapsedMs) => {
@@ -28548,6 +29025,8 @@ fn fs_main() -> @location(0) vec4<f32> {
                       const additionalRecord =
                         renderFieldExecution?.surfaceTable?.metadata?.[additionalDescriptor.surfaceIndex];
                       if (!additionalRecord) continue;
+                      let additionalTranslation = null;
+                      let additionalSurfaceResult = null;
                       try {
                         const additionalExtraction =
                           await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
@@ -28564,9 +29043,16 @@ fn fs_main() -> @location(0) vec4<f32> {
                             pbrPayload: additionalRecord.opticalState || null
                           });
                         const additionalWrapped = additionalExtraction?.extensionExecution;
-                        if (additionalWrapped?.extensionExecution?.ok !== true) continue;
-                        const additionalTranslation =
-                          await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+                        additionalSurfaceResult = additionalWrapped?.extensionExecution?.result ?? null;
+                        if (additionalWrapped?.extensionExecution?.ok !== true) {
+                          releaseUncommittedNativeSurfaceResources({
+                            device: resolvedDeviceResult.device,
+                            extensionSurfaceResult: additionalSurfaceResult,
+                            reason: 'additional-native-surface-extraction-not-ready'
+                          });
+                          continue;
+                        }
+                        additionalTranslation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
                             device: resolvedDeviceResult.device,
                             extensionExecution: additionalWrapped.extensionExecution,
                             surfaceIndex: additionalRecord.index ?? additionalDescriptor.surfaceIndex,
@@ -28607,7 +29093,15 @@ fn fs_main() -> @location(0) vec4<f32> {
                             retainDrawIndirectRowsBuffer: true,
                             waitForQueueCompletion: false
                           });
-                        if (!additionalTranslation?.surfaceDraw) continue;
+                        if (!additionalTranslation?.surfaceDraw) {
+                          releaseUncommittedNativeSurfaceResources({
+                            device: resolvedDeviceResult.device,
+                            translation: additionalTranslation,
+                            extensionSurfaceResult: additionalSurfaceResult,
+                            reason: 'additional-native-surface-translation-not-ready'
+                          });
+                          continue;
+                        }
                         additionalTranslation.surfaceDraw.emissiveTemperatureK =
                           Math.max(0, Number(additionalRecord.emissiveTemperatureK) || 0);
                         const additionalSnapshotBuffer = snapshotResidentFieldGradientBuffer({
@@ -28636,6 +29130,7 @@ fn fs_main() -> @location(0) vec4<f32> {
                         }
                         additionalEntries.push({
                           translation: additionalTranslation,
+                          extensionSurfaceResult: additionalSurfaceResult,
                           surfaceKey: additionalRecord.surfaceKey
                             ?? additionalDescriptor.surfaceKey
                             ?? null,
@@ -28645,6 +29140,12 @@ fn fs_main() -> @location(0) vec4<f32> {
                           depthWriteFlag: additionalRecord.depthWriteFlag ?? 1
                         });
                       } catch (additionalError) {
+                        releaseUncommittedNativeSurfaceResources({
+                          device: resolvedDeviceResult.device,
+                          translation: additionalTranslation,
+                          extensionSurfaceResult: additionalSurfaceResult,
+                          reason: 'additional-native-surface-extraction-error'
+                        });
                         markSphResidentRenderProgress('additional-native-surface-extraction-failed', {
                           stage: 'native-marching-cubes',
                           surfaceIndex: additionalDescriptor.surfaceIndex,
@@ -28687,6 +29188,11 @@ fn fs_main() -> @location(0) vec4<f32> {
                     surfaceDrawRefreshElapsedMs: nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs ?? null
                   });
                 } else {
+                  releaseUncommittedNativeSurfaceResources({
+                    device: resolvedDeviceResult.device,
+                    extensionSurfaceResult: extensionExecution?.extensionExecution?.result ?? null,
+                    reason: 'native-marching-cubes-primary-extraction-not-ready'
+                  });
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema = nativeExtraction.schema;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionAllowed = nativeSurfaceExtractionAllowed;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus = nativeExtraction.status;
@@ -30261,6 +30767,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       bridge.nativeSurfaceConsumerSubmitFenceStartedAtMs = startedAtMs;
       bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = null;
       bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
+      bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
+      bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = false;
       bridge.nativeSurfaceConsumerRafBlockedReason = null;
     }
     publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-pending', {
@@ -30269,22 +30777,63 @@ fn fs_main() -> @location(0) vec4<f32> {
       startedAtMs
     });
     let nativeFenceTimeoutHandle = null;
+    let nativeFenceExceededBudget = false;
     const queueFence = bridge.device.queue.onSubmittedWorkDone()
       .then(
         () => ({ status: 'resolved' }),
         (error) => ({ status: 'error', error })
       );
-    const fenceSource = nativeConsumerFence
-      ? Promise.race([
-          queueFence,
-          new Promise((resolve) => {
-            nativeFenceTimeoutHandle = setTimeout(() => {
-              resolve({ status: 'timeout' });
-            }, SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS);
-          })
-        ])
-      : queueFence;
-    const fence = fenceSource
+    let fence = null;
+    const publishFenceSettlement = (status, extra = {}) => {
+      if (
+        residentSurfaceDrawSubmitFence === fence
+        && residentSurfaceDrawSubmitFenceSerial === serial
+      ) {
+        return publishResidentSurfaceDrawSubmitFence(status, { serial, ...extra });
+      }
+      return {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-submit-fence.v0',
+        status,
+        serial,
+        residentGpuRefreshInFlightCount,
+        residentGpuWorkInFlightCount,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false,
+        ...extra
+      };
+    };
+    if (nativeConsumerFence) {
+      nativeFenceTimeoutHandle = setTimeout(() => {
+        nativeFenceTimeoutHandle = null;
+        nativeFenceExceededBudget = true;
+        const elapsedMs = Math.max(0, nowMs() - startedAtMs);
+        if (bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
+          bridge.lastSubmitFenceStatus = 'pending-timeout';
+          bridge.lastSubmitFenceElapsedMs = elapsedMs;
+          bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
+          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = true;
+          bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = true;
+          bridge.nativeSurfaceConsumerSubmitFenceReason =
+            `native WebGPU surface submit fence exceeded ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms; actual queue completion is still pending`;
+          bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-pending-after-timeout';
+        }
+        publishSphNativeWebGpuSurfaceDeferredResourceRelease(bridge, {
+          status: 'native-webgpu-surface-resource-release-waiting-submit-fence-timeout',
+          reason: bridge.nativeSurfaceConsumerSubmitFenceReason
+        });
+        publishFenceSettlement('resident-surface-draw-submit-fence-timeout', {
+          reason,
+          renderStatus,
+          elapsedMs,
+          timeoutMs: SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS,
+          queueCompletionPending: true
+        });
+      }, SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS);
+    }
+    fence = queueFence
       .then((result = { status: 'resolved' }) => {
         if (nativeFenceTimeoutHandle != null) {
           clearTimeout(nativeFenceTimeoutHandle);
@@ -30298,33 +30847,40 @@ fn fs_main() -> @location(0) vec4<f32> {
           bridge.lastSubmitFenceReason = message;
           if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
             bridge.nativeSurfaceConsumerSubmitFencePending = false;
+            bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
+            bridge.nativeSurfaceConsumerSubmitFenceFailed = true;
             bridge.nativeSurfaceConsumerSubmitFenceReason = message;
-            if (
-              bridge.nativeSurfaceConsumerContinuousRaf === true
-              && running
-              && sphResidentSurfaceDrawRenderBridge === bridge
-            ) {
-              scheduleSphNativeWebGpuSurfaceConsumerFrame({
-                reason: 'native-webgpu-surface-consumer-after-submit-fence-error'
-              });
-            }
+            bridge.nativeSurfaceConsumerRafBlockedReason = 'native-submit-fence-error';
           }
-          if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
-          return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-error', {
+          publishSphNativeWebGpuSurfaceDeferredResourceRelease(bridge, {
+            status: 'native-webgpu-surface-resource-release-waiting-submit-fence-error',
+            reason: message
+          });
+          const errorTelemetry = publishFenceSettlement(
+            'resident-surface-draw-submit-fence-error',
+            {
             reason,
             renderStatus,
+            elapsedMs,
+            exceededTimeoutBudget: nativeFenceExceededBudget,
             error: message
-          });
+            }
+          );
+          if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
+          return errorTelemetry;
         }
-        const timedOut = result.status === 'timeout';
-        bridge.lastSubmitFenceStatus = timedOut ? 'timeout' : 'resolved';
+        bridge.lastSubmitFenceStatus = nativeFenceExceededBudget
+          ? 'resolved-after-timeout'
+          : 'resolved';
         bridge.lastSubmitFenceElapsedMs = elapsedMs;
         if (nativeConsumerFence && bridge.nativeSurfaceConsumerSubmitFenceSerial === serial) {
           bridge.nativeSurfaceConsumerSubmitFencePending = false;
           bridge.nativeSurfaceConsumerSubmitFenceElapsedMs = elapsedMs;
-          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = timedOut;
-          bridge.nativeSurfaceConsumerSubmitFenceReason = timedOut
-            ? `native WebGPU surface submit fence timed out after ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms`
+          bridge.nativeSurfaceConsumerSubmitFenceTimedOut = false;
+          bridge.nativeSurfaceConsumerSubmitFenceFailed = false;
+          bridge.nativeSurfaceConsumerSubmitFenceExceededBudget = nativeFenceExceededBudget;
+          bridge.nativeSurfaceConsumerSubmitFenceReason = nativeFenceExceededBudget
+            ? `${reason}; queue completion resolved after exceeding the ${SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS}ms budget`
             : reason;
           if (
             bridge.nativeSurfaceConsumerContinuousRaf === true
@@ -30332,22 +30888,28 @@ fn fs_main() -> @location(0) vec4<f32> {
             && sphResidentSurfaceDrawRenderBridge === bridge
           ) {
             scheduleSphNativeWebGpuSurfaceConsumerFrame({
-              reason: timedOut
-                ? 'native-webgpu-surface-consumer-after-submit-fence-timeout'
+              reason: nativeFenceExceededBudget
+                ? 'native-webgpu-surface-consumer-after-late-submit-fence'
                 : 'native-webgpu-surface-consumer-after-submit-fence'
             });
           }
         }
-        if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
-        publishResidentSurfaceDrawSubmitFence(timedOut
-          ? 'resident-surface-draw-submit-fence-timeout'
+        const resolvedTelemetry = publishFenceSettlement(nativeFenceExceededBudget
+          ? 'resident-surface-draw-submit-fence-resolved-after-timeout'
           : 'resident-surface-draw-submit-fence-resolved', {
           reason,
           renderStatus,
           elapsedMs,
-          timeoutMs: timedOut ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null
+          exceededTimeoutBudget: nativeFenceExceededBudget,
+          timeoutMs: nativeFenceExceededBudget ? SPH_NATIVE_WEBGPU_SURFACE_SUBMIT_FENCE_TIMEOUT_MS : null
         });
-        return scene.userData.sphResidentSurfaceDrawSubmitFence;
+        if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
+        if (nativeConsumerFence) {
+          flushSphNativeWebGpuSurfaceDeferredResourceReleases(bridge, {
+            reason: 'native-webgpu-surface-submit-fence-resolved'
+          });
+        }
+        return resolvedTelemetry;
       });
     residentSurfaceDrawSubmitFence = fence;
     bridge.lastSubmitFence = fence;
@@ -30360,6 +30922,21 @@ fn fs_main() -> @location(0) vec4<f32> {
   } = {}) {
     const fence = residentSurfaceDrawSubmitFence;
     if (!fence) {
+      const bridge = sphResidentSurfaceDrawRenderBridge;
+      if (
+        bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && bridge.nativeSurfaceConsumerSubmitFenceFailed
+      ) {
+        const message = bridge.nativeSurfaceConsumerSubmitFenceReason
+          || 'resident surface draw submit fence failed';
+        publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-await-error', {
+          reason,
+          stage,
+          error: message,
+          persistentFailure: true
+        });
+        throw new Error(message);
+      }
       return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-skip-no-pending-submit', {
         reason,
         stage
@@ -30374,7 +30951,10 @@ fn fs_main() -> @location(0) vec4<f32> {
       startedAtMs
     });
     try {
-      await fence;
+      const result = await fence;
+      if (result?.status === 'resident-surface-draw-submit-fence-error') {
+        throw new Error(result.error || 'resident surface draw submit fence failed');
+      }
       return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-awaited', {
         reason,
         stage,
@@ -30412,6 +30992,28 @@ fn fs_main() -> @location(0) vec4<f32> {
         fullPhysicsValidation: false
       };
       return false;
+    }
+    if (
+      sphResidentSurfaceDrawRenderBridge?.rendererBridge
+        === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+    ) {
+      scene.userData.sphRendererFrame = {
+        schema: 'peercompute.ulg.sph-three-renderer-frame.v0',
+        status: 'renderer-frame-delegated-native-webgpu-surface-consumer',
+        reason,
+        rendererInitStatus,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        nativeSurfaceResourceGeneration:
+          sphResidentSurfaceDrawRenderBridge.activeSurfaceResourceOwner?.generation ?? null,
+        nativeSubmitFencePending: Boolean(
+          sphResidentSurfaceDrawRenderBridge.nativeSurfaceConsumerSubmitFencePending
+        ),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      return true;
     }
     if (renderer.isWebGPURenderer && residentGpuSubmissionPaused()) {
       scene.userData.sphRendererFrame = {
@@ -30469,9 +31071,6 @@ fn fs_main() -> @location(0) vec4<f32> {
     if (!running) return;
     controls.update();
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
-    const nativeSurfaceConsumerActive = Boolean(
-      sphResidentSurfaceDrawRenderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
-    );
     if (rendered) {
       renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
     }
@@ -30489,8 +31088,21 @@ fn fs_main() -> @location(0) vec4<f32> {
     const pixelRatio = resolveSphScenePixelRatio(window.devicePixelRatio);
     camera.aspect = viewport.aspect;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(pixelRatio);
-    renderer.setSize(w, h, false);
+    const currentPixelRatio = renderer.getPixelRatio?.() ?? null;
+    const rendererResizeRequired = rendererCanvasResizeRequired({
+      canvasWidth: renderer.domElement?.width ?? 0,
+      canvasHeight: renderer.domElement?.height ?? 0,
+      width: w,
+      height: h,
+      pixelRatio,
+      currentPixelRatio
+    });
+    if (rendererResizeRequired) {
+      if (!Number.isFinite(Number(currentPixelRatio)) || Math.abs(Number(currentPixelRatio) - pixelRatio) > 1e-6) {
+        renderer.setPixelRatio(pixelRatio);
+      }
+      renderer.setSize(w, h, false);
+    }
     resizeSphResidentSurfaceDrawOverlayCanvas();
     workerOffscreenPresentationBridge?.resize?.({
       width: w,
@@ -30508,6 +31120,8 @@ fn fs_main() -> @location(0) vec4<f32> {
       backingWidth: drawingBufferSize?.x ?? renderer.domElement?.width ?? null,
       backingHeight: drawingBufferSize?.y ?? renderer.domElement?.height ?? null,
       pixelRatio,
+      rendererResizeRequired,
+      rendererResizeApplied: rendererResizeRequired,
       containerClientWidth: viewport.clientWidth || null,
       containerClientHeight: viewport.clientHeight || null,
       containerRectWidth: viewport.rectWidth || null,
@@ -30663,6 +31277,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
   function dispose() {
     running = false;
+    backgroundEnvironmentLoadGeneration += 1;
     resizeObserver?.disconnect?.();
     window.removeEventListener('resize', handleWindowResize);
     window.visualViewport?.removeEventListener?.('resize', handleVisualViewportResize);
@@ -30677,6 +31292,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
     environment?.dispose?.();
     pmrem?.dispose?.();
+    backgroundEnvironmentTexture?.dispose?.();
+    backgroundEnvironmentTexture = null;
     if (sphGpuParticleUpload?.status === 'webgpu-uploaded') destroySphGpuParticleBuffers(sphGpuParticleUpload);
     if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
     if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
